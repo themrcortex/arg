@@ -396,6 +396,29 @@ set_env_value() {
   mv -f "$temp" "$ENV_FILE"
 }
 
+ensure_setup_token() {
+  local current token
+  current="$(awk -F= '$1 == "DONATELLO_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  [[ -n "$current" ]] && return 0
+  token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  [[ "$token" =~ ^[0-9a-f]{64}$ ]] || die "Could not generate the one-time setup code."
+  set_env_value DONATELLO_SETUP_TOKEN "$token"
+}
+
+show_setup_code_if_needed() {
+  local state code
+  state="$(curl --connect-timeout 1 --max-time 2 -fsS "http://127.0.0.1:$(panel_port)/api/state" 2>/dev/null || true)"
+  [[ "$state" == *'"installed":false'* ]] || return 0
+  code="$(awk -F= '$1 == "DONATELLO_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  if [[ -z "$code" ]] && has journalctl; then
+    code="$(journalctl -u "$SERVICE_NAME" -n 100 --no-pager 2>/dev/null | sed -n 's/.*DONATELLO_SETUP_CODE=//p' | tail -n 1)"
+  fi
+  [[ -n "$code" ]] || return 0
+  say "FIRST ADMINISTRATOR SETUP"
+  info "One-time setup code: $code"
+  info "Use this code on the HTTPS panel setup screen. Keep it private."
+}
+
 sync_ufw_rules() {
   has ufw || return 0
   ufw status 2>/dev/null | rg -q '^Status: active' || return 0
@@ -581,7 +604,7 @@ configure_https() {
   info "Automatic renewal: twice-daily Certbot check"
   [[ "$is_ip" != "y" ]] || info "IP address certificates are short-lived and renew automatically."
   warn "Make sure inbound TCP port 80 is allowed by your provider firewall for certificate renewal."
-  info "Create the first administrator through an SSH tunnel to http://127.0.0.1:$(panel_port); public setup is blocked until then."
+  info "For public first-admin setup, enter the one-time code printed by the installer on the HTTPS setup screen."
 }
 
 wait_for_https() {
@@ -615,18 +638,18 @@ show_access_summary() {
     panel_url="https://$domain"
     printf '\n  %sPANEL LOGIN%s\n  ' "$C_CYAN" "$C_RESET"
     printf '\033]8;;%s\033\\%s%s%s\033]8;;\033\\\n\n' "$panel_url" "$C_BOLD" "$panel_url" "$C_RESET"
-    info "Create the first administrator through a local SSH tunnel:"
+    info "Create the first administrator on this HTTPS page with the one-time code printed below."
     if [[ -n "$address" ]]; then
       printf '  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@%s%s\n' "$C_GREEN" "$port" "$port" "$address" "$C_RESET"
     else
       printf '  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@<SERVER_IP>%s\n' "$C_GREEN" "$port" "$port" "$C_RESET"
     fi
-    info "Open http://127.0.0.1:$port once to create the first account; use HTTPS after that."
+    info "The SSH tunnel is an alternative if you prefer to create the account locally."
   else
     panel_url="http://${address:-<SERVER_IP>}:$(panel_port)"
     printf '\n  %sPUBLIC PANEL%s\n  ' "$C_CYAN" "$C_RESET"
     printf '\033]8;;%s\033\\%s%s%s\033]8;;\033\\\n\n' "$panel_url" "$C_BOLD" "$panel_url" "$C_RESET"
-    info "Sign in with your Donatello account. Open this link after creating the first administrator through SSH tunnel."
+    info "Create the first administrator locally through SSH, or enable HTTPS before using the one-time setup code."
     if [[ -n "$address" ]]; then
       printf '  From your computer, run:\n  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@%s%s\n' \
         "$C_GREEN" "$port" "$port" "$address" "$C_RESET"
@@ -707,6 +730,7 @@ install_app() {
   ensure_service_account
   configure_ufw_status
   write_default_config
+  ensure_setup_token
   ensure_public_bind
   sync_ufw_rules
   take_database_ownership
@@ -728,6 +752,7 @@ install_app() {
   info "Service status: sudo donatello status"
   configure_https
   show_access_summary
+  show_setup_code_if_needed
 }
 
 wait_until_active() {
@@ -755,6 +780,7 @@ update_app() {
   require_root update
   require_systemd
   [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Run 'donatello install' first."
+  ensure_setup_token
   ensure_public_bind
   sync_ufw_rules
   prepare_source
@@ -777,6 +803,7 @@ update_app() {
     rm -f "$previous"
     say "DONATELLO was updated successfully"
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
+    show_setup_code_if_needed
     return
   fi
   if [[ -s "$previous" ]]; then
@@ -891,8 +918,12 @@ draw_control_center() {
   fi
 
   printf '\033[2J\033[H'
-  printf '\n  %s%s%s\n' "$C_BOLD" "$C_PURPLE" '█▀▄ █▀█ █▄█ ▄▀█ ▀█▀ █▀▀ █   █   █▀█'
-  printf '  %s%s%s\n' "$C_BOLD" "$C_PURPLE" '█▄▀ █▄█  █  █▀█  █  ██▄ █▄▄ █▄▄ █▄█'
+  printf '\n      %s╲━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╱%s\n' "$C_PURPLE" "$C_RESET"
+  printf '  ━━━━━%s╡%s  %s◉%s  %s━━━━━━━━━━━━━━━━━━%s◉%s  %s╞%s━━━━━\n' \
+    "$C_PURPLE" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_PURPLE" "$C_BOLD" "$C_RESET" "$C_PURPLE" "$C_RESET"
+  printf '  %s%s%s\n' "$C_BOLD" "$C_PURPLE" '███  ███  █  █  ███  ███  ████  █    █    ███'
+  printf '  %s%s%s\n' "$C_BOLD" "$C_PURPLE" '█  █ █ █  ██ █  █  █  ██   █    █    █    █ █'
+  printf '  %s%s%s\n' "$C_BOLD" "$C_PURPLE" '███  ███  █ ██  ████   ██   ███  ████  ████  ███'
   printf '  %sVPS CONTROL CENTER%s\n' "$C_DIM" "$C_RESET"
   printf '  %s────────────────────────────────────────────────────────────────────%s\n' "$C_PURPLE" "$C_RESET"
   printf '  Service  %s● %s%s\n' "$state_color" "$state" "$C_RESET"

@@ -34,6 +34,8 @@ struct Frontend;
 struct Credentials {
     username: String,
     password: String,
+    #[serde(default)]
+    setup_token: Option<String>,
 }
 #[derive(Deserialize)]
 struct NewUser {
@@ -146,13 +148,36 @@ async fn setup(
     Json(input): Json<Credentials>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    if !remote.ip().is_loopback() {
+    let local_setup = remote.ip().is_loopback();
+    let db = state.lock().unwrap();
+    let expected_token = env::var("DONATELLO_SETUP_TOKEN").ok().or_else(|| {
+        db.query_row(
+            "SELECT value FROM settings WHERE key='setup_token'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    });
+    let setup_token_valid = expected_token
+        .zip(input.setup_token.as_deref().map(str::to_owned))
+        .is_some_and(|(expected, supplied)| !expected.is_empty() && expected == supplied);
+    if !local_setup && !setup_token_valid {
         return Err(error(
             StatusCode::FORBIDDEN,
-            "Create the first administrator through a local SSH tunnel.",
+            "Enter the one-time setup code shown in the server console.",
         ));
     }
-    let db = state.lock().unwrap();
+    if !local_setup
+        && headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            != Some("https")
+    {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Use the HTTPS panel URL to create the first administrator.",
+        ));
+    }
     if initialized(&db) {
         return Err(error(StatusCode::CONFLICT, "Already installed"));
     }
@@ -178,6 +203,8 @@ async fn setup(
         params![input.username, hash],
     )
     .map_err(db_error)?;
+    db.execute("DELETE FROM settings WHERE key='setup_token'", [])
+        .map_err(db_error)?;
     audit(
         &db,
         &input.username,
@@ -703,7 +730,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL);")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+    let has_users = initialized(&db);
+    let configured_setup_token = env::var("DONATELLO_SETUP_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty());
+    if !has_users && configured_setup_token.is_none() {
+        let generated = token();
+        let inserted = db.execute(
+            "INSERT OR IGNORE INTO settings(key,value) VALUES ('setup_token',?1)",
+            [&generated],
+        )?;
+        if inserted > 0 {
+            println!("DONATELLO_SETUP_CODE={generated}");
+        }
+    }
     db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now()])?;
     let state = Arc::new(Mutex::new(db));
     let app = Router::new()

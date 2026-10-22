@@ -79,6 +79,7 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
+  const [setupToken, setSetupToken] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const [created, setCreated] = useState(false)
@@ -93,12 +94,13 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
     try {
       await api(installer ? 'setup' : 'login', {
         method: 'POST',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, ...(installer ? { setup_token: setupToken } : {}) }),
       })
       if (installer) {
         setCreated(true)
         setPassword('')
         setConfirm('')
+        setSetupToken('')
       } else onSuccess()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'خطایی رخ داد')
@@ -144,9 +146,9 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
             {installer && (
               <Alert className="mb-5 border-primary/30 bg-primary/10 text-foreground">
                 <AlertDescription className="leading-7">
-                  برای امنیت، ساخت اولین حساب فقط از اتصال محلی مجاز است. ابتدا با SSH tunnel به
-                  پورت ۸۲۸۲ وصل شوید و این حساب را بسازید؛ سپس از نشانی HTTPS برای ورود استفاده
-                  کنید.
+                  برای ساخت حساب از این نشانی عمومی، کد یک‌بارمصرف نمایش‌داده‌شده در کنسول سرور را
+                  وارد کنید و مطمئن شوید صفحه با HTTPS باز شده است. ساخت حساب از اتصال SSH محلی هم
+                  بدون کد امکان‌پذیر است.
                 </AlertDescription>
               </Alert>
             )}
@@ -177,6 +179,19 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
                   placeholder="حداقل ۱۲ نویسه"
                 />
               </div>
+              {installer && (
+                <div className="space-y-2">
+                  <Label htmlFor="setup-token">کد یک‌بارمصرف راه‌اندازی</Label>
+                  <Input
+                    id="setup-token"
+                    type="password"
+                    autoComplete="one-time-code"
+                    value={setupToken}
+                    onChange={(e) => setSetupToken(e.target.value)}
+                    placeholder="برای ورود عمومی، کد کنسول سرور را وارد کنید"
+                  />
+                </div>
+              )}
               {installer && (
                 <div className="space-y-2">
                   <Label htmlFor="confirm">تکرار گذرواژه</Label>
