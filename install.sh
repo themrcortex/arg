@@ -34,6 +34,9 @@ SERVER_PUBLIC_IP=""
 PORT80_STOPPED_UNIT=""
 CERTBOT_BIN=""
 MENU_ACTIVE=0
+UPDATE_STATUS="NOT CHECKED"
+UPDATE_LOCAL_REV=""
+UPDATE_REMOTE_REV=""
 
 readonly RUST_HOME="${RUSTUP_HOME:-/root/.rustup}"
 readonly CARGO_HOME_DIR="${CARGO_HOME:-/root/.cargo}"
@@ -261,6 +264,27 @@ detect_public_ipv4() {
   address="$(curl -4 --connect-timeout 3 --max-time 6 -fsS https://api.ipify.org 2>/dev/null || true)"
   [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
   printf '%s\n' "$address"
+}
+
+check_update_status() {
+  local local_rev remote_output remote_rev
+  UPDATE_STATUS="CHECK FAILED"
+  UPDATE_LOCAL_REV=""
+  UPDATE_REMOTE_REV=""
+  [[ -f "$SERVICE_FILE" ]] || { UPDATE_STATUS="NOT INSTALLED"; return 0; }
+  [[ -d "$SOURCE_DIR/.git" ]] || return 0
+  local_rev="$(git -C "$SOURCE_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
+  [[ "$local_rev" =~ ^[0-9a-f]{40}$ ]] || return 0
+  remote_output="$(GIT_TERMINAL_PROMPT=0 timeout 4s git -c credential.helper= ls-remote "$REPOSITORY" "refs/heads/$BRANCH" 2>/dev/null || true)"
+  remote_rev="${remote_output%%[[:space:]]*}"
+  [[ "$remote_rev" =~ ^[0-9a-f]{40}$ ]] || return 0
+  UPDATE_LOCAL_REV="${local_rev:0:7}"
+  UPDATE_REMOTE_REV="${remote_rev:0:7}"
+  if [[ "$local_rev" == "$remote_rev" ]]; then
+    UPDATE_STATUS="UP TO DATE"
+  else
+    UPDATE_STATUS="AVAILABLE"
+  fi
 }
 
 write_bind_config() {
@@ -902,7 +926,7 @@ draw_menu_item() {
 }
 
 draw_control_center() {
-  local selected="$1" digit_buffer="$2" state="NOT INSTALLED" state_color="$C_DIM" endpoint="Not installed" tls_bind tls_port scheme
+  local selected="$1" digit_buffer="$2" state="NOT INSTALLED" state_color="$C_DIM" endpoint="Not installed" update_color="$C_DIM" tls_bind tls_port scheme
   if valid_menu_choice "$digit_buffer" && [[ "$digit_buffer" != 0 ]]; then selected="$digit_buffer"; fi
   if [[ -f "$SERVICE_FILE" ]]; then
     state="STOPPED"
@@ -936,6 +960,12 @@ draw_control_center() {
   else
     printf '%s%s%s\n' "$C_BOLD" "$endpoint" "$C_RESET"
   fi
+  case "$UPDATE_STATUS" in
+    AVAILABLE) update_color="$C_YELLOW"; printf '  Update   %s● AVAILABLE  %s → %s  (9 to update)%s\n' "$update_color" "$UPDATE_LOCAL_REV" "$UPDATE_REMOTE_REV" "$C_RESET" ;;
+    'UP TO DATE') update_color="$C_GREEN"; printf '  Update   %s● UP TO DATE  %s%s\n' "$update_color" "$UPDATE_LOCAL_REV" "$C_RESET" ;;
+    'NOT INSTALLED') printf '  Update   %s● NOT INSTALLED%s\n' "$C_DIM" "$C_RESET" ;;
+    *) printf '  Update   %s● CHECK FAILED%s\n' "$C_YELLOW" "$C_RESET" ;;
+  esac
   printf '  %s────────────────────────────────────────────────────────────────────%s\n\n' "$C_PURPLE" "$C_RESET"
 
   printf '  %sSETUP%s\n' "$C_CYAN" "$C_RESET"
@@ -1003,6 +1033,7 @@ main_menu() {
   local digit_buffer=""
   local selected=1
   MENU_ACTIVE=1
+  check_update_status
   [[ -f "$SERVICE_FILE" ]] && selected=2
   if [[ -z "$SERVER_PUBLIC_IP" && -f "$SERVICE_FILE" ]]; then SERVER_PUBLIC_IP="$(detect_public_ipv4 || true)"; fi
   if [[ -r /dev/tty && -t 1 && -t 0 && "${TERM:-dumb}" != "dumb" ]] && has stty; then
@@ -1045,6 +1076,12 @@ main_menu() {
       printf '  Service: %s\n  Panel: %s\n\n' \
         "$( [[ -f "$SERVICE_FILE" ]] && systemctl is-active "$SERVICE_NAME" 2>/dev/null || printf 'not installed' )" \
       "$( [[ -s "$DOMAIN_FILE" ]] && printf 'https://%s' "$(<"$DOMAIN_FILE")" || printf 'http://%s:%s' "${SERVER_PUBLIC_IP:-<SERVER_IP>}" "$(panel_port 2>/dev/null || printf '8282')" )"
+      case "$UPDATE_STATUS" in
+        AVAILABLE) printf '  Update: AVAILABLE  %s -> %s (option 9)\n\n' "$UPDATE_LOCAL_REV" "$UPDATE_REMOTE_REV" ;;
+        'UP TO DATE') printf '  Update: UP TO DATE  %s\n\n' "$UPDATE_LOCAL_REV" ;;
+        'NOT INSTALLED') printf '  Update: NOT INSTALLED\n\n' ;;
+        *) printf '  Update: CHECK FAILED\n\n' ;;
+      esac
       printf '  1 Install / repair     2 Status       3 Start          4 Stop\n'
       printf '  5 Restart              6 Logs         7 Change port    8 HTTPS / SSL\n'
       printf '  9 Update              10 Uninstall    11 Purge data     0 Exit\n\n'
