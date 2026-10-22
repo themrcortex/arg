@@ -61,7 +61,7 @@ export const commonPorts: [number, string][] = [
 
 const systemMetrics: [string, string][] = [
   ['cpu-use', 'مصرف پردازنده'], ['cpu-idle', 'زمان بیکاری CPU'], ['cpu-cores', 'هسته‌های در دسترس'],
-  ['load-1', 'بار ۱ دقیقه'], ['load-5', 'بار ۵ دقیقه'], ['load-15', 'بار ۱۵ دقیقه'],
+  ['load-1', 'بار 1 دقیقه'], ['load-5', 'بار 5 دقیقه'], ['load-15', 'بار 15 دقیقه'],
   ['uptime-days', 'روزهای روشن‌بودن'], ['uptime-hours', 'ساعت‌های روشن‌بودن'], ['uptime-minutes', 'دقایق روشن‌بودن'],
   ['mem-total', 'حافظهٔ کل'], ['mem-used', 'حافظهٔ مصرف‌شده'], ['mem-available', 'حافظهٔ در دسترس'],
   ['mem-percent', 'درصد مصرف حافظه'], ['mem-free', 'حافظهٔ آزاد'], ['mem-buffers', 'بافرهای حافظه'],
@@ -88,7 +88,7 @@ const portFilters: [string, string][] = [
   ['all', 'همهٔ پورت‌ها'], ['tcp', 'همهٔ TCP'], ['udp', 'همهٔ UDP'],
   ['ipv4', 'همهٔ IPv4'], ['ipv6', 'همهٔ IPv6'], ['tcp4', 'TCP روی IPv4'], ['tcp6', 'TCP روی IPv6'],
   ['udp4', 'UDP روی IPv4'], ['udp6', 'UDP روی IPv6'], ['low', 'پورت‌های سیستمی'],
-  ['high', 'پورت‌های ۱۰۲۴ به بالا'], ['web', 'پورت‌های وب'], ['remote', 'دسترسی راه دور'],
+  ['high', 'پورت‌های 1024 به بالا'], ['web', 'پورت‌های وب'], ['remote', 'دسترسی راه دور'],
   ['mail', 'پورت‌های ایمیل'], ['database', 'پایگاه‌های داده'], ['dns', 'پورت DNS'],
 ]
 
@@ -161,7 +161,7 @@ export const explorerGroups: ExplorerGroup[] = [
   {
     id: 'audit', label: 'گزارش عملیات', icon: ScrollText, admin: true,
     categories: [
-      category('audit-main', 'گزارش کامل', [page('audit', 'رویدادهای اخیر', '۱۰۰ رویداد آخر پنل')]),
+      category('audit-main', 'گزارش کامل', [page('audit', 'رویدادهای اخیر', '100 رویداد آخر پنل')]),
       category('audit-filters', 'ردیابی رویداد', auditFilters.map(([key, label]) => entry('audit', key, label))),
     ],
   },

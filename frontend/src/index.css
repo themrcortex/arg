@@ -170,3 +170,16 @@ body {
   padding: 8px 12px;
   font-size: 12px;
 }
+
+/* Overview workspace */
+.dashboard-overview { isolation: isolate; }
+.overview-hero {
+  background: radial-gradient(circle at 5% 105%, rgba(163, 103, 255, .22), transparent 44%), radial-gradient(circle at 92% 4%, rgba(110, 72, 177, .19), transparent 36%), radial-gradient(circle, rgba(197, 166, 255, .09) .7px, transparent 1px), linear-gradient(115deg, #211b34 0%, #1b1930 48%, #131723 100%);
+  background-size: auto, auto, 20px 20px, auto;
+  box-shadow: 0 28px 70px -45px rgba(142, 91, 236, .38), inset 0 1px rgba(255, 255, 255, .055);
+}
+.overview-hero-stat { min-height: 126px; padding: 17px; border: 1px solid rgba(226, 209, 255, .095); border-radius: 18px; background: rgba(13, 13, 27, .26); backdrop-filter: blur(8px); }
+.overview-metric, .overview-section { background: linear-gradient(145deg, #191a29, #12131d 80%); box-shadow: inset 0 1px rgba(255,255,255,.035), 0 12px 32px -28px #000; }
+.overview-metric::before { content: ''; position: absolute; top: 0; left: 19px; right: 19px; height: 1px; background: linear-gradient(90deg, transparent, var(--metric-color), transparent); opacity: .4; }
+.overview-metric:hover { border-color: color-mix(in srgb, var(--metric-color) 35%, transparent); transform: translateY(-2px); }
+.overview-metric { transition: border-color .2s ease, transform .2s ease; }

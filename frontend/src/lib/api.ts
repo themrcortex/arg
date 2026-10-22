@@ -59,7 +59,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return result as T
 }
 export function formatNumber(n: number) {
-  return new Intl.NumberFormat('fa-IR').format(n || 0)
+  return new Intl.NumberFormat('en-US').format(n || 0)
 }
 export function formatBytes(n: number) {
   let value = Number(n) || 0
@@ -69,7 +69,7 @@ export function formatBytes(n: number) {
     value /= 1024
     index++
   }
-  return `${new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(value)} ${units[index]}`
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(value)} ${units[index]}`
 }
 export function formatUptime(seconds: number) {
   const days = Math.floor(seconds / 86400)

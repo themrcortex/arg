@@ -176,7 +176,7 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
                     minLength={installer ? 12 : 1}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder={installer ? 'حداقل ۱۲ نویسه' : 'گذرواژهٔ حساب'}
+                    placeholder={installer ? 'حداقل 12 نویسه' : 'گذرواژهٔ حساب'}
                   />
                   <button
                     type="button"

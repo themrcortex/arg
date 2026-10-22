@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
   ArrowDownLeft,
@@ -17,7 +17,6 @@ import {
   Radio,
   RefreshCw,
   ScrollText,
-  Server,
   Shield,
   ShieldCheck,
   Terminal,
@@ -30,7 +29,6 @@ import {
   api,
   formatBytes,
   formatNumber,
-  formatUptime,
   type AuditEvent,
   type Dashboard,
   type Firewall,
@@ -85,7 +83,7 @@ function useDashboard(notify: (message: string) => void) {
     const timer = window.setInterval(refresh, 5000)
     return () => window.clearInterval(timer)
   }, [refresh])
-  const history = samples.map((sample) => ({ at: sample.at, time: new Date(sample.at * 1000).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }), rx: sample.rx, tx: sample.tx }))
+  const history = samples.map((sample) => ({ at: sample.at, time: new Date(sample.at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }), rx: sample.rx, tx: sample.tx }))
   const resourceHistory = samples.map(({ at, cpu, memory, disk }) => ({ at, cpu, memory, disk }))
   return { data, history, resourceHistory, cpu: samples.at(-1)?.cpu ?? null, loading, refresh, range, setRange }
 }
@@ -169,7 +167,7 @@ function AlertControls({ user, cpu, memory, disk, notify }: { user: User; cpu: n
     finally { setBusy(false) }
   }
   return <SectionCard title="آستانه‌های هشدار" description="تنظیمات در سرور ذخیره می‌شوند و وضعیت فعلی با آنها سنجیده می‌شود">
-    <form onSubmit={save} className="grid gap-4 md:grid-cols-3">{([['cpu', 'پردازنده', cpu], ['memory', 'حافظه', memory], ['disk', 'دیسک', disk]] as const).map(([key, label, value]) => <div key={key} className="rounded-xl border border-white/10 bg-white/[.025] p-4"><div className="mb-3 flex items-center justify-between text-xs"><Label htmlFor={`limit-${key}`}>{label}</Label><Badge variant={value !== null && value >= limits[key] ? 'warning' : 'success'}>{value !== null && value >= limits[key] ? 'بالاتر از حد' : 'عادی'}</Badge></div><div className="flex items-center gap-2"><Input id={`limit-${key}`} type="number" min={1} max={100} value={limits[key]} disabled={user.role !== 'admin'} onChange={(event) => setLimits((old) => ({ ...old, [key]: Number(event.target.value) }))}/><span className="text-sm">٪</span></div></div>)}{user.role === 'admin' && <Button type="submit" disabled={busy} className="md:col-span-3 md:w-fit">ذخیرهٔ آستانه‌ها</Button>}</form>
+    <form onSubmit={save} className="grid gap-4 md:grid-cols-3">{([['cpu', 'پردازنده', cpu], ['memory', 'حافظه', memory], ['disk', 'دیسک', disk]] as const).map(([key, label, value]) => <div key={key} className="rounded-xl border border-white/10 bg-white/[.025] p-4"><div className="mb-3 flex items-center justify-between text-xs"><Label htmlFor={`limit-${key}`}>{label}</Label><Badge variant={value !== null && value >= limits[key] ? 'warning' : 'success'}>{value !== null && value >= limits[key] ? 'بالاتر از حد' : 'عادی'}</Badge></div><div className="flex items-center gap-2"><Input id={`limit-${key}`} type="number" lang="en" dir="ltr" min={1} max={100} value={limits[key]} disabled={user.role !== 'admin'} onChange={(event) => setLimits((old) => ({ ...old, [key]: Number(event.target.value) }))}/><span className="text-sm">٪</span></div></div>)}{user.role === 'admin' && <Button type="submit" disabled={busy} className="md:col-span-3 md:w-fit">ذخیرهٔ آستانه‌ها</Button>}</form>
   </SectionCard>
 }
 
@@ -191,224 +189,86 @@ export function PortProbeControls({ notify }: { notify: (message: string) => voi
     catch (error) { notify(error instanceof Error ? error.message : 'بررسی پورت ناموفق بود') }
     finally { setBusy(false) }
   }
-  return <SectionCard title="آزمایش اتصال TCP" description="یک اتصال واقعی از داخل سرور به پورت موردنظر برقرار می‌شود"><form onSubmit={submit} className="flex flex-wrap items-end gap-3"><div className="space-y-2"><Label htmlFor="port-probe">پورت</Label><Input id="port-probe" type="number" min={1} max={65535} value={port} onChange={(event) => setPort(event.target.value)} className="w-36"/></div><Button type="submit" disabled={busy}>{busy ? 'در حال بررسی…' : 'بررسی اتصال'}</Button>{result && <span className="text-xs text-muted-foreground">{result}</span>}</form></SectionCard>
+  return <SectionCard title="آزمایش اتصال TCP" description="یک اتصال واقعی از داخل سرور به پورت موردنظر برقرار می‌شود"><form onSubmit={submit} className="flex flex-wrap items-end gap-3"><div className="space-y-2"><Label htmlFor="port-probe">پورت</Label><Input id="port-probe" type="number" lang="en" dir="ltr" min={1} max={65535} value={port} onChange={(event) => setPort(event.target.value)} className="w-36"/></div><Button type="submit" disabled={busy}>{busy ? 'در حال بررسی…' : 'بررسی اتصال'}</Button>{result && <span className="text-xs text-muted-foreground">{result}</span>}</form></SectionCard>
 }
 
-export function DashboardPage({ user, Heading, notify }: { user: User } & Common) {
+function DashboardMetric({ icon: Icon, label, value, subtitle, progress, samples, tone }: {
+  icon: typeof Cpu
+  label: string
+  value: string
+  subtitle: string
+  progress?: number
+  samples: number[]
+  tone: 'violet' | 'cyan' | 'amber' | 'blue'
+}) {
+  const colors = { violet: '#bd96ff', cyan: '#61dfd1', amber: '#f0b980', blue: '#85a8ff' }
+  const color = colors[tone]
+  const peak = Math.max(100, ...samples)
+  const points = samples.length > 1 ? samples.map((sample, index) => `${index * 150 / (samples.length - 1)},${46 - Math.min(sample / peak, 1) * 38}`).join(' ') : ''
+  return <div className="overview-metric group relative overflow-hidden rounded-[22px] border border-white/[.085] p-5 md:p-6" style={{ '--metric-color': color } as CSSProperties}>
+    <div className="flex items-start justify-between gap-3"><span className="text-[11px] font-semibold text-[#a8a4b7]">{label}</span><span className="grid h-10 w-10 place-items-center rounded-xl border border-white/[.07] bg-white/[.045]" style={{ color }}><Icon size={19} strokeWidth={1.8}/></span></div>
+    <div className="mt-6 text-[29px] font-extrabold leading-none tracking-tight text-white tabular-nums" dir="ltr">{value}</div>
+    <div className="mt-2 text-[11px] text-[#8f90a6]">{subtitle}</div>
+    <div className="mt-5 flex h-11 items-end gap-3"><div className="min-w-0 flex-1">{progress !== undefined && <div className="h-1.5 overflow-hidden rounded-full bg-white/[.075]"><div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(Math.max(progress, 0), 100)}%`, background: color, boxShadow: `0 0 12px ${color}80` }}/></div>}</div>{points && <svg viewBox="0 0 150 50" preserveAspectRatio="none" className="h-10 w-28 shrink-0 opacity-80" aria-hidden="true"><polyline points={points} fill="none" stroke={color} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/></svg>}</div>
+  </div>
+}
+
+export function DashboardPage({ user, notify }: { user: User } & Common) {
   const { data, history, resourceHistory, cpu, loading, refresh, range, setRange } = useDashboard(notify)
-  const memory = data && data.memory_kib ? Math.round((1 - data.available_kib / data.memory_kib) * 100) : 0
-  const disk =
-    data && data.disk_total_bytes
-      ? Math.round((1 - (data.disk_free_bytes || 0) / data.disk_total_bytes) * 100)
-      : 0
-  return (
-    <>
-      <Heading
-        title="نمای کلی"
-        description="سلام، وضعیت سرورت را در یک نگاه ببین."
-        action={
-          <Button variant="outline" size="sm" onClick={refresh}>
-            <RefreshCw size={15} /> به‌روزرسانی
-          </Button>
-        }
-      />
-      <div className="hero-glow relative mb-5 flex min-h-[220px] items-center justify-between overflow-hidden rounded-[26px] border border-[#67517f] p-7 md:p-9">
-        <div className="relative z-10">
-          <Badge variant="success" className="mb-4">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> سیستم فعال
-          </Badge>
-          <div className="brand-text text-[38px] font-black leading-none sm:text-[52px] lg:text-[66px]" dir="ltr">DONATELLO</div>
-          <div className="mt-3 flex items-center gap-3" dir="ltr"><span className="h-[2px] w-9 bg-[#63e4cb]"/><span className="font-mono text-[10px] tracking-[.22em] text-[#a6eddf]">YOUR SERVER. CLEARLY.</span></div>
-          <h2 className="mt-6 text-lg font-extrabold md:text-xl">خوش آمدی، {user.username}</h2>
-          <p className="mt-1.5 text-sm text-[#cbb8e0]">
-            {data ? (
-              <>
-                سرور <span className="mono text-white">{data.hostname || 'Linux'}</span> آمادهٔ مدیریت است.
-              </>
-            ) : (
-              'در حال دریافت اطلاعات سرور…'
-            )}
-          </p>
-        </div>
-        <div className="relative hidden h-36 w-36 shrink-0 place-items-center rounded-[36px] border border-white/10 bg-white/5 text-[#d1afff] shadow-[0_0_65px_#8b5cf633] md:grid">
-          <div className="absolute inset-3 rounded-[28px] border border-dashed border-white/10"/>
-          <Server size={66} strokeWidth={1.1} />
-        </div>
-      </div>
-      {loading && !data ? (
-        <LoadingCards />
-      ) : (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <Metric
-            icon={Cpu}
-            label="مصرف پردازنده"
-            value={cpu === null ? 'در حال سنجش' : `${formatNumber(cpu)}٪`}
-            detail="نمونه‌برداری هر ۵ ثانیه"
-            progress={cpu ?? 0}
-          />
-          <Metric
-            icon={Database}
-            label="حافظهٔ مصرف‌شده"
-            value={formatBytes(((data?.memory_kib || 0) - (data?.available_kib || 0)) * 1024)}
-            detail={`از ${formatBytes((data?.memory_kib || 0) * 1024)} · ${formatNumber(memory)}٪`}
-            progress={memory}
-          />
-          <Metric
-            icon={HardDrive}
-            label="فضای دیسک /"
-            value={
-              data?.disk_total_bytes
-                ? formatBytes(data.disk_total_bytes - (data.disk_free_bytes || 0))
-                : 'نامشخص'
-            }
-            detail={
-              data?.disk_total_bytes
-                ? `از ${formatBytes(data.disk_total_bytes)} · ${formatNumber(disk)}٪`
-                : 'آمار دیسک در دسترس نیست'
-            }
-            progress={disk}
-          />
-          <Metric
-            icon={Clock3}
-            label="زمان روشن‌بودن"
-            value={formatUptime(data?.uptime_seconds || 0)}
-            detail={`بار سیستم: ${data?.load || '—'}`}
-          />
-        </div>
-      )}
-      <div className="mt-5">
-        <SectionCard title="نبض منابع سرور" description="تاریخچهٔ ثبت‌شده توسط سرویس، حتی وقتی پنل باز نبوده است" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m', '1h', '24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1 text-[11px] ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground hover:text-white'}`} dir="ltr">{item}</button>)}</div>}>
-          <ResourceChart samples={resourceHistory} />
-        </SectionCard>
-      </div>
-      {data && (
-        <div className="mt-5 grid gap-5 md:grid-cols-2">
-          <SectionCard title="مصرف خود Donatello" description="اندازه‌گیری فرایند پنل · به‌روزرسانی هر ۵ ثانیه">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <Metric
-                icon={Cpu}
-                label="CPU پنل"
-                value={`${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}٪`}
-                detail="سهم از توان کل پردازنده‌های سرور"
-                progress={data.process_cpu_percent}
-              />
-              <Metric
-                icon={Database}
-                label="RAM پنل"
-                value={formatBytes(data.process_rss_bytes)}
-                detail="حافظهٔ مقیم فرایند (RSS)، شامل کتابخانه‌های مشترک"
-              />
-            </div>
-          </SectionCard>
-          <SectionCard title="روش اندازه‌گیری" description="مقدار واقعی فرایند Donatello در همین سرور">
-            <p className="text-sm leading-7 text-muted-foreground">
-              RAM از حافظهٔ مقیم فرایند خوانده می‌شود. CPU از اختلاف نمونه‌های زمان پردازنده محاسبه شده و بر تعداد هسته‌ها تقسیم می‌شود؛ بنابراین مصرف کل سرور در کارت‌های بالا جداگانه نمایش داده می‌شود.
-            </p>
-          </SectionCard>
-        </div>
-      )}
-      <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/></div>
-      <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_1fr]">
-        <SectionCard
-          title="ترافیک لحظه‌ای شبکه"
-          description={`نرخ واقعی دریافت و ارسال · تاریخچهٔ ${range} از سرویس`}
-          right={
-            <Badge variant="outline">
-              <Activity size={13} /> زنده
-            </Badge>
-          }
-        >
-          <div dir="ltr">
-            {history.length > 0 ? (
-              <TrafficChart history={history} />
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
-                <Activity size={28} className="text-primary" /> نمودار پس از دومین نمونه‌برداری نمایش داده
-                می‌شود.
-              </div>
-            )}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-4 border-t border-border pt-4 text-xs text-muted-foreground">
-            <span className="flex items-center gap-2">
-              <i className="h-2 w-2 rounded-full bg-[#b487ff]" /> دریافت
-            </span>
-            <span className="flex items-center gap-2">
-              <i className="h-2 w-2 rounded-full bg-[#59d3bc]" /> ارسال
-            </span>
-          </div>
-        </SectionCard>
-        <SectionCard
-          title="کارت‌های شبکه"
-          description={`${formatNumber(data?.interfaces.length || 0)} کارت شناسایی شد`}
-          right={<Network size={18} className="text-primary" />}
-        >
-          <div className="space-y-1">
-            {data?.interfaces.length ? (
-              data.interfaces.slice(0, 5).map((item) => (
-                <div
-                  key={item.name}
-                  className="flex items-center justify-between gap-3 border-b border-border/65 py-3 last:border-0"
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-secondary text-primary">
-                      <Network size={17} />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold" dir="ltr">
-                        {item.name}
-                      </div>
-                      <div className="truncate text-xs text-muted-foreground" dir="ltr">
-                        {item.addresses?.join(' · ') || item.mac}
-                      </div>
-                    </div>
-                  </div>
-                  <Badge variant={item.state === 'up' ? 'success' : 'outline'}>
-                    {item.state === 'up' ? 'فعال' : item.state || 'نامشخص'}
-                  </Badge>
-                </div>
-              ))
-            ) : (
-              <div className="py-12 text-center text-sm text-muted-foreground">کارت شبکه‌ای پیدا نشد.</div>
-            )}
-          </div>
-        </SectionCard>
-      </div>
-      <div className="mt-5">
-        <SectionCard
-          title="پورت‌های شنونده"
-          description="پورت‌های TCP و UDP شناسایی‌شده روی سرور"
-          right={<Badge variant="outline">{formatNumber(data?.ports.length || 0)} پورت</Badge>}
-        >
-          <PortsTable ports={data?.ports.slice(0, 8) || []} />
-        </SectionCard>
-      </div>
-    </>
-  )
+  const memory = data?.memory_kib ? Math.round((1 - data.available_kib / data.memory_kib) * 100) : 0
+  const disk = data?.disk_total_bytes ? Math.round((1 - (data.disk_free_bytes || 0) / data.disk_total_bytes) * 100) : 0
+  const throughput = history.at(-1) ? history[history.length - 1].rx + history[history.length - 1].tx : 0
+  const resourceValues = resourceHistory.length ? resourceHistory : [{ at: 0, cpu: 0, memory, disk }]
+  return <div className="dashboard-overview space-y-5">
+    <div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><div className="mb-3 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[.2em] text-[#90e6d5]" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-[#71e4cf] shadow-[0_0_12px_#71e4cf]"/> COMMAND CENTER / OVERVIEW</div><h1 className="text-3xl font-extrabold text-white md:text-[38px]">سرورت، در یک نگاه</h1><p className="mt-2 text-sm text-[#9996ab]">وضعیت زنده، تاریخچه و ابزارهای مدیریت در یک فضای روشن و منظم.</p></div><Button variant="outline" size="sm" onClick={refresh} className="h-10 rounded-xl border-white/10 bg-white/[.03]"><RefreshCw size={15}/> به‌روزرسانی</Button></div>
+
+    <section className="overview-hero relative overflow-hidden rounded-[28px] border border-[#544276]/70 p-6 md:p-8 lg:p-9">
+      <div className="relative z-10 grid gap-9 lg:grid-cols-[1.15fr_.85fr] lg:items-end"><div><div className="mb-5 flex flex-wrap items-center gap-2"><span className="inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/[.07] px-3 py-1.5 text-[11px] font-semibold text-[#91e1c7]"><span className="h-1.5 w-1.5 rounded-full bg-[#75e7c1] shadow-[0_0_9px_#75e7c1]"/> سرویس فعال</span><span className="rounded-full border border-white/10 bg-white/[.04] px-3 py-1.5 text-[10px] font-bold tracking-wider text-[#bcb4ce]" dir="ltr">RUST · LIVE TELEMETRY</span></div><h2 className="max-w-xl text-[27px] font-extrabold leading-[1.6] text-white md:text-[38px]">سلام {user.username}،<br/><span className="text-[#c7a7ff]">کنترل سرور دست توست.</span></h2><p className="mt-3 text-sm leading-7 text-[#c1b9d3]">داده‌ها هر 5 ثانیه در خود سرویس ثبت می‌شوند؛ حتی وقتی این صفحه بسته باشد.</p><div className="mt-6 flex flex-wrap items-center gap-3"><span className="text-[11px] text-[#a7a0ba]">سرور</span><span className="rounded-lg border border-white/10 bg-black/20 px-3 py-1.5 font-mono text-xs text-white" dir="ltr">{data?.hostname || 'Loading...'}</span><span className="text-[11px] text-[#a7a0ba]">بار سیستم</span><span className="font-mono text-xs text-[#93e7d7]" dir="ltr">{data?.load || '—'}</span></div></div>
+      <div className="grid grid-cols-2 gap-3"><div className="overview-hero-stat"><span className="text-[#ac9cc8]"><Clock3 size={18}/></span><div className="mt-5 text-[22px] font-bold text-white" dir="ltr">{`${formatNumber(Math.floor((data?.uptime_seconds || 0) / 86400))}d ${formatNumber(Math.floor(((data?.uptime_seconds || 0) % 86400) / 3600))}h`}</div><div className="mt-1 text-xs text-[#ad9fbe]">زمان روشن‌بودن</div></div><div className="overview-hero-stat"><span className="text-[#87dfd1]"><Network size={18}/></span><div className="mt-5 text-[22px] font-bold text-white tabular-nums" dir="ltr">{formatNumber(data?.interfaces.length || 0)}</div><div className="mt-1 text-xs text-[#ad9fbe]">کارت شبکه</div></div><div className="overview-hero-stat"><span className="text-[#d7b4ff]"><Radio size={18}/></span><div className="mt-5 text-[22px] font-bold text-white tabular-nums" dir="ltr">{formatNumber(data?.ports.length || 0)}</div><div className="mt-1 text-xs text-[#ad9fbe]">پورت شنونده</div></div><div className="overview-hero-stat"><span className="text-[#f0bf92]"><Gauge size={18}/></span><div className="mt-5 text-[22px] font-bold text-white tabular-nums" dir="ltr">{formatNumber(Math.round(data?.process_cpu_percent || 0))}%</div><div className="mt-1 text-xs text-[#ad9fbe]">CPU پنل</div></div></div></div>
+      <div className="overview-hero-orbit pointer-events-none absolute -bottom-32 -left-20 h-[430px] w-[430px] rounded-full border border-white/[.065]"/><div className="overview-hero-orbit pointer-events-none absolute -bottom-20 -left-6 h-[300px] w-[300px] rounded-full border border-white/[.065]"/>
+    </section>
+
+    {loading && !data ? <LoadingCards/> : <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="شاخص‌های سرور">
+      <DashboardMetric icon={Cpu} tone="violet" label="پردازنده" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} subtitle="مصرف فعلی CPU" progress={cpu || 0} samples={resourceValues.map((s) => s.cpu)}/>
+      <DashboardMetric icon={Database} tone="cyan" label="حافظه" value={`${formatNumber(memory)}%`} subtitle={`${formatBytes(((data?.memory_kib || 0) - (data?.available_kib || 0)) * 1024)} از ${formatBytes((data?.memory_kib || 0) * 1024)}`} progress={memory} samples={resourceValues.map((s) => s.memory)}/>
+      <DashboardMetric icon={HardDrive} tone="amber" label="دیسک ریشه" value={`${formatNumber(disk)}%`} subtitle={data?.disk_total_bytes ? `${formatBytes(data.disk_total_bytes - (data.disk_free_bytes || 0))} از ${formatBytes(data.disk_total_bytes)}` : 'داده‌ای در دسترس نیست'} progress={disk} samples={resourceValues.map((s) => s.disk)}/>
+      <DashboardMetric icon={Activity} tone="blue" label="ترافیک لحظه‌ای" value={`${formatBytes(throughput)}/s`} subtitle="مجموع دریافت و ارسال" samples={history.map((s) => s.rx + s.tx)}/>
+    </section>}
+
+    <section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-[10px] font-bold tracking-[.16em] text-[#9ee4d6]" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-[#69e2cc]"/> RESOURCE HISTORY</div><h2 className="text-xl font-bold text-white">روند مصرف منابع</h2><p className="mt-1 text-xs text-[#9492a6]">تاریخچهٔ ثبت‌شدهٔ CPU، حافظه و دیسک روی سرور</p></div><div className="flex gap-1 rounded-xl border border-white/10 bg-[#10111b] p-1" aria-label="بازه زمانی نمودار">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`min-w-12 rounded-lg px-3 py-2 text-xs font-semibold transition ${range === item ? 'bg-[#553d7d] text-white shadow-lg' : 'text-[#9690a9] hover:text-white'}`} dir="ltr">{item}</button>)}</div></div><ResourceChart samples={resourceHistory}/></section>
+
+    <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]"><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-5"><h2 className="text-xl font-bold text-white">جریان شبکه</h2><p className="mt-1 text-xs text-[#9492a6]">نرخ دریافت و ارسال، با همان بازهٔ نمودار منابع</p></div><TrafficChart history={history}/></section><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4 flex items-start justify-between"><div><h2 className="text-xl font-bold text-white">وضعیت کارت‌ها</h2><p className="mt-1 text-xs text-[#9492a6]">رابط‌های شبکهٔ شناسایی‌شده</p></div><Network size={18} className="text-[#8fdfd3]"/></div><div className="space-y-2">{data?.interfaces.slice(0, 5).map((item) => <div key={item.name} className="flex items-center justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] px-4 py-3"><div className="min-w-0"><div className="truncate font-mono text-sm text-white" dir="ltr">{item.name}</div><div className="mt-1 truncate font-mono text-[10px] text-[#89899e]" dir="ltr">{item.addresses?.join(' · ') || item.mac}</div></div><span className={`h-2 w-2 shrink-0 rounded-full ${item.state === 'up' ? 'bg-[#6bdfbf] shadow-[0_0_10px_#6bdfbf]' : 'bg-[#77758e]'}`}/></div>)}{!data?.interfaces.length && <p className="py-9 text-center text-xs text-muted-foreground">کارت شبکه‌ای پیدا نشد.</p>}</div></section></div>
+
+    <div className="grid gap-5 xl:grid-cols-[1fr_1fr]"><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4"><h2 className="text-xl font-bold text-white">مصرف خود Donatello</h2><p className="mt-1 text-xs text-[#9492a6]">اندازه‌گیری مستقیم فرایند پنل</p></div><div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-white/[.07] bg-white/[.025] p-4"><span className="text-xs text-muted-foreground">CPU</span><div className="mt-3 text-2xl font-bold text-white tabular-nums" dir="ltr">{formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%</div></div><div className="rounded-xl border border-white/[.07] bg-white/[.025] p-4"><span className="text-xs text-muted-foreground">RAM</span><div className="mt-3 text-2xl font-bold text-white tabular-nums" dir="ltr">{formatBytes(data?.process_rss_bytes || 0)}</div></div></div><p className="mt-4 text-[11px] leading-6 text-[#8f8da1]">RAM برابر حافظهٔ مقیم فرایند است؛ CPU نسبت به توان کل هسته‌ها محاسبه می‌شود.</p></section><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4"><h2 className="text-xl font-bold text-white">پورت‌های فعال</h2><p className="mt-1 text-xs text-[#9492a6]">نمونه‌ای از شنونده‌های TCP و UDP</p></div><div className="flex flex-wrap gap-2">{data?.ports.slice(0, 12).map((port, index) => <span key={`${port.port}-${port.protocol}-${index}`} className="rounded-lg border border-white/10 bg-white/[.035] px-3 py-2 font-mono text-xs text-[#c8bfd9]" dir="ltr">{port.port}<span className="text-[#8e85a2]">/{port.protocol.toLowerCase()}</span></span>)}{!data?.ports.length && <p className="py-5 text-xs text-muted-foreground">پورت شنونده‌ای پیدا نشد.</p>}</div></section></div>
+    <AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/>
+  </div>
 }
 
 function ResourceChart({ samples }: { samples: ResourceSample[] }) {
-  return <TimeSeriesChart samples={samples} series={[{ key: 'cpu', label: 'پردازنده', color: '#be9bff' }, { key: 'memory', label: 'حافظه', color: '#55d8cb' }, { key: 'disk', label: 'دیسک', color: '#f1bb8a' }]} max={100} unit="٪" />
+  return <TimeSeriesChart samples={samples} series={[{ key: 'cpu', label: 'پردازنده', color: '#be9bff' }, { key: 'memory', label: 'حافظه', color: '#55d8cb' }, { key: 'disk', label: 'دیسک', color: '#f1bb8a' }]} max={100} unit="%" />
 }
 
 type ChartSeries = { key: string; label: string; color: string }
 function TimeSeriesChart({ samples, series, max, unit }: { samples: (ResourceSample | Sample)[]; series: ChartSeries[]; max: number; unit: string }) {
   const [hover, setHover] = useState<number | null>(null)
-  if (!samples.length) return <div className="grid h-[235px] place-items-center text-center text-sm text-muted-foreground">سرویس در حال جمع‌آوری نخستین نمونه است. تاریخچه از این پس در پس‌زمینه ذخیره می‌شود.</div>
-  const width = 720, left = 42, right = 16, top = 18, bottom = 214
+  if (!samples.length) return <div className="grid h-[290px] place-items-center rounded-2xl border border-dashed border-white/10 bg-[#10111a] p-6 text-center text-sm text-muted-foreground">سرویس در حال ثبت نخستین نمونه است. نمودار با دادهٔ ذخیره‌شده نمایش داده می‌شود.</div>
+  const width = 760, left = 50, right = 15, top = 20, bottom = 235
   const x = (index: number) => left + index * (width - left - right) / Math.max(samples.length - 1, 1)
   const y = (value: number) => bottom - Math.min(Math.max(value / max, 0), 1) * (bottom - top)
   const selected = hover === null ? samples.length - 1 : Math.max(0, Math.min(hover, samples.length - 1))
   const current = samples[selected]
-  const stamp = (at: number) => new Date(at * 1000).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })
-  return <div className="rounded-xl border border-white/[.055] bg-[#10111b] p-3 md:p-4">
-    <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">{series.map((item) => <span key={item.key} className="flex items-center gap-2 text-muted-foreground"><i className="h-2 w-2 rounded-full" style={{ background: item.color, boxShadow: `0 0 10px ${item.color}88` }}/>{item.label} <b className="font-mono text-white" dir="ltr">{new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(Number((current as unknown as Record<string, number>)[item.key]) || 0)}{unit}</b></span>)}<span className="mr-auto font-mono text-[10px] text-muted-foreground" dir="ltr">{stamp(current.at)}</span></div>
-    <div className="h-[235px]" dir="ltr"><svg viewBox="0 0 720 250" width="100%" height="100%" preserveAspectRatio="none" onMouseLeave={() => setHover(null)} onMouseMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setHover(Math.round(((event.clientX - rect.left) / rect.width * width - left) / (width - left - right) * (samples.length - 1))) }} role="img" aria-label={`تاریخچهٔ ${series.map((s) => s.label).join('، ')}`}>
-      <defs>{series.map((item) => <linearGradient key={item.key} id={`chart-${item.key}`} x1="0" y1="0" x2="0" y2="1"><stop stopColor={item.color} stopOpacity=".24"/><stop offset="1" stopColor={item.color} stopOpacity="0"/></linearGradient>)}</defs>
-      {[0, .25, .5, .75, 1].map((fraction) => { const py = y(fraction * max); return <g key={fraction}><line x1={left} x2={width-right} y1={py} y2={py} stroke="#363448" strokeDasharray="3 6"/><text x={left-10} y={py+4} fill="#8d8a9f" fontSize="11" textAnchor="end">{unit === '٪' ? `${Math.round(fraction*max)}%` : formatBytes(fraction*max)}</text></g> })}
-      {series.map((item) => { const points = samples.map((sample, index) => `${x(index)},${y(Number((sample as unknown as Record<string, number>)[item.key]) || 0)}`).join(' '); return <g key={item.key}><polygon points={`${left},${bottom} ${points} ${x(samples.length-1)},${bottom}`} fill={`url(#chart-${item.key})`}/><polyline points={points} fill="none" stroke={item.color} strokeWidth="2.6" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"/></g> })}
-      <line x1={x(selected)} x2={x(selected)} y1={top} y2={bottom} stroke="#a999c3" strokeOpacity=".45" strokeDasharray="4 5"/>
-      {series.map((item) => <circle key={item.key} cx={x(selected)} cy={y(Number((current as unknown as Record<string, number>)[item.key]) || 0)} r="4.5" fill={item.color} stroke="#10111b" strokeWidth="2"/>)}
-      <text x={left} y="242" fill="#9995ac" fontSize="11">{stamp(samples[0].at)}</text><text x={width-right} y="242" textAnchor="end" fill="#9995ac" fontSize="11">{stamp(samples[samples.length-1].at)}</text>
+  const read = (sample: ResourceSample | Sample, key: string) => Number((sample as unknown as Record<string, number>)[key]) || 0
+  const display = (value: number) => unit === '%' ? `${formatNumber(Math.round(value * 10) / 10)}%` : `${formatBytes(value)}/s`
+  const stamp = (at: number) => new Date(at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+  return <div className="overflow-hidden rounded-2xl border border-white/[.075] bg-[#10121d]">
+    <div className="flex flex-wrap items-center gap-2 border-b border-white/[.065] px-4 py-3 md:px-5">{series.map((item) => <div key={item.key} className="flex items-center gap-2 rounded-lg bg-white/[.025] px-2.5 py-1.5 text-[11px]"><span className="h-1.5 w-1.5 rounded-full" style={{ background: item.color, boxShadow: `0 0 9px ${item.color}` }}/><span className="text-[#aaa7b9]">{item.label}</span><b className="font-mono font-semibold text-white tabular-nums" dir="ltr">{display(read(current, item.key))}</b></div>)}<span className="mr-auto rounded-lg border border-white/[.065] px-2 py-1 font-mono text-[10px] text-[#9895aa]" dir="ltr">{stamp(current.at)}</span></div>
+    <div className="h-[255px] px-3 pt-3 md:h-[315px] md:px-5" dir="ltr"><svg viewBox="0 0 760 276" width="100%" height="100%" preserveAspectRatio="none" onMouseLeave={() => setHover(null)} onMouseMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setHover(Math.round(((event.clientX - rect.left) / rect.width * width - left) / (width - left - right) * (samples.length - 1))) }} role="img" aria-label={`تاریخچهٔ ${series.map((item) => item.label).join('، ')}`}>
+      <defs><linearGradient id={`overview-fill-${series[0].key}`} x1="0" y1="0" x2="0" y2="1"><stop stopColor={series[0].color} stopOpacity=".24"/><stop offset="1" stopColor={series[0].color} stopOpacity="0"/></linearGradient></defs>
+      {[0, .25, .5, .75, 1].map((fraction) => { const py = y(fraction * max); return <g key={fraction}><line x1={left} x2={width-right} y1={py} y2={py} stroke="#38394c" strokeOpacity=".65" strokeDasharray="2 7"/><text x={left-11} y={py+4} fill="#818095" fontSize="10" textAnchor="end">{unit === '%' ? `${Math.round(fraction * max)}%` : formatBytes(fraction * max)}</text></g> })}
+      {series.map((item, lineIndex) => { const points = samples.map((sample, index) => `${x(index)},${y(read(sample, item.key))}`).join(' '); return <g key={item.key}>{lineIndex === 0 && <polygon points={`${left},${bottom} ${points} ${x(samples.length - 1)},${bottom}`} fill={`url(#overview-fill-${item.key})`}/>}<polyline points={points} fill="none" stroke={item.color} strokeOpacity={lineIndex === 0 ? 1 : .86} strokeWidth={lineIndex === 0 ? 3 : 2.4} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/></g> })}
+      <line x1={x(selected)} x2={x(selected)} y1={top} y2={bottom} stroke="#c6b9df" strokeOpacity=".42" strokeDasharray="3 6"/>
+      {series.map((item) => <circle key={item.key} cx={x(selected)} cy={y(read(current, item.key))} r="4.8" fill={item.color} stroke="#10121d" strokeWidth="2"/>)}
+      <text x={left} y="266" fill="#8d8ca2" fontSize="11">{stamp(samples[0].at)}</text><text x={width-right} y="266" textAnchor="end" fill="#8d8ca2" fontSize="11">{stamp(samples[samples.length - 1].at)}</text>
     </svg></div>
   </div>
 }
@@ -430,7 +290,7 @@ function DistributionBars({ title, description, items }: {
 }
 
 function TrafficChart({ history }: { history: Sample[] }) {
-  return <TimeSeriesChart samples={history} series={[{ key: 'rx', label: 'دریافت', color: '#be9bff' }, { key: 'tx', label: 'ارسال', color: '#55d8cb' }]} max={Math.max(1024, ...history.flatMap((sample) => [sample.rx, sample.tx])) * 1.12} unit=" B/s" />
+  return <TimeSeriesChart samples={history} series={[{ key: 'rx', label: 'دریافت', color: '#be9bff' }, { key: 'tx', label: 'ارسال', color: '#55d8cb' }]} max={Math.max(1024, ...history.flatMap((sample) => [sample.rx, sample.tx])) * 1.12} unit="bytes" />
 }
 
 function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
@@ -600,7 +460,7 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
           <div className="flex gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button><Button variant="outline" size="sm" disabled={!data?.status} onClick={() => downloadText('donatello-ufw.txt', data?.status || '')}><Download size={15}/> دریافت قوانین</Button></div>
         }
       />
-      {user.role === 'admin' && <div className="mb-5"><SectionCard title="مدیریت قانون دسترسی" description="فقط قانون‌های دارای برچسب DONATELLO WEB از اینجا قابل حذف هستند"><div className="flex flex-wrap items-end gap-3"><div className="space-y-2"><Label htmlFor="rule-port">پورت</Label><Input id="rule-port" type="number" min={1} max={65535} value={rulePort} onChange={(event) => setRulePort(event.target.value)} className="w-32"/></div><div className="space-y-2"><Label htmlFor="rule-proto">پروتکل</Label><Select value={ruleProtocol} onValueChange={(value) => setRuleProtocol(value as 'tcp' | 'udp')}><SelectTrigger id="rule-proto" className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="tcp">TCP</SelectItem><SelectItem value="udp">UDP</SelectItem></SelectContent></Select></div><Button disabled={changing || !rulePort} onClick={() => void changeRule('add')}>افزودن اجازه</Button><Button variant="outline" disabled={changing || !rulePort} onClick={() => void changeRule('remove')}>حذف قانون Donatello</Button></div></SectionCard></div>}
+      {user.role === 'admin' && <div className="mb-5"><SectionCard title="مدیریت قانون دسترسی" description="فقط قانون‌های دارای برچسب DONATELLO WEB از اینجا قابل حذف هستند"><div className="flex flex-wrap items-end gap-3"><div className="space-y-2"><Label htmlFor="rule-port">پورت</Label><Input id="rule-port" type="number" lang="en" dir="ltr" min={1} max={65535} value={rulePort} onChange={(event) => setRulePort(event.target.value)} className="w-32"/></div><div className="space-y-2"><Label htmlFor="rule-proto">پروتکل</Label><Select value={ruleProtocol} onValueChange={(value) => setRuleProtocol(value as 'tcp' | 'udp')}><SelectTrigger id="rule-proto" className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="tcp">TCP</SelectItem><SelectItem value="udp">UDP</SelectItem></SelectContent></Select></div><Button disabled={changing || !rulePort} onClick={() => void changeRule('add')}>افزودن اجازه</Button><Button variant="outline" disabled={changing || !rulePort} onClick={() => void changeRule('remove')}>حذف قانون Donatello</Button></div></SectionCard></div>}
       <div className="mb-5"><DistributionBars title="ترکیب قوانین UFW" description="بر اساس خروجی فعلی ufw status numbered" items={['ALLOW', 'DENY', 'REJECT', 'LIMIT'].map((action) => ({ label: action, value: rules.filter((line) => line.includes(action)).length }))} /></div>
       <div className="grid gap-5 lg:grid-cols-[1.5fr_.85fr]">
         <SectionCard
@@ -735,7 +595,7 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
                     minLength={12}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="حداقل ۱۲ نویسه"
+                    placeholder="حداقل 12 نویسه"
                   />
                 </div>
                 <div className="space-y-2">
@@ -891,10 +751,10 @@ export function AuditPage({ Heading, notify }: Common) {
           <div className="flex gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button><Button variant="outline" size="sm" disabled={!events.length} onClick={() => { const rows = [['at','actor','action','detail'], ...events.map((event) => [new Date(event.at * 1000).toISOString(), event.actor, event.action, event.detail])]; downloadText('donatello-audit.csv', '\uFEFF' + rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n'), 'text/csv;charset=utf-8') }}><Download size={15}/> دریافت CSV</Button></div>
         }
       />
-      <div className="mb-5"><DistributionBars title="ترکیب عملیات اخیر" description="از میان ۱۰۰ رویداد آخر ثبت‌شده" items={['login', 'logout', 'account.password', 'user.create', 'user.update'].map((action) => ({ label: action, value: events.filter((event) => event.action === action).length }))} /></div>
+      <div className="mb-5"><DistributionBars title="ترکیب عملیات اخیر" description="از میان 100 رویداد آخر ثبت‌شده" items={['login', 'logout', 'account.password', 'user.create', 'user.update'].map((action) => ({ label: action, value: events.filter((event) => event.action === action).length }))} /></div>
       <SectionCard
         title="آخرین رویدادها"
-        description="۱۰۰ رویداد اخیر"
+        description="100 رویداد اخیر"
         right={<ScrollText size={18} className="text-primary" />}
       >
         {loading ? (
@@ -913,7 +773,7 @@ export function AuditPage({ Heading, notify }: Common) {
               {events.map((e, i) => (
                 <TableRow key={`${e.at}-${i}`}>
                   <TableCell className="whitespace-nowrap text-muted-foreground">
-                    {new Date(e.at * 1000).toLocaleString('fa-IR')}
+                    {new Date(e.at * 1000).toLocaleString('en-US')}
                   </TableCell>
                   <TableCell className="font-semibold">{e.actor}</TableCell>
                   <TableCell>
@@ -950,8 +810,8 @@ export function SettingsPage({
       value: location.port || (location.protocol === 'https:' ? '443' : '80'),
       description: 'پورت فعلی در آدرس مرورگر',
     },
-    { icon: LockKeyhole, title: 'امنیت نشست', value: '۲۴ ساعت', description: 'کوکی HttpOnly و SameSite' },
-    { icon: Gauge, title: 'دورهٔ مانیتورینگ', value: '۵ ثانیه', description: 'به‌روزرسانی خودکار داشبورد' },
+    { icon: LockKeyhole, title: 'امنیت نشست', value: '24 ساعت', description: 'کوکی HttpOnly و SameSite' },
+    { icon: Gauge, title: 'دورهٔ مانیتورینگ', value: '5 ثانیه', description: 'به‌روزرسانی خودکار داشبورد' },
   ]
   return (
     <>
