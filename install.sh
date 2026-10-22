@@ -12,6 +12,7 @@ readonly BINARY="/usr/local/lib/donatello/donatello"
 readonly CLI="/usr/local/bin/donatello"
 readonly LEGACY_INSTALLER="/usr/local/sbin/donatello-installer"
 readonly SERVICE_FILE="/etc/systemd/system/donatello.service"
+readonly PRIVILEGED_SERVICE_FILE="/etc/systemd/system/donatello-privileged.service"
 readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
 readonly UFW_HELPER="/usr/local/lib/donatello/ufw-helper"
 readonly PORT_HELPER="/usr/local/lib/donatello/port-helper"
@@ -279,9 +280,6 @@ configure_ufw_status() {
   sudoers_tmp="$(mktemp /etc/sudoers.d/.donatello-ufw.XXXXXX)"
   printf '%s ALL=(root) NOPASSWD: %s *\n' "$SERVICE_USER" "$PORT_HELPER" > "$sudoers_tmp"
   printf '%s ALL=(root) NOPASSWD: %s check, %s run\n' "$SERVICE_USER" "$UPDATE_HELPER" "$UPDATE_HELPER" >> "$sudoers_tmp"
-  if [[ -n "$ufw" ]]; then
-    printf '%s ALL=(root) NOPASSWD: %s status numbered, %s *\n' "$SERVICE_USER" "$ufw" "$UFW_HELPER" >> "$sudoers_tmp"
-  fi
   chmod 0440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then
     rm -f "$sudoers_tmp"
@@ -840,6 +838,35 @@ UNIT
   systemctl daemon-reload
 }
 
+write_privileged_service_unit() {
+  cat > "$PRIVILEGED_SERVICE_FILE" <<'UNIT'
+[Unit]
+Description=Donatello restricted privileged operations
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=donatello
+RuntimeDirectory=donatello-privileged
+RuntimeDirectoryMode=0770
+UMask=0007
+ExecStart=/usr/local/lib/donatello/donatello privileged-helper
+Restart=on-failure
+RestartSec=2
+PrivateTmp=true
+ProtectHome=true
+ProtectControlGroups=true
+LockPersonality=true
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  chmod 0644 "$PRIVILEGED_SERVICE_FILE"
+  systemctl daemon-reload
+}
+
 activate_binary() {
   local built="$SOURCE_DIR/target/release/donatello"
   local staged
@@ -875,6 +902,8 @@ install_app() {
   sync_ufw_rules
   take_database_ownership
   activate_binary
+  write_privileged_service_unit
+  systemctl enable --now donatello-privileged.service
   write_service_unit
   install_cli
   systemctl enable "$SERVICE_NAME"
@@ -938,6 +967,8 @@ update_app() {
   fi
   install -o root -g root -m 0755 "$SOURCE_DIR/target/release/donatello" "$staged"
   mv -f "$staged" "$BINARY"
+  write_privileged_service_unit
+  systemctl restart donatello-privileged.service
   write_service_unit
   install_cli
   systemctl restart "$SERVICE_NAME"
@@ -1249,6 +1280,7 @@ delete_app() {
     chmod 0600 "$DATA_DIR/.database-path"
   fi
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  systemctl disable --now donatello-privileged.service 2>/dev/null || true
   if has ufw && ufw status 2>/dev/null | rg -q '^Status: active'; then
     while IFS= read -r rule_id; do
       [[ -n "$rule_id" ]] || continue
@@ -1257,7 +1289,7 @@ delete_app() {
   fi
   systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
   rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
-  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER"
+  rm -f "$SERVICE_FILE" "$PRIVILEGED_SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER"
   if [[ -n "$domain" ]]; then
     rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$CERT_DEPLOY_HOOK"
     if [[ -x /snap/bin/certbot ]]; then
