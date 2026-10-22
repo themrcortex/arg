@@ -273,7 +273,8 @@ configure_ufw_status() {
   if [[ -n "$ufw" ]]; then
     install -o root -g root -m 0755 "$SOURCE_DIR/scripts/ufw-helper.sh" "$UFW_HELPER"
   else
-    rm -f "$UFW_HELPER"
+    # Keep the helper available so an administrator can install UFW from the web panel.
+    install -o root -g root -m 0755 "$SOURCE_DIR/scripts/ufw-helper.sh" "$UFW_HELPER"
   fi
   sudoers_tmp="$(mktemp /etc/sudoers.d/.donatello-ufw.XXXXXX)"
   printf '%s ALL=(root) NOPASSWD: %s *\n' "$SERVICE_USER" "$PORT_HELPER" > "$sudoers_tmp"

@@ -813,7 +813,7 @@ async fn managed_firewall_rules(State(state): State<AppState>, headers: HeaderMa
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
     // Import rules created by earlier Donatello releases so they can be edited here.
-    if let Ok(output) = std::process::Command::new("sudo").args(["-n", "ufw", "status", "numbered"]).output() {
+    if let Ok(output) = std::process::Command::new("sudo").args(["-n", "/usr/local/lib/donatello/ufw-helper", "status"]).output() {
         if output.status.success() {
             for line in String::from_utf8_lossy(&output.stdout).lines().filter(|line| line.contains("# DONATELLO WEB")) {
                 let tokens: Vec<_> = line.split_whitespace().collect();
@@ -1070,7 +1070,7 @@ async fn firewall(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
     }
     let mut command = tokio::process::Command::new("sudo");
     command
-        .args(["-n", "ufw", "status", "numbered"])
+        .args(["-n", "/usr/local/lib/donatello/ufw-helper", "status"])
         .kill_on_drop(true);
     let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output()).await;
     Ok(Json(match output {
@@ -1085,20 +1085,33 @@ async fn firewall(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
 }
 #[derive(Deserialize)]
 struct FirewallStateInput { enabled: bool }
+fn run_ufw_admin_action(action: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/lib/donatello/ufw-helper", action])
+        .output()
+        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "UFW helper unavailable; run sudo donatello update once"))?;
+    if output.status.success() { Ok(()) }
+    else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(error(StatusCode::BAD_REQUEST, if detail.is_empty() { "UFW operation failed" } else { "UFW operation failed; inspect the service logs" }))
+    }
+}
 async fn update_firewall_state(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<FirewallStateInput>) -> ApiResult {
     check_origin(&headers)?;
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
     let action = if input.enabled { "enable" } else { "disable" };
-    let output = std::process::Command::new("sudo")
-        .args(["-n", "/usr/local/lib/donatello/ufw-helper", action])
-        .output()
-        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "UFW helper unavailable; update Donatello"))?;
-    if !output.status.success() {
-        return Err(error(StatusCode::BAD_REQUEST, "UFW state change failed; check SSH and panel access rules"));
-    }
+    run_ufw_admin_action(action)?;
     audit(&db, &actor.username, "firewall.state", action);
     Ok(Json(json!({"enabled": input.enabled})))
+}
+async fn install_firewall(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    run_ufw_admin_action("install")?;
+    audit(&db, &actor.username, "firewall.install", "UFW installed from web panel");
+    Ok(Json(json!({"installed": true})))
 }
 fn update_status() -> Value {
     let output = std::process::Command::new("sudo")
@@ -1212,6 +1225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/users/{id}", put(update_user))
         .route("/api/audit", get(audit_log))
         .route("/api/firewall", get(firewall).put(update_firewall_state))
+        .route("/api/firewall/install", post(install_firewall))
         .route("/api/firewall/rules", get(managed_firewall_rules).post(add_firewall_rule))
         .route("/api/firewall/rules/{id}", put(update_firewall_rule).delete(delete_firewall_rule))
         .fallback(get(static_file))

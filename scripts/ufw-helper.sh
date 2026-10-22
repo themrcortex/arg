@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 if [[ $# -eq 1 ]]; then
-  ufw_bin="$(command -v ufw)"
+  if [[ "$1" == install ]]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y --no-install-recommends ufw >/dev/null
+    exit 0
+  fi
+  ufw_bin="$(command -v ufw || true)"
   [[ -n "$ufw_bin" ]] || exit 3
   case "$1" in
+    status) "$ufw_bin" status numbered ;;
     enable)
       ssh_ports="$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2}' || true)"
       [[ -n "$ssh_ports" ]] || ssh_ports=22
