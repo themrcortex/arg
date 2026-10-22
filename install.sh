@@ -581,43 +581,135 @@ view_logs() {
   journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
 }
 
-main_menu() {
-  local selection
-  while true; do
-    printf '\n%s%s  DONATELLO CONTROL CENTER%s\n' "$C_BOLD" "$C_CYAN" "$C_RESET"
-    if [[ -f "$SERVICE_FILE" ]]; then
-      printf '  %s● Installed%s\n\n' "$C_GREEN" "$C_RESET"
-    else
-      printf '  %s○ Not installed%s\n\n' "$C_DIM" "$C_RESET"
+draw_menu_item() {
+  local selected="$1" number="$2" title="$3" hint="$4"
+  if [[ "$selected" == "$number" ]]; then
+    printf '  %s❯%s %s%-2s%s  %-30s %s%s%s\n' \
+      "$C_PURPLE" "$C_RESET" "$C_BOLD" "$number" "$C_RESET" "$title" "$C_DIM" "$hint" "$C_RESET"
+  else
+    printf '    %s%-2s%s  %-30s %s%s%s\n' "$C_DIM" "$number" "$C_RESET" "$title" "$C_DIM" "$hint" "$C_RESET"
+  fi
+}
+
+draw_control_center() {
+  local selected="$1" state="NOT INSTALLED" state_color="$C_DIM" endpoint="localhost"
+  if [[ -f "$SERVICE_FILE" ]]; then
+    state="STOPPED"
+    state_color="$C_YELLOW"
+    if has systemctl && systemctl is-active --quiet "$SERVICE_NAME"; then
+      state="RUNNING"
+      state_color="$C_GREEN"
     fi
-    printf '  %sINSTALLATION%s\n' "$C_DIM" "$C_RESET"
-    printf '   1) Install / repair DONATELLO\n\n'
-    printf '  %sSERVICE MANAGEMENT%s\n' "$C_DIM" "$C_RESET"
-    printf '   2) Service status       3) Start service\n'
-    printf '   4) Stop service         5) Restart service\n'
-    printf '   6) View service logs    7) Change panel port\n\n'
-    printf '  %sMAINTENANCE%s\n' "$C_DIM" "$C_RESET"
-    printf '   8) Update DONATELLO     9) Configure HTTPS / SSL\n'
-    printf '  10) Uninstall (keep data)\n'
-    printf '  11) Uninstall and purge all data\n\n'
-    printf '   H) Help                 0) Exit\n\n'
-    read -r -p 'Select an option: ' selection || return 0
-    case "$selection" in
-      1) install_app; pause_menu ;;
-      2) show_status; pause_menu ;;
-      3) run_service_action start; pause_menu ;;
-      4) run_service_action stop; pause_menu ;;
-      5) run_service_action restart; pause_menu ;;
-      6) view_logs 100; pause_menu ;;
-      7) change_port; pause_menu ;;
-      8) update_app; pause_menu ;;
-      9) configure_https; pause_menu ;;
-      10) delete_app ""; pause_menu ;;
-      11) delete_app "--purge"; pause_menu ;;
-      h|H) usage; pause_menu ;;
-      0) return 0 ;;
-      *) warn "Invalid selection. Choose an option from the menu."; pause_menu ;;
+  fi
+  if [[ -s "$DOMAIN_FILE" ]]; then
+    endpoint="https://$(<"$DOMAIN_FILE")"
+  elif [[ -f "$ENV_FILE" ]]; then
+    endpoint="127.0.0.1:$(panel_port)"
+  fi
+
+  printf '\033[2J\033[H'
+  printf '\n  %s╭──────────────────────────────────────────────────────────────╮%s\n' "$C_PURPLE" "$C_RESET"
+  printf '  %s│%s  %sDONATELLO%s  %s/ VPS CONTROL CENTER                         %s│%s\n' \
+    "$C_PURPLE" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_DIM" "$C_PURPLE" "$C_RESET"
+  printf '  %s│%s  Service: %s● %-14s%s  Panel: %-24s %s│%s\n' \
+    "$C_PURPLE" "$C_RESET" "$state_color" "$state" "$C_RESET" "$endpoint" "$C_PURPLE" "$C_RESET"
+  printf '  %s╰──────────────────────────────────────────────────────────────╯%s\n\n' "$C_PURPLE" "$C_RESET"
+
+  printf '  %sSETUP%s\n' "$C_CYAN" "$C_RESET"
+  draw_menu_item "$selected" 1 'Install / repair' 'Build and configure the service'
+  printf '\n  %sSERVICE%s\n' "$C_CYAN" "$C_RESET"
+  draw_menu_item "$selected" 2 'Service status' 'View systemd health and details'
+  draw_menu_item "$selected" 3 'Start service' 'Bring the panel online'
+  draw_menu_item "$selected" 4 'Stop service' 'Stop the background service'
+  draw_menu_item "$selected" 5 'Restart service' 'Restart after configuration changes'
+  draw_menu_item "$selected" 6 'View service logs' 'Inspect recent Donatello logs'
+  draw_menu_item "$selected" 7 'Change panel port' 'Update the local listening port'
+  printf '\n  %sSECURITY & MAINTENANCE%s\n' "$C_CYAN" "$C_RESET"
+  draw_menu_item "$selected" 8 'Configure HTTPS / SSL' 'Set up Nginx and Let’s Encrypt'
+  draw_menu_item "$selected" 9 'Update Donatello' 'Fetch and install the latest version'
+  draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove Donatello and retain its data'
+  draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove Donatello and all its data'
+  printf '\n  %s↑%s / %s↓%s move   %sEnter%s select   %s1–9%s quick select   %sq%s quit\n\n' \
+    "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+}
+
+read_menu_key() {
+  local saved key sequence
+  saved="$(stty -g </dev/tty 2>/dev/null)" || return 1
+  stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null || return 1
+  IFS= read -r -s -n 1 key </dev/tty || key=""
+  if [[ "$key" == $'\033' ]]; then
+    IFS= read -r -s -n 2 -t 1 sequence </dev/tty || sequence=""
+    case "$sequence" in
+      '[A') key='up' ;;
+      '[B') key='down' ;;
+      *) key='escape' ;;
     esac
+  elif [[ "$key" == $'\r' || "$key" == $'\n' ]]; then
+    key='enter'
+  fi
+  stty "$saved" </dev/tty 2>/dev/null || true
+  printf '%s' "$key"
+}
+
+run_menu_action() {
+  case "$1" in
+    1) install_app ;;
+    2) show_status ;;
+    3) run_service_action start ;;
+    4) run_service_action stop ;;
+    5) run_service_action restart ;;
+    6) view_logs 100 ;;
+    7) change_port ;;
+    8) configure_https ;;
+    9) update_app ;;
+    10) delete_app "" ;;
+    11) delete_app "--purge" ;;
+  esac
+}
+
+main_menu() {
+  local selection="" key interactive=0
+  local selected=1
+  [[ -f "$SERVICE_FILE" ]] && selected=2
+  if [[ -r /dev/tty && -t 1 && -t 0 && "${TERM:-dumb}" != "dumb" ]] && has stty; then
+    interactive=1
+  fi
+
+  while true; do
+    if (( interactive )); then
+      draw_control_center "$selected"
+      key="$(read_menu_key)" || interactive=0
+      if (( interactive )); then
+        case "$key" in
+          up|k) (( selected > 1 )) && ((selected--)) || selected=11 ;;
+          down|j) (( selected < 11 )) && ((selected++)) || selected=1 ;;
+          enter) selection="$selected" ;;
+          q|Q|escape) printf '\033[0m\n'; return 0 ;;
+          h|H) usage; pause_menu; continue ;;
+          [1-9]) selection="$key" ;;
+          0) return 0 ;;
+          *) continue ;;
+        esac
+      fi
+    else
+      printf '\n%s%s  DONATELLO CONTROL CENTER%s\n' "$C_BOLD" "$C_CYAN" "$C_RESET"
+      printf '  Service: %s\n  Panel: %s\n\n' \
+        "$( [[ -f "$SERVICE_FILE" ]] && systemctl is-active "$SERVICE_NAME" 2>/dev/null || printf 'not installed' )" \
+        "$( [[ -s "$DOMAIN_FILE" ]] && printf 'https://%s' "$(<"$DOMAIN_FILE")" || printf 'localhost:%s' "$(panel_port 2>/dev/null || printf '8282')" )"
+      printf '  1 Install / repair     2 Status       3 Start          4 Stop\n'
+      printf '  5 Restart              6 Logs         7 Change port    8 HTTPS / SSL\n'
+      printf '  9 Update              10 Uninstall    11 Purge data     0 Exit\n\n'
+      read -r -p 'Select an option: ' selection || return 0
+      [[ "$selection" == "0" ]] && return 0
+      [[ "$selection" =~ ^([1-9]|10|11)$ ]] || { warn 'Choose a menu option from 1 to 11.'; continue; }
+    fi
+
+    if [[ -n "$selection" ]]; then
+      run_menu_action "$selection"
+      selection=""
+      pause_menu
+    fi
   done
 }
 
