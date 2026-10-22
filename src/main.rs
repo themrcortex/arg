@@ -32,6 +32,9 @@ use tokio::{
 };
 
 const PRIVILEGED_SOCKET: &str = "/run/donatello-privileged/manager.sock";
+const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
+const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
+static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
 type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -1522,6 +1525,107 @@ async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap
     );
     Ok(Json(json!({"scheduled": true})))
 }
+#[derive(Deserialize)]
+struct NginxSiteContentInput {
+    content: String,
+}
+#[derive(Deserialize)]
+struct NginxSiteEnabledInput {
+    enabled: bool,
+}
+
+fn nginx_manager_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
+    let response = privileged_request(request)?;
+    if response["ok"] == true {
+        Ok(response["data"].clone())
+    } else {
+        Err(error(
+            StatusCode::BAD_REQUEST,
+            response["error"]
+                .as_str()
+                .unwrap_or("Nginx operation failed"),
+        ))
+    }
+}
+
+async fn nginx_sites(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    let result = nginx_manager_request(json!({"action":"nginx-list"}))?;
+    Ok(Json(result))
+}
+
+async fn get_nginx_site(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    let result = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+    Ok(Json(result))
+}
+
+async fn save_nginx_site(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxSiteContentInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    if input.content.len() > 512 * 1024 {
+        return Err(error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "تنظیمات سایت نمی‌تواند بیشتر از 512 KB باشد.",
+        ));
+    }
+    let result =
+        nginx_manager_request(json!({"action":"nginx-save","name":name,"content":input.content}))?;
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "nginx.site.edit", &format!("site={name}"));
+    Ok(Json(result))
+}
+
+async fn toggle_nginx_site(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxSiteEnabledInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    let result = nginx_manager_request(
+        json!({"action":"nginx-toggle","name":name,"enabled":input.enabled}),
+    )?;
+    let db = state.lock().unwrap();
+    audit(
+        &db,
+        &actor,
+        "nginx.site.toggle",
+        &format!("site={name} enabled={}", input.enabled),
+    );
+    Ok(Json(result))
+}
 async fn static_file(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let file = if path.is_empty() { "index.html" } else { path };
@@ -1580,6 +1684,271 @@ fn privileged_peer_allowed(stream: &UnixStream) -> bool {
         .is_some_and(|expected_uid| credentials.uid == expected_uid)
 }
 
+fn valid_nginx_site_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn nginx_site_paths(name: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    if !valid_nginx_site_name(name) {
+        return Err("نام سایت معتبر نیست.".into());
+    }
+    let available_dir = std::path::Path::new(NGINX_AVAILABLE_DIR);
+    let enabled_dir = std::path::Path::new(NGINX_ENABLED_DIR);
+    if !available_dir.is_dir() || !enabled_dir.is_dir() {
+        return Err("Nginx نصب نیست یا پوشه‌های sites-available و sites-enabled پیدا نشدند.".into());
+    }
+    Ok((available_dir.join(name), enabled_dir.join(name)))
+}
+
+fn nginx_site_enabled(name: &str) -> Result<bool, String> {
+    let (available, enabled) = nginx_site_paths(name)?;
+    let available_meta = fs::symlink_metadata(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    if !available_meta.file_type().is_file() {
+        return Err("فایل سایت باید یک فایل معمولی در sites-available باشد.".into());
+    }
+    match fs::symlink_metadata(&enabled) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.to_string()),
+        Ok(meta) if !meta.file_type().is_symlink() => {
+            Err("مسیر sites-enabled اشغال شده و symlink معتبر نیست.".into())
+        }
+        Ok(_) => {
+            let target = fs::canonicalize(&enabled)
+                .map_err(|_| "symlink سایت شکسته یا مقصد آن نامعتبر است.")?;
+            let expected = fs::canonicalize(&available).map_err(|error| error.to_string())?;
+            if target == expected {
+                Ok(true)
+            } else {
+                Err("symlink موجود به فایل sites-available همین سایت اشاره نمی‌کند.".into())
+            }
+        }
+    }
+}
+
+fn nginx_config_test() -> Result<(), String> {
+    let output = std::process::Command::new("nginx")
+        .arg("-t")
+        .output()
+        .map_err(|error| format!("اجرای nginx -t ناموفق بود: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            "اعتبارسنجی تنظیمات Nginx ناموفق بود.".into()
+        } else {
+            detail
+        })
+    }
+}
+
+fn nginx_reload_if_active() -> Result<(), String> {
+    let active = std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "nginx"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !active {
+        return Ok(());
+    }
+    let output = std::process::Command::new("systemctl")
+        .args(["reload", "nginx"])
+        .output()
+        .map_err(|error| format!("بارگذاری مجدد Nginx ناموفق بود: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            "بارگذاری مجدد Nginx ناموفق بود.".into()
+        } else {
+            detail
+        })
+    }
+}
+
+fn nginx_list_sites() -> Result<Value, String> {
+    let available_dir = std::path::Path::new(NGINX_AVAILABLE_DIR);
+    if !available_dir.is_dir() {
+        return Err("Nginx نصب نیست یا sites-available پیدا نشد.".into());
+    }
+    let mut sites = Vec::new();
+    for entry in fs::read_dir(available_dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_file()
+        {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !valid_nginx_site_name(&name) {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|error| error.to_string())?;
+        if metadata.len() > 512 * 1024 {
+            continue;
+        }
+        let enabled = nginx_site_enabled(&name)?;
+        sites.push(json!({"name":name,"enabled":enabled,"bytes":metadata.len()}));
+    }
+    sites.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
+    Ok(json!(sites))
+}
+
+fn nginx_get_site(name: &str) -> Result<Value, String> {
+    let (available, _) = nginx_site_paths(name)?;
+    let metadata = fs::symlink_metadata(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    if !metadata.file_type().is_file() {
+        return Err("فایل سایت باید یک فایل معمولی باشد.".into());
+    }
+    if metadata.len() > 512 * 1024 {
+        return Err("حجم تنظیمات سایت از حد مجاز بیشتر است.".into());
+    }
+    let content = fs::read_to_string(&available).map_err(|error| error.to_string())?;
+    Ok(
+        json!({"name":name,"enabled":nginx_site_enabled(name)?,"content":content,"bytes":metadata.len()}),
+    )
+}
+
+fn nginx_atomic_write(path: &std::path::Path, content: &[u8], mode: u32) -> Result<(), String> {
+    let parent = path.parent().ok_or("مسیر تنظیمات نامعتبر است.")?;
+    let file_name = path
+        .file_name()
+        .and_then(|part| part.to_str())
+        .ok_or("نام فایل نامعتبر است.")?;
+    let temp = parent.join(format!(".donatello-{file_name}-{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| error.to_string())?;
+        file.write_all(content).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(mode & 0o777))
+            .map_err(|error| error.to_string())?;
+        fs::rename(&temp, path).map_err(|error| error.to_string())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+fn nginx_save_site(name: &str, content: &str) -> Result<Value, String> {
+    if content.len() > 512 * 1024 || content.contains('\0') {
+        return Err("تنظیمات خالی، نامعتبر یا بزرگ‌تر از 512 KB است.".into());
+    }
+    let (available, _) = nginx_site_paths(name)?;
+    let metadata = fs::symlink_metadata(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    if !metadata.file_type().is_file() {
+        return Err("فقط فایل معمولی داخل sites-available قابل ویرایش است.".into());
+    }
+    let old_content = fs::read(&available).map_err(|error| error.to_string())?;
+    let enabled = nginx_site_enabled(name)?;
+    nginx_atomic_write(
+        &available,
+        content.as_bytes(),
+        metadata.permissions().mode(),
+    )?;
+    if let Err(error) = nginx_config_test() {
+        let _ = nginx_atomic_write(&available, &old_content, metadata.permissions().mode());
+        return Err(format!(
+            "تنظیمات ذخیره نشد و نسخهٔ قبلی بازگردانده شد: {error}"
+        ));
+    }
+    if enabled {
+        if let Err(error) = nginx_reload_if_active() {
+            let _ = nginx_atomic_write(&available, &old_content, metadata.permissions().mode());
+            let _ = nginx_reload_if_active();
+            return Err(format!(
+                "بارگذاری تنظیمات ناموفق بود؛ نسخهٔ قبلی بازگردانده شد: {error}"
+            ));
+        }
+    }
+    Ok(
+        json!({"name":name,"enabled":enabled,"message":if enabled { "تنظیمات ذخیره و بررسی شد." } else { "تنظیمات ذخیره و بررسی شد؛ سایت غیرفعال است." }}),
+    )
+}
+
+fn nginx_set_site_enabled(name: &str, enabled: bool) -> Result<Value, String> {
+    let (available, link) = nginx_site_paths(name)?;
+    let metadata = fs::symlink_metadata(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    if !metadata.file_type().is_file() {
+        return Err("فقط فایل معمولی داخل sites-available قابل فعال‌سازی است.".into());
+    }
+    let was_enabled = nginx_site_enabled(name)?;
+    if was_enabled == enabled {
+        return Ok(json!({"name":name,"enabled":enabled,"message":"وضعیت سایت تغییری نکرد."}));
+    }
+    if enabled {
+        std::os::unix::fs::symlink(format!("../sites-available/{name}"), &link)
+            .map_err(|error| format!("ساخت symlink خودکار ناموفق بود: {error}"))?;
+    } else {
+        fs::remove_file(&link).map_err(|error| format!("حذف symlink ناموفق بود: {error}"))?;
+    }
+    let apply = nginx_config_test().and_then(|_| nginx_reload_if_active());
+    if let Err(error) = apply {
+        if enabled {
+            let _ = fs::remove_file(&link);
+        } else {
+            let _ = std::os::unix::fs::symlink(format!("../sites-available/{name}"), &link);
+        }
+        return Err(format!(
+            "تغییر اعمال نشد و وضعیت قبلی بازگردانده شد: {error}"
+        ));
+    }
+    Ok(
+        json!({"name":name,"enabled":enabled,"message":if enabled { "سایت فعال شد و symlink ساخته شد." } else { "سایت غیرفعال شد و symlink حذف شد." }}),
+    )
+}
+
+fn execute_nginx_request(action: &str, request: &Value) -> Value {
+    let result = match action {
+        "nginx-list" => nginx_list_sites().map(|sites| json!({"sites":sites})),
+        "nginx-get" => request["name"]
+            .as_str()
+            .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(nginx_get_site)
+            .map(|site| json!({"site":site})),
+        "nginx-save" => request["name"]
+            .as_str()
+            .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(|name| {
+                request["content"]
+                    .as_str()
+                    .ok_or_else(|| "متن تنظیمات ارسال نشده است.".to_owned())
+                    .and_then(|content| nginx_save_site(name, content))
+            })
+            .map(|site| json!({"site":site})),
+        "nginx-toggle" => request["name"]
+            .as_str()
+            .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(|name| {
+                request["enabled"]
+                    .as_bool()
+                    .ok_or_else(|| "وضعیت سایت ارسال نشده است.".to_owned())
+                    .and_then(|enabled| nginx_set_site_enabled(name, enabled))
+            })
+            .map(|site| json!({"site":site})),
+        _ => Err("درخواست مدیریت Nginx پشتیبانی نمی‌شود.".to_owned()),
+    };
+    match result {
+        Ok(value) => json!({"ok":true,"data":value}),
+        Err(error) => json!({"ok":false,"error":error}),
+    }
+}
+
 fn execute_privileged_request(request: &Value) -> Value {
     let action = match request["action"].as_str() {
         Some("status") => "status",
@@ -1590,8 +1959,18 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("remove") => "remove",
         Some("update-check") => "update-check",
         Some("update-run") => "update-run",
+        Some("nginx-list") => "nginx-list",
+        Some("nginx-get") => "nginx-get",
+        Some("nginx-save") => "nginx-save",
+        Some("nginx-toggle") => "nginx-toggle",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
+    if action.starts_with("nginx-") {
+        let _guard = NGINX_OPERATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        return execute_nginx_request(action, request);
+    }
     let mut args = vec![action.to_owned()];
     if action == "add" || action == "remove" {
         let Some(port) = request["port"]
@@ -1653,10 +2032,12 @@ async fn serve_privileged_connection(mut stream: UnixStream) {
     }
     let mut line = String::new();
     let response = match AsyncBufReader::new(&mut stream).read_line(&mut line).await {
-        Ok(size) if size > 0 && size <= 4096 => match serde_json::from_str::<Value>(&line) {
-            Ok(request) => execute_privileged_request(&request),
-            Err(_) => json!({"ok":false,"error":"Invalid request"}),
-        },
+        Ok(size) if size > 0 && size <= 4 * 1024 * 1024 => {
+            match serde_json::from_str::<Value>(&line) {
+                Ok(request) => execute_privileged_request(&request),
+                Err(_) => json!({"ok":false,"error":"Invalid request"}),
+            }
+        }
         _ => json!({"ok":false,"error":"Invalid request"}),
     };
     let _ = stream.write_all(format!("{}\n", response).as_bytes()).await;
@@ -1741,6 +2122,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))
         .route("/api/audit", get(audit_log))
+        .route("/api/nginx/sites", get(nginx_sites))
+        .route(
+            "/api/nginx/sites/{name}",
+            get(get_nginx_site).put(save_nginx_site),
+        )
+        .route("/api/nginx/sites/{name}/enabled", put(toggle_nginx_site))
         .route("/api/firewall", get(firewall).put(update_firewall_state))
         .route("/api/firewall/install", post(install_firewall))
         .route(

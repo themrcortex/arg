@@ -27,7 +27,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
-import { AuditPage, DashboardPage, FirewallPage, NetworkPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
+import { AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { navigation, pageFromHash, type PageId } from './navigation'
 const developer = (
   <a
@@ -390,7 +390,7 @@ export default function App() {
           <div className="mt-9 flex-1 space-y-6 overflow-y-auto pb-5">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall'].includes(item.id)) },
+              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx'].includes(item.id)) },
               { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="mb-2 px-3 text-[10px] font-bold tracking-[.12em] text-[#76778d]">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} className={cn('flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-right text-[13px] transition', currentPage === item.id ? 'border border-primary/25 bg-primary/[.13] font-semibold text-white shadow-[inset_-3px_0_#a987ff]' : 'border border-transparent text-[#a6a6bb] hover:bg-white/[.055] hover:text-white')}><item.icon size={17} strokeWidth={1.8}/><span className="flex-1">{item.label}</span>{currentPage === item.id && <span className="h-1.5 w-1.5 rounded-full bg-[#bd9aff]"/>}</button>)}</div></nav>)}
           </div>
@@ -414,6 +414,7 @@ export default function App() {
             {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={setNotice} user={user} />}
+            {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'users' && user.role === 'admin' && (
               <UsersPage current={user} Heading={PageHeading} notify={setNotice} />
             )}

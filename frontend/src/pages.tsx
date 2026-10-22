@@ -8,6 +8,7 @@ import {
   Database,
   Download,
   Gauge,
+  Globe,
   HardDrive,
   Info,
   Github,
@@ -15,7 +16,9 @@ import {
   Network,
   Plus,
   Pencil,
+  Power,
   Search,
+  Save,
   Trash2,
   Radio,
   RefreshCw,
@@ -518,6 +521,82 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
     <details className="mt-5 rounded-2xl border border-white/10 bg-[#14151f] p-5"><summary className="cursor-pointer text-sm font-semibold text-white">همهٔ قوانین UFW و خروجی خام</summary><div className="mt-4 flex justify-end"><Button variant="outline" size="sm" disabled={!data?.status} onClick={() => downloadText('donatello-ufw.txt', data?.status || '')}><Download size={14}/> دریافت خروجی</Button></div><pre className="mt-3 max-h-[480px] overflow-auto whitespace-pre-wrap rounded-xl bg-[#0e101a] p-4 text-left font-mono text-xs leading-6 text-muted-foreground" dir="ltr">{data?.status || data?.error || 'UFW unavailable'}</pre></details>
     <Alert className="mt-5"><ShieldCheck size={17} className="mb-2 text-primary"/><AlertTitle>حفاظت دسترسی</AlertTitle><AlertDescription>پورت‌های SSH، HTTP، HTTPS و پورت‌های پنل از ویرایش در این بخش محافظت می‌شوند. هنگام فعال‌کردن UFW، دسترسی SSH و پنل ابتدا مجاز می‌شود.</AlertDescription></Alert>
     <Dialog open={dialogOpen} onOpenChange={setDialogOpen}><DialogContent><DialogHeader><DialogTitle>{editing === null ? 'قانون جدید' : 'ویرایش قانون'}</DialogTitle><DialogDescription>قانون در UFW اعمال می‌شود و می‌توانی بعداً آن را غیرفعال کنی.</DialogDescription></DialogHeader><form onSubmit={save} className="space-y-4"><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="firewall-port">پورت</Label><Input id="firewall-port" type="number" lang="en" dir="ltr" min={1} max={65535} required value={form.port} onChange={(event) => setForm((old) => ({ ...old, port: event.target.value }))}/></div><div className="space-y-2"><Label>پروتکل</Label><div role="group" aria-label="انتخاب پروتکل شبکه" className="grid grid-cols-3 gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1">{([['tcp','TCP'], ['udp','UDP'], ['both','TCP + UDP']] as const).map(([value,label]) => <button key={value} type="button" aria-pressed={form.protocol === value} onClick={() => setForm((old) => ({ ...old, protocol: value }))} className={`rounded-lg px-2 py-2.5 text-xs font-mono font-semibold transition ${form.protocol === value ? 'bg-primary/25 text-white shadow-sm' : 'text-muted-foreground hover:bg-white/[.04] hover:text-white'}`}>{label}</button>)}</div><p className="text-[11px] text-muted-foreground">{form.protocol === 'both' ? 'دو قانون جداگانه برای TCP و UDP ساخته می‌شود.' : `فقط ترافیک ${form.protocol.toUpperCase()} برای این پورت مدیریت می‌شود.`}</p></div></div><div className="space-y-2"><Label htmlFor="firewall-policy">رفتار</Label><Select value={form.policy} onValueChange={(value) => setForm((old) => ({ ...old, policy: value as 'allow' | 'deny' }))}><SelectTrigger id="firewall-policy"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="allow">اجازه</SelectItem><SelectItem value="deny">مسدود</SelectItem></SelectContent></Select></div><label className="flex items-center justify-between rounded-xl border border-white/10 p-3 text-sm"><span>قانون فعال باشد</span><Switch checked={form.enabled} onCheckedChange={(checked) => setForm((old) => ({ ...old, enabled: checked }))}/></label><Button type="submit" disabled={busy || !form.port} className="w-full">{busy ? 'در حال ذخیره…' : 'ذخیرهٔ قانون'}</Button></form></DialogContent></Dialog>
+  </>
+}
+
+type NginxSite = { name: string; enabled: boolean; bytes?: number; content?: string; message?: string }
+export function NginxPage({ Heading, notify }: Common) {
+  const [sites, setSites] = useState<NginxSite[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [editing, setEditing] = useState<string | null>(null)
+  const [content, setContent] = useState('')
+  const [editorOpen, setEditorOpen] = useState(false)
+
+  const refresh = useCallback(async () => {
+    try {
+      const result = await api<{ sites: NginxSite[] }>('nginx/sites')
+      setSites(result.sites)
+      setLoadError('')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'خواندن سایت‌های Nginx ناموفق بود.'
+      setLoadError(message)
+    } finally { setLoading(false) }
+  }, [])
+  useEffect(() => { void refresh() }, [refresh])
+
+  async function editSite(site: NginxSite) {
+    setBusy(true)
+    try {
+      const result = await api<{ site: NginxSite }>(`nginx/sites/${encodeURIComponent(site.name)}`)
+      setEditing(site.name)
+      setContent(result.site.content || '')
+      setEditorOpen(true)
+    } catch (error) { notify(error instanceof Error ? error.message : 'خواندن تنظیمات سایت ناموفق بود.') }
+    finally { setBusy(false) }
+  }
+
+  async function saveSite(event: FormEvent) {
+    event.preventDefault()
+    if (!editing) return
+    setBusy(true)
+    try {
+      const result = await api<{ site: NginxSite }>(`nginx/sites/${encodeURIComponent(editing)}`, { method: 'PUT', body: JSON.stringify({ content }) })
+      setEditorOpen(false)
+      notify(result.site.message || 'تنظیمات ذخیره و بررسی شد.')
+      await refresh()
+    } catch (error) { notify(error instanceof Error ? error.message : 'ذخیره تنظیمات ناموفق بود.') }
+    finally { setBusy(false) }
+  }
+
+  async function toggleSite(site: NginxSite) {
+    setBusy(true)
+    try {
+      const result = await api<{ site: NginxSite }>(`nginx/sites/${encodeURIComponent(site.name)}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled: !site.enabled }) })
+      notify(result.site.message || (site.enabled ? 'سایت خاموش شد.' : 'سایت روشن شد.'))
+      await refresh()
+    } catch (error) { notify(error instanceof Error ? error.message : 'تغییر وضعیت سایت ناموفق بود.') }
+    finally { setBusy(false) }
+  }
+
+  const enabledCount = sites.filter((site) => site.enabled).length
+  return <>
+    <Heading title="مدیریت سایت‌های Nginx" description="سایت‌ها را فعال یا غیرفعال کن، symlink را خودکار بساز و تنظیمات را با اعتبارسنجی ویرایش کن." action={<Button variant="outline" size="sm" disabled={loading} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/> تازه‌سازی</Button>}/>
+    <div className="mb-5 grid gap-3 sm:grid-cols-3">
+      <Metric icon={Globe} label="همهٔ سایت‌ها" value={formatNumber(sites.length)} detail="فایل‌های معتبر sites-available"/>
+      <Metric icon={Power} label="فعال" value={formatNumber(enabledCount)} detail="symlink فعال در sites-enabled"/>
+      <Metric icon={ShieldCheck} label="غیرفعال" value={formatNumber(sites.length - enabledCount)} detail="آمادهٔ فعال‌سازی با یک کلیک"/>
+    </div>
+    {loadError && <Alert className="mb-5 border-amber-300/20 bg-amber-300/[.06]"><AlertTitle>فهرست سایت‌ها در دسترس نیست</AlertTitle><AlertDescription className="leading-6">{loadError}<span className="mt-1 block">برای مدیریت سایت‌ها، Nginx و پوشه‌های استاندارد <code dir="ltr">sites-available</code> و <code dir="ltr">sites-enabled</code> باید موجود باشند.</span></AlertDescription></Alert>}
+    <SectionCard title="سایت‌های موجود" description="فعال‌سازی، symlink استاندارد را می‌سازد؛ خاموش‌کردن فقط symlink همان سایت را حذف می‌کند." right={<Badge variant="outline">{formatNumber(sites.length)} سایت</Badge>}>
+      {loading ? <Skeleton className="h-48"/> : sites.length ? <div className="grid gap-3 xl:grid-cols-2">{sites.map((site) => <article key={site.name} className="rounded-2xl border border-white/10 bg-white/[.025] p-4 transition hover:border-primary/25 hover:bg-white/[.04]">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><Globe size={16} className="shrink-0 text-primary"/><h2 className="truncate font-mono text-sm font-semibold text-white" dir="ltr">{site.name}</h2></div><p className="mt-2 font-mono text-[11px] text-muted-foreground" dir="ltr">/etc/nginx/sites-available/{site.name}</p><p className="mt-1 text-[11px] text-muted-foreground" dir="ltr">{site.enabled ? `symlink → ../sites-available/${site.name}` : 'بدون symlink فعال'}</p></div><Badge variant={site.enabled ? 'success' : 'outline'}>{site.enabled ? 'روشن' : 'خاموش'}</Badge></div>
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[.07] pt-3"><Button size="sm" variant={site.enabled ? 'outline' : 'default'} disabled={busy} onClick={() => void toggleSite(site)}><Power size={14}/>{site.enabled ? 'خاموش‌کردن سایت' : 'روشن‌کردن و ساخت symlink'}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void editSite(site)}><Pencil size={14}/>ویرایش تنظیمات</Button>{typeof site.bytes === 'number' && <span className="mr-auto self-center font-mono text-[10px] text-muted-foreground" dir="ltr">{formatNumber(site.bytes)} B</span>}</div>
+      </article>)}</div> : !loadError ? <div className="rounded-xl border border-dashed border-white/10 py-14 text-center"><Globe size={22} className="mx-auto text-muted-foreground"/><p className="mt-3 text-sm font-medium text-white">سایتی پیدا نشد</p><p className="mt-1 text-xs text-muted-foreground">فایل‌های پیکربندی Nginx در مسیر sites-available نمایش داده می‌شوند.</p></div> : null}
+    </SectionCard>
+    <Alert className="mt-5"><ShieldCheck size={16} className="mb-2 text-primary"/><AlertTitle>اعمال ایمن تنظیمات</AlertTitle><AlertDescription>قبل از ذخیره یا تغییر symlink، دستور <code dir="ltr">nginx -t</code> اجرا می‌شود. اگر تنظیمات معتبر نباشند، تغییر برگردانده می‌شود؛ در صورت روشن‌بودن سرویس، پس از اعتبارسنجی Nginx reload خواهد شد.</AlertDescription></Alert>
+    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>ویرایش سایت <span className="font-mono text-primary" dir="ltr">{editing}</span></DialogTitle><DialogDescription>مسیر فایل: <code dir="ltr">/etc/nginx/sites-available/{editing}</code>. ذخیره فقط پس از موفقیت <code dir="ltr">nginx -t</code> اعمال می‌شود.</DialogDescription></DialogHeader><form onSubmit={saveSite} className="space-y-4"><textarea aria-label="تنظیمات Nginx" spellCheck={false} dir="ltr" value={content} onChange={(event) => setContent(event.target.value)} className="min-h-[55vh] w-full resize-y rounded-xl border border-white/10 bg-[#0b0c12] p-4 font-mono text-xs leading-6 text-[#e3d8f5] outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"/><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">سقف اندازهٔ فایل 512 KB است؛ در صورت خطا نسخهٔ قبلی حفظ می‌شود.</p><Button type="submit" disabled={busy}><Save size={15}/>{busy ? 'در حال اعتبارسنجی…' : 'اعتبارسنجی و ذخیره'}</Button></div></form></DialogContent></Dialog>
   </>
 }
 
