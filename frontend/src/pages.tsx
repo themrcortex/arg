@@ -17,9 +17,7 @@ import {
   Radio,
   RefreshCw,
   ScrollText,
-  Shield,
   ShieldCheck,
-  Terminal,
   UserRound,
   Users,
   Wifi,
@@ -54,7 +52,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Skeleton } from './components/ui/skeleton'
 import { Switch } from './components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
@@ -171,13 +168,6 @@ function AlertControls({ user, cpu, memory, disk, notify }: { user: User; cpu: n
   </SectionCard>
 }
 
-export function SystemControls({ user, notify }: { user: User; notify: (message: string) => void }) {
-  const { data, cpu } = useDashboard(notify)
-  const memory = data?.memory_kib ? Math.round((1 - data.available_kib / data.memory_kib) * 100) : 0
-  const disk = data?.disk_total_bytes ? Math.round((1 - (data.disk_free_bytes || 0) / data.disk_total_bytes) * 100) : 0
-  return <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/></div>
-}
-
 export function PortProbeControls({ notify }: { notify: (message: string) => void }) {
   const [port, setPort] = useState('443')
   const [result, setResult] = useState<string | null>(null)
@@ -242,6 +232,47 @@ export function DashboardPage({ user, notify }: { user: User } & Common) {
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]"><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4"><h2 className="text-xl font-bold text-white">مصرف خود Donatello</h2><p className="mt-1 text-xs text-[#9492a6]">اندازه‌گیری مستقیم فرایند پنل</p></div><div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-white/[.07] bg-white/[.025] p-4"><span className="text-xs text-muted-foreground">CPU</span><div className="mt-3 text-2xl font-bold text-white tabular-nums" dir="ltr">{formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%</div></div><div className="rounded-xl border border-white/[.07] bg-white/[.025] p-4"><span className="text-xs text-muted-foreground">RAM</span><div className="mt-3 text-2xl font-bold text-white tabular-nums" dir="ltr">{formatBytes(data?.process_rss_bytes || 0)}</div></div></div><p className="mt-4 text-[11px] leading-6 text-[#8f8da1]">RAM برابر حافظهٔ مقیم فرایند است؛ CPU نسبت به توان کل هسته‌ها محاسبه می‌شود.</p></section><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4"><h2 className="text-xl font-bold text-white">پورت‌های فعال</h2><p className="mt-1 text-xs text-[#9492a6]">نمونه‌ای از شنونده‌های TCP و UDP</p></div><div className="flex flex-wrap gap-2">{data?.ports.slice(0, 12).map((port, index) => <span key={`${port.port}-${port.protocol}-${index}`} className="rounded-lg border border-white/10 bg-white/[.035] px-3 py-2 font-mono text-xs text-[#c8bfd9]" dir="ltr">{port.port}<span className="text-[#8e85a2]">/{port.protocol.toLowerCase()}</span></span>)}{!data?.ports.length && <p className="py-5 text-xs text-muted-foreground">پورت شنونده‌ای پیدا نشد.</p>}</div></section></div>
     <AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/>
   </div>
+}
+
+function DataRows({ rows }: { rows: { label: string; value: string; detail?: string }[] }) {
+  return <Table><TableHeader><TableRow><TableHead>شاخص</TableHead><TableHead>مقدار</TableHead><TableHead className="hidden md:table-cell">توضیح</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={row.label}><TableCell className="font-medium">{row.label}</TableCell><TableCell><span className="font-mono font-semibold text-white tabular-nums" dir="ltr">{row.value}</span></TableCell><TableCell className="hidden text-xs text-muted-foreground md:table-cell">{row.detail || '—'}</TableCell></TableRow>)}</TableBody></Table>
+}
+
+export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
+  const { data, resourceHistory, cpu, range, setRange, loading, refresh } = useDashboard(notify)
+  const totalMemory = (data?.memory_kib || 0) * 1024
+  const availableMemory = (data?.available_kib || 0) * 1024
+  const memoryPercent = totalMemory ? Math.round((1 - availableMemory / totalMemory) * 100) : 0
+  const totalDisk = data?.disk_total_bytes || 0
+  const freeDisk = data?.disk_free_bytes || 0
+  const diskPercent = totalDisk ? Math.round((1 - freeDisk / totalDisk) * 100) : 0
+  const load = (data?.load || '').split(' ')
+  const memoryDetail = data?.memory_details
+  return <>
+    <Heading title="سیستم و منابع" description="پردازنده، حافظه و دیسک را با جزئیات واقعی سرور بررسی کن." action={<Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>}/>
+    {loading && !data ? <LoadingCards/> : <>
+      <div className="grid gap-4 md:grid-cols-3"><Metric icon={Cpu} label="CPU" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={`بار 1/5/15 دقیقه: ${data?.load || '—'}`} progress={cpu || 0}/><Metric icon={Database} label="حافظه" value={`${formatNumber(memoryPercent)}%`} detail={`${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}`} progress={memoryPercent}/><Metric icon={HardDrive} label="دیسک ریشه" value={`${formatNumber(diskPercent)}%`} detail={`${formatBytes(totalDisk - freeDisk)} از ${formatBytes(totalDisk)}`} progress={diskPercent}/></div>
+      <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}><ResourceChart samples={resourceHistory}/></SectionCard></div>
+      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: formatNumber(data?.cpu_cores || 0) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: `${formatNumber(Math.floor((data?.uptime_seconds || 0) / 86400))}d ${formatNumber(Math.floor(((data?.uptime_seconds || 0) % 86400) / 3600))}h` }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: formatBytes(totalMemory) }, { label: 'مصرف‌شده', value: formatBytes(totalMemory - availableMemory), detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: formatBytes(availableMemory) }, { label: 'Cache', value: formatBytes((memoryDetail?.cached_kib || 0) * 1024) }, { label: 'Buffer', value: formatBytes((memoryDetail?.buffers_kib || 0) * 1024) }, { label: 'Swap کل', value: formatBytes((data?.swap_total_kib || 0) * 1024) }, { label: 'Swap مصرف‌شده', value: formatBytes(((data?.swap_total_kib || 0) - (data?.swap_free_kib || 0)) * 1024) }]}/></SectionCard></div>
+      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="فضای فایل‌سیستم ریشه"><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk ? formatBytes(totalDisk) : '—' }, { label: 'مصرف‌شده', value: totalDisk ? formatBytes(totalDisk - freeDisk) : '—' }, { label: 'آزاد', value: totalDisk ? formatBytes(freeDisk) : '—' }, { label: 'درصد مصرف', value: totalDisk ? `${formatNumber(diskPercent)}%` : '—' }]}/></SectionCard><SectionCard title="مصرف Donatello" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: `${formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%` }, { label: 'RAM پنل', value: formatBytes(data?.process_rss_bytes || 0), detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
+      <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memoryPercent} disk={diskPercent} notify={notify}/></div>
+    </>}
+  </>
+}
+
+export function PortsPage({ Heading, notify }: Common) {
+  const { data, loading, refresh } = useDashboard(notify)
+  const [query, setQuery] = useState('')
+  const [protocol, setProtocol] = useState<'all' | 'TCP' | 'UDP'>('all')
+  const [ipVersion, setIpVersion] = useState<'all' | 'IPv4' | 'IPv6'>('all')
+  const ports = (data?.ports || []).filter((port) => (protocol === 'all' || port.protocol === protocol) && (ipVersion === 'all' || (port.ipv6 ? 'IPv6' : 'IPv4') === ipVersion) && (!query.trim() || String(port.port).includes(query.trim())))
+  return <>
+    <Heading title="پورت‌های شنونده" description="پورت‌های باز در خود سرور را پیدا کن و اتصال TCP را آزمایش کن." action={<Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>}/>
+    <div className="grid gap-4 sm:grid-cols-3"><Metric icon={Radio} label="همهٔ شنونده‌ها" value={formatNumber(data?.ports.length || 0)} detail="TCP و UDP روی IPv4 و IPv6"/><Metric icon={Network} label="TCP" value={formatNumber(data?.ports.filter((port) => port.protocol === 'TCP').length || 0)} detail="در حالت LISTEN"/><Metric icon={Wifi} label="UDP" value={formatNumber(data?.ports.filter((port) => port.protocol === 'UDP').length || 0)} detail="سوکت‌های UDP ثبت‌شده"/></div>
+    <div className="mt-5"><PortProbeControls notify={notify}/></div>
+    <div className="mt-5"><SectionCard title="فهرست پورت‌ها" description="فیلتر و جست‌وجو در خروجی فعلی کرنل" right={<Badge variant="outline">{formatNumber(ports.length)} مورد</Badge>}><div className="mb-5 flex flex-wrap gap-3"><label className="min-w-[180px] flex-1"><span className="mb-1 block text-xs text-muted-foreground">جست‌وجوی شمارهٔ پورت</span><Input inputMode="numeric" lang="en" dir="ltr" value={query} onChange={(event) => setQuery(event.target.value.replace(/[^0-9]/g, ''))} placeholder="443, 8080..."/></label><div><span className="mb-1 block text-xs text-muted-foreground">پروتکل</span><Select value={protocol} onValueChange={(value) => setProtocol(value as typeof protocol)}><SelectTrigger className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">همه</SelectItem><SelectItem value="TCP">TCP</SelectItem><SelectItem value="UDP">UDP</SelectItem></SelectContent></Select></div><div><span className="mb-1 block text-xs text-muted-foreground">نسخهٔ IP</span><Select value={ipVersion} onValueChange={(value) => setIpVersion(value as typeof ipVersion)}><SelectTrigger className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">همه</SelectItem><SelectItem value="IPv4">IPv4</SelectItem><SelectItem value="IPv6">IPv6</SelectItem></SelectContent></Select></div></div>{loading && !data ? <Skeleton className="h-48"/> : <PortsTable ports={ports}/>}</SectionCard></div>
+    <Alert className="mt-5"><Info size={17} className="mb-2 text-primary"/><AlertTitle>شنود محلی و دسترسی بیرونی</AlertTitle><AlertDescription>وجود پورت در این فهرست به معنی دسترسی از اینترنت نیست. قانون UFW و فایروال ارائه‌دهنده را نیز بررسی کن. حجم ترافیک به‌تفکیک پورت هنوز اندازه‌گیری نمی‌شود.</AlertDescription></Alert>
+  </>
 }
 
 function ResourceChart({ samples }: { samples: ResourceSample[] }) {
@@ -323,19 +354,18 @@ function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
 }
 
 export function NetworkPage({ Heading, notify }: Common) {
-  const { data, loading, refresh } = useDashboard(notify)
+  const { data, history, loading, refresh, range, setRange } = useDashboard(notify)
   return (
     <>
       <Heading
-        title="شبکه و پورت‌ها"
-        description="کارت‌ها، آدرس‌ها، شمارنده‌ها و پورت‌های شنونده"
+        title="شبکه"
+        description="رابط‌های شبکه، آدرس‌ها و جریان ترافیک را بررسی کن."
         action={
           <Button variant="outline" size="sm" onClick={refresh}>
             <RefreshCw size={15} /> به‌روزرسانی
           </Button>
         }
       />
-      <div className="mb-5"><PortProbeControls notify={notify}/></div>
       {loading && !data ? (
         <LoadingCards />
       ) : (
@@ -387,38 +417,8 @@ export function NetworkPage({ Heading, notify }: Common) {
           <div className="mt-5">
             <DistributionBars title="توزیع ترافیک کارت‌ها" description="جمع بایت‌های دریافت و ارسال هر رابط از زمان شروع آن" items={(data?.interfaces || []).map((item) => ({ label: item.name, value: item.rx_bytes + item.tx_bytes, display: formatBytes(item.rx_bytes + item.tx_bytes) }))} />
           </div>
-          <div className="mt-5">
-            <SectionCard
-              title="پورت‌های شنونده"
-              description="داده‌ها مستقیماً از اطلاعات کرنل خوانده می‌شوند"
-              right={<Badge variant="default">{formatNumber(data?.ports.length || 0)} مورد</Badge>}
-            >
-              <Tabs defaultValue="all" dir="rtl">
-                <TabsList>
-                  <TabsTrigger value="all">همه</TabsTrigger>
-                  <TabsTrigger value="tcp">TCP</TabsTrigger>
-                  <TabsTrigger value="udp">UDP</TabsTrigger>
-                </TabsList>
-                <TabsContent value="all">
-                  <PortsTable ports={data?.ports || []} />
-                </TabsContent>
-                <TabsContent value="tcp">
-                  <PortsTable ports={data?.ports.filter((p) => p.protocol === 'TCP') || []} />
-                </TabsContent>
-                <TabsContent value="udp">
-                  <PortsTable ports={data?.ports.filter((p) => p.protocol === 'UDP') || []} />
-                </TabsContent>
-              </Tabs>
-            </SectionCard>
-          </div>
-          <Alert className="mt-5">
-            <Info size={17} className="mb-2 text-primary" />
-            <AlertTitle>دربارهٔ ترافیک هر پورت</AlertTitle>
-            <AlertDescription>
-              شمارنده‌های کارت شبکه فعال‌اند. اندازه‌گیری بایت به‌تفکیک پورت به جمع‌آوری داده با nftables یا
-              eBPF نیاز دارد و هنوز در این نسخه فعال نیست.
-            </AlertDescription>
-          </Alert>
+          <div className="mt-5"><SectionCard title="نرخ ترافیک شبکه" description="نمونه‌های ذخیره‌شده توسط سرویس" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}><TrafficChart history={history}/></SectionCard></div>
+          <div className="mt-5"><SectionCard title="جزئیات رابط‌ها" description="شمارنده‌های فعلی هر کارت از کرنل خوانده می‌شوند"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>رابط</TableHead><TableHead>وضعیت</TableHead><TableHead>MTU</TableHead><TableHead>سرعت لینک</TableHead><TableHead>بستهٔ دریافتی</TableHead><TableHead>بستهٔ ارسالی</TableHead><TableHead>خطا / حذف</TableHead></TableRow></TableHeader><TableBody>{(data?.interfaces || []).map((item) => <TableRow key={item.name}><TableCell className="font-mono text-white" dir="ltr">{item.name}</TableCell><TableCell>{item.state || '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.mtu ?? '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.speed_mbps ? `${formatNumber(item.speed_mbps)} Mbps` : '—'}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.rx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.tx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber((item.rx_errors || 0) + (item.tx_errors || 0) + (item.rx_dropped || 0) + (item.tx_dropped || 0))}</TableCell></TableRow>)}</TableBody></Table></div></SectionCard></div>
         </>
       )}
     </>
@@ -815,7 +815,7 @@ export function SettingsPage({
   ]
   return (
     <>
-      <Heading title="تنظیمات" description="اطلاعات اجرای پنل و مسیر توسعهٔ قابلیت‌ها" />
+      <Heading title="تنظیمات" description="امنیت حساب، نشانی پنل و وضعیت تنظیمات اجرایی" />
       <div className="grid gap-5 lg:grid-cols-[1.1fr_.9fr]">
         <SectionCard title="وضعیت فعلی پنل" description="پیکربندی و امنیت">
           <div className="space-y-1">
@@ -838,38 +838,9 @@ export function SettingsPage({
             ))}
           </div>
         </SectionCard>
-        <SectionCard title="قابلیت‌های در حال توسعه" description="بر اساس نقشهٔ محصول Donatello">
-          <div className="space-y-3">
-            {[
-              { icon: Terminal, name: 'ترمینال وب', detail: 'نشست محدود با مجوز مستقل' },
-              { icon: Wifi, name: 'تست سرعت', detail: 'اندازه‌گیری دانلود، آپلود و تأخیر' },
-              { icon: Shield, name: 'SSL و ACME', detail: 'صدور و تمدید گواهی با بازیابی سرویس' },
-              { icon: Download, name: 'ترافیک هر پورت', detail: 'شمارنده‌های nftables یا eBPF' },
-            ].map((item) => (
-              <div
-                key={item.name}
-                className="flex items-center gap-3 rounded-xl border border-border/70 bg-secondary/35 p-3"
-              >
-                <item.icon size={18} className="shrink-0 text-primary" />
-                <div>
-                  <div className="text-sm font-semibold">{item.name}</div>
-                  <div className="text-xs text-muted-foreground">{item.detail}</div>
-                </div>
-              </div>
-            ))}
-          </div>
+        <SectionCard title="نشانی پنل" description="دسترسی و مدیریت اتصال">
+          <div className="space-y-4"><div className="rounded-xl border border-white/10 bg-white/[.03] p-4"><div className="mb-2 text-xs text-muted-foreground">آدرس فعلی</div><div className="break-all font-mono text-sm text-white" dir="ltr">{location.origin}</div></div><Button variant="outline" onClick={() => void navigator.clipboard.writeText(location.origin).then(() => notify('آدرس پنل کپی شد.')).catch(() => notify('کپی آدرس ناموفق بود.'))}>کپی آدرس پنل</Button><p className="text-xs leading-6 text-muted-foreground">برای تغییر پورت و گواهی SSL از منوی سرور با دستور <code className="font-mono text-white" dir="ltr">sudo donatello</code> استفاده کن.</p></div>
         </SectionCard>
-      </div>
-      <div className="mt-5">
-        <Alert>
-          <Info size={17} className="mb-2 text-primary" />
-          <AlertTitle>تغییر پورت</AlertTitle>
-          <AlertDescription>
-            در این نسخه، پورت از متغیر محیطی{' '}
-            <code className="mono rounded bg-background px-1.5 py-0.5">DONATELLO_BIND</code> تنظیم می‌شود و پس
-            از راه‌اندازی دوبارهٔ سرویس اعمال خواهد شد.
-          </AlertDescription>
-        </Alert>
       </div>
       <div className="mt-5">
         <PasswordCard notify={notify} />

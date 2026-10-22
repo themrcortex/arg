@@ -9,12 +9,10 @@ import {
   LifeBuoy,
   LogOut,
   Menu,
-  Command,
-  Search,
   Settings,
   X,
 } from 'lucide-react'
-import { api, formatNumber, type User } from './lib/api'
+import { api, type User } from './lib/api'
 import { cn } from './lib/utils'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
@@ -30,9 +28,8 @@ import {
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
-import { AuditPage, DashboardPage, FirewallPage, NetworkPage, SettingsPage, UsersPage, SystemControls, PortProbeControls } from './pages'
-import { ExplorerPage } from './explorer/ExplorerPage'
-import { entryById, explorerGroups, type ExplorerGroup } from './explorer/catalog'
+import { AuditPage, DashboardPage, FirewallPage, NetworkPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
+import { navigation, pageFromHash, type PageId } from './navigation'
 const developer = (
   <a
     className="font-semibold text-[#c4a1ff] transition hover:text-white hover:underline"
@@ -243,28 +240,11 @@ function PageHeading({
   )
 }
 
-function PageOptions({ group, currentPage, onSelect }: { group: ExplorerGroup; currentPage: string; onSelect: (id: string) => void }) {
-  const [query, setQuery] = useState('')
-  const [expanded, setExpanded] = useState<string | null>(null)
-  useEffect(() => {
-    setQuery('')
-    setExpanded(group.categories.find((section) => section.items.some((item) => item.id === currentPage))?.id || null)
-  }, [group.id, currentPage])
-  const sections = group.categories.map((section) => ({ ...section, items: section.items.filter((item) => item.kind !== 'page' && `${item.label} ${item.description}`.toLocaleLowerCase('fa-IR').includes(query.toLocaleLowerCase('fa-IR'))) })).filter((section) => section.items.length)
-  return <section id="page-options" className="mt-8 rounded-2xl border border-white/10 bg-[#15151f] p-5 md:p-7">
-    <div className="flex flex-wrap items-center justify-between gap-4"><div><h2 className="text-lg font-bold text-white">ابزارها و نماهای {group.label}</h2><p className="mt-1 text-xs text-muted-foreground">زیرشاخهٔ موردنظر را اینجا باز کن.</p></div><label className="relative block"><Search size={15} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"/><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="جست‌وجو در این صفحه" className="w-[220px] pr-9"/></label></div>
-    <div className="mt-6 grid gap-2 md:grid-cols-2">{sections.map((section) => { const open = Boolean(query) || expanded === section.id || (!expanded && section.items.some((item) => item.id === currentPage)); return <div key={section.id} className="self-start rounded-xl border border-white/[.08] bg-white/[.025]"><button onClick={() => setExpanded(open ? 'closed' : section.id)} aria-expanded={open} className="flex w-full items-center justify-between p-4 text-right text-sm font-semibold text-white"><span>{section.label} <span className="mr-1 text-[10px] text-muted-foreground">{formatNumber(section.items.length)}</span></span><ChevronDown size={15} className={cn('transition', !open && 'rotate-90')}/></button>{open && <div className="flex flex-wrap gap-2 border-t border-white/[.08] p-3">{section.items.map((item) => <button key={item.id} onClick={() => onSelect(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} className={cn('rounded-lg border px-3 py-2 text-xs transition', currentPage === item.id ? 'border-primary/50 bg-primary/20 text-white' : 'border-white/10 bg-white/[.025] text-muted-foreground hover:border-primary/40 hover:text-white')}>{item.label}</button>)}</div>}</div> })}</div>
-  </section>
-}
-
 export default function App() {
   const [boot, setBoot] = useState(true)
   const [installed, setInstalled] = useState(false)
   const [user, setUser] = useState<User | null>(null)
-  const [page, setPage] = useState(() => {
-    const fromHash = window.location.hash.replace(/^#\/?/, '')
-    return entryById.has(fromHash) ? fromHash : 'dashboard'
-  })
+  const [page, setPage] = useState<PageId>(() => pageFromHash(window.location.hash))
   const [mobileOpen, setMobileOpen] = useState(false)
   const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
@@ -287,8 +267,7 @@ export default function App() {
   }, [refresh])
   useEffect(() => {
     const onHash = () => {
-      const id = window.location.hash.replace(/^#\/?/, '')
-      if (entryById.has(id)) setPage(id)
+      setPage(pageFromHash(window.location.hash))
     }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
@@ -330,15 +309,10 @@ export default function App() {
       </div>
     )
   if (!installed || !user) return <Auth installer={!installed} onSuccess={refresh} />
-  const allowedGroups = explorerGroups.filter((group) => !group.admin || user.role === 'admin')
-  const allowedIds = new Set(allowedGroups.flatMap((group) => group.categories.flatMap((category) => category.items.map((entry) => entry.id))))
-  const currentPage = allowedIds.has(page) ? page : 'dashboard'
-  const active = entryById.get(currentPage) || entryById.get('dashboard')!
-  const groupFor = (id: string) => allowedGroups.find((group) => group.categories.some((section) => section.items.some((entry) => entry.id === id)))
-  const activeGroup = groupFor(currentPage) || allowedGroups[0]
-  const rootPage = (id: string) => ({ overview: 'dashboard', system: 'system-cpu-use', network: 'network', ports: 'ports-all', firewall: 'firewall', users: 'users', audit: 'audit', settings: 'settings' } as Record<string, string>)[id]
-  function selectPage(next: string) {
-    if (!allowedIds.has(next)) return
+  const allowedPages = navigation.filter((item) => !item.admin || user.role === 'admin')
+  const currentPage = allowedPages.some((item) => item.id === page) ? page : 'dashboard'
+  function selectPage(next: PageId) {
+    if (!allowedPages.some((item) => item.id === next)) return
     setPage(next)
     window.location.hash = `/${next}`
     setMobileOpen(false)
@@ -353,10 +327,10 @@ export default function App() {
           </button>
           <div className="mb-3 h-px w-8 bg-white/10" />
           <nav className="flex flex-1 flex-col items-center gap-2" aria-label="انتخاب بخش">
-            {allowedGroups.map((group) => {
-              const selected = activeGroup?.id === group.id
+            {allowedPages.map((group) => {
+              const selected = currentPage === group.id
               return <Tooltip key={group.id}>
-                <TooltipTrigger asChild><button onClick={() => selectPage(rootPage(group.id))} aria-label={group.label} aria-current={selected ? 'page' : undefined} className={cn('rail-button relative grid h-10 w-10 place-items-center rounded-xl transition', selected ? 'bg-[#312547] text-[#c2a1ff]' : 'text-[#8d91a7] hover:bg-white/[.06] hover:text-white')}><group.icon size={19} strokeWidth={1.8}/>{selected && <span className="absolute -right-[13px] h-5 w-[3px] rounded-full bg-primary shadow-glow"/>}</button></TooltipTrigger>
+                <TooltipTrigger asChild><button onClick={() => selectPage(group.id)} aria-label={group.label} aria-current={selected ? 'page' : undefined} className={cn('rail-button relative grid h-10 w-10 place-items-center rounded-xl transition', selected ? 'bg-[#312547] text-[#c2a1ff]' : 'text-[#8d91a7] hover:bg-white/[.06] hover:text-white')}><group.icon size={19} strokeWidth={1.8}/>{selected && <span className="absolute -right-[13px] h-5 w-[3px] rounded-full bg-primary shadow-glow"/>}</button></TooltipTrigger>
                 <TooltipContent side="left">{group.label}</TooltipContent>
               </Tooltip>
             })}
@@ -370,9 +344,9 @@ export default function App() {
           <div className="flex items-center justify-between px-2"><Brand /><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button></div>
           <div className="mt-9 px-3 text-[10px] font-bold tracking-[.1em] text-muted-foreground">فضای کار</div>
           <nav className="mt-3 flex-1 space-y-1" aria-label="صفحات اصلی">
-            {allowedGroups.map((group) => <button key={group.id} onClick={() => selectPage(rootPage(group.id))} aria-current={activeGroup.id === group.id ? 'page' : undefined} className={cn('flex w-full items-center gap-3 rounded-xl px-3 py-3 text-right text-sm transition', activeGroup.id === group.id ? 'bg-primary/15 font-semibold text-white shadow-[inset_-3px_0_#a987ff]' : 'text-[#a6a6bb] hover:bg-white/[.05] hover:text-white')}><group.icon size={18}/><span>{group.label}</span></button>)}
+            {allowedPages.map((group) => <button key={group.id} onClick={() => selectPage(group.id)} aria-current={currentPage === group.id ? 'page' : undefined} className={cn('flex w-full items-center gap-3 rounded-xl px-3 py-3 text-right text-sm transition', currentPage === group.id ? 'bg-primary/15 font-semibold text-white shadow-[inset_-3px_0_#a987ff]' : 'text-[#a6a6bb] hover:bg-white/[.05] hover:text-white')}><group.icon size={18}/><span>{group.label}</span></button>)}
           </nav>
-          <div className="rounded-xl border border-white/10 bg-white/[.03] p-3 text-xs text-muted-foreground"><span className="mb-2 block h-2 w-2 rounded-full bg-emerald-400"/>سرور متصل است<br/><span className="mt-1 block text-[10px]">جزئیات هر بخش داخل صفحهٔ آن قرار دارد.</span></div>
+          <div className="rounded-xl border border-white/10 bg-white/[.03] p-3 text-xs text-muted-foreground"><span className="mb-2 block h-2 w-2 rounded-full bg-emerald-400"/>سرور متصل است<br/><span className="mt-1 block text-[10px]">هر بخش ابزارها و داده‌های خودش را دارد.</span></div>
         </aside>
         {mobileOpen && (
           <button
@@ -384,10 +358,12 @@ export default function App() {
         <div className="min-w-0">
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
             <div className="flex items-center gap-2"><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO CONTROL PLANE</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
-            <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" className="h-9 w-9 rounded-lg" onClick={() => document.getElementById('page-options')?.scrollIntoView({ behavior: 'smooth' })} aria-label="جست‌وجو"><Search size={18}/></Button><span className="hidden rounded-lg border border-white/10 px-2 py-1 text-[10px] text-muted-foreground md:inline-flex" dir="ltr"><Command size={12} className="ml-1"/>K</span><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+            <div className="flex items-center gap-1.5"><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}
+            {currentPage === 'system' && <SystemPage user={user} Heading={PageHeading} notify={setNotice} />}
+            {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={setNotice} user={user} />}
             {currentPage === 'users' && user.role === 'admin' && (
@@ -397,10 +373,6 @@ export default function App() {
               <AuditPage Heading={PageHeading} notify={setNotice} />
             )}
             {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} />}
-            {active.kind !== 'page' && <ExplorerPage key={currentPage} item={active} user={user} onNavigate={selectPage} notify={setNotice} />}
-            {active.kind === 'system' && <SystemControls user={user} notify={setNotice} />}
-            {active.kind === 'ports' && <div className="mt-5"><PortProbeControls notify={setNotice}/></div>}
-            {activeGroup.id !== 'overview' && <PageOptions group={activeGroup} currentPage={currentPage} onSelect={selectPage}/>}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} Donatello · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>

@@ -133,28 +133,6 @@ body {
 .app-shell {
   background-color: #0d0e15;
 }
-.sidebar-scroll {
-  scrollbar-color: #51466a transparent;
-  scrollbar-width: thin;
-}
-.nav-group:hover {
-  background: rgba(255, 255, 255, .035);
-}
-.nav-leaf[aria-current="page"] {
-  box-shadow: inset -2px 0 #a987ff;
-}
-.dot-grid {
-  background-image: radial-gradient(circle, rgba(178, 147, 255, .17) .8px, transparent 1px);
-  background-size: 20px 20px;
-}
-.insight-hero {
-  background-color: #121521;
-  background-image:
-    radial-gradient(circle, rgba(178, 147, 255, .12) .8px, transparent 1px),
-    radial-gradient(circle at 85% 5%, rgba(123, 88, 214, .24), transparent 34%),
-    linear-gradient(115deg, #181b2a, #11131e);
-  background-size: 20px 20px, auto, auto;
-}
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   unicode-bidi: isolate;
