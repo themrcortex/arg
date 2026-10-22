@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   Activity, ArrowLeft, ArrowUpRight, Clock3, Info, LockKeyhole,
   Network, RefreshCw, Shield, Users,
@@ -194,37 +194,17 @@ export function ExplorerPage({ item, user, onNavigate, notify }: {
   const [cpu, setCpu] = useState<number | null>(null)
   const [rate, setRate] = useState({ rx: 0, tx: 0 })
   const [trend, setTrend] = useState<number[]>([])
-  const previous = useRef<{ total: number; idle: number; rx: number; tx: number; at: number } | null>(null)
-  const valueRef = useRef(item.value)
-  valueRef.current = item.value
-
+  const [hasStoredTrend, setHasStoredTrend] = useState(false)
   const refresh = useCallback(async () => {
     try {
       if (['system', 'network', 'ports'].includes(item.kind)) {
-        const next = await api<Dashboard>('dashboard')
-        const now = Date.now()
-        const rx = next.interfaces.reduce((sum, device) => sum + device.rx_bytes, 0)
-        const tx = next.interfaces.reduce((sum, device) => sum + device.tx_bytes, 0)
-        const old = previous.current
-        if (old) {
-          const total = (next.cpu_total || 0) - old.total
-          const idle = (next.cpu_idle || 0) - old.idle
-          const nextCpu = total > 0 ? Math.max(0, Math.min(100, (1 - idle / total) * 100)) : 0
-          const seconds = Math.max((now - old.at) / 1000, 0.1)
-          const nextRate = { rx: Math.max(0, (rx - old.rx) / seconds), tx: Math.max(0, (tx - old.tx) / seconds) }
-          setCpu(nextCpu)
-          setRate(nextRate)
-          const number = item.kind === 'system' ? systemStat(valueRef.current, next, nextCpu).number :
-            item.kind === 'network' ? networkStat(valueRef.current, next, nextRate).number :
-            filterPorts(next.ports, valueRef.current).length
-          setTrend((values) => [...values, number].slice(-24))
-        } else {
-          const number = item.kind === 'system' ? systemStat(valueRef.current, next, null).number :
-            item.kind === 'network' ? networkStat(valueRef.current, next, { rx: 0, tx: 0 }).number :
-            filterPorts(next.ports, valueRef.current).length
-          setTrend([number])
-        }
-        previous.current = { total: next.cpu_total || 0, idle: next.cpu_idle || 0, rx, tx, at: now }
+        const [next, history] = await Promise.all([api<Dashboard>('dashboard'), api<{ samples: { cpu: number; memory: number; disk: number; rx: number; tx: number }[] }>('history?range=5m')])
+        const latest = history.samples.at(-1)
+        setCpu(latest?.cpu ?? null)
+        setRate({ rx: latest?.rx ?? 0, tx: latest?.tx ?? 0 })
+        const key = item.kind === 'system' ? ({ 'cpu-use': 'cpu', 'mem-percent': 'memory', 'disk-percent': 'disk' } as Record<string, 'cpu' | 'memory' | 'disk'>)[item.value] : item.kind === 'network' ? ({ 'rx-rate': 'rx', 'tx-rate': 'tx' } as Record<string, 'rx' | 'tx'>)[item.value] : undefined
+        setHasStoredTrend(Boolean(key))
+        setTrend(key ? history.samples.map((sample) => sample[key!]) : [])
         setDashboard(next)
       } else if (item.kind === 'firewall') setFirewall(await api<Firewall>('firewall'))
       else if (item.kind === 'users') setUsers((await api<{ users: User[] }>('users')).users)
@@ -234,7 +214,7 @@ export function ExplorerPage({ item, user, onNavigate, notify }: {
     } finally {
       setLoading(false)
     }
-  }, [item.kind, notify])
+  }, [item.kind, item.value, notify])
 
   useEffect(() => {
     void refresh()
@@ -278,7 +258,7 @@ export function ExplorerPage({ item, user, onNavigate, notify }: {
             <p className="mt-4 text-sm leading-7 text-muted-foreground">{stat.note}</p>
             {stat.percent !== undefined && <div className="mt-6 h-2 overflow-hidden rounded-full bg-white/5"><div className="h-full rounded-full bg-gradient-to-r from-[#5adfc9] to-[#af83ff]" style={{ width: `${Math.min(100, Math.max(0, stat.percent))}%` }}/></div>}
           </CardContent></Card>
-          <Card><CardHeader><CardTitle className="flex items-center gap-2"><Activity size={18} className="text-primary"/> روند زنده</CardTitle><p className="text-xs text-muted-foreground">نمونه‌های این صفحه هر ۵ ثانیه ثبت می‌شوند؛ تاریخچه با بستن صفحه پاک می‌شود.</p></CardHeader><CardContent><TrendChart values={trend} unit={stat.unit}/></CardContent></Card>
+          <Card><CardHeader><CardTitle className="flex items-center gap-2"><Activity size={18} className="text-primary"/> تاریخچهٔ ثبت‌شده</CardTitle><p className="text-xs text-muted-foreground">تاریخچهٔ پنج دقیقهٔ اخیر در سرویس ذخیره می‌شود و به باز بودن صفحه وابسته نیست.</p></CardHeader><CardContent>{hasStoredTrend ? <TrendChart values={trend} unit={stat.unit}/> : <div className="grid h-44 place-items-center text-center text-sm text-muted-foreground">برای این شاخص تاریخچه ذخیره نمی‌شود. مقدار فعلی از سرور خوانده شده است.</div>}</CardContent></Card>
         </div>
       )}
 
@@ -303,7 +283,7 @@ export function ExplorerPage({ item, user, onNavigate, notify }: {
         <div className="grid gap-5 xl:grid-cols-[.7fr_1.3fr]">
           <Card className="metric-card"><CardContent className="p-7"><Shield className="text-primary"/><div className="mt-6 text-5xl font-extrabold">{formatNumber(matchingRules.length)}</div><p className="mt-3 text-sm text-muted-foreground">قانون مطابق فیلتر · از {formatNumber(allRules.length)} قانون</p><Badge className="mt-6" variant={firewall?.available ? 'success' : 'warning'}>{firewall?.available ? 'UFW در دسترس' : 'UFW در دسترس نیست'}</Badge></CardContent></Card>
           <Card><CardHeader><CardTitle>ترکیب قوانین UFW</CardTitle></CardHeader><CardContent><Distribution items={['ALLOW', 'DENY', 'REJECT', 'LIMIT'].map((action) => ({ label: action, value: allRules.filter((line) => line.includes(action)).length }))}/></CardContent></Card>
-          <Card className="xl:col-span-2"><CardHeader><CardTitle>خروجی قوانین مطابق فیلتر</CardTitle></CardHeader><CardContent><pre className="max-h-[480px] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-white/10 bg-[#090b13] p-5 text-left font-mono text-xs leading-7 text-[#cbc9dc]" dir="ltr">{item.value === 'status' ? firewall?.status : matchingRules.join('\n') || 'No matching UFW rule found.'}{firewall?.error && `\n${firewall.error}`}</pre><p className="mt-4 text-xs text-muted-foreground">این نما فقط وضعیت UFW را می‌خواند و قانون جدید اعمال نمی‌کند.</p></CardContent></Card>
+          <Card className="xl:col-span-2"><CardHeader><CardTitle>خروجی قوانین مطابق فیلتر</CardTitle></CardHeader><CardContent><pre className="max-h-[480px] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-white/10 bg-[#090b13] p-5 text-left font-mono text-xs leading-7 text-[#cbc9dc]" dir="ltr">{item.value === 'status' ? firewall?.status : matchingRules.join('\n') || 'No matching UFW rule found.'}{firewall?.error && `\n${firewall.error}`}</pre><p className="mt-4 text-xs text-muted-foreground">افزودن و حذف قوانین Donatello از صفحهٔ اصلی فایروال انجام می‌شود.</p></CardContent></Card>
         </div>
       )}
 
@@ -329,7 +309,7 @@ export function ExplorerPage({ item, user, onNavigate, notify }: {
         </CardContent></Card>
       )}
 
-      <div className="flex items-start gap-3 rounded-2xl border border-white/10 bg-white/[.025] p-4 text-xs leading-6 text-muted-foreground"><Info size={17} className="mt-0.5 shrink-0 text-[#a6eddf]"/> داده‌ها از API همین سرور خوانده می‌شوند. نمودارهای زندهٔ این صفحه فقط نمونه‌های همین نشست مرورگر را نشان می‌دهند.</div>
+      <div className="flex items-start gap-3 rounded-2xl border border-white/10 bg-white/[.025] p-4 text-xs leading-6 text-muted-foreground"><Info size={17} className="mt-0.5 shrink-0 text-[#a6eddf]"/> داده‌ها از API همین سرور خوانده می‌شوند. تاریخچهٔ شاخص‌های پشتیبانی‌شده در پایگاه‌دادهٔ سرویس ثبت می‌شود.</div>
     </div>
   )
 }

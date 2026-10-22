@@ -13,6 +13,7 @@ readonly CLI="/usr/local/bin/donatello"
 readonly LEGACY_INSTALLER="/usr/local/sbin/donatello-installer"
 readonly SERVICE_FILE="/etc/systemd/system/donatello.service"
 readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
+readonly UFW_HELPER="/usr/local/lib/donatello/ufw-helper"
 readonly ENV_DIR="/etc/donatello"
 readonly ENV_FILE="/etc/donatello/donatello.env"
 readonly DOMAIN_FILE="/etc/donatello/https-domain"
@@ -255,11 +256,13 @@ configure_ufw_status() {
   ufw="$(command -v ufw || true)"
   if [[ -z "$ufw" ]]; then
     rm -f "$SUDOERS_FILE"
+    rm -f "$UFW_HELPER"
     return
   fi
   has visudo || die "UFW is installed but visudo was not found. Configure the restricted UFW permission manually."
+  install -o root -g root -m 0755 "$SOURCE_DIR/scripts/ufw-helper.sh" "$UFW_HELPER"
   sudoers_tmp="$(mktemp /etc/sudoers.d/.donatello-ufw.XXXXXX)"
-  printf '%s ALL=(root) NOPASSWD: %s status numbered\n' "$SERVICE_USER" "$ufw" > "$sudoers_tmp"
+  printf '%s ALL=(root) NOPASSWD: %s status numbered, %s *\n' "$SERVICE_USER" "$ufw" "$UFW_HELPER" > "$sudoers_tmp"
   chmod 0440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then
     rm -f "$sudoers_tmp"
@@ -544,7 +547,7 @@ sync_ufw_rules() {
   while IFS= read -r rule_id; do
     [[ -n "$rule_id" ]] || continue
     ufw --force delete "$rule_id" >/dev/null 2>&1 || true
-  done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO / {gsub(/[\[\]]/, "", $1); print $1}' | sort -rn)
+  done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO panel|# DONATELLO HTTPS challenge/ {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
   ufw allow "$port/tcp" comment 'DONATELLO panel' >/dev/null
   if [[ -s "$DOMAIN_FILE" ]]; then
     tls_bind="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
@@ -1227,11 +1230,11 @@ delete_app() {
     while IFS= read -r rule_id; do
       [[ -n "$rule_id" ]] || continue
       ufw --force delete "$rule_id" >/dev/null 2>&1 || true
-    done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO / {gsub(/[\[\]]/, "", $1); print $1}' | sort -rn)
+    done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO / {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
   fi
   systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
   rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
-  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE"
+  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER"
   if [[ -n "$domain" ]]; then
     rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$CERT_DEPLOY_HOOK"
     if [[ -x /snap/bin/certbot ]]; then

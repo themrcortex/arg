@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
   ArrowDownLeft,
@@ -60,61 +60,34 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
-type Sample = { time: string; rx: number; tx: number }
-type ResourceSample = { cpu: number; memory: number; disk: number }
+type Sample = { at: number; time: string; rx: number; tx: number }
+type ResourceSample = { at: number; cpu: number; memory: number; disk: number }
+type StoredSample = { at: number; cpu: number; memory: number; disk: number; rx: number; tx: number }
 
 function useDashboard(notify: (message: string) => void) {
   const [data, setData] = useState<Dashboard | null>(null)
-  const [history, setHistory] = useState<Sample[]>([])
-  const [resourceHistory, setResourceHistory] = useState<ResourceSample[]>([])
-  const [cpu, setCpu] = useState<number | null>(null)
+  const [samples, setSamples] = useState<StoredSample[]>([])
+  const [range, setRange] = useState<'5m' | '1h' | '24h'>('5m')
   const [loading, setLoading] = useState(true)
-  const last = useRef<{ rx: number; tx: number; total: number; idle: number; at: number } | null>(null)
   const refresh = useCallback(async () => {
     try {
-      const next = await api<Dashboard>('dashboard')
+      const [next, history] = await Promise.all([api<Dashboard>('dashboard'), api<{ samples: StoredSample[] }>(`history?range=${range}`)])
       setData(next)
-      const rx = next.interfaces.reduce((a, n) => a + n.rx_bytes, 0)
-      const tx = next.interfaces.reduce((a, n) => a + n.tx_bytes, 0)
-      const at = Date.now()
-      const prev = last.current
-      if (prev) {
-        const seconds = Math.max((at - prev.at) / 1000, 0.1)
-        setHistory((old) =>
-          [
-            ...old,
-            {
-              time: new Date(at).toLocaleTimeString('fa-IR', { minute: '2-digit', second: '2-digit' }),
-              rx: Math.max(0, (rx - prev.rx) / seconds),
-              tx: Math.max(0, (tx - prev.tx) / seconds),
-            },
-          ].slice(-20),
-        )
-        const total = (next.cpu_total || 0) - prev.total
-        const idle = (next.cpu_idle || 0) - prev.idle
-        if (total > 0) {
-          const cpuValue = Math.max(0, Math.min(100, Math.round((1 - idle / total) * 100)))
-          setCpu(cpuValue)
-          setResourceHistory((items) => [...items, {
-            cpu: cpuValue,
-            memory: next.memory_kib ? Math.max(0, (1 - next.available_kib / next.memory_kib) * 100) : 0,
-            disk: next.disk_total_bytes ? Math.max(0, (1 - (next.disk_free_bytes || 0) / next.disk_total_bytes) * 100) : 0,
-          }].slice(-24))
-        }
-      }
-      last.current = { rx, tx, total: next.cpu_total || 0, idle: next.cpu_idle || 0, at }
+      setSamples(history.samples)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'خواندن اطلاعات سرور ناموفق بود')
     } finally {
       setLoading(false)
     }
-  }, [notify])
+  }, [notify, range])
   useEffect(() => {
     void refresh()
     const timer = window.setInterval(refresh, 5000)
     return () => window.clearInterval(timer)
   }, [refresh])
-  return { data, history, resourceHistory, cpu, loading, refresh }
+  const history = samples.map((sample) => ({ at: sample.at, time: new Date(sample.at * 1000).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' }), rx: sample.rx, tx: sample.tx }))
+  const resourceHistory = samples.map(({ at, cpu, memory, disk }) => ({ at, cpu, memory, disk }))
+  return { data, history, resourceHistory, cpu: samples.at(-1)?.cpu ?? null, loading, refresh, range, setRange }
 }
 
 function SectionCard({
@@ -184,8 +157,45 @@ function LoadingCards() {
   )
 }
 
+function AlertControls({ user, cpu, memory, disk, notify }: { user: User; cpu: number | null; memory: number; disk: number; notify: (message: string) => void }) {
+  const [limits, setLimits] = useState({ cpu: 85, memory: 85, disk: 85 })
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { void api<typeof limits>('monitoring/alerts').then(setLimits).catch(() => undefined) }, [])
+  async function save(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    try { setLimits(await api<typeof limits>('monitoring/alerts', { method: 'PUT', body: JSON.stringify(limits) })); notify('آستانه‌های هشدار ذخیره شدند.') }
+    catch (error) { notify(error instanceof Error ? error.message : 'ذخیره ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  return <SectionCard title="آستانه‌های هشدار" description="تنظیمات در سرور ذخیره می‌شوند و وضعیت فعلی با آنها سنجیده می‌شود">
+    <form onSubmit={save} className="grid gap-4 md:grid-cols-3">{([['cpu', 'پردازنده', cpu], ['memory', 'حافظه', memory], ['disk', 'دیسک', disk]] as const).map(([key, label, value]) => <div key={key} className="rounded-xl border border-white/10 bg-white/[.025] p-4"><div className="mb-3 flex items-center justify-between text-xs"><Label htmlFor={`limit-${key}`}>{label}</Label><Badge variant={value !== null && value >= limits[key] ? 'warning' : 'success'}>{value !== null && value >= limits[key] ? 'بالاتر از حد' : 'عادی'}</Badge></div><div className="flex items-center gap-2"><Input id={`limit-${key}`} type="number" min={1} max={100} value={limits[key]} disabled={user.role !== 'admin'} onChange={(event) => setLimits((old) => ({ ...old, [key]: Number(event.target.value) }))}/><span className="text-sm">٪</span></div></div>)}{user.role === 'admin' && <Button type="submit" disabled={busy} className="md:col-span-3 md:w-fit">ذخیرهٔ آستانه‌ها</Button>}</form>
+  </SectionCard>
+}
+
+export function SystemControls({ user, notify }: { user: User; notify: (message: string) => void }) {
+  const { data, cpu } = useDashboard(notify)
+  const memory = data?.memory_kib ? Math.round((1 - data.available_kib / data.memory_kib) * 100) : 0
+  const disk = data?.disk_total_bytes ? Math.round((1 - (data.disk_free_bytes || 0) / data.disk_total_bytes) * 100) : 0
+  return <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/></div>
+}
+
+export function PortProbeControls({ notify }: { notify: (message: string) => void }) {
+  const [port, setPort] = useState('443')
+  const [result, setResult] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    try { const response = await api<{ port: number; open: boolean }>('network/probe', { method: 'POST', body: JSON.stringify({ port: Number(port) }) }); setResult(response.open ? `پورت ${response.port} روی خود سرور اتصال TCP می‌پذیرد.` : `پورت ${response.port} روی خود سرور اتصال TCP نمی‌پذیرد.`) }
+    catch (error) { notify(error instanceof Error ? error.message : 'بررسی پورت ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  return <SectionCard title="آزمایش اتصال TCP" description="یک اتصال واقعی از داخل سرور به پورت موردنظر برقرار می‌شود"><form onSubmit={submit} className="flex flex-wrap items-end gap-3"><div className="space-y-2"><Label htmlFor="port-probe">پورت</Label><Input id="port-probe" type="number" min={1} max={65535} value={port} onChange={(event) => setPort(event.target.value)} className="w-36"/></div><Button type="submit" disabled={busy}>{busy ? 'در حال بررسی…' : 'بررسی اتصال'}</Button>{result && <span className="text-xs text-muted-foreground">{result}</span>}</form></SectionCard>
+}
+
 export function DashboardPage({ user, Heading, notify }: { user: User } & Common) {
-  const { data, history, resourceHistory, cpu, loading, refresh } = useDashboard(notify)
+  const { data, history, resourceHistory, cpu, loading, refresh, range, setRange } = useDashboard(notify)
   const memory = data && data.memory_kib ? Math.round((1 - data.available_kib / data.memory_kib) * 100) : 0
   const disk =
     data && data.disk_total_bytes
@@ -267,7 +277,7 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
         </div>
       )}
       <div className="mt-5">
-        <SectionCard title="نبض منابع سرور" description="تغییرات CPU، حافظه و دیسک در همین نشست مرورگر · هر ۵ ثانیه" right={<Activity size={18} className="text-primary" />}>
+        <SectionCard title="نبض منابع سرور" description="تاریخچهٔ ثبت‌شده توسط سرویس، حتی وقتی پنل باز نبوده است" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m', '1h', '24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} className={`rounded-md px-2.5 py-1 text-[11px] ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground hover:text-white'}`} dir="ltr">{item}</button>)}</div>}>
           <ResourceChart samples={resourceHistory} />
         </SectionCard>
       </div>
@@ -297,17 +307,18 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
           </SectionCard>
         </div>
       )}
+      <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_1fr]">
         <SectionCard
           title="ترافیک لحظه‌ای شبکه"
-          description="نرخ واقعی دریافت و ارسال، به‌روزرسانی هر ۵ ثانیه"
+          description={`نرخ واقعی دریافت و ارسال · تاریخچهٔ ${range} از سرویس`}
           right={
             <Badge variant="outline">
               <Activity size={13} /> زنده
             </Badge>
           }
         >
-          <div className="h-[250px]" dir="ltr">
+          <div dir="ltr">
             {history.length > 0 ? (
               <TrafficChart history={history} />
             ) : (
@@ -376,16 +387,29 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
 }
 
 function ResourceChart({ samples }: { samples: ResourceSample[] }) {
-  if (samples.length < 2) return <div className="grid h-44 place-items-center text-sm text-muted-foreground">نمودار پس از چند نمونه‌برداری نمایش داده می‌شود.</div>
-  const points = (key: keyof ResourceSample) => samples.map((sample, index) => `${12 + index * 476 / Math.max(samples.length - 1, 1)},${170 - sample[key] * 1.4}`).join(' ')
-  return <div>
-    <div className="h-44" dir="ltr"><svg viewBox="0 0 500 190" preserveAspectRatio="none" width="100%" height="100%" role="img" aria-label="روند مصرف CPU، حافظه و دیسک">
-      {[30, 100, 170].map((y) => <line key={y} x1="12" x2="488" y1={y} y2={y} stroke="#473851" strokeDasharray="3 6" />)}
-      <polyline points={points('cpu')} fill="none" stroke="#b487ff" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
-      <polyline points={points('memory')} fill="none" stroke="#59d3bc" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
-      <polyline points={points('disk')} fill="none" stroke="#e0ac72" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
+  return <TimeSeriesChart samples={samples} series={[{ key: 'cpu', label: 'پردازنده', color: '#be9bff' }, { key: 'memory', label: 'حافظه', color: '#55d8cb' }, { key: 'disk', label: 'دیسک', color: '#f1bb8a' }]} max={100} unit="٪" />
+}
+
+type ChartSeries = { key: string; label: string; color: string }
+function TimeSeriesChart({ samples, series, max, unit }: { samples: (ResourceSample | Sample)[]; series: ChartSeries[]; max: number; unit: string }) {
+  const [hover, setHover] = useState<number | null>(null)
+  if (!samples.length) return <div className="grid h-[235px] place-items-center text-center text-sm text-muted-foreground">سرویس در حال جمع‌آوری نخستین نمونه است. تاریخچه از این پس در پس‌زمینه ذخیره می‌شود.</div>
+  const width = 720, left = 42, right = 16, top = 18, bottom = 214
+  const x = (index: number) => left + index * (width - left - right) / Math.max(samples.length - 1, 1)
+  const y = (value: number) => bottom - Math.min(Math.max(value / max, 0), 1) * (bottom - top)
+  const selected = hover === null ? samples.length - 1 : Math.max(0, Math.min(hover, samples.length - 1))
+  const current = samples[selected]
+  const stamp = (at: number) => new Date(at * 1000).toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' })
+  return <div className="rounded-xl border border-white/[.055] bg-[#10111b] p-3 md:p-4">
+    <div className="mb-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs">{series.map((item) => <span key={item.key} className="flex items-center gap-2 text-muted-foreground"><i className="h-2 w-2 rounded-full" style={{ background: item.color, boxShadow: `0 0 10px ${item.color}88` }}/>{item.label} <b className="font-mono text-white" dir="ltr">{new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(Number((current as unknown as Record<string, number>)[item.key]) || 0)}{unit}</b></span>)}<span className="mr-auto font-mono text-[10px] text-muted-foreground" dir="ltr">{stamp(current.at)}</span></div>
+    <div className="h-[235px]" dir="ltr"><svg viewBox="0 0 720 250" width="100%" height="100%" preserveAspectRatio="none" onMouseLeave={() => setHover(null)} onMouseMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setHover(Math.round(((event.clientX - rect.left) / rect.width * width - left) / (width - left - right) * (samples.length - 1))) }} role="img" aria-label={`تاریخچهٔ ${series.map((s) => s.label).join('، ')}`}>
+      <defs>{series.map((item) => <linearGradient key={item.key} id={`chart-${item.key}`} x1="0" y1="0" x2="0" y2="1"><stop stopColor={item.color} stopOpacity=".24"/><stop offset="1" stopColor={item.color} stopOpacity="0"/></linearGradient>)}</defs>
+      {[0, .25, .5, .75, 1].map((fraction) => { const py = y(fraction * max); return <g key={fraction}><line x1={left} x2={width-right} y1={py} y2={py} stroke="#363448" strokeDasharray="3 6"/><text x={left-10} y={py+4} fill="#8d8a9f" fontSize="11" textAnchor="end">{unit === '٪' ? `${Math.round(fraction*max)}%` : formatBytes(fraction*max)}</text></g> })}
+      {series.map((item) => { const points = samples.map((sample, index) => `${x(index)},${y(Number((sample as unknown as Record<string, number>)[item.key]) || 0)}`).join(' '); return <g key={item.key}><polygon points={`${left},${bottom} ${points} ${x(samples.length-1)},${bottom}`} fill={`url(#chart-${item.key})`}/><polyline points={points} fill="none" stroke={item.color} strokeWidth="2.6" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke"/></g> })}
+      <line x1={x(selected)} x2={x(selected)} y1={top} y2={bottom} stroke="#a999c3" strokeOpacity=".45" strokeDasharray="4 5"/>
+      {series.map((item) => <circle key={item.key} cx={x(selected)} cy={y(Number((current as unknown as Record<string, number>)[item.key]) || 0)} r="4.5" fill={item.color} stroke="#10111b" strokeWidth="2"/>)}
+      <text x={left} y="242" fill="#9995ac" fontSize="11">{stamp(samples[0].at)}</text><text x={width-right} y="242" textAnchor="end" fill="#9995ac" fontSize="11">{stamp(samples[samples.length-1].at)}</text>
     </svg></div>
-    <div className="mt-2 flex flex-wrap gap-5 text-xs text-muted-foreground"><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#b487ff]"/>CPU</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#59d3bc]"/>حافظه</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#e0ac72]"/>دیسک</span></div>
   </div>
 }
 
@@ -406,61 +430,7 @@ function DistributionBars({ title, description, items }: {
 }
 
 function TrafficChart({ history }: { history: Sample[] }) {
-  const max = Math.max(1024, ...history.flatMap((sample) => [sample.rx, sample.tx]))
-  const x = (index: number) => 12 + (index * 476) / Math.max(history.length - 1, 1)
-  const y = (value: number) => 210 - (value / max) * 180
-  const line = (key: 'rx' | 'tx') =>
-    history.map((sample, index) => `${index ? 'L' : 'M'} ${x(index)} ${y(sample[key])}`).join(' ')
-  const area = (key: 'rx' | 'tx') => `${line(key)} L ${x(history.length - 1)} 210 L 12 210 Z`
-  const last = history[history.length - 1]
-  return (
-    <svg
-      viewBox="0 0 500 250"
-      width="100%"
-      height="100%"
-      preserveAspectRatio="none"
-      role="img"
-      aria-label={`نرخ دریافت ${formatBytes(last.rx)} و ارسال ${formatBytes(last.tx)} در ثانیه`}
-    >
-      <defs>
-        <linearGradient id="rxGradient" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#b487ff" stopOpacity=".35" />
-          <stop offset="100%" stopColor="#b487ff" stopOpacity="0" />
-        </linearGradient>
-        <linearGradient id="txGradient" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#59d3bc" stopOpacity=".22" />
-          <stop offset="100%" stopColor="#59d3bc" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      {[30, 90, 150, 210].map((position) => (
-        <line
-          key={position}
-          x1="12"
-          x2="488"
-          y1={position}
-          y2={position}
-          stroke="#473851"
-          strokeDasharray="3 5"
-        />
-      ))}
-      <path d={area('rx')} fill="url(#rxGradient)" />
-      <path d={area('tx')} fill="url(#txGradient)" />
-      <path d={line('rx')} fill="none" stroke="#b487ff" strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
-      <path d={line('tx')} fill="none" stroke="#59d3bc" strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
-      <circle cx={x(history.length - 1)} cy={y(last.rx)} r="4" fill="#b487ff">
-        <title>{`${last.time} · دریافت ${formatBytes(last.rx)}/ثانیه`}</title>
-      </circle>
-      <circle cx={x(history.length - 1)} cy={y(last.tx)} r="4" fill="#59d3bc">
-        <title>{`${last.time} · ارسال ${formatBytes(last.tx)}/ثانیه`}</title>
-      </circle>
-      <text x="12" y="238" fill="#a698b6" fontSize="11">
-        {history[0].time}
-      </text>
-      <text x="488" y="238" fill="#a698b6" fontSize="11" textAnchor="end">
-        {last.time}
-      </text>
-    </svg>
-  )
+  return <TimeSeriesChart samples={history} series={[{ key: 'rx', label: 'دریافت', color: '#be9bff' }, { key: 'tx', label: 'ارسال', color: '#55d8cb' }]} max={Math.max(1024, ...history.flatMap((sample) => [sample.rx, sample.tx])) * 1.12} unit=" B/s" />
 }
 
 function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
@@ -505,6 +475,7 @@ export function NetworkPage({ Heading, notify }: Common) {
           </Button>
         }
       />
+      <div className="mb-5"><PortProbeControls notify={notify}/></div>
       {loading && !data ? (
         <LoadingCards />
       ) : (
@@ -594,8 +565,11 @@ export function NetworkPage({ Heading, notify }: Common) {
   )
 }
 
-export function FirewallPage({ Heading, notify }: Common) {
+export function FirewallPage({ Heading, notify, user }: Common & { user: User }) {
   const [data, setData] = useState<Firewall | null>(null)
+  const [rulePort, setRulePort] = useState('8080')
+  const [ruleProtocol, setRuleProtocol] = useState<'tcp' | 'udp'>('tcp')
+  const [changing, setChanging] = useState(false)
   const [loading, setLoading] = useState(true)
   const refresh = useCallback(async () => {
     try {
@@ -609,6 +583,13 @@ export function FirewallPage({ Heading, notify }: Common) {
   useEffect(() => {
     void refresh()
   }, [refresh])
+  async function changeRule(action: 'add' | 'remove') {
+    if (action === 'remove' && !window.confirm(`قانون مدیریت‌شدهٔ ${rulePort}/${ruleProtocol} حذف شود؟`)) return
+    setChanging(true)
+    try { await api('firewall/rules', { method: 'POST', body: JSON.stringify({ action, port: Number(rulePort), protocol: ruleProtocol }) }); notify(action === 'add' ? 'قانون دسترسی اضافه شد.' : 'قانون دسترسی حذف شد.'); await refresh() }
+    catch (error) { notify(error instanceof Error ? error.message : 'تغییر قانون ناموفق بود') }
+    finally { setChanging(false) }
+  }
   const rules = (data?.status || '').split('\n').filter((line) => /^\s*\[\s*\d+\]/.test(line))
   return (
     <>
@@ -616,11 +597,10 @@ export function FirewallPage({ Heading, notify }: Common) {
         title="فایروال UFW"
         description="وضعیت و قوانین ثبت‌شدهٔ فایروال سرور"
         action={
-          <Button variant="outline" size="sm" onClick={refresh}>
-            <RefreshCw size={15} /> به‌روزرسانی
-          </Button>
+          <div className="flex gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button><Button variant="outline" size="sm" disabled={!data?.status} onClick={() => downloadText('donatello-ufw.txt', data?.status || '')}><Download size={15}/> دریافت قوانین</Button></div>
         }
       />
+      {user.role === 'admin' && <div className="mb-5"><SectionCard title="مدیریت قانون دسترسی" description="فقط قانون‌های دارای برچسب DONATELLO WEB از اینجا قابل حذف هستند"><div className="flex flex-wrap items-end gap-3"><div className="space-y-2"><Label htmlFor="rule-port">پورت</Label><Input id="rule-port" type="number" min={1} max={65535} value={rulePort} onChange={(event) => setRulePort(event.target.value)} className="w-32"/></div><div className="space-y-2"><Label htmlFor="rule-proto">پروتکل</Label><Select value={ruleProtocol} onValueChange={(value) => setRuleProtocol(value as 'tcp' | 'udp')}><SelectTrigger id="rule-proto" className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="tcp">TCP</SelectItem><SelectItem value="udp">UDP</SelectItem></SelectContent></Select></div><Button disabled={changing || !rulePort} onClick={() => void changeRule('add')}>افزودن اجازه</Button><Button variant="outline" disabled={changing || !rulePort} onClick={() => void changeRule('remove')}>حذف قانون Donatello</Button></div></SectionCard></div>}
       <div className="mb-5"><DistributionBars title="ترکیب قوانین UFW" description="بر اساس خروجی فعلی ufw status numbered" items={['ALLOW', 'DENY', 'REJECT', 'LIMIT'].map((action) => ({ label: action, value: rules.filter((line) => line.includes(action)).length }))} /></div>
       <div className="grid gap-5 lg:grid-cols-[1.5fr_.85fr]">
         <SectionCard
@@ -656,8 +636,7 @@ export function FirewallPage({ Heading, notify }: Common) {
             </div>
             <Alert>
               <AlertDescription>
-                ویرایش قوانین UFW پس از افزودن بررسی امنیتی، تأیید تغییر و مسیر بازیابی فعال خواهد شد. این
-                صفحه فعلاً وضعیت واقعی را نشان می‌دهد.
+                ساخت و حذف قوانین فقط برای مدیر و از مسیر محدود Donatello انجام می‌شود. حذف قوانین دیگر سرور از این صفحه مجاز نیست.
               </AlertDescription>
             </Alert>
           </div>
@@ -879,6 +858,15 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
   )
 }
 
+function downloadText(filename: string, content: string, type = 'text/plain') {
+  const url = URL.createObjectURL(new Blob([content], { type }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 export function AuditPage({ Heading, notify }: Common) {
   const [events, setEvents] = useState<AuditEvent[]>([])
   const [loading, setLoading] = useState(true)
@@ -900,9 +888,7 @@ export function AuditPage({ Heading, notify }: Common) {
         title="گزارش عملیات"
         description="ردیابی آخرین تغییرات و ورودهای پنل"
         action={
-          <Button variant="outline" size="sm" onClick={refresh}>
-            <RefreshCw size={15} /> به‌روزرسانی
-          </Button>
+          <div className="flex gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button><Button variant="outline" size="sm" disabled={!events.length} onClick={() => { const rows = [['at','actor','action','detail'], ...events.map((event) => [new Date(event.at * 1000).toISOString(), event.actor, event.action, event.detail])]; downloadText('donatello-audit.csv', '\uFEFF' + rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n'), 'text/csv;charset=utf-8') }}><Download size={15}/> دریافت CSV</Button></div>
         }
       />
       <div className="mb-5"><DistributionBars title="ترکیب عملیات اخیر" description="از میان ۱۰۰ رویداد آخر ثبت‌شده" items={['login', 'logout', 'account.password', 'user.create', 'user.update'].map((action) => ({ label: action, value: events.filter((event) => event.action === action).length }))} /></div>

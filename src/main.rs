@@ -3,7 +3,7 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -601,6 +601,136 @@ fn listening_ports() -> Vec<Value> {
     ports.dedup();
     ports
 }
+fn network_totals() -> (u64, u64) {
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    if let Ok(entries) = fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            if entry.file_name() == "lo" { continue; }
+            let path = entry.path().join("statistics");
+            rx = rx.saturating_add(fs::read_to_string(path.join("rx_bytes")).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0));
+            tx = tx.saturating_add(fs::read_to_string(path.join("tx_bytes")).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0));
+        }
+    }
+    (rx, tx)
+}
+async fn collect_metrics(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut previous_cpu = cpu_ticks();
+    let mut previous_network = network_totals();
+    let mut previous_at = Instant::now();
+    let mut sample_count = 0u64;
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let at = now();
+        let current_cpu = cpu_ticks();
+        let current_network = network_totals();
+        let elapsed = previous_at.elapsed().as_secs_f64().max(0.1);
+        previous_at = Instant::now();
+        let total = current_cpu.0.saturating_sub(previous_cpu.0);
+        let idle = current_cpu.1.saturating_sub(previous_cpu.1);
+        let cpu = if total > 0 { (100.0 * (1.0 - idle as f64 / total as f64)).clamp(0.0, 100.0) } else { 0.0 };
+        let mem = meminfo();
+        let memory_total = *mem.get("MemTotal").unwrap_or(&0);
+        let memory_available = *mem.get("MemAvailable").unwrap_or(&0);
+        let memory = if memory_total > 0 { (100.0 * (1.0 - memory_available as f64 / memory_total as f64)).clamp(0.0, 100.0) } else { 0.0 };
+        let (disk_total, disk_free) = disk_usage();
+        let disk = if disk_total > 0 { (100.0 * (1.0 - disk_free as f64 / disk_total as f64)).clamp(0.0, 100.0) } else { 0.0 };
+        let rx_rate = current_network.0.saturating_sub(previous_network.0) as f64 / elapsed;
+        let tx_rate = current_network.1.saturating_sub(previous_network.1) as f64 / elapsed;
+        previous_cpu = current_cpu;
+        previous_network = current_network;
+        sample_count = sample_count.wrapping_add(1);
+        if let Ok(db) = state.lock() {
+            let _ = db.execute("INSERT OR REPLACE INTO metric_samples(at,cpu,memory,disk,rx_rate,tx_rate) VALUES (?1,?2,?3,?4,?5,?6)", params![at,cpu,memory,disk,rx_rate,tx_rate]);
+            // Keep seven days of five-second samples, including across service restarts.
+            if sample_count % 60 == 0 { let _ = db.execute("DELETE FROM metric_samples WHERE at<?1", [at - 7 * 86400]); }
+        }
+    }
+}
+#[derive(Deserialize)]
+struct HistoryQuery { range: Option<String> }
+async fn history(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<HistoryQuery>) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    let (seconds, step) = match query.range.as_deref() {
+        Some("1h") => (3600, 3),
+        Some("24h") => (86400, 24),
+        Some("7d") => (7 * 86400, 180),
+        _ => (300, 1),
+    };
+    let mut stmt = db.prepare("SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM metric_samples WHERE at>=?1 AND at%?2<5 ORDER BY at").map_err(db_error)?;
+    let rows = stmt.query_map(params![now() - seconds, step * 5], |row| Ok(json!({
+        "at": row.get::<_, i64>(0)?, "cpu": row.get::<_, f64>(1)?, "memory": row.get::<_, f64>(2)?, "disk": row.get::<_, f64>(3)?,
+        "rx": row.get::<_, f64>(4)?, "tx": row.get::<_, f64>(5)?
+    }))).map_err(db_error)?;
+    let samples: Vec<Value> = rows.filter_map(Result::ok).collect();
+    Ok(Json(json!({"samples": samples, "interval_seconds": 5, "retention_seconds": 7 * 86400})))
+}
+#[derive(Deserialize)]
+struct AlertSettings { cpu: u8, memory: u8, disk: u8 }
+fn read_alert_settings(db: &Connection) -> Value {
+    let read = |key: &str| -> u8 {
+        db.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get::<_, String>(0))
+            .ok().and_then(|value| value.parse::<u8>().ok()).unwrap_or(85)
+    };
+    json!({"cpu": read("alert_cpu"), "memory": read("alert_memory"), "disk": read("alert_disk")})
+}
+async fn alert_settings(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    Ok(Json(read_alert_settings(&db)))
+}
+async fn update_alert_settings(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<AlertSettings>) -> ApiResult {
+    check_origin(&headers)?;
+    if [input.cpu, input.memory, input.disk].iter().any(|value| !(1..=100).contains(value)) {
+        return Err(error(StatusCode::BAD_REQUEST, "Thresholds must be between 1 and 100"));
+    }
+    let db = state.lock().unwrap();
+    let user = require_admin(&db, &headers)?;
+    for (key, value) in [("alert_cpu", input.cpu), ("alert_memory", input.memory), ("alert_disk", input.disk)] {
+        db.execute("INSERT INTO settings(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value.to_string()]).map_err(db_error)?;
+    }
+    audit(&db, &user.username, "monitoring_settings", &format!("CPU {}%, memory {}%, disk {}%", input.cpu, input.memory, input.disk));
+    Ok(Json(read_alert_settings(&db)))
+}
+#[derive(Deserialize)]
+struct PortProbe { port: u16 }
+async fn port_probe(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<PortProbe>) -> ApiResult {
+    check_origin(&headers)?;
+    {
+        let db = state.lock().unwrap();
+        require_user(&db, &headers)?;
+    }
+    if input.port == 0 { return Err(error(StatusCode::BAD_REQUEST, "Invalid port")); }
+    let target = SocketAddr::from(([127, 0, 0, 1], input.port));
+    let open = tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(target)).await.is_ok_and(|result| result.is_ok());
+    Ok(Json(json!({"port": input.port, "open": open, "target": "127.0.0.1"})))
+}
+#[derive(Deserialize)]
+struct FirewallRuleChange { action: String, port: u16, protocol: String }
+async fn firewall_rule(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<FirewallRuleChange>) -> ApiResult {
+    check_origin(&headers)?;
+    if input.port == 0 || !["tcp", "udp"].contains(&input.protocol.as_str()) || !["add", "remove"].contains(&input.action.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "Invalid firewall rule"));
+    }
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?
+    };
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/lib/donatello/ufw-helper", &input.action, &input.port.to_string(), &input.protocol])
+        .output()
+        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "UFW helper is unavailable; run sudo donatello update"))?;
+    if !output.status.success() {
+        return Err(error(StatusCode::BAD_REQUEST, "UFW change failed. Check that UFW is installed and this is a Donatello-managed rule."));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "firewall.rule", &format!("{} {}/{}", input.action, input.port, input.protocol));
+    Ok(Json(json!({"ok": true})))
+}
 async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
         let db = state.lock().unwrap();
@@ -836,7 +966,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL);")?;
     let has_users = initialized(&db);
     let configured_setup_token = env::var("DONATELLO_SETUP_TOKEN")
         .ok()
@@ -853,6 +983,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now()])?;
     let state = Arc::new(Mutex::new(db));
+    tokio::spawn(collect_metrics(state.clone()));
     let app = Router::new()
         .route("/api/state", get(state_handler))
         .route("/api/setup", post(setup))
@@ -860,10 +991,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/logout", post(logout))
         .route("/api/account/password", post(change_password))
         .route("/api/dashboard", get(dashboard))
+        .route("/api/history", get(history))
+        .route("/api/monitoring/alerts", get(alert_settings).put(update_alert_settings))
+        .route("/api/network/probe", post(port_probe))
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))
         .route("/api/audit", get(audit_log))
         .route("/api/firewall", get(firewall))
+        .route("/api/firewall/rules", post(firewall_rule))
         .fallback(get(static_file))
         .with_state(state);
     let bind = env::var("DONATELLO_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
