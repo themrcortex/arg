@@ -40,7 +40,7 @@ Donatello یک پنل وب راست‌به‌چپ برای دیدن وضعیت �
 **پیش‌نیاز:** Linux، Rust stable و Node.js 20 یا جدیدتر برای توسعهٔ فرانت.
 
 ```bash
-# پس از دریافت فایل‌های پروژه
+git clone https://github.com/parsasajjadi2008/donatello.git
 cd donatello
 cargo run --release
 ```
