@@ -3,9 +3,11 @@ import {
   Activity,
   ArrowLeft,
   ChevronDown,
-  ChevronLeft,
+  Command,
   Eye,
   EyeOff,
+  Headphones,
+  LifeBuoy,
   LogOut,
   Menu,
   Search,
@@ -251,10 +253,13 @@ export default function App() {
   })
   const [mobileOpen, setMobileOpen] = useState(false)
   const [navQuery, setNavQuery] = useState('')
-  const [openGroups, setOpenGroups] = useState<string[]>(['overview'])
   const [openCategories, setOpenCategories] = useState<string[]>(['overview-main'])
   const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
+  const [navGroup, setNavGroup] = useState(() => {
+    const fromHash = window.location.hash.replace(/^#\/?/, '')
+    return explorerGroups.find((group) => group.categories.some((section) => section.items.some((item) => item.id === fromHash)))?.id || 'overview'
+  })
   const refresh = useCallback(async () => {
     setBoot(true)
     setLoadError('')
@@ -281,10 +286,21 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
   useEffect(() => {
+    const onShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        setMobileOpen(true)
+        window.setTimeout(() => document.getElementById('sidebar-search')?.focus(), 30)
+      }
+    }
+    window.addEventListener('keydown', onShortcut)
+    return () => window.removeEventListener('keydown', onShortcut)
+  }, [])
+  useEffect(() => {
     for (const group of explorerGroups) {
       const category = group.categories.find((section) => section.items.some((entry) => entry.id === page))
       if (category) {
-        setOpenGroups((items) => items.includes(group.id) ? items : [...items, group.id])
+        setNavGroup(group.id)
         setOpenCategories((items) => items.includes(category.id) ? items : [...items, category.id])
         break
       }
@@ -331,10 +347,11 @@ export default function App() {
   const allowedIds = new Set(allowedGroups.flatMap((group) => group.categories.flatMap((category) => category.items.map((entry) => entry.id))))
   const currentPage = allowedIds.has(page) ? page : 'dashboard'
   const active = entryById.get(currentPage) || entryById.get('dashboard')!
-  const activeGroup = allowedGroups.find((group) => group.categories.some((category) => category.items.some((entry) => entry.id === currentPage)))
+  const activeGroup = allowedGroups.find((group) => group.id === navGroup) || allowedGroups[0]
   const filter = navQuery.trim().toLocaleLowerCase('fa-IR')
-  function toggleGroup(id: string) {
-    setOpenGroups((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id])
+  function selectGroup(id: string) {
+    setNavGroup(id)
+    setNavQuery('')
   }
   function toggleCategory(id: string) {
     setOpenCategories((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id])
@@ -342,70 +359,57 @@ export default function App() {
   function selectPage(next: string) {
     if (!allowedIds.has(next)) return
     setPage(next)
+    const group = allowedGroups.find((item) => item.categories.some((category) => category.items.some((entry) => entry.id === next)))
+    if (group) setNavGroup(group.id)
     window.location.hash = `/${next}`
     setMobileOpen(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="app-shell min-h-screen lg:grid lg:grid-cols-[310px_minmax(0,1fr)]">
-        <aside
-          className={cn(
-            'app-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(88vw,310px)] flex-col border-l border-white/10 px-4 py-6 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[310px] lg:translate-x-0',
-            mobileOpen ? 'translate-x-0' : 'translate-x-full',
-          )}
-        >
-          <div className="flex items-center justify-between px-2">
-            <Brand />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="lg:hidden"
-              onClick={() => setMobileOpen(false)}
-              aria-label="بستن منو"
-            >
-              <X size={18} />
-            </Button>
-          </div>
-          <div className="mt-8 rounded-2xl border border-white/10 bg-white/[.035] p-3">
-            <label className="relative block">
-              <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <input value={navQuery} onChange={(event) => setNavQuery(event.target.value)} placeholder={`جست‌وجو در ${formatNumber(allowedIds.size)} نما…`} aria-label="جست‌وجو در گزینه‌ها" className="h-10 w-full rounded-xl border border-white/10 bg-[#11121c] pr-9 pl-3 text-xs text-foreground outline-none transition focus:border-primary/60" />
-            </label>
-            <div className="mt-2 flex items-center justify-between px-1 text-[10px] text-muted-foreground"><span>فضای کاری</span><span className="font-mono" dir="ltr">{allowedIds.size} VIEWS</span></div>
-          </div>
-          <nav className="sidebar-scroll mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto pl-1" aria-label="ناوبری اصلی">
+      <div className="app-shell min-h-screen lg:grid lg:grid-cols-[64px_260px_minmax(0,1fr)]">
+        <aside className="app-rail sticky top-0 z-30 hidden h-screen flex-col items-center border-l border-white/10 py-4 lg:flex" aria-label="دسته‌بندی‌های اصلی">
+          <button onClick={() => selectPage('dashboard')} className="mb-6 grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/[.035] transition hover:border-primary/40" aria-label="داشبورد">
+            <span className="grid h-7 w-7 place-items-center rounded-lg bg-gradient-to-br from-[#dec3ff] to-[#7650cb] text-sm font-black text-[#211135] shadow-glow">D</span>
+          </button>
+          <div className="mb-3 h-px w-8 bg-white/10" />
+          <nav className="flex flex-1 flex-col items-center gap-2" aria-label="انتخاب بخش">
             {allowedGroups.map((group) => {
-              const categories = group.categories.map((category) => ({ ...category, items: category.items.filter((item) => !filter || `${item.label} ${item.description} ${item.value}`.toLocaleLowerCase('fa-IR').includes(filter)) })).filter((category) => category.items.length)
-              if (!categories.length) return null
-              const expanded = Boolean(filter) || openGroups.includes(group.id)
-              const count = group.categories.reduce((total, category) => total + category.items.length, 0)
-              return <div key={group.id} className="rounded-xl">
-                <button onClick={() => toggleGroup(group.id)} className={cn('nav-group flex w-full items-center gap-3 rounded-xl px-3 py-3 text-right text-sm font-semibold transition', activeGroup?.id === group.id ? 'text-white' : 'text-[#a8a9be] hover:text-white')} aria-expanded={expanded}>
-                  <span className={cn('grid h-8 w-8 shrink-0 place-items-center rounded-lg', activeGroup?.id === group.id ? 'bg-primary/15 text-primary' : 'bg-white/[.035] text-[#8c91a8]')}><group.icon size={17}/></span>
-                  <span className="flex-1">{group.label}</span><span className="font-mono text-[10px] text-muted-foreground">{formatNumber(count)}</span><ChevronLeft size={15} className={cn('text-muted-foreground transition-transform', expanded && '-rotate-90')}/>
-                </button>
-                {expanded && <div className="mr-7 border-r border-white/10 pb-2 pr-3">
-                  {categories.map((category) => {
-                    const catOpen = Boolean(filter) || openCategories.includes(category.id)
-                    return <div key={category.id} className="mt-1">
-                      <button onClick={() => toggleCategory(category.id)} className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-right text-[11px] font-semibold text-[#777d96] transition hover:text-white" aria-expanded={catOpen}><span>{category.label}</span><ChevronDown size={13} className={cn('transition-transform', !catOpen && 'rotate-90')}/></button>
-                      {catOpen && <div className="space-y-0.5">{category.items.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} title={item.description || item.label} aria-current={currentPage === item.id ? 'page' : undefined} className={cn('nav-leaf flex w-full items-center gap-2 rounded-lg px-3 py-2 text-right text-xs transition', currentPage === item.id ? 'bg-[#302446] font-semibold text-white' : 'text-[#a7a8ba] hover:bg-white/[.055] hover:text-white')}><span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', currentPage === item.id ? 'bg-[#a6eddf] shadow-[0_0_10px_#a6eddf]' : 'bg-[#55546e]')}/><span className="min-w-0 flex-1 truncate">{item.label}</span>{currentPage === item.id && <ArrowLeft size={13} className="text-primary"/>}</button>)}</div>}
-                    </div>
-                  })}
-                </div>}
-              </div>
+              const selected = activeGroup?.id === group.id
+              return <Tooltip key={group.id}>
+                <TooltipTrigger asChild><button onClick={() => selectGroup(group.id)} aria-label={group.label} aria-current={selected ? 'page' : undefined} className={cn('rail-button relative grid h-10 w-10 place-items-center rounded-xl transition', selected ? 'bg-[#312547] text-[#c2a1ff]' : 'text-[#8d91a7] hover:bg-white/[.06] hover:text-white')}><group.icon size={19} strokeWidth={1.8}/>{selected && <span className="absolute -right-[13px] h-5 w-[3px] rounded-full bg-primary shadow-glow"/>}</button></TooltipTrigger>
+                <TooltipContent side="left">{group.label}</TooltipContent>
+              </Tooltip>
             })}
           </nav>
-          <div className="mt-3 space-y-3 border-t border-white/10 pt-3">
-            <div className="rounded-2xl border border-white/10 bg-white/[.035] p-3">
-              <div className="flex items-center gap-2 text-sm font-semibold">
-                <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_#4ade80]" />
-                پنل آنلاین است
+          <div className="mt-auto flex flex-col items-center gap-2 border-t border-white/10 pt-3">
+            <Tooltip><TooltipTrigger asChild><button onClick={() => selectPage('settings')} className="rail-button grid h-10 w-10 place-items-center rounded-xl text-[#8d91a7] transition hover:bg-white/[.06] hover:text-white" aria-label="تنظیمات"><Settings size={18}/></button></TooltipTrigger><TooltipContent side="left">تنظیمات</TooltipContent></Tooltip>
+            <a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="rail-button grid h-10 w-10 place-items-center rounded-xl text-[#8d91a7] transition hover:bg-white/[.06] hover:text-white" aria-label="پشتیبانی"><Headphones size={18}/></a>
+          </div>
+        </aside>
+        <aside className={cn('app-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(88vw,300px)] flex-col border-l border-white/10 px-4 py-5 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[260px] lg:translate-x-0', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
+          <div className="flex items-center justify-between px-1">
+            <div className="min-w-0"><div className="text-[10px] font-semibold tracking-[.18em] text-[#a6eddf]" dir="ltr">DONATELLO / CONTROL</div><h2 className="mt-2 truncate text-lg font-bold text-white">{activeGroup?.label}</h2></div>
+            <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button>
+          </div>
+          <div className="mt-4 rounded-xl border border-white/10 bg-white/[.035] p-3">
+            <label className="relative block"><Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"/><input id="sidebar-search" value={navQuery} onChange={(event) => setNavQuery(event.target.value)} placeholder={`جست‌وجو در ${formatNumber(allowedIds.size)} نما…`} aria-label="جست‌وجو در گزینه‌ها" className="h-10 w-full rounded-lg border border-white/10 bg-[#11121c] pr-9 pl-3 text-xs text-foreground outline-none transition focus:border-primary/60"/></label>
+            <div className="mt-2 flex items-center justify-between px-1 text-[10px] text-muted-foreground"><span>{filter ? 'نتایج جست‌وجو' : 'گزینه‌های این بخش'}</span><span className="font-mono" dir="ltr">{activeGroup?.categories.flatMap((section) => section.items).length} VIEWS</span></div>
+          </div>
+          <div className="sidebar-scroll mt-3 flex gap-1 overflow-x-auto pb-2 lg:hidden">{allowedGroups.map((group) => <button key={group.id} onClick={() => selectGroup(group.id)} className={cn('flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-2 text-[10px]', activeGroup?.id === group.id ? 'border-primary/40 bg-primary/10 text-white' : 'border-white/10 text-muted-foreground')}><group.icon size={13}/>{group.label}</button>)}</div>
+          <nav className="sidebar-scroll mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto pl-1" aria-label="ناوبری اصلی">
+            {(filter ? allowedGroups : [activeGroup]).filter((group) => Boolean(group)).flatMap((group) => group!.categories.map((section) => ({ group: group!, section, items: section.items.filter((item) => !filter || `${item.label} ${item.description} ${item.value}`.toLocaleLowerCase('fa-IR').includes(filter)) })).filter((section) => section.items.length).map(({ group, section, items }) => {
+              const expanded = Boolean(filter) || openCategories.includes(section.id)
+              return <div key={`${group.id}-${section.id}`} className="mt-1">
+                {filter && <button onClick={() => selectGroup(group.id)} className="mb-1 flex w-full items-center gap-2 px-2 pt-2 text-[10px] font-bold text-[#a6eddf]"><group.icon size={12}/>{group.label}</button>}
+                <button onClick={() => toggleCategory(section.id)} className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-right text-[11px] font-semibold text-[#9294a9] transition hover:text-white" aria-expanded={expanded}><span>{section.label}</span><ChevronDown size={13} className={cn('transition-transform', !expanded && 'rotate-90')}/></button>
+                {expanded && <div className="space-y-0.5 border-r border-white/10 pr-2">{items.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} title={item.description || item.label} aria-current={currentPage === item.id ? 'page' : undefined} className={cn('nav-leaf flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-right text-xs transition', currentPage === item.id ? 'bg-[#342849] font-semibold text-white' : 'text-[#a7a8ba] hover:bg-white/[.055] hover:text-white')}><span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', currentPage === item.id ? 'bg-primary shadow-[0_0_10px_#a987ff]' : 'bg-[#55546e]')}/><span className="min-w-0 flex-1 truncate">{item.label}</span>{currentPage === item.id && <ArrowLeft size={12} className="text-primary"/>}</button>)}</div>}
               </div>
-              <p className="mt-1.5 font-mono text-[10px] text-muted-foreground" dir="ltr">DONATELLO / LIVE SERVER</p>
-            </div>
-            <p className="px-2 text-center text-[11px] text-muted-foreground">ساخته‌شده توسط {developer}</p>
+            }))}
+          </nav>
+          <div className="mt-3 border-t border-white/10 pt-3">
+            <button onClick={() => selectPage('settings')} className="flex w-full items-center gap-3 rounded-xl p-2 text-right transition hover:bg-white/[.04]"><Avatar className="h-9 w-9"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="min-w-0 flex-1"><b className="block truncate text-xs text-white">{user.username}</b><span className="mt-1 block text-[10px] text-muted-foreground">{user.role === 'admin' ? 'مدیر سرور' : user.role === 'operator' ? 'اپراتور' : 'ناظر'}</span></span><Settings size={15} className="text-muted-foreground"/></button>
+            <div className="mt-2 flex items-center gap-2 px-2 text-[10px] text-muted-foreground"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>سرور متصل است <span className="mr-auto font-mono" dir="ltr">LIVE</span></div>
           </div>
         </aside>
         {mobileOpen && (
@@ -416,53 +420,9 @@ export default function App() {
           />
         )}
         <div className="min-w-0">
-          <header className="sticky top-0 z-20 flex h-[78px] items-center justify-between gap-3 border-b border-white/10 bg-background/85 px-5 backdrop-blur-xl md:px-9">
-            <div className="flex items-center gap-3">
-              <Button
-                variant="ghost"
-                size="icon"
-                className="lg:hidden"
-                onClick={() => setMobileOpen(true)}
-                aria-label="باز کردن منو"
-              >
-                <Menu size={20} />
-              </Button>
-              <div className="text-xs text-muted-foreground">
-                Donatello <span className="mx-2 text-border">/</span>{' '}
-                <span className="font-semibold text-foreground">{active.label}</span>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="hidden sm:inline-flex">
-                    <Badge variant="success">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> متصل به سرور
-                    </Badge>
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>داده‌ها از سرور فعلی خوانده می‌شوند</TooltipContent>
-              </Tooltip>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" className="h-11 gap-2 rounded-xl px-1.5">
-                    <Avatar className="h-9 w-9">
-                      <AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback>
-                    </Avatar>
-                    <span className="hidden text-sm sm:inline">{user.username}</span>
-                    <ChevronDown size={14} className="text-muted-foreground" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onSelect={() => selectPage('settings')}>
-                    <Settings size={15} /> تنظیمات
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={logout} className="text-rose-300">
-                    <LogOut size={15} /> خروج
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
+          <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
+            <div className="flex items-center gap-2"><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO CONTROL PLANE</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
+            <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" className="h-9 w-9 rounded-lg" onClick={() => { setMobileOpen(true); window.setTimeout(() => document.getElementById('sidebar-search')?.focus(), 30) }} aria-label="جست‌وجو"><Search size={18}/></Button><span className="hidden rounded-lg border border-white/10 px-2 py-1 text-[10px] text-muted-foreground md:inline-flex" dir="ltr"><Command size={12} className="ml-1"/>K</span><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}

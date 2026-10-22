@@ -121,7 +121,17 @@ body {
   background-size: auto, 18px 18px, auto;
 }
 .app-sidebar {
-  background: linear-gradient(155deg, #10121d 0%, #11111d 62%, #141022 100%);
+  background: linear-gradient(155deg, #11111b 0%, #101019 62%, #15111f 100%);
+}
+.app-rail {
+  background: #0c0d14;
+}
+.utility-bar {
+  background: rgba(13, 14, 21, .94);
+  backdrop-filter: blur(18px);
+}
+.app-shell {
+  background-color: #0d0e15;
 }
 .sidebar-scroll {
   scrollbar-color: #51466a transparent;
