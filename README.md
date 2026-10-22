@@ -18,7 +18,7 @@
 
 ## Quick Install · نصب سریع
 
-**[⬇ دریافت مستقیم فایل Bash نصب Donatello](https://github.com/parsasajjadi2008/donatello/releases/latest/download/donatello-install.sh)**
+**[⬇ دریافت مستقیم فایل Bash نصب Donatello](https://github.com/parsasajjadi2008/donatello/releases/latest/download/install.sh)**
 
 روی Debian یا Ubuntu دارای systemd، فایل را دریافت و اجرا کنید. نیازی نیست پیش از نصب مخزن را دستی clone کنید؛ اسکریپت پیش‌نیازها را نصب می‌کند، سورس را دریافت و build می‌کند، سپس سرویس Donatello را راه می‌اندازد.
 
@@ -29,7 +29,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 sudo bash donatello.sh install
 ```
 
-اگر لینک دانلود بالا را مستقیم باز کردید، فایل `donatello-install.sh` دریافت‌شده را این‌طور اجرا کنید: `sudo bash /path/to/donatello-install.sh install`.
+اگر لینک دانلود بالا را مستقیم باز کردید، فایل `install.sh` دریافت‌شده را این‌طور اجرا کنید: `sudo bash /path/to/install.sh install`.
 
 بعد از نصب، برنامه به‌صورت خودکار با systemd فعال می‌شود و با روشن‌شدن سرور دوباره اجرا خواهد شد.
 
