@@ -260,6 +260,8 @@ export default function App() {
   const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
   const refresh = useCallback(async () => {
+    setBoot(true)
+    setLoadError('')
     try {
       const state = await api<{ installed: boolean; user?: User | null }>('state')
       setInstalled(state.installed)
