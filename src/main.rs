@@ -1075,9 +1075,11 @@ async fn firewall(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
     let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output()).await;
     Ok(Json(match output {
         Ok(Ok(o)) => {
-            json!({"available":o.status.success(),"status":String::from_utf8_lossy(&o.stdout),"error":String::from_utf8_lossy(&o.stderr)})
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_owned();
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            json!({"available":o.status.success(),"status":stdout,"error": if stderr.is_empty() { "".to_owned() } else { stderr }})
         }
-        Ok(Err(_)) => json!({"available":false,"status":"UFW is not installed"}),
+        Ok(Err(error)) => json!({"available":false,"status":"UFW could not be queried","error":error.to_string()}),
         Err(_) => json!({"available":false,"status":"UFW timed out"}),
     }))
 }

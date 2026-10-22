@@ -158,6 +158,17 @@ install_os_dependencies() {
   apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config iproute2 ripgrep
 }
 
+ensure_firewall_dependency() {
+  has ufw && return 0
+  [[ -r /etc/os-release ]] || die "Cannot install UFW: /etc/os-release is missing."
+  source /etc/os-release
+  [[ "${ID:-}" == debian || "${ID:-}" == ubuntu ]] || die "UFW installation is supported on Debian and Ubuntu only."
+  say "Installing UFW for panel firewall management"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends ufw
+}
+
 ensure_rust() {
   if [[ ! -x "$CARGO_HOME_DIR/bin/rustup" ]]; then
     say "Installing the Rust stable toolchain"
@@ -852,6 +863,7 @@ install_app() {
   require_systemd
   install_os_dependencies
   ensure_rust
+  ensure_firewall_dependency
   prepare_source
   build_release
   ensure_service_account
@@ -909,6 +921,7 @@ update_app() {
   [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Run 'donatello install' first."
   ensure_setup_token
   ensure_public_bind
+  ensure_firewall_dependency
   sync_ufw_rules
   prepare_source
   build_release
