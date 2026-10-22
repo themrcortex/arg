@@ -29,7 +29,9 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 sudo bash donatello.sh install
 ```
 
-اگر لینک دانلود بالا را مستقیم باز کردید، فایل `install.sh` دریافت‌شده را این‌طور اجرا کنید: `sudo bash /path/to/install.sh install`.
+برای بازکردن منوی کامل نصب به‌جای نصب مستقیم، آرگومان `install` را حذف کنید: `sudo bash donatello.sh`.
+
+اگر لینک دانلود بالا را مستقیم باز کردید، فایل `install.sh` دریافت‌شده را این‌طور اجرا کنید: `sudo bash /path/to/install.sh`؛ منوی تعاملی باز می‌شود.
 
 بعد از نصب، برنامه به‌صورت خودکار با systemd فعال می‌شود و با روشن‌شدن سرور دوباره اجرا خواهد شد.
 
@@ -54,7 +56,8 @@ ssh -L 8282:127.0.0.1:8282 user@SERVER_IP
 
 | دستور | کار |
 | --- | --- |
-| `sudo donatello manage` | بازکردن منوی مدیریت تعاملی |
+| `sudo donatello` | بازکردن منوی کامل مدیریت |
+| `sudo donatello manage` | بازکردن همان منوی مدیریت تعاملی |
 | `sudo donatello status` | دیدن وضعیت سرویس |
 | `sudo donatello start` | شروع سرویس |
 | `sudo donatello stop` | توقف سرویس |

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly APP_NAME="Donatello"
+readonly APP_NAME="DONATELLO"
 readonly SERVICE_NAME="donatello"
 readonly REPOSITORY="https://github.com/parsasajjadi2008/donatello.git"
 readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/parsasajjadi2008/donatello/main/install.sh"
@@ -27,31 +27,77 @@ export RUSTUP_HOME="$RUST_HOME"
 export CARGO_HOME="$CARGO_HOME_DIR"
 export PATH="$CARGO_HOME_DIR/bin:$PATH"
 
-say() { printf '\n\033[1;35m%s\033[0m\n' "$*"; }
+if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
+  readonly C_RESET=$'\033[0m'
+  readonly C_BOLD=$'\033[1m'
+  readonly C_PURPLE=$'\033[1;35m'
+  readonly C_CYAN=$'\033[1;36m'
+  readonly C_GREEN=$'\033[1;32m'
+  readonly C_YELLOW=$'\033[1;33m'
+  readonly C_RED=$'\033[1;31m'
+  readonly C_DIM=$'\033[2m'
+else
+  readonly C_RESET=''
+  readonly C_BOLD=''
+  readonly C_PURPLE=''
+  readonly C_CYAN=''
+  readonly C_GREEN=''
+  readonly C_YELLOW=''
+  readonly C_RED=''
+  readonly C_DIM=''
+fi
+
+say() { printf '\n%s%s%s\n' "$C_PURPLE" "$*" "$C_RESET"; }
 info() { printf '  %s\n' "$*"; }
-warn() { printf '\033[1;33m  %s\033[0m\n' "$*" >&2; }
-die() { printf '\033[1;31mخطا: %s\033[0m\n' "$*" >&2; exit 1; }
+warn() { printf '%s  WARNING: %s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
+die() { printf '%s  ERROR: %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
+show_banner() {
+  printf '%s' "$C_PURPLE"
+  cat <<'BANNER'
+  ██████╗  ██████╗ ███╗   ██╗ █████╗ ████████╗███████╗██╗     ██╗      ██████╗
+  ██╔══██╗██╔═══██╗████╗  ██║██╔══██╗╚══██╔══╝██╔════╝██║     ██║     ██╔═══██╗
+  ██║  ██║██║   ██║██╔██╗ ██║███████║   ██║   █████╗  ██║     ██║     ██║   ██║
+  ██║  ██║██║   ██║██║╚██╗██║██╔══██║   ██║   ██╔══╝  ██║     ██║     ██║   ██║
+  ██████╔╝╚██████╔╝██║ ╚████║██║  ██║   ██║   ███████╗███████╗███████╗╚██████╔╝
+  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚══════╝ ╚═════╝
+BANNER
+  printf '%s\n' "$C_RESET"
+  printf '  %sVPS MANAGEMENT%s  %s·%s  %sINSTALLER & SERVICE CONSOLE%s\n' \
+    "$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET" "$C_CYAN" "$C_RESET"
+  printf '  %s\n\n' '────────────────────────────────────────────────────────────────────────────'
+}
+
+pause_menu() {
+  if [[ -t 0 ]]; then
+    read -r -p 'Press Enter to continue...' _ || true
+  fi
+}
+
 require_root() {
-  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "این دستور را با sudo اجرا کنید: sudo bash donatello.sh $1"
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] && return 0
+  if [[ "$1" == "install" ]]; then
+    die "Run the installer as root: sudo bash install.sh install"
+  fi
+  die "Run this command as root: sudo donatello $1"
 }
 
 require_systemd() {
-  has systemctl || die "systemd روی این سیستم پیدا نشد."
-  [[ -d /run/systemd/system ]] || die "systemd در حال اجرا نیست؛ نصب سرویس ممکن نیست."
+  has systemctl || die "systemctl was not found on this system."
+  [[ -d /run/systemd/system ]] || die "systemd is not running; the service cannot be managed."
 }
 
 install_os_dependencies() {
-  [[ -r /etc/os-release ]] || die "فقط Debian و Ubuntu پشتیبانی می‌شوند."
+  [[ -r /etc/os-release ]] || die "Only Debian and Ubuntu are supported."
   # shellcheck disable=SC1091
   source /etc/os-release
   case "${ID:-}" in
     debian|ubuntu) ;;
-    *) die "توزیع ${PRETTY_NAME:-ناشناخته} پشتیبانی نمی‌شود؛ Debian یا Ubuntu لازم است." ;;
+    *) die "${PRETTY_NAME:-This Linux distribution} is not supported. Debian or Ubuntu is required." ;;
   esac
-  has apt-get || die "apt-get روی این سیستم پیدا نشد."
-  say "نصب پیش‌نیازهای ساخت"
+  has apt-get || die "apt-get was not found on this system."
+  say "Installing build dependencies"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
   apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config
@@ -59,7 +105,7 @@ install_os_dependencies() {
 
 ensure_rust() {
   if [[ ! -x "$CARGO_HOME_DIR/bin/rustup" ]]; then
-    say "نصب Rust stable"
+    say "Installing the Rust stable toolchain"
     local installer
     installer="$(mktemp /tmp/donatello-rustup.XXXXXX)"
     curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$installer"
@@ -74,22 +120,22 @@ ensure_rust() {
 prepare_source() {
   mkdir -p "$INSTALL_DIR"
   if [[ -d "$SOURCE_DIR/.git" ]]; then
-    say "دریافت آخرین نسخه از GitHub"
+    say "Fetching the latest source from GitHub"
     git -C "$SOURCE_DIR" fetch --depth 1 origin "$BRANCH"
     git -C "$SOURCE_DIR" reset --hard FETCH_HEAD
   elif [[ -e "$SOURCE_DIR" ]]; then
-    die "$SOURCE_DIR وجود دارد اما یک مخزن Git نیست؛ آن را بررسی کنید."
+    die "$SOURCE_DIR exists but is not a Git repository. Please inspect it before continuing."
   else
-    say "دریافت Donatello از GitHub"
+    say "Downloading Donatello source from GitHub"
     git clone --depth 1 --branch "$BRANCH" "$REPOSITORY" "$SOURCE_DIR"
   fi
 }
 
 build_release() {
-  [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "فایل‌های فرانت‌اند پیدا نشدند. مخزن یا شاخهٔ main را بررسی کنید."
-  say "ساخت نسخهٔ release"
+  [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the repository and main branch."
+  say "Building the optimized release"
   (cd "$SOURCE_DIR" && cargo +stable build --locked --release)
-  [[ -x "$SOURCE_DIR/target/release/donatello" ]] || die "ساخت باینری Donatello ناموفق بود."
+  [[ -x "$SOURCE_DIR/target/release/donatello" ]] || die "The Donatello binary was not created."
 }
 
 ensure_service_account() {
@@ -110,13 +156,13 @@ configure_ufw_status() {
     rm -f "$SUDOERS_FILE"
     return
   fi
-  has visudo || die "ufw نصب است اما visudo پیدا نشد؛ مجوز محدود UFW را دستی تنظیم کنید."
+  has visudo || die "UFW is installed but visudo was not found. Configure the restricted UFW permission manually."
   sudoers_tmp="$(mktemp /etc/sudoers.d/.donatello-ufw.XXXXXX)"
   printf '%s ALL=(root) NOPASSWD: %s status numbered\n' "$SERVICE_USER" "$ufw" > "$sudoers_tmp"
   chmod 0440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then
     rm -f "$sudoers_tmp"
-    die "فایل مجوز فقط‌خواندنی UFW معتبر نیست."
+    die "The restricted UFW sudoers rule did not pass validation."
   fi
   mv -f "$sudoers_tmp" "$SUDOERS_FILE"
 }
@@ -203,13 +249,13 @@ install_app() {
   if ! systemctl is-active --quiet "$SERVICE_NAME"; then
     systemctl --no-pager --full status "$SERVICE_NAME" || true
     journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
-    die "سرویس بالا نیامد؛ گزارش بالا را بررسی کنید."
+    die "The service did not start. Review the service status and logs above."
   fi
-  say "نصب Donatello کامل شد"
-  info "وضعیت سرویس: sudo donatello status"
-  info "مدیریت: sudo donatello manage"
-  info "آدرس پیش‌فرض پنل: http://127.0.0.1:8282"
-  info "برای اتصال امن از SSH tunnel استفاده کنید؛ پنل به‌صورت پیش‌فرض عمومی نیست."
+  say "DONATELLO is installed and running"
+  info "Service status: sudo donatello status"
+  info "Management menu: sudo donatello manage"
+  info "Default panel URL: http://127.0.0.1:8282"
+  info "The panel listens on localhost by default. Use an SSH tunnel for remote access."
 }
 
 wait_until_active() {
@@ -224,7 +270,7 @@ wait_until_active() {
 update_app() {
   require_root update
   require_systemd
-  [[ -f "$SERVICE_FILE" ]] || die "Donatello نصب نیست؛ ابتدا install را اجرا کنید."
+  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Run 'donatello install' first."
   prepare_source
   build_release
   local previous staged
@@ -243,18 +289,18 @@ update_app() {
   systemctl restart "$SERVICE_NAME"
   if wait_until_active; then
     rm -f "$previous"
-    say "Donatello با موفقیت به‌روز شد"
-    info "نسخهٔ منبع: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
+    say "DONATELLO was updated successfully"
+    info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
     return
   fi
   if [[ -s "$previous" ]]; then
-    warn "نسخهٔ جدید بالا نیامد؛ نسخهٔ قبلی بازگردانده می‌شود."
+    warn "The new release did not start. Restoring the previous binary."
     install -o root -g root -m 0755 "$previous" "$BINARY"
     systemctl restart "$SERVICE_NAME" || true
   fi
   rm -f "$previous"
   journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
-  die "به‌روزرسانی فعال نشد."
+  die "The update could not be activated."
 }
 
 show_status() {
@@ -262,16 +308,16 @@ show_status() {
   if [[ -f "$SERVICE_FILE" ]]; then
     systemctl --no-pager --full status "$SERVICE_NAME" || true
   else
-    info "Donatello نصب نیست."
+    info "DONATELLO is not installed."
   fi
 }
 
 change_port() {
   require_root manage
-  [[ -f "$ENV_FILE" ]] || die "تنظیمات پیدا نشد؛ Donatello نصب نیست."
+  [[ -f "$ENV_FILE" ]] || die "Configuration was not found. DONATELLO is not installed."
   local port
-  read -r -p "پورت جدید پنل (۱ تا ۶۵۵۳۵): " port
-  [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) || die "پورت نامعتبر است."
+  read -r -p "New panel port (1-65535): " port
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) || die "Invalid port. Enter a number from 1 to 65535."
   local db_path
   db_path="$(awk -F= '$1 == "DONATELLO_DB" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
   [[ -n "$db_path" ]] || db_path="$DEFAULT_DB"
@@ -282,43 +328,81 @@ change_port() {
   chmod 0640 "$temp"
   mv -f "$temp" "$ENV_FILE"
   systemctl restart "$SERVICE_NAME"
-  wait_until_active || die "سرویس پس از تغییر پورت بالا نیامد."
-  say "پورت پنل به 127.0.0.1:$port تغییر کرد."
+  wait_until_active || die "The service did not start after changing the port."
+  say "The panel port is now 127.0.0.1:$port"
 }
 
 manage_app() {
   require_root manage
-  require_systemd
   if [[ "${2:-}" != "" ]]; then
+    require_systemd
     case "$2" in
       status) show_status ;;
       start|stop|restart)
-        [[ -f "$SERVICE_FILE" ]] || die "Donatello نصب نیست."
+        [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed."
         systemctl "$2" "$SERVICE_NAME"
         ;;
       logs) journalctl -u "$SERVICE_NAME" -n "${3:-100}" --no-pager ;;
       port) change_port ;;
       update) update_app ;;
       delete) delete_app "${3:-}" ;;
-      *) die "گزینهٔ مدیریت ناشناخته است: $2" ;;
+      *) die "Unknown management action: $2" ;;
     esac
     return
   fi
+  main_menu
+}
+
+run_service_action() {
+  local action="$1"
+  require_root "$action"
+  require_systemd
+  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed."
+  systemctl "$action" "$SERVICE_NAME"
+}
+
+view_logs() {
+  local lines="${1:-100}"
+  [[ "$lines" =~ ^[0-9]+$ ]] || die "Log line count must be a positive number."
+  require_root logs
+  require_systemd
+  journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+}
+
+main_menu() {
+  local selection
   while true; do
-    printf '\n\033[1;35mDonatello · مدیریت سرویس\033[0m\n'
-    printf '  1) وضعیت سرویس\n  2) شروع\n  3) توقف\n  4) راه‌اندازی دوباره\n  5) مشاهدهٔ لاگ\n  6) تغییر پورت پنل\n  7) به‌روزرسانی\n  8) حذف\n  0) خروج\n'
-    read -r -p 'انتخاب: ' selection
+    printf '\n%s%s  DONATELLO CONTROL CENTER%s\n' "$C_BOLD" "$C_CYAN" "$C_RESET"
+    if [[ -f "$SERVICE_FILE" ]]; then
+      printf '  %s● Installed%s\n\n' "$C_GREEN" "$C_RESET"
+    else
+      printf '  %s○ Not installed%s\n\n' "$C_DIM" "$C_RESET"
+    fi
+    printf '  %sINSTALLATION%s\n' "$C_DIM" "$C_RESET"
+    printf '   1) Install / repair DONATELLO\n\n'
+    printf '  %sSERVICE MANAGEMENT%s\n' "$C_DIM" "$C_RESET"
+    printf '   2) Service status       3) Start service\n'
+    printf '   4) Stop service         5) Restart service\n'
+    printf '   6) View service logs    7) Change panel port\n\n'
+    printf '  %sMAINTENANCE%s\n' "$C_DIM" "$C_RESET"
+    printf '   8) Update DONATELLO     9) Uninstall (keep data)\n'
+    printf '  10) Uninstall and purge all data\n\n'
+    printf '   H) Help                 0) Exit\n\n'
+    read -r -p 'Select an option: ' selection || return 0
     case "$selection" in
-      1) show_status ;;
-      2) systemctl start "$SERVICE_NAME" ;;
-      3) systemctl stop "$SERVICE_NAME" ;;
-      4) systemctl restart "$SERVICE_NAME" ;;
-      5) journalctl -u "$SERVICE_NAME" -n 100 --no-pager ;;
-      6) change_port ;;
-      7) update_app ;;
-      8) delete_app ""; [[ ! -f "$SERVICE_FILE" ]] && return ;;
-      0) return ;;
-      *) warn "گزینهٔ نامعتبر است." ;;
+      1) install_app; pause_menu ;;
+      2) show_status; pause_menu ;;
+      3) run_service_action start; pause_menu ;;
+      4) run_service_action stop; pause_menu ;;
+      5) run_service_action restart; pause_menu ;;
+      6) view_logs 100; pause_menu ;;
+      7) change_port; pause_menu ;;
+      8) update_app; pause_menu ;;
+      9) delete_app ""; pause_menu ;;
+      10) delete_app "--purge"; pause_menu ;;
+      h|H) usage; pause_menu ;;
+      0) return 0 ;;
+      *) warn "Invalid selection. Choose an option from the menu."; pause_menu ;;
     esac
   done
 }
@@ -328,13 +412,13 @@ delete_app() {
   require_systemd
   local purge="${1:-}"
   if [[ "$purge" == "--purge" ]]; then
-    warn "این کار سرویس، سورس، تنظیمات و همهٔ داده‌های Donatello را پاک می‌کند."
-    read -r -p 'برای تأیید دقیقاً PURGE DONATELLO را وارد کنید: ' confirmation
-    [[ "$confirmation" == "PURGE DONATELLO" ]] || die "پاک‌سازی لغو شد."
+    warn "This will remove the service, source, configuration, and all DONATELLO data."
+    read -r -p 'Type PURGE DONATELLO to confirm: ' confirmation
+    [[ "$confirmation" == "PURGE DONATELLO" ]] || die "Purge cancelled."
   else
-    warn "سرویس و باینری حذف می‌شوند؛ پایگاه داده و تنظیمات در /var/lib/donatello و /etc/donatello باقی می‌مانند."
-    read -r -p 'برای تأیید دقیقاً DELETE DONATELLO را وارد کنید: ' confirmation
-    [[ "$confirmation" == "DELETE DONATELLO" ]] || die "حذف لغو شد."
+    warn "The service and application will be removed. Database and configuration will be kept."
+    read -r -p 'Type DELETE DONATELLO to confirm: ' confirmation
+    [[ "$confirmation" == "DELETE DONATELLO" ]] || die "Uninstall cancelled."
   fi
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
   rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE"
@@ -346,47 +430,55 @@ delete_app() {
     rm -rf "$INSTALL_DIR" "$DATA_DIR" "$ENV_DIR"
     userdel "$SERVICE_USER" 2>/dev/null || true
     groupdel "$SERVICE_GROUP" 2>/dev/null || true
-    say "Donatello و همهٔ داده‌هایش پاک شدند."
+    say "DONATELLO and all application data have been removed."
   else
-    say "Donatello حذف شد؛ داده‌ها و تنظیمات برای نصب دوباره نگه داشته شدند."
+    say "DONATELLO has been removed. Data and configuration were preserved."
   fi
 }
 
 usage() {
   cat <<'HELP'
-Donatello · installer and system service manager
+DONATELLO · Installer and System Service Manager
 
 Usage:
-  sudo bash donatello.sh install
+  sudo donatello                  Open the interactive control center
+  sudo donatello menu             Open the interactive control center
+  sudo bash install.sh             Open the interactive installer menu
+  sudo bash install.sh install     Install DONATELLO
   sudo donatello manage [status|start|stop|restart|logs|port|update|delete]
   sudo donatello update
   sudo donatello delete [--purge]
 
 Commands:
   install          Build Donatello and install its systemd service
-  manage           Open the interactive service manager
+  manage           Open the interactive control center
+  status           Show service status
+  start|stop       Start or stop the systemd service
+  restart          Restart the systemd service
+  logs [count]     Show recent service logs
   update           Fetch main, build, replace the binary, and roll back on failure
-  delete           Remove the service and binary after typed confirmation
-  delete --purge   Also remove configuration, database, and service account
+  delete           Uninstall the service while preserving application data
+  delete --purge   Uninstall and remove all configuration and application data
 
 Supported systems: Debian and Ubuntu with systemd.
 HELP
 }
 
-case "${1:-help}" in
+show_banner
+
+case "${1:-menu}" in
   install) install_app ;;
   manage) manage_app "$@" ;;
+  menu) main_menu ;;
   status) show_status ;;
   start|stop|restart)
     require_root "$1"
     require_systemd
-    [[ -f "$SERVICE_FILE" ]] || die "Donatello نصب نیست."
+    [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed."
     systemctl "$1" "$SERVICE_NAME"
     ;;
   logs)
-    require_root logs
-    require_systemd
-    journalctl -u "$SERVICE_NAME" -n "${2:-100}" --no-pager
+    view_logs "${2:-100}"
     ;;
   update) update_app ;;
   delete) delete_app "${2:-}" ;;
