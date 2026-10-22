@@ -16,14 +16,23 @@ readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
 readonly ENV_DIR="/etc/donatello"
 readonly ENV_FILE="/etc/donatello/donatello.env"
 readonly DOMAIN_FILE="/etc/donatello/https-domain"
-readonly NGINX_SITE="/etc/nginx/sites-available/donatello"
-readonly NGINX_SITE_LINK="/etc/nginx/sites-enabled/donatello"
+readonly LEGACY_NGINX_SITE="/etc/nginx/sites-available/donatello"
+readonly LEGACY_NGINX_SITE_LINK="/etc/nginx/sites-enabled/donatello"
+readonly TLS_DIR="/etc/donatello/tls"
+readonly TLS_CERT="$TLS_DIR/fullchain.pem"
+readonly TLS_KEY="$TLS_DIR/privkey.pem"
+readonly CERT_DEPLOY_HOOK="/etc/letsencrypt/renewal-hooks/deploy/donatello"
+readonly CERT_NAME="donatello"
+readonly CERTBOT_TIMER_SERVICE="/etc/systemd/system/donatello-certbot-renew.service"
+readonly CERTBOT_TIMER_UNIT="/etc/systemd/system/donatello-certbot-renew.timer"
 readonly DATA_DIR="/var/lib/donatello"
 readonly SERVICE_USER="donatello"
 readonly SERVICE_GROUP="donatello"
 readonly DEFAULT_BIND="127.0.0.1:8282"
 readonly DEFAULT_DB="/var/lib/donatello/donatello.db"
 SERVER_PUBLIC_IP=""
+PORT80_STOPPED_UNIT=""
+CERTBOT_BIN=""
 
 readonly RUST_HOME="${RUSTUP_HOME:-/root/.rustup}"
 readonly CARGO_HOME_DIR="${CARGO_HOME:-/root/.cargo}"
@@ -114,7 +123,7 @@ install_os_dependencies() {
   say "Installing build dependencies"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config
+  apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config iproute2 ripgrep
 }
 
 ensure_rust() {
@@ -232,46 +241,187 @@ write_bind_config() {
   local bind="$1" db_path temp
   db_path="$(configured_db_path)"
   temp="$(mktemp /etc/donatello/.donatello.env.XXXXXX)"
-  printf 'DONATELLO_BIND=%s\nDONATELLO_DB=%s\n' "$bind" "$db_path" > "$temp"
+  if [[ -f "$ENV_FILE" ]]; then
+    awk -F= '$1 != "DONATELLO_BIND" && $1 != "DONATELLO_DB" { print }' "$ENV_FILE" > "$temp"
+  fi
+  printf 'DONATELLO_BIND=%s\nDONATELLO_DB=%s\n' "$bind" "$db_path" >> "$temp"
   chown root:"$SERVICE_GROUP" "$temp"
   chmod 0640 "$temp"
   mv -f "$temp" "$ENV_FILE"
 }
 
 install_https_dependencies() {
-  say "Installing Nginx and Let's Encrypt tools"
+  say "Installing Let's Encrypt tools"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends nginx certbot python3-certbot-nginx
+  apt-get install -y --no-install-recommends certbot iproute2 ripgrep
+  CERTBOT_BIN="$(command -v certbot)"
 }
 
-write_nginx_proxy() {
-  local domain="$1" port="$2" temp
-  [[ ! -e "$NGINX_SITE" || -f "$DOMAIN_FILE" ]] || die "$NGINX_SITE already exists and is not managed by DONATELLO."
-  install -d -o root -g root -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
-  temp="$(mktemp /etc/nginx/sites-available/.donatello.XXXXXX)"
-  cat > "$temp" <<NGINX
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $domain;
+ensure_ip_certbot() {
+  local version minimum
+  version="$("$CERTBOT_BIN" --version 2>&1 | rg -o '[0-9]+(\.[0-9]+){1,2}' | head -n 1 || true)"
+  [[ -n "$version" ]] || version="0.0.0"
+  minimum="$(printf '%s\n' 5.4.0 "$version" | sort -V | head -n 1)"
+  [[ "$minimum" == "5.4.0" ]] && return 0
 
-    location / {
-        proxy_pass http://127.0.0.1:$port;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
+  say "Installing Certbot 5.4 or newer for IP address certificates"
+  apt-get install -y --no-install-recommends snapd
+  systemctl enable --now snapd.socket
+  snap install certbot --classic
+  [[ -x /snap/bin/certbot ]] || die "The current Certbot could not be installed from Snap."
+  CERTBOT_BIN="/snap/bin/certbot"
+  version="$("$CERTBOT_BIN" --version 2>&1 | rg -o '[0-9]+(\.[0-9]+){1,2}' | head -n 1 || true)"
+  [[ -n "$version" ]] || version="0.0.0"
+  minimum="$(printf '%s\n' 5.4.0 "$version" | sort -V | head -n 1)"
+  [[ "$minimum" == "5.4.0" ]] || die "Certbot 5.4 or newer is required for IP certificates."
 }
-NGINX
-  chmod 0644 "$temp"
-  mv -f "$temp" "$NGINX_SITE"
-  ln -sfn "$NGINX_SITE" "$NGINX_SITE_LINK"
-  nginx -t
-  systemctl enable --now nginx
-  systemctl reload nginx
+
+ensure_certbot_renewal() {
+  # Use the exact Certbot binary that issued the certificate. This matters for
+  # IP certificates when the distro package is older than the Snap release.
+  systemctl disable --now certbot.timer snap.certbot.renew.timer 2>/dev/null || true
+  cat > "$CERTBOT_TIMER_SERVICE" <<UNIT
+[Unit]
+Description=Renew Donatello TLS certificate
+
+[Service]
+Type=oneshot
+ExecStart=$CERTBOT_BIN renew --quiet
+UNIT
+  cat > "$CERTBOT_TIMER_UNIT" <<'UNIT'
+[Unit]
+Description=Twice-daily renewal check for Donatello certificates
+
+[Timer]
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+  chmod 0644 "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
+  systemctl daemon-reload
+  systemctl enable --now donatello-certbot-renew.timer
+}
+
+restore_port80_service() {
+  [[ -n "$PORT80_STOPPED_UNIT" ]] || return 0
+  if systemctl start "$PORT80_STOPPED_UNIT"; then
+    PORT80_STOPPED_UNIT=""
+    return 0
+  else
+    warn "$PORT80_STOPPED_UNIT could not be restarted; start it manually."
+    return 1
+  fi
+}
+
+port80_systemd_service() {
+  has ss || return 1
+  local listeners pid unit found=""
+  listeners="$(ss -H -ltnp 'sport = :80' 2>/dev/null)" || return 1
+  [[ -n "$listeners" ]] || return 0
+  while IFS= read -r pid; do
+    [[ -n "$pid" && -r "/proc/$pid/cgroup" ]] || return 1
+    unit="$(sed -nE 's#.*\/([^/]+\.service)$#\1#p' "/proc/$pid/cgroup" | head -n 1)"
+    [[ "$unit" =~ ^[A-Za-z0-9_.@:-]+\.service$ ]] || return 1
+    systemctl is-active --quiet "$unit" || return 1
+    case "$unit" in
+      docker.service|containerd.service|podman.service|snap.docker.dockerd.service) return 1 ;;
+    esac
+    if [[ -n "$found" && "$found" != "$unit" ]]; then
+      return 1
+    fi
+    found="$unit"
+  done < <(sed -nE 's/.*pid=([0-9]+).*/\1/p' <<< "$listeners" | sort -u)
+  [[ -n "$found" ]] || return 1
+  printf '%s\n' "$found"
+}
+
+available_tls_port() {
+  has ss || return 1
+  local port
+  for port in 443 8443 9443 10443; do
+    if ! ss -H -ltn "sport = :$port" 2>/dev/null | rg -q .; then
+      printf '%s\n' "$port"
+      return 0
+    fi
+  done
+  return 1
+}
+
+set_env_value() {
+  local name="$1" value="$2" temp
+  temp="$(mktemp /etc/donatello/.donatello.env.XXXXXX)"
+  if [[ -f "$ENV_FILE" ]]; then
+    awk -F= -v name="$name" '$1 != name { print }' "$ENV_FILE" > "$temp"
+  fi
+  printf '%s=%s\n' "$name" "$value" >> "$temp"
+  chown root:"$SERVICE_GROUP" "$temp"
+  chmod 0640 "$temp"
+  mv -f "$temp" "$ENV_FILE"
+}
+
+write_cert_deploy_hook() {
+  install -d -o root -g root -m 0755 "$(dirname "$CERT_DEPLOY_HOOK")"
+  cat > "$CERT_DEPLOY_HOOK" <<'HOOK'
+#!/bin/sh
+set -eu
+domain_file=/etc/donatello/https-domain
+[ -s "$domain_file" ] || exit 0
+domain=$(cat "$domain_file")
+case " ${RENEWED_DOMAINS:-} " in
+  *" $domain "*) ;;
+  *) exit 0 ;;
+esac
+install -o root -g donatello -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/donatello/tls/fullchain.pem
+install -o root -g donatello -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/donatello/tls/privkey.pem
+systemctl restart donatello.service
+HOOK
+  chmod 0755 "$CERT_DEPLOY_HOOK"
+  chown root:root "$CERT_DEPLOY_HOOK"
+}
+
+copy_certificate_files() {
+  local cert_dir="$1"
+  install -d -o root -g "$SERVICE_GROUP" -m 0750 "$TLS_DIR"
+  install -o root -g "$SERVICE_GROUP" -m 0640 "$cert_dir/fullchain.pem" "$TLS_CERT"
+  install -o root -g "$SERVICE_GROUP" -m 0640 "$cert_dir/privkey.pem" "$TLS_KEY"
+}
+
+issue_certificate() {
+  local host="$1" email="$2" port80_unit="$3" is_ip="$4" stopped="n"
+  local -a hooks=() identifier_args=()
+  write_cert_deploy_hook
+  if [[ "$is_ip" == "y" ]]; then
+    identifier_args=(--ip-address "$host" --preferred-profile shortlived)
+  else
+    identifier_args=(-d "$host")
+  fi
+  if [[ -n "$port80_unit" ]]; then
+    info "Temporarily stopping $port80_unit to release TCP port 80."
+    systemctl stop "$port80_unit" || die "Could not stop $port80_unit; no certificate request was made."
+    PORT80_STOPPED_UNIT="$port80_unit"
+    trap 'restore_port80_service' EXIT INT TERM
+    stopped="y"
+    hooks+=(--pre-hook "systemctl stop $port80_unit" --post-hook "systemctl start $port80_unit")
+  fi
+
+  if "$CERTBOT_BIN" certonly --standalone --preferred-challenges http --non-interactive \
+    --agree-tos --email "$email" --cert-name "$CERT_NAME" "${identifier_args[@]}" \
+    --deploy-hook "$CERT_DEPLOY_HOOK" "${hooks[@]}"; then
+    if [[ "$stopped" == "y" ]] && ! restore_port80_service; then
+      die "The certificate was issued, but $port80_unit could not be restarted."
+    fi
+    trap - EXIT INT TERM
+    return 0
+  fi
+  if [[ "$stopped" == "y" ]] && ! restore_port80_service; then
+    die "Certificate issuance failed and $port80_unit could not be restarted."
+  fi
+  trap - EXIT INT TERM
+  return 1
 }
 
 configure_https() {
@@ -279,7 +429,7 @@ configure_https() {
   require_systemd
   [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Install it before configuring HTTPS."
 
-  local address confirmed domain email dns_matches port existing_domain
+  local address confirmed host email dns_matches port existing_domain port80_unit env_backup is_ip
   address="$(detect_public_ipv4 || true)"
   if [[ -n "$address" ]]; then
     info "Detected public IPv4 address: $address"
@@ -297,53 +447,105 @@ configure_https() {
   existing_domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   if [[ -n "$existing_domain" ]]; then
     say "HTTPS is already configured for $existing_domain"
-    info "Panel URL: https://$existing_domain"
+    port="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    port="${port##*:}"
+    if [[ -n "$port" && "$port" != "443" ]]; then
+      info "Panel URL: https://$existing_domain:$port"
+    else
+      info "Panel URL: https://$existing_domain"
+    fi
     info "Certificate renewal is managed by Certbot."
     return 0
   fi
 
-  read_answer 'Domain name pointed to this server (leave blank to skip): ' domain
-  [[ -n "$domain" ]] || {
+  read_answer "Domain name or server IP for HTTPS [$address] (type skip to skip): " host "$address"
+  [[ "${host,,}" != "skip" && -n "$host" ]] || {
     info "HTTPS setup skipped. The panel remains private on localhost."
     return 0
   }
-  [[ "$domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die "Enter a valid fully qualified domain name."
-
-  dns_matches="$(getent ahostsv4 "$domain" | awk '{print $1}' | sort -u || true)"
-  if [[ -z "$dns_matches" || ( -n "$address" && " $dns_matches " != *" $address "* ) ]]; then
-    warn "The domain does not currently resolve to the detected server IP."
-    info "Domain addresses: ${dns_matches:-none}"
-    [[ -z "$address" ]] || info "Detected server IP: $address"
-    read_answer 'Continue and let certificate validation decide? [y/N]: ' confirmed 'n'
-    [[ "${confirmed,,}" == "y" || "${confirmed,,}" == "yes" ]] || return 0
+  if [[ "$host" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    is_ip="y"
+    if [[ -n "$address" && "$host" != "$address" ]]; then
+      warn "The requested IP does not match the detected public server IP ($address)."
+      read_answer 'Continue with this IP address? [y/N]: ' confirmed 'n'
+      [[ "${confirmed,,}" == "y" || "${confirmed,,}" == "yes" ]] || return 0
+    fi
+  else
+    is_ip="n"
+    [[ "$host" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die "Enter a valid fully qualified domain name or IPv4 address."
+    dns_matches="$(getent ahostsv4 "$host" | awk '{print $1}' | sort -u || true)"
+    if [[ -z "$dns_matches" || ( -n "$address" && " $dns_matches " != *" $address "* ) ]]; then
+      warn "The domain does not currently resolve to the detected server IP."
+      info "Domain addresses: ${dns_matches:-none}"
+      [[ -z "$address" ]] || info "Detected server IP: $address"
+      read_answer 'Continue and let certificate validation decide? [y/N]: ' confirmed 'n'
+      [[ "${confirmed,,}" == "y" || "${confirmed,,}" == "yes" ]] || return 0
+    fi
   fi
 
   read_answer 'Email address for certificate expiry notices: ' email
   [[ "$email" == *@*.* ]] || die "Enter a valid email address for the certificate."
-  port="$(panel_port)"
-
   install_https_dependencies
-  write_nginx_proxy "$domain" "$port"
-  if certbot --nginx --non-interactive --agree-tos --redirect --email "$email" -d "$domain"; then
-    printf '%s\n' "$domain" > "$DOMAIN_FILE"
-    chown root:"$SERVICE_GROUP" "$DOMAIN_FILE"
-    chmod 0640 "$DOMAIN_FILE"
-    if systemctl list-unit-files certbot.timer --no-legend 2>/dev/null | rg -q '^certbot\.timer'; then
-      systemctl enable --now certbot.timer
-    fi
-    say "HTTPS is active"
-    info "Panel URL: https://$domain"
-    info "Automatic renewal: certbot.timer"
-    warn "Make sure inbound TCP ports 80 and 443 are allowed by your provider firewall."
-  else
-    rm -f "$NGINX_SITE_LINK" "$NGINX_SITE"
-    nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
-    warn "Certificate issuance failed. The panel remains available only through localhost or an SSH tunnel."
+  [[ "$is_ip" != "y" ]] || ensure_ip_certbot
+  port80_unit="$(port80_systemd_service)" || die "TCP port 80 is occupied by a process that cannot be safely paused as a systemd service. Stop it manually, then run 'sudo donatello ssl' again."
+  if ! issue_certificate "$host" "$email" "$port80_unit" "$is_ip"; then
+    rm -f "$CERT_DEPLOY_HOOK"
+    warn "Certificate issuance failed. The panel remains available through localhost or an SSH tunnel."
+    return 0
   fi
+
+  port="$(available_tls_port)" || {
+    certbot delete --cert-name "$CERT_NAME" --non-interactive >/dev/null 2>&1 || true
+    rm -f "$CERT_DEPLOY_HOOK"
+    die "No available HTTPS port was found (tried 443, 8443, 9443, and 10443)."
+  }
+  env_backup="$(mktemp /etc/donatello/.donatello.env.backup.XXXXXX)"
+  cp -p "$ENV_FILE" "$env_backup"
+  copy_certificate_files "/etc/letsencrypt/live/$CERT_NAME"
+  printf '%s\n' "$host" > "$DOMAIN_FILE"
+  chown root:"$SERVICE_GROUP" "$DOMAIN_FILE"
+  chmod 0640 "$DOMAIN_FILE"
+  set_env_value DONATELLO_TLS_CERT "$TLS_CERT"
+  set_env_value DONATELLO_TLS_KEY "$TLS_KEY"
+  set_env_value DONATELLO_TLS_BIND "0.0.0.0:$port"
+  ensure_certbot_renewal
+  if ! systemctl restart "$SERVICE_NAME" || ! wait_until_active || ! wait_for_https "$host" "$port"; then
+    journalctl -u "$SERVICE_NAME" -n 30 --no-pager || true
+    mv -f "$env_backup" "$ENV_FILE"
+    rm -f "$DOMAIN_FILE" "$TLS_CERT" "$TLS_KEY" "$CERT_DEPLOY_HOOK"
+    "$CERTBOT_BIN" delete --cert-name "$CERT_NAME" --non-interactive >/dev/null 2>&1 || true
+    systemctl restart "$SERVICE_NAME" || true
+    warn "The certificate was issued, but HTTPS did not start. The previous local panel settings were restored."
+    return 0
+  fi
+  rm -f "$env_backup"
+  say "HTTPS is active"
+  if [[ "$port" == "443" ]]; then
+    info "Panel URL: https://$host"
+  else
+    info "Panel URL: https://$host:$port"
+    warn "Port 443 is occupied. Allow inbound TCP port $port in your firewalls."
+  fi
+  info "Automatic renewal: twice-daily Certbot check"
+  [[ "$is_ip" != "y" ]] || info "IP address certificates are short-lived and renew automatically."
+  warn "Make sure inbound TCP port 80 is allowed by your provider firewall for certificate renewal."
+  info "Create the first administrator through an SSH tunnel to http://127.0.0.1:$(panel_port); public setup is blocked until then."
+}
+
+wait_for_https() {
+  local domain="$1" port="$2" attempt
+  for attempt in {1..20}; do
+    if curl --connect-timeout 1 --max-time 2 -fsS --resolve "$domain:$port:127.0.0.1" \
+      "https://$domain:$port/api/state" -o /dev/null 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 show_access_summary() {
-  local address domain port
+  local address domain port tls_bind tls_port
   address="$SERVER_PUBLIC_IP"
   domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   port="$(panel_port)"
@@ -354,7 +556,18 @@ show_access_summary() {
     info "Public IP was not confirmed. Use your server IP in the SSH command below."
   fi
   if [[ -n "$domain" ]]; then
+    tls_bind="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    tls_port="${tls_bind##*:}"
+    [[ -n "$tls_port" && "$tls_port" != "443" ]] && domain="$domain:$tls_port"
+    [[ -n "$tls_port" ]] || domain="$domain:443"
     printf '\n  %sPANEL LOGIN%s\n  %shttps://%s%s\n\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$domain" "$C_RESET"
+    info "Create the first administrator through a local SSH tunnel:"
+    if [[ -n "$address" ]]; then
+      printf '  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@%s%s\n' "$C_GREEN" "$port" "$port" "$address" "$C_RESET"
+    else
+      printf '  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@<SERVER_IP>%s\n' "$C_GREEN" "$port" "$port" "$C_RESET"
+    fi
+    info "Open http://127.0.0.1:$port once to create the first account; use HTTPS after that."
   else
     printf '\n  %sPANEL LOGIN%s  (open after connecting the SSH tunnel)\n' "$C_CYAN" "$C_RESET"
     printf '  %shttp://127.0.0.1:%s%s\n\n' "$C_BOLD" "$port" "$C_RESET"
@@ -399,6 +612,8 @@ ProtectControlGroups=true
 ReadWritePaths=/var/lib/donatello
 RestrictSUIDSGID=true
 LockPersonality=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 LimitNOFILE=65536
 
 [Install]
@@ -536,9 +751,9 @@ change_port() {
   wait_for_panel || die "The service is running but the web panel did not answer on the new port."
   local domain
   domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
-  if [[ -n "$domain" && -f "$NGINX_SITE" ]]; then
-    sed -E -i "s#proxy_pass http://127\\.0\\.0\\.1:[0-9]+;#proxy_pass http://127.0.0.1:$port;#" "$NGINX_SITE"
-    nginx -t && systemctl reload nginx || die "The panel port changed, but the HTTPS proxy could not be updated."
+  if [[ -n "$domain" && -f "$LEGACY_NGINX_SITE" ]]; then
+    sed -E -i "s#proxy_pass http://127\\.0\\.0\\.1:[0-9]+;#proxy_pass http://127.0.0.1:$port;#" "$LEGACY_NGINX_SITE"
+    nginx -t && systemctl reload nginx || die "The panel port changed, but the legacy HTTPS proxy could not be updated."
   fi
   say "The panel port is now 127.0.0.1:$port"
 }
@@ -592,7 +807,7 @@ draw_menu_item() {
 }
 
 draw_control_center() {
-  local selected="$1" state="NOT INSTALLED" state_color="$C_DIM" endpoint="localhost"
+  local selected="$1" state="NOT INSTALLED" state_color="$C_DIM" endpoint="localhost" tls_bind tls_port
   if [[ -f "$SERVICE_FILE" ]]; then
     state="STOPPED"
     state_color="$C_YELLOW"
@@ -603,6 +818,9 @@ draw_control_center() {
   fi
   if [[ -s "$DOMAIN_FILE" ]]; then
     endpoint="https://$(<"$DOMAIN_FILE")"
+    tls_bind="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    tls_port="${tls_bind##*:}"
+    [[ -n "$tls_port" && "$tls_port" != "443" ]] && endpoint="$endpoint:$tls_port"
   elif [[ -f "$ENV_FILE" ]]; then
     endpoint="127.0.0.1:$(panel_port)"
   fi
@@ -625,7 +843,7 @@ draw_control_center() {
   draw_menu_item "$selected" 6 'View service logs' 'Inspect recent Donatello logs'
   draw_menu_item "$selected" 7 'Change panel port' 'Update the local listening port'
   printf '\n  %sSECURITY & MAINTENANCE%s\n' "$C_CYAN" "$C_RESET"
-  draw_menu_item "$selected" 8 'Configure HTTPS / SSL' 'Set up Nginx and Let’s Encrypt'
+  draw_menu_item "$selected" 8 'Configure HTTPS / SSL' 'Get a certificate and enable Rust TLS'
   draw_menu_item "$selected" 9 'Update Donatello' 'Fetch and install the latest version'
   draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove Donatello and retain its data'
   draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove Donatello and all its data'
@@ -741,11 +959,19 @@ delete_app() {
     chmod 0600 "$DATA_DIR/.database-path"
   fi
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
+  rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
   rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE"
   if [[ -n "$domain" ]]; then
-    rm -f "$NGINX_SITE_LINK" "$NGINX_SITE"
-    if has certbot; then
-      certbot delete --cert-name "$domain" --non-interactive >/dev/null 2>&1 || true
+    rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$CERT_DEPLOY_HOOK"
+    if [[ -x /snap/bin/certbot ]]; then
+      /snap/bin/certbot delete --cert-name "$CERT_NAME" --non-interactive >/dev/null 2>&1 || true
+    elif has certbot; then
+      if [[ -d "/etc/letsencrypt/live/$CERT_NAME" ]]; then
+        certbot delete --cert-name "$CERT_NAME" --non-interactive >/dev/null 2>&1 || true
+      elif [[ -d "/etc/letsencrypt/live/$domain" ]]; then
+        certbot delete --cert-name "$domain" --non-interactive >/dev/null 2>&1 || true
+      fi
     fi
     if has nginx; then
       nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
@@ -807,7 +1033,7 @@ Commands:
   restart          Restart the systemd service
   logs [count]     Show recent service logs
   update           Fetch main, build, replace the binary, and roll back on failure
-  ssl              Configure HTTPS with Nginx and Let's Encrypt
+  ssl              Obtain a Let's Encrypt certificate and enable Rust TLS
   delete           Uninstall the service while preserving application data
   delete --purge   Uninstall and remove all configuration and application data
 

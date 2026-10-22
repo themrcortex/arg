@@ -141,6 +141,15 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
             </CardDescription>
           </CardHeader>
           <CardContent>
+            {installer && (
+              <Alert className="mb-5 border-primary/30 bg-primary/10 text-foreground">
+                <AlertDescription className="leading-7">
+                  برای امنیت، ساخت اولین حساب فقط از اتصال محلی مجاز است. ابتدا با SSH tunnel به
+                  پورت ۸۲۸۲ وصل شوید و این حساب را بسازید؛ سپس از نشانی HTTPS برای ورود استفاده
+                  کنید.
+                </AlertDescription>
+              </Alert>
+            )}
             <form onSubmit={submit} className="space-y-5">
               <div className="space-y-2">
                 <Label htmlFor="username">نام کاربری</Label>

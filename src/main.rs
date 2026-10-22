@@ -3,7 +3,7 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -140,11 +140,18 @@ async fn state(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     Ok(Json(json!({"installed": true, "user": user})))
 }
 async fn setup(
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<Credentials>,
 ) -> ApiResult {
     check_origin(&headers)?;
+    if !remote.ip().is_loopback() {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Create the first administrator through a local SSH tunnel.",
+        ));
+    }
     let db = state.lock().unwrap();
     if initialized(&db) {
         return Err(error(StatusCode::CONFLICT, "Already installed"));
@@ -715,7 +722,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bind = env::var("DONATELLO_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
     let addr: SocketAddr = bind.parse()?;
     println!("Donatello listening at http://{addr}");
-    axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let tls_cert = env::var("DONATELLO_TLS_CERT").ok();
+    let tls_key = env::var("DONATELLO_TLS_KEY").ok();
+    match (tls_cert, tls_key) {
+        (Some(cert), Some(key)) => {
+            rustls::crypto::ring::default_provider()
+                .install_default()
+                .map_err(|_| "Failed to configure the TLS crypto provider")?;
+            let tls_bind = env::var("DONATELLO_TLS_BIND")
+                .unwrap_or_else(|_| "0.0.0.0:443".into())
+                .parse::<SocketAddr>()?;
+            let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+            println!("Donatello listening at https://{tls_bind}");
+            let https_app = app.clone().layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    if !request.headers().contains_key(axum::http::header::HOST) {
+                        if let Some(authority) = request.uri().authority() {
+                            if let Ok(host) = axum::http::HeaderValue::from_str(authority.as_str())
+                            {
+                                request.headers_mut().insert(axum::http::header::HOST, host);
+                            }
+                        }
+                    }
+                    request.headers_mut().insert(
+                        axum::http::header::HeaderName::from_static("x-forwarded-proto"),
+                        axum::http::HeaderValue::from_static("https"),
+                    );
+                    next.run(request).await
+                },
+            ));
+            let https_app = https_app.into_make_service_with_connect_info::<SocketAddr>();
+            let https_server = axum_server::bind_rustls(tls_bind, tls).serve(https_app);
+            let http_app = app.into_make_service_with_connect_info::<SocketAddr>();
+            tokio::select! {
+                result = axum::serve(listener, http_app) => result?,
+                result = https_server => result?,
+            }
+        }
+        (None, None) => {
+            let http_app = app.into_make_service_with_connect_info::<SocketAddr>();
+            axum::serve(listener, http_app).await?;
+        }
+        _ => return Err("Both DONATELLO_TLS_CERT and DONATELLO_TLS_KEY must be set".into()),
+    }
     Ok(())
 }
 async fn state_handler(state: State<AppState>, headers: HeaderMap) -> ApiResult {
