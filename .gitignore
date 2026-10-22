@@ -1,0 +1,6 @@
+/target/
+/.cargo/
+/.rustup/
+/data/
+/frontend/node_modules/
+/frontend/*.tsbuildinfo

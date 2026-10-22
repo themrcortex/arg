@@ -1,0 +1,84 @@
+@import '@fontsource-variable/vazirmatn/wght.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 260 31% 7%;
+    --foreground: 270 30% 96%;
+    --card: 260 27% 12%;
+    --card-foreground: 270 30% 96%;
+    --popover: 260 26% 16%;
+    --popover-foreground: 270 30% 96%;
+    --primary: 266 89% 70%;
+    --primary-foreground: 260 30% 9%;
+    --secondary: 260 25% 18%;
+    --secondary-foreground: 270 28% 95%;
+    --muted: 260 20% 19%;
+    --muted-foreground: 260 13% 66%;
+    --accent: 265 31% 25%;
+    --accent-foreground: 270 30% 98%;
+    --destructive: 352 80% 60%;
+    --border: 261 22% 25%;
+    --input: 261 22% 29%;
+    --ring: 266 89% 70%;
+    --radius: 1.25rem;
+  }
+  * {
+    @apply border-border;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Vazirmatn Variable', ui-sans-serif, system-ui, sans-serif;
+    min-width: 320px;
+  }
+  button,
+  input,
+  select {
+    font: inherit;
+  }
+  ::selection {
+    background: hsl(266 89% 70% / 0.35);
+  }
+}
+
+body {
+  background-image:
+    radial-gradient(ellipse 45% 45% at 9% 4%, rgba(109, 58, 184, 0.19), transparent 75%),
+    radial-gradient(ellipse 38% 48% at 98% 92%, rgba(67, 46, 110, 0.17), transparent 75%);
+  background-attachment: fixed;
+}
+.brand-text {
+  font-family: Georgia, 'Times New Roman', serif;
+  letter-spacing: -0.06em;
+}
+.soft-panel {
+  background: linear-gradient(145deg, hsl(260 27% 14% / 0.98), hsl(260 27% 11% / 0.98));
+}
+.metric-card {
+  background: linear-gradient(145deg, hsl(260 28% 15%), hsl(260 26% 12%));
+}
+.hero-glow {
+  background:
+    radial-gradient(circle at 90% 12%, rgba(190, 143, 255, 0.22), transparent 38%),
+    linear-gradient(115deg, #3e285d, #24192f 72%);
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  unicode-bidi: isolate;
+  direction: ltr;
+}
+.ltr {
+  direction: ltr;
+}
+.chart-tooltip {
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--popover));
+  border-radius: 12px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
