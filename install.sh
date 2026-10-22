@@ -28,7 +28,7 @@ readonly CERTBOT_TIMER_UNIT="/etc/systemd/system/donatello-certbot-renew.timer"
 readonly DATA_DIR="/var/lib/donatello"
 readonly SERVICE_USER="donatello"
 readonly SERVICE_GROUP="donatello"
-readonly DEFAULT_BIND="127.0.0.1:8282"
+readonly DEFAULT_BIND="0.0.0.0:8282"
 readonly DEFAULT_DB="/var/lib/donatello/donatello.db"
 SERVER_PUBLIC_IP=""
 PORT80_STOPPED_UNIT=""
@@ -250,6 +250,18 @@ write_bind_config() {
   mv -f "$temp" "$ENV_FILE"
 }
 
+ensure_public_bind() {
+  local current port
+  current="$(awk -F= '$1 == "DONATELLO_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  [[ -n "$current" ]] || current="$DEFAULT_BIND"
+  case "$current" in
+    127.0.0.1:*|localhost:*)
+      port="${current##*:}"
+      write_bind_config "0.0.0.0:$port"
+      ;;
+  esac
+}
+
 install_https_dependencies() {
   say "Installing Let's Encrypt tools"
   export DEBIAN_FRONTEND=noninteractive
@@ -361,6 +373,24 @@ set_env_value() {
   chown root:"$SERVICE_GROUP" "$temp"
   chmod 0640 "$temp"
   mv -f "$temp" "$ENV_FILE"
+}
+
+sync_ufw_rules() {
+  has ufw || return 0
+  ufw status 2>/dev/null | rg -q '^Status: active' || return 0
+  local port tls_bind tls_port rule_id
+  port="$(panel_port)"
+  while IFS= read -r rule_id; do
+    [[ -n "$rule_id" ]] || continue
+    ufw --force delete "$rule_id" >/dev/null 2>&1 || true
+  done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO / {gsub(/[\[\]]/, "", $1); print $1}' | sort -rn)
+  ufw allow "$port/tcp" comment 'DONATELLO panel' >/dev/null
+  if [[ -s "$DOMAIN_FILE" ]]; then
+    tls_bind="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    tls_port="${tls_bind##*:}"
+    ufw allow 80/tcp comment 'DONATELLO HTTPS challenge' >/dev/null
+    [[ -z "$tls_port" ]] || ufw allow "$tls_port/tcp" comment 'DONATELLO HTTPS panel' >/dev/null
+  fi
 }
 
 write_cert_deploy_hook() {
@@ -508,6 +538,7 @@ configure_https() {
   set_env_value DONATELLO_TLS_CERT "$TLS_CERT"
   set_env_value DONATELLO_TLS_KEY "$TLS_KEY"
   set_env_value DONATELLO_TLS_BIND "0.0.0.0:$port"
+  sync_ufw_rules
   ensure_certbot_renewal
   if ! systemctl restart "$SERVICE_NAME" || ! wait_until_active || ! wait_for_https "$host" "$port"; then
     journalctl -u "$SERVICE_NAME" -n 30 --no-pager || true
@@ -545,8 +576,8 @@ wait_for_https() {
 }
 
 show_access_summary() {
-  local address domain port tls_bind tls_port
-  address="$SERVER_PUBLIC_IP"
+  local address domain port tls_bind tls_port panel_url
+  address="${SERVER_PUBLIC_IP:-$(detect_public_ipv4 || true)}"
   domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   port="$(panel_port)"
   say "DONATELLO IS READY"
@@ -560,7 +591,9 @@ show_access_summary() {
     tls_port="${tls_bind##*:}"
     [[ -n "$tls_port" && "$tls_port" != "443" ]] && domain="$domain:$tls_port"
     [[ -n "$tls_port" ]] || domain="$domain:443"
-    printf '\n  %sPANEL LOGIN%s\n  %shttps://%s%s\n\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$domain" "$C_RESET"
+    panel_url="https://$domain"
+    printf '\n  %sPANEL LOGIN%s\n  ' "$C_CYAN" "$C_RESET"
+    printf '\033]8;;%s\033\\%s%s%s\033]8;;\033\\\n\n' "$panel_url" "$C_BOLD" "$panel_url" "$C_RESET"
     info "Create the first administrator through a local SSH tunnel:"
     if [[ -n "$address" ]]; then
       printf '  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@%s%s\n' "$C_GREEN" "$port" "$port" "$address" "$C_RESET"
@@ -569,8 +602,10 @@ show_access_summary() {
     fi
     info "Open http://127.0.0.1:$port once to create the first account; use HTTPS after that."
   else
-    printf '\n  %sPANEL LOGIN%s  (open after connecting the SSH tunnel)\n' "$C_CYAN" "$C_RESET"
-    printf '  %shttp://127.0.0.1:%s%s\n\n' "$C_BOLD" "$port" "$C_RESET"
+    panel_url="http://${address:-<SERVER_IP>}:$(panel_port)"
+    printf '\n  %sPUBLIC PANEL%s\n  ' "$C_CYAN" "$C_RESET"
+    printf '\033]8;;%s\033\\%s%s%s\033]8;;\033\\\n\n' "$panel_url" "$C_BOLD" "$panel_url" "$C_RESET"
+    info "Sign in with your Donatello account. Open this link after creating the first administrator through SSH tunnel."
     if [[ -n "$address" ]]; then
       printf '  From your computer, run:\n  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@%s%s\n' \
         "$C_GREEN" "$port" "$port" "$address" "$C_RESET"
@@ -578,8 +613,7 @@ show_access_summary() {
       printf '  From your computer, run:\n  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@<SERVER_IP>%s\n' \
         "$C_GREEN" "$port" "$port" "$C_RESET"
     fi
-    info "Replace <SSH_USER> with your server login, then open the panel link above."
-    info "Enable HTTPS with a domain: sudo donatello ssl"
+    info "Replace <SSH_USER> with your server login. For secure public sign-in, enable HTTPS: sudo donatello ssl"
   fi
   printf '\n  %sMANAGEMENT MENU%s\n  Run: %sdonatello%s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET"
   info "From a non-root account, use: sudo donatello"
@@ -652,6 +686,8 @@ install_app() {
   ensure_service_account
   configure_ufw_status
   write_default_config
+  ensure_public_bind
+  sync_ufw_rules
   take_database_ownership
   activate_binary
   write_service_unit
@@ -698,6 +734,8 @@ update_app() {
   require_root update
   require_systemd
   [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Run 'donatello install' first."
+  ensure_public_bind
+  sync_ufw_rules
   prepare_source
   build_release
   local previous staged
@@ -745,7 +783,8 @@ change_port() {
   local port
   read -r -p "New panel port (1-65535): " port
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) || die "Invalid port. Enter a number from 1 to 65535."
-  write_bind_config "127.0.0.1:$port"
+  write_bind_config "0.0.0.0:$port"
+  sync_ufw_rules
   systemctl restart "$SERVICE_NAME"
   wait_until_active || die "The service did not start after changing the port."
   wait_for_panel || die "The service is running but the web panel did not answer on the new port."
@@ -755,7 +794,7 @@ change_port() {
     sed -E -i "s#proxy_pass http://127\\.0\\.0\\.1:[0-9]+;#proxy_pass http://127.0.0.1:$port;#" "$LEGACY_NGINX_SITE"
     nginx -t && systemctl reload nginx || die "The panel port changed, but the legacy HTTPS proxy could not be updated."
   fi
-  say "The panel port is now 127.0.0.1:$port"
+  say "The panel is publicly listening on port $port"
 }
 
 manage_app() {
@@ -807,7 +846,7 @@ draw_menu_item() {
 }
 
 draw_control_center() {
-  local selected="$1" state="NOT INSTALLED" state_color="$C_DIM" endpoint="localhost" tls_bind tls_port
+  local selected="$1" digit_buffer="$2" state="NOT INSTALLED" state_color="$C_DIM" endpoint="Not installed" tls_bind tls_port scheme
   if [[ -f "$SERVICE_FILE" ]]; then
     state="STOPPED"
     state_color="$C_YELLOW"
@@ -822,16 +861,26 @@ draw_control_center() {
     tls_port="${tls_bind##*:}"
     [[ -n "$tls_port" && "$tls_port" != "443" ]] && endpoint="$endpoint:$tls_port"
   elif [[ -f "$ENV_FILE" ]]; then
-    endpoint="127.0.0.1:$(panel_port)"
+    if [[ -n "$SERVER_PUBLIC_IP" ]]; then
+      endpoint="http://$SERVER_PUBLIC_IP:$(panel_port)"
+    else
+      endpoint="http://<SERVER_IP>:$(panel_port)"
+    fi
   fi
 
   printf '\033[2J\033[H'
-  printf '\n  %s╭──────────────────────────────────────────────────────────────╮%s\n' "$C_PURPLE" "$C_RESET"
-  printf '  %s│%s  %sDONATELLO%s  %s/ VPS CONTROL CENTER                         %s│%s\n' \
-    "$C_PURPLE" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_DIM" "$C_PURPLE" "$C_RESET"
-  printf '  %s│%s  Service: %s● %-14s%s  Panel: %-24s %s│%s\n' \
-    "$C_PURPLE" "$C_RESET" "$state_color" "$state" "$C_RESET" "$endpoint" "$C_PURPLE" "$C_RESET"
-  printf '  %s╰──────────────────────────────────────────────────────────────╯%s\n\n' "$C_PURPLE" "$C_RESET"
+  printf '\n  %s%s%s\n' "$C_BOLD" "$C_PURPLE" '█▀▄ █▀█ █▄█ ▄▀█ ▀█▀ █▀▀ █   █   █▀█'
+  printf '  %s%s%s\n' "$C_BOLD" "$C_PURPLE" '█▄▀ █▄█  █  █▀█  █  ██▄ █▄▄ █▄▄ █▄█'
+  printf '  %sVPS CONTROL CENTER%s\n' "$C_DIM" "$C_RESET"
+  printf '  %s────────────────────────────────────────────────────────────────────%s\n' "$C_PURPLE" "$C_RESET"
+  printf '  Service  %s● %s%s\n' "$state_color" "$state" "$C_RESET"
+  printf '  Panel    '
+  if [[ "$endpoint" == http* ]]; then
+    printf '\033]8;;%s\033\\%s%s%s\033]8;;\033\\\n' "$endpoint" "$C_BOLD" "$endpoint" "$C_RESET"
+  else
+    printf '%s%s%s\n' "$C_BOLD" "$endpoint" "$C_RESET"
+  fi
+  printf '  %s────────────────────────────────────────────────────────────────────%s\n\n' "$C_PURPLE" "$C_RESET"
 
   printf '  %sSETUP%s\n' "$C_CYAN" "$C_RESET"
   draw_menu_item "$selected" 1 'Install / repair' 'Build and configure the service'
@@ -841,14 +890,17 @@ draw_control_center() {
   draw_menu_item "$selected" 4 'Stop service' 'Stop the background service'
   draw_menu_item "$selected" 5 'Restart service' 'Restart after configuration changes'
   draw_menu_item "$selected" 6 'View service logs' 'Inspect recent Donatello logs'
-  draw_menu_item "$selected" 7 'Change panel port' 'Update the local listening port'
+  draw_menu_item "$selected" 7 'Change panel port' 'Update the public listening port'
   printf '\n  %sSECURITY & MAINTENANCE%s\n' "$C_CYAN" "$C_RESET"
   draw_menu_item "$selected" 8 'Configure HTTPS / SSL' 'Get a certificate and enable Rust TLS'
   draw_menu_item "$selected" 9 'Update Donatello' 'Fetch and install the latest version'
   draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove Donatello and retain its data'
   draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove Donatello and all its data'
-  printf '\n  %s↑%s / %s↓%s move   %sEnter%s select   %s1–9%s quick select   %sq%s quit\n\n' \
-    "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+  printf '\n  Type option%s%s%s then %sEnter%s   %s↑%s / %s↓%s move   %sq%s quit' \
+    "$([[ -n "$digit_buffer" ]] && printf ' [' || true)" "$digit_buffer" "$([[ -n "$digit_buffer" ]] && printf ']' || true)" \
+    "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
+  [[ -n "$digit_buffer" ]] || printf '  (0 to exit)'
+  printf '\n\n'
 }
 
 read_menu_key() {
@@ -887,34 +939,50 @@ run_menu_action() {
 }
 
 main_menu() {
-  local selection="" key interactive=0
+  local selection="" key interactive=0 action_ready=0
+  local digit_buffer=""
   local selected=1
   [[ -f "$SERVICE_FILE" ]] && selected=2
+  if [[ -z "$SERVER_PUBLIC_IP" && -f "$SERVICE_FILE" ]]; then SERVER_PUBLIC_IP="$(detect_public_ipv4 || true)"; fi
   if [[ -r /dev/tty && -t 1 && -t 0 && "${TERM:-dumb}" != "dumb" ]] && has stty; then
     interactive=1
   fi
 
   while true; do
     if (( interactive )); then
-      draw_control_center "$selected"
+      draw_control_center "$selected" "$digit_buffer"
       key="$(read_menu_key)" || interactive=0
       if (( interactive )); then
         case "$key" in
           up|k) (( selected > 1 )) && ((selected--)) || selected=11 ;;
           down|j) (( selected < 11 )) && ((selected++)) || selected=1 ;;
-          enter) selection="$selected" ;;
+          enter)
+            if [[ -n "$digit_buffer" ]]; then
+              [[ "$digit_buffer" != "0" ]] || { printf '\033[0m\n'; return 0; }
+              selection="$digit_buffer"
+              [[ "$selection" =~ ^([1-9]|10|11)$ ]] || { warn 'Choose a menu option from 1 to 11.'; selection=""; digit_buffer=""; continue; }
+            else
+              selection="$selected"
+            fi
+            digit_buffer=""
+            action_ready=1
+            ;;
           q|Q|escape) printf '\033[0m\n'; return 0 ;;
           h|H) usage; pause_menu; continue ;;
-          [1-9]) selection="$key" ;;
-          0) return 0 ;;
+          [0-9])
+            digit_buffer+="$key"
+            if ((${#digit_buffer} > 2)); then digit_buffer="${digit_buffer:0:2}"; fi
+            ;;
+          backspace|$'\177') digit_buffer="${digit_buffer%?}" ;;
           *) continue ;;
         esac
       fi
     else
+    SERVER_PUBLIC_IP="${SERVER_PUBLIC_IP:-$(detect_public_ipv4 || true)}"
       printf '\n%s%s  DONATELLO CONTROL CENTER%s\n' "$C_BOLD" "$C_CYAN" "$C_RESET"
       printf '  Service: %s\n  Panel: %s\n\n' \
         "$( [[ -f "$SERVICE_FILE" ]] && systemctl is-active "$SERVICE_NAME" 2>/dev/null || printf 'not installed' )" \
-        "$( [[ -s "$DOMAIN_FILE" ]] && printf 'https://%s' "$(<"$DOMAIN_FILE")" || printf 'localhost:%s' "$(panel_port 2>/dev/null || printf '8282')" )"
+      "$( [[ -s "$DOMAIN_FILE" ]] && printf 'https://%s' "$(<"$DOMAIN_FILE")" || printf 'http://%s:%s' "${SERVER_PUBLIC_IP:-<SERVER_IP>}" "$(panel_port 2>/dev/null || printf '8282')" )"
       printf '  1 Install / repair     2 Status       3 Start          4 Stop\n'
       printf '  5 Restart              6 Logs         7 Change port    8 HTTPS / SSL\n'
       printf '  9 Update              10 Uninstall    11 Purge data     0 Exit\n\n'
@@ -923,9 +991,10 @@ main_menu() {
       [[ "$selection" =~ ^([1-9]|10|11)$ ]] || { warn 'Choose a menu option from 1 to 11.'; continue; }
     fi
 
-    if [[ -n "$selection" ]]; then
+    if (( action_ready )) && [[ -n "$selection" ]]; then
       run_menu_action "$selection"
       selection=""
+      action_ready=0
       pause_menu
     fi
   done
@@ -959,6 +1028,12 @@ delete_app() {
     chmod 0600 "$DATA_DIR/.database-path"
   fi
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+  if has ufw && ufw status 2>/dev/null | rg -q '^Status: active'; then
+    while IFS= read -r rule_id; do
+      [[ -n "$rule_id" ]] || continue
+      ufw --force delete "$rule_id" >/dev/null 2>&1 || true
+    done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO / {gsub(/[\[\]]/, "", $1); print $1}' | sort -rn)
+  fi
   systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
   rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
   rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE"
