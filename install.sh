@@ -98,6 +98,27 @@ read_answer() {
   printf -v "$variable" '%s' "${answer:-$default}"
 }
 
+normalize_menu_digits() {
+  local value="$1" pair native ascii
+  local -a digit_pairs=(
+    '۰:0' '۱:1' '۲:2' '۳:3' '۴:4' '۵:5' '۶:6' '۷:7' '۸:8' '۹:9'
+    '٠:0' '١:1' '٢:2' '٣:3' '٤:4' '٥:5' '٦:6' '٧:7' '٨:8' '٩:9'
+  )
+  for pair in "${digit_pairs[@]}"; do
+    native="${pair%%:*}"
+    ascii="${pair#*:}"
+    value="${value//"$native"/$ascii}"
+  done
+  printf '%s' "$value"
+}
+
+valid_menu_choice() {
+  case "$1" in
+    0|1|2|3|4|5|6|7|8|9|10|11) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 require_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] && return 0
   if [[ "$1" == "install" ]]; then
@@ -847,6 +868,7 @@ draw_menu_item() {
 
 draw_control_center() {
   local selected="$1" digit_buffer="$2" state="NOT INSTALLED" state_color="$C_DIM" endpoint="Not installed" tls_bind tls_port scheme
+  if valid_menu_choice "$digit_buffer" && [[ "$digit_buffer" != 0 ]]; then selected="$digit_buffer"; fi
   if [[ -f "$SERVICE_FILE" ]]; then
     state="STOPPED"
     state_color="$C_YELLOW"
@@ -907,7 +929,11 @@ read_menu_key() {
   local saved key sequence
   saved="$(stty -g </dev/tty 2>/dev/null)" || return 1
   stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null || return 1
-  IFS= read -r -s -n 1 key </dev/tty || key=""
+  if IFS= read -r -s -n 1 key </dev/tty; then
+    [[ -n "$key" ]] || key='enter'
+  else
+    key=""
+  fi
   if [[ "$key" == $'\033' ]]; then
     IFS= read -r -s -n 2 -t 1 sequence </dev/tty || sequence=""
     case "$sequence" in
@@ -969,8 +995,8 @@ main_menu() {
             ;;
           q|Q|escape) printf '\033[0m\n'; return 0 ;;
           h|H) usage; pause_menu; continue ;;
-          [0-9])
-            digit_buffer+="$key"
+          [0-9۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩])
+            digit_buffer="$(normalize_menu_digits "$digit_buffer$key")"
             if ((${#digit_buffer} > 2)); then digit_buffer="${digit_buffer:0:2}"; fi
             ;;
           backspace|$'\177') digit_buffer="${digit_buffer%?}" ;;
@@ -987,8 +1013,10 @@ main_menu() {
       printf '  5 Restart              6 Logs         7 Change port    8 HTTPS / SSL\n'
       printf '  9 Update              10 Uninstall    11 Purge data     0 Exit\n\n'
       read -r -p 'Select an option: ' selection || return 0
+      selection="$(normalize_menu_digits "${selection//$'\r'/}")"
       [[ "$selection" == "0" ]] && return 0
-      [[ "$selection" =~ ^([1-9]|10|11)$ ]] || { warn 'Choose a menu option from 1 to 11.'; continue; }
+      valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 11.'; continue; }
+      action_ready=1
     fi
 
     if (( action_ready )) && [[ -n "$selection" ]]; then
