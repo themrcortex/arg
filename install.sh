@@ -23,6 +23,7 @@ readonly SERVICE_USER="donatello"
 readonly SERVICE_GROUP="donatello"
 readonly DEFAULT_BIND="127.0.0.1:8282"
 readonly DEFAULT_DB="/var/lib/donatello/donatello.db"
+SERVER_PUBLIC_IP=""
 
 readonly RUST_HOME="${RUSTUP_HOME:-/root/.rustup}"
 readonly CARGO_HOME_DIR="${CARGO_HOME:-/root/.cargo}"
@@ -284,9 +285,11 @@ configure_https() {
     info "Detected public IPv4 address: $address"
     read_answer "Is this the public IP address of this server? [Y/n]: " confirmed "y"
     if [[ "${confirmed,,}" == "n" || "${confirmed,,}" == "no" ]]; then
+      SERVER_PUBLIC_IP=""
       warn "Address confirmation declined. HTTPS setup was skipped."
       return 0
     fi
+    SERVER_PUBLIC_IP="$address"
   else
     warn "A public IPv4 address could not be detected."
   fi
@@ -341,21 +344,32 @@ configure_https() {
 
 show_access_summary() {
   local address domain port
-  address="$(detect_public_ipv4 || true)"
+  address="$SERVER_PUBLIC_IP"
   domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   port="$(panel_port)"
+  say "DONATELLO IS READY"
   if [[ -n "$address" ]]; then
-    info "Detected server public IP: $address"
+    info "Server IP: $address"
   else
-    info "Could not detect a public IP address."
+    info "Public IP was not confirmed. Use your server IP in the SSH command below."
   fi
   if [[ -n "$domain" ]]; then
-    info "Panel URL: https://$domain"
+    printf '\n  %sPANEL LOGIN%s\n  %shttps://%s%s\n\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$domain" "$C_RESET"
   else
-    info "Panel is listening locally on port $port."
-    info "To access it remotely, use: ssh -L $port:localhost:$port user@SERVER_IP"
-    info "Configure HTTPS later with: sudo donatello ssl"
+    printf '\n  %sPANEL LOGIN%s  (open after connecting the SSH tunnel)\n' "$C_CYAN" "$C_RESET"
+    printf '  %shttp://127.0.0.1:%s%s\n\n' "$C_BOLD" "$port" "$C_RESET"
+    if [[ -n "$address" ]]; then
+      printf '  From your computer, run:\n  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@%s%s\n' \
+        "$C_GREEN" "$port" "$port" "$address" "$C_RESET"
+    else
+      printf '  From your computer, run:\n  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@<SERVER_IP>%s\n' \
+        "$C_GREEN" "$port" "$port" "$C_RESET"
+    fi
+    info "Replace <SSH_USER> with your server login, then open the panel link above."
+    info "Enable HTTPS with a domain: sudo donatello ssl"
   fi
+  printf '\n  %sMANAGEMENT MENU%s\n  Run: %sdonatello%s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET"
+  info "From a non-root account, use: sudo donatello"
 }
 
 write_service_unit() {
@@ -440,7 +454,6 @@ install_app() {
   fi
   say "DONATELLO is installed and running"
   info "Service status: sudo donatello status"
-  info "Management menu: sudo donatello manage"
   configure_https
   show_access_summary
 }
