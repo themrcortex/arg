@@ -446,7 +446,7 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
   const [busy, setBusy] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<number | null>(null)
-  const [form, setForm] = useState<{ port: string; protocol: 'tcp' | 'udp'; policy: 'allow' | 'deny'; enabled: boolean }>({ port: '', protocol: 'tcp', policy: 'allow', enabled: true })
+  const [form, setForm] = useState<{ port: string; protocol: 'tcp' | 'udp' | 'both'; policy: 'allow' | 'deny'; enabled: boolean }>({ port: '', protocol: 'tcp', policy: 'allow', enabled: true })
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all')
   const refresh = useCallback(async () => {
@@ -459,7 +459,7 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
   const filtered = rules.filter((rule) => (statusFilter === 'all' || (statusFilter === 'enabled') === rule.enabled) && (!query.trim() || String(rule.port).includes(query.trim())))
   function openEditor(rule?: ManagedFirewallRule) {
     setEditing(rule?.id ?? null)
-    setForm(rule ? { port: String(rule.port), protocol: rule.protocol, policy: rule.policy, enabled: rule.enabled } : { port: '', protocol: 'tcp', policy: 'allow', enabled: true })
+    setForm(rule ? { port: String(rule.port), protocol: rule.protocol, policy: rule.policy, enabled: rule.enabled } : { port: '', protocol: 'both', policy: 'allow', enabled: true })
     setDialogOpen(true)
   }
   async function save(event: FormEvent) {
@@ -467,9 +467,10 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
     setBusy(true)
     try {
       const path = editing === null ? 'firewall/rules' : `firewall/rules/${editing}`
-      await api(path, { method: editing === null ? 'POST' : 'PUT', body: JSON.stringify({ ...form, port: Number(form.port) }) })
+      const protocols = editing === null && form.protocol === 'both' ? ['tcp', 'udp'] : [form.protocol]
+      await Promise.all(protocols.map((protocol) => api(path, { method: editing === null ? 'POST' : 'PUT', body: JSON.stringify({ ...form, protocol, port: Number(form.port) }) })))
       setDialogOpen(false)
-      notify(editing === null ? 'قانون فایروال ساخته شد.' : 'قانون فایروال ویرایش شد.')
+      notify(protocols.length === 2 ? 'قوانین TCP و UDP ساخته شدند.' : editing === null ? 'قانون فایروال ساخته شد.' : 'قانون فایروال ویرایش شد.')
       await refresh()
     } catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ قانون ناموفق بود') }
     finally { setBusy(false) }
@@ -508,7 +509,7 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
     </SectionCard>
     <details className="mt-5 rounded-2xl border border-white/10 bg-[#14151f] p-5"><summary className="cursor-pointer text-sm font-semibold text-white">همهٔ قوانین UFW و خروجی خام</summary><div className="mt-4 flex justify-end"><Button variant="outline" size="sm" disabled={!data?.status} onClick={() => downloadText('donatello-ufw.txt', data?.status || '')}><Download size={14}/> دریافت خروجی</Button></div><pre className="mt-3 max-h-[480px] overflow-auto whitespace-pre-wrap rounded-xl bg-[#0e101a] p-4 text-left font-mono text-xs leading-6 text-muted-foreground" dir="ltr">{data?.status || data?.error || 'UFW unavailable'}</pre></details>
     <Alert className="mt-5"><ShieldCheck size={17} className="mb-2 text-primary"/><AlertTitle>حفاظت دسترسی</AlertTitle><AlertDescription>پورت‌های SSH، HTTP، HTTPS و پورت‌های پنل از ویرایش در این بخش محافظت می‌شوند. هنگام فعال‌کردن UFW، دسترسی SSH و پنل ابتدا مجاز می‌شود.</AlertDescription></Alert>
-    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}><DialogContent><DialogHeader><DialogTitle>{editing === null ? 'قانون جدید' : 'ویرایش قانون'}</DialogTitle><DialogDescription>قانون در UFW اعمال می‌شود و می‌توانی بعداً آن را غیرفعال کنی.</DialogDescription></DialogHeader><form onSubmit={save} className="space-y-4"><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="firewall-port">پورت</Label><Input id="firewall-port" type="number" lang="en" dir="ltr" min={1} max={65535} required value={form.port} onChange={(event) => setForm((old) => ({ ...old, port: event.target.value }))}/></div><div className="space-y-2"><Label htmlFor="firewall-protocol">پروتکل</Label><Select value={form.protocol} onValueChange={(value) => setForm((old) => ({ ...old, protocol: value as 'tcp' | 'udp' }))}><SelectTrigger id="firewall-protocol"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="tcp">TCP</SelectItem><SelectItem value="udp">UDP</SelectItem></SelectContent></Select></div></div><div className="space-y-2"><Label htmlFor="firewall-policy">رفتار</Label><Select value={form.policy} onValueChange={(value) => setForm((old) => ({ ...old, policy: value as 'allow' | 'deny' }))}><SelectTrigger id="firewall-policy"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="allow">اجازه</SelectItem><SelectItem value="deny">مسدود</SelectItem></SelectContent></Select></div><label className="flex items-center justify-between rounded-xl border border-white/10 p-3 text-sm"><span>قانون فعال باشد</span><Switch checked={form.enabled} onCheckedChange={(checked) => setForm((old) => ({ ...old, enabled: checked }))}/></label><Button type="submit" disabled={busy || !form.port} className="w-full">{busy ? 'در حال ذخیره…' : 'ذخیرهٔ قانون'}</Button></form></DialogContent></Dialog>
+    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}><DialogContent><DialogHeader><DialogTitle>{editing === null ? 'قانون جدید' : 'ویرایش قانون'}</DialogTitle><DialogDescription>قانون در UFW اعمال می‌شود و می‌توانی بعداً آن را غیرفعال کنی.</DialogDescription></DialogHeader><form onSubmit={save} className="space-y-4"><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="firewall-port">پورت</Label><Input id="firewall-port" type="number" lang="en" dir="ltr" min={1} max={65535} required value={form.port} onChange={(event) => setForm((old) => ({ ...old, port: event.target.value }))}/></div><div className="space-y-2"><Label>پروتکل</Label><div className="flex gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1">{(['tcp', 'udp'] as const).map((protocol) => { const selected = form.protocol === 'both' || form.protocol === protocol; return <button key={protocol} type="button" aria-pressed={selected} onClick={() => setForm((old) => ({ ...old, protocol: old.protocol === 'both' ? protocol : old.protocol === protocol ? (protocol === 'tcp' ? 'udp' : 'tcp') : 'both' }))} className={`flex-1 rounded-lg px-3 py-2 text-xs font-mono uppercase transition ${selected ? 'bg-primary/25 text-white' : 'text-muted-foreground hover:text-white'}`}>{protocol}</button> })}</div><p className="text-[11px] text-muted-foreground">با انتخاب هر دو، دو قانون مستقل TCP و UDP ساخته می‌شود.</p></div></div><div className="space-y-2"><Label htmlFor="firewall-policy">رفتار</Label><Select value={form.policy} onValueChange={(value) => setForm((old) => ({ ...old, policy: value as 'allow' | 'deny' }))}><SelectTrigger id="firewall-policy"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="allow">اجازه</SelectItem><SelectItem value="deny">مسدود</SelectItem></SelectContent></Select></div><label className="flex items-center justify-between rounded-xl border border-white/10 p-3 text-sm"><span>قانون فعال باشد</span><Switch checked={form.enabled} onCheckedChange={(checked) => setForm((old) => ({ ...old, enabled: checked }))}/></label><Button type="submit" disabled={busy || !form.port} className="w-full">{busy ? 'در حال ذخیره…' : 'ذخیرهٔ قانون'}</Button></form></DialogContent></Dialog>
   </>
 }
 
