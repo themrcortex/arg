@@ -596,8 +596,10 @@ async fn firewall(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
         let db = state.lock().unwrap();
         require_user(&db, &headers)?;
     }
-    let mut command = tokio::process::Command::new("ufw");
-    command.args(["status", "numbered"]).kill_on_drop(true);
+    let mut command = tokio::process::Command::new("sudo");
+    command
+        .args(["-n", "ufw", "status", "numbered"])
+        .kill_on_drop(true);
     let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output()).await;
     Ok(Json(match output {
         Ok(Ok(o)) => {

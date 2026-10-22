@@ -39,6 +39,8 @@ Donatello یک پنل وب راست‌به‌چپ برای دیدن وضعیت �
 
 **پیش‌نیاز:** Linux، Rust stable و Node.js 20 یا جدیدتر برای توسعهٔ فرانت.
 
+اجرای مستقیم از سورس:
+
 ```bash
 git clone https://github.com/parsasajjadi2008/donatello.git
 cd donatello
@@ -67,6 +69,28 @@ cargo run --release
 ```
 
 برای دسترسی عمومی، پنل را پشت reverse proxy دارای HTTPS قرار دهید و پورت داخلی Donatello را عمومی نکنید. صدور خودکار گواهی در خود پنل هنوز آماده نیست.
+
+## نصب سرویس با Bash
+
+`install.sh` سرویس systemd را نصب می‌کند و یک منوی مدیریت برای سرویس، لاگ، پورت، به‌روزرسانی و حذف دارد. این نصب‌گر فعلاً روی Debian و Ubuntu دارای systemd پشتیبانی می‌شود.
+
+```bash
+git clone https://github.com/parsasajjadi2008/donatello.git
+cd donatello
+sudo bash install.sh install
+```
+
+پس از نصب:
+
+```bash
+sudo donatello-installer manage       # منوی تعاملی
+sudo donatello-installer manage logs  # لاگ‌های اخیر
+sudo donatello-installer manage port  # تغییر پورت loopback پنل
+sudo donatello-installer update       # دریافت، ساخت و به‌روزرسانی
+sudo donatello-installer delete       # حذف برنامه با حفظ داده‌ها
+```
+
+حذف کامل داده‌ها فقط با دستور `sudo donatello-installer delete --purge` و واردکردن عبارت تأیید انجام می‌شود. پنل روی `127.0.0.1` می‌ماند؛ از SSH tunnel یا reverse proxy دارای HTTPS استفاده کنید.
 
 ## توسعه
 
