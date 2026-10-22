@@ -3,8 +3,8 @@ set -Eeuo pipefail
 
 readonly APP_NAME="DONATELLO"
 readonly SERVICE_NAME="donatello"
-readonly REPOSITORY="https://github.com/parsasajjadi2008/donatello.git"
-readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/parsasajjadi2008/donatello/main/install.sh"
+readonly REPOSITORY="https://github.com/themrcortex/donatello.git"
+readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/themrcortex/donatello/main/install.sh"
 readonly BRANCH="main"
 readonly INSTALL_DIR="/opt/donatello"
 readonly SOURCE_DIR="/opt/donatello/source"
@@ -14,6 +14,7 @@ readonly LEGACY_INSTALLER="/usr/local/sbin/donatello-installer"
 readonly SERVICE_FILE="/etc/systemd/system/donatello.service"
 readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
 readonly UFW_HELPER="/usr/local/lib/donatello/ufw-helper"
+readonly PORT_HELPER="/usr/local/lib/donatello/port-helper"
 readonly ENV_DIR="/etc/donatello"
 readonly ENV_FILE="/etc/donatello/donatello.env"
 readonly DOMAIN_FILE="/etc/donatello/https-domain"
@@ -254,15 +255,18 @@ ensure_service_account() {
 configure_ufw_status() {
   local ufw sudoers_tmp
   ufw="$(command -v ufw || true)"
-  if [[ -z "$ufw" ]]; then
-    rm -f "$SUDOERS_FILE"
+  has visudo || die "visudo is required to configure restricted panel management."
+  install -o root -g root -m 0755 "$SOURCE_DIR/scripts/port-helper.sh" "$PORT_HELPER"
+  if [[ -n "$ufw" ]]; then
+    install -o root -g root -m 0755 "$SOURCE_DIR/scripts/ufw-helper.sh" "$UFW_HELPER"
+  else
     rm -f "$UFW_HELPER"
-    return
   fi
-  has visudo || die "UFW is installed but visudo was not found. Configure the restricted UFW permission manually."
-  install -o root -g root -m 0755 "$SOURCE_DIR/scripts/ufw-helper.sh" "$UFW_HELPER"
   sudoers_tmp="$(mktemp /etc/sudoers.d/.donatello-ufw.XXXXXX)"
-  printf '%s ALL=(root) NOPASSWD: %s status numbered, %s *\n' "$SERVICE_USER" "$ufw" "$UFW_HELPER" > "$sudoers_tmp"
+  printf '%s ALL=(root) NOPASSWD: %s *\n' "$SERVICE_USER" "$PORT_HELPER" > "$sudoers_tmp"
+  if [[ -n "$ufw" ]]; then
+    printf '%s ALL=(root) NOPASSWD: %s status numbered, %s *\n' "$SERVICE_USER" "$ufw" "$UFW_HELPER" >> "$sudoers_tmp"
+  fi
   chmod 0440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then
     rm -f "$sudoers_tmp"
@@ -787,7 +791,7 @@ write_service_unit() {
   cat > "$SERVICE_FILE" <<'UNIT'
 [Unit]
 Description=Donatello VPS Management Panel
-Documentation=https://github.com/parsasajjadi2008/donatello
+Documentation=https://github.com/themrcortex/donatello
 After=network-online.target
 Wants=network-online.target
 
@@ -905,6 +909,7 @@ update_app() {
   sync_ufw_rules
   prepare_source
   build_release
+  configure_ufw_status
   local previous staged
   previous="$(mktemp /var/tmp/donatello.previous.XXXXXX)"
   install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
@@ -952,8 +957,9 @@ change_port() {
   require_root manage
   [[ -f "$ENV_FILE" ]] || die "Configuration was not found. DONATELLO is not installed."
   local port
-  read -r -p "New panel port (1-65535): " port
-  [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) || die "Invalid port. Enter a number from 1 to 65535."
+  port="${1:-}"
+  if [[ -z "$port" ]]; then read -r -p "New panel port (1024-65535): " port; fi
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1024 && port <= 65535 )) || die "Invalid port. Enter a number from 1024 to 65535."
   write_bind_config "0.0.0.0:$port"
   sync_ufw_rules
   systemctl restart "$SERVICE_NAME"
@@ -979,7 +985,7 @@ manage_app() {
         systemctl "$2" "$SERVICE_NAME"
         ;;
       logs) journalctl -u "$SERVICE_NAME" -n "${3:-100}" --no-pager ;;
-      port) change_port ;;
+      port) change_port "${3:-}" ;;
       ssl) configure_https ;;
       update) update_app ;;
       delete) delete_app "${3:-}" ;;
@@ -1234,7 +1240,7 @@ delete_app() {
   fi
   systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
   rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
-  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER"
+  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER" "$PORT_HELPER"
   if [[ -n "$domain" ]]; then
     rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$CERT_DEPLOY_HOOK"
     if [[ -x /snap/bin/certbot ]]; then

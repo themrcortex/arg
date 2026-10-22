@@ -5,7 +5,6 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
-  Headphones,
   LifeBuoy,
   LogOut,
   Menu,
@@ -27,7 +26,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { AuditPage, DashboardPage, FirewallPage, NetworkPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { navigation, pageFromHash, type PageId } from './navigation'
 const developer = (
@@ -319,34 +317,17 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
-    <TooltipProvider delayDuration={150}>
-      <div className="app-shell min-h-screen lg:grid lg:grid-cols-[64px_220px_minmax(0,1fr)]">
-        <aside className="app-rail sticky top-0 z-30 hidden h-screen flex-col items-center border-l border-white/10 py-4 lg:flex" aria-label="دسته‌بندی‌های اصلی">
-          <button onClick={() => selectPage('dashboard')} className="mb-6 grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/[.035] transition hover:border-primary/40" aria-label="داشبورد">
-            <span className="grid h-7 w-7 place-items-center rounded-lg bg-gradient-to-br from-[#dec3ff] to-[#7650cb] text-sm font-black text-[#211135] shadow-glow">D</span>
-          </button>
-          <div className="mb-3 h-px w-8 bg-white/10" />
-          <nav className="flex flex-1 flex-col items-center gap-2" aria-label="انتخاب بخش">
-            {allowedPages.map((group) => {
-              const selected = currentPage === group.id
-              return <Tooltip key={group.id}>
-                <TooltipTrigger asChild><button onClick={() => selectPage(group.id)} aria-label={group.label} aria-current={selected ? 'page' : undefined} className={cn('rail-button relative grid h-10 w-10 place-items-center rounded-xl transition', selected ? 'bg-[#312547] text-[#c2a1ff]' : 'text-[#8d91a7] hover:bg-white/[.06] hover:text-white')}><group.icon size={19} strokeWidth={1.8}/>{selected && <span className="absolute -right-[13px] h-5 w-[3px] rounded-full bg-primary shadow-glow"/>}</button></TooltipTrigger>
-                <TooltipContent side="left">{group.label}</TooltipContent>
-              </Tooltip>
-            })}
-          </nav>
-          <div className="mt-auto flex flex-col items-center gap-2 border-t border-white/10 pt-3">
-            <Tooltip><TooltipTrigger asChild><button onClick={() => selectPage('settings')} className="rail-button grid h-10 w-10 place-items-center rounded-xl text-[#8d91a7] transition hover:bg-white/[.06] hover:text-white" aria-label="تنظیمات"><Settings size={18}/></button></TooltipTrigger><TooltipContent side="left">تنظیمات</TooltipContent></Tooltip>
-            <a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="rail-button grid h-10 w-10 place-items-center rounded-xl text-[#8d91a7] transition hover:bg-white/[.06] hover:text-white" aria-label="پشتیبانی"><Headphones size={18}/></a>
-          </div>
-        </aside>
-        <aside className={cn('app-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(82vw,270px)] flex-col border-l border-white/10 px-4 py-6 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[220px] lg:translate-x-0', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
+      <div className="app-shell min-h-screen lg:grid lg:grid-cols-[248px_minmax(0,1fr)]">
+        <aside className={cn('app-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(82vw,270px)] flex-col border-l border-white/10 px-4 py-6 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[248px] lg:translate-x-0', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
           <div className="flex items-center justify-between px-2"><Brand /><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button></div>
-          <div className="mt-9 px-3 text-[10px] font-bold tracking-[.1em] text-muted-foreground">فضای کار</div>
-          <nav className="mt-3 flex-1 space-y-1" aria-label="صفحات اصلی">
-            {allowedPages.map((group) => <button key={group.id} onClick={() => selectPage(group.id)} aria-current={currentPage === group.id ? 'page' : undefined} className={cn('flex w-full items-center gap-3 rounded-xl px-3 py-3 text-right text-sm transition', currentPage === group.id ? 'bg-primary/15 font-semibold text-white shadow-[inset_-3px_0_#a987ff]' : 'text-[#a6a6bb] hover:bg-white/[.05] hover:text-white')}><group.icon size={18}/><span>{group.label}</span></button>)}
-          </nav>
-          <div className="rounded-xl border border-white/10 bg-white/[.03] p-3 text-xs text-muted-foreground"><span className="mb-2 block h-2 w-2 rounded-full bg-emerald-400"/>سرور متصل است<br/><span className="mt-1 block text-[10px]">هر بخش ابزارها و داده‌های خودش را دارد.</span></div>
+          <div className="mt-9 flex-1 space-y-6 overflow-y-auto pb-5">
+            {[
+              { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
+              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall'].includes(item.id)) },
+              { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings'].includes(item.id)) },
+            ].map((section) => <nav key={section.title} aria-label={section.title}><div className="mb-2 px-3 text-[10px] font-bold tracking-[.12em] text-[#76778d]">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} className={cn('flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-right text-[13px] transition', currentPage === item.id ? 'border border-primary/25 bg-primary/[.13] font-semibold text-white shadow-[inset_-3px_0_#a987ff]' : 'border border-transparent text-[#a6a6bb] hover:bg-white/[.055] hover:text-white')}><item.icon size={17} strokeWidth={1.8}/><span className="flex-1">{item.label}</span>{currentPage === item.id && <span className="h-1.5 w-1.5 rounded-full bg-[#bd9aff]"/>}</button>)}</div></nav>)}
+          </div>
+          <div className="space-y-3 border-t border-white/10 pt-4"><div className="flex items-center gap-2 px-2 text-[11px] text-[#a9aabc]"><span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_9px_#4ade80]"/> سرویس متصل</div><button onClick={() => selectPage('settings')} className="flex w-full items-center gap-2 rounded-xl border border-white/10 bg-white/[.03] p-2.5 text-right transition hover:bg-white/[.07]"><Avatar className="h-9 w-9"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-white">{user.username}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{user.role === 'admin' ? 'مدیر' : user.role === 'operator' ? 'اپراتور' : 'ناظر'}</span></span><Settings size={14} className="text-muted-foreground"/></button></div>
         </aside>
         {mobileOpen && (
           <button
@@ -357,7 +338,7 @@ export default function App() {
         )}
         <div className="min-w-0">
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
-            <div className="flex items-center gap-2"><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO CONTROL PLANE</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
+            <div className="flex items-center gap-2"><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO <span className="text-[#7f768f]">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
             <div className="flex items-center gap-1.5"><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
@@ -372,7 +353,7 @@ export default function App() {
             {currentPage === 'audit' && user.role === 'admin' && (
               <AuditPage Heading={PageHeading} notify={setNotice} />
             )}
-            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} />}
+            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} user={user} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} Donatello · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
@@ -388,7 +369,6 @@ export default function App() {
           </div>
         )}
       </div>
-    </TooltipProvider>
   )
 }
 

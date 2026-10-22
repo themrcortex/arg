@@ -271,9 +271,10 @@ async fn login(
         [&input.username],
     );
     let raw = token();
+    let session_seconds = setting_u64(&db, "session_hours", 24).clamp(1, 72) as i64 * 3600;
     db.execute(
         "INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?1,?2,?3)",
-        params![session_hash(&raw), id, now() + 86400],
+        params![session_hash(&raw), id, now() + session_seconds],
     )
     .map_err(db_error)?;
     audit(&db, &input.username, "login", "Successful login");
@@ -282,7 +283,7 @@ async fn login(
         .and_then(|v| v.to_str().ok())
         == Some("https");
     let cookie = format!(
-        "donatello_session={raw}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400{}",
+        "donatello_session={raw}; HttpOnly; SameSite=Strict; Path=/; Max-Age={session_seconds}{}",
         if secure { "; Secure" } else { "" }
     );
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response())
@@ -614,16 +615,91 @@ fn network_totals() -> (u64, u64) {
     }
     (rx, tx)
 }
+fn setting_u64(db: &Connection, key: &str, default: u64) -> u64 {
+    db.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| row.get::<_, String>(0))
+        .ok().and_then(|value| value.parse().ok()).unwrap_or(default)
+}
+fn monitoring_config(db: &Connection) -> Value {
+    json!({
+        "enabled": setting_u64(db, "history_enabled", 1) == 1,
+        "interval_seconds": setting_u64(db, "history_interval", 5),
+        "retention_days": setting_u64(db, "history_retention_days", 7),
+        "session_hours": setting_u64(db, "session_hours", 24)
+    })
+}
+#[derive(Deserialize)]
+struct MonitoringConfig {
+    enabled: bool,
+    interval_seconds: u64,
+    retention_days: u64,
+    session_hours: u64,
+}
+async fn get_monitoring_config(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    Ok(Json(monitoring_config(&db)))
+}
+async fn put_monitoring_config(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<MonitoringConfig>) -> ApiResult {
+    check_origin(&headers)?;
+    if ![5, 10, 15, 30, 60].contains(&input.interval_seconds)
+        || ![1, 3, 7, 14, 30].contains(&input.retention_days)
+        || ![1, 6, 12, 24, 72].contains(&input.session_hours) {
+        return Err(error(StatusCode::BAD_REQUEST, "Invalid monitoring settings"));
+    }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    for (key, value) in [
+        ("history_enabled", if input.enabled { 1 } else { 0 }),
+        ("history_interval", input.interval_seconds),
+        ("history_retention_days", input.retention_days),
+        ("session_hours", input.session_hours),
+    ] {
+        db.execute("INSERT INTO settings(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value.to_string()]).map_err(db_error)?;
+    }
+    db.execute("DELETE FROM metric_samples WHERE at<?1", [now() - (input.retention_days * 86400) as i64]).map_err(db_error)?;
+    audit(&db, &actor.username, "monitoring.config", &format!("enabled={} interval={}s retention={}d session={}h", input.enabled, input.interval_seconds, input.retention_days, input.session_hours));
+    Ok(Json(monitoring_config(&db)))
+}
+#[derive(Deserialize)]
+struct PanelPortInput { port: u16 }
+async fn get_panel_port(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    let port = env::var("DONATELLO_BIND").ok()
+        .and_then(|bind| bind.rsplit(':').next().and_then(|part| part.parse::<u16>().ok()))
+        .unwrap_or(8282);
+    Ok(Json(json!({"port": port})))
+}
+async fn change_panel_port(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<PanelPortInput>) -> ApiResult {
+    check_origin(&headers)?;
+    if input.port < 1024 {
+        return Err(error(StatusCode::BAD_REQUEST, "Choose a port from 1024 to 65535"));
+    }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/lib/donatello/port-helper", &input.port.to_string()])
+        .output()
+        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Panel port helper unavailable; update Donatello"))?;
+    if !output.status.success() {
+        return Err(error(StatusCode::BAD_REQUEST, "Panel port change could not be scheduled; check the port and service logs"));
+    }
+    audit(&db, &actor.username, "panel.port", &format!("scheduled HTTP port {}", input.port));
+    Ok(Json(json!({"scheduled": true, "port": input.port})))
+}
 async fn collect_metrics(state: AppState) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut previous_cpu = cpu_ticks();
     let mut previous_network = network_totals();
     let mut previous_at = Instant::now();
     let mut sample_count = 0u64;
-    interval.tick().await;
     loop {
-        interval.tick().await;
+        let (enabled, interval_seconds, retention_days) = {
+            let db = state.lock().unwrap();
+            (setting_u64(&db, "history_enabled", 1) == 1,
+             setting_u64(&db, "history_interval", 5).clamp(5, 60),
+             setting_u64(&db, "history_retention_days", 7).clamp(1, 30))
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(interval_seconds)).await;
         let at = now();
         let current_cpu = cpu_ticks();
         let current_network = network_totals();
@@ -643,10 +719,12 @@ async fn collect_metrics(state: AppState) {
         previous_cpu = current_cpu;
         previous_network = current_network;
         sample_count = sample_count.wrapping_add(1);
-        if let Ok(db) = state.lock() {
+        if enabled {
+          if let Ok(db) = state.lock() {
+            if setting_u64(&db, "history_enabled", 1) != 1 { continue; }
             let _ = db.execute("INSERT OR REPLACE INTO metric_samples(at,cpu,memory,disk,rx_rate,tx_rate) VALUES (?1,?2,?3,?4,?5,?6)", params![at,cpu,memory,disk,rx_rate,tx_rate]);
-            // Keep seven days of five-second samples, including across service restarts.
-            if sample_count % 60 == 0 { let _ = db.execute("DELETE FROM metric_samples WHERE at<?1", [at - 7 * 86400]); }
+            if sample_count % 60 == 0 { let _ = db.execute("DELETE FROM metric_samples WHERE at<?1", [at - (retention_days * 86400) as i64]); }
+          }
         }
     }
 }
@@ -661,13 +739,13 @@ async fn history(State(state): State<AppState>, headers: HeaderMap, Query(query)
         Some("7d") => (7 * 86400, 180),
         _ => (300, 1),
     };
-    let mut stmt = db.prepare("SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM metric_samples WHERE at>=?1 AND at%?2<5 ORDER BY at").map_err(db_error)?;
-    let rows = stmt.query_map(params![now() - seconds, step * 5], |row| Ok(json!({
+    let mut stmt = db.prepare("SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM metric_samples WHERE at>=?1 ORDER BY at").map_err(db_error)?;
+    let rows = stmt.query_map([now() - seconds], |row| Ok(json!({
         "at": row.get::<_, i64>(0)?, "cpu": row.get::<_, f64>(1)?, "memory": row.get::<_, f64>(2)?, "disk": row.get::<_, f64>(3)?,
         "rx": row.get::<_, f64>(4)?, "tx": row.get::<_, f64>(5)?
     }))).map_err(db_error)?;
-    let samples: Vec<Value> = rows.filter_map(Result::ok).collect();
-    Ok(Json(json!({"samples": samples, "interval_seconds": 5, "retention_seconds": 7 * 86400})))
+    let samples: Vec<Value> = rows.enumerate().filter_map(|(index, row)| if index % step == 0 { row.ok() } else { None }).collect();
+    Ok(Json(json!({"samples": samples, "config": monitoring_config(&db)})))
 }
 #[derive(Deserialize)]
 struct AlertSettings { cpu: u8, memory: u8, disk: u8 }
@@ -709,26 +787,107 @@ async fn port_probe(State(state): State<AppState>, headers: HeaderMap, Json(inpu
     let open = tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect(target)).await.is_ok_and(|result| result.is_ok());
     Ok(Json(json!({"port": input.port, "open": open, "target": "127.0.0.1"})))
 }
+#[derive(Clone, Deserialize, Serialize)]
+struct ManagedFirewallRule { id: i64, port: u16, protocol: String, policy: String, enabled: bool }
 #[derive(Deserialize)]
-struct FirewallRuleChange { action: String, port: u16, protocol: String }
-async fn firewall_rule(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<FirewallRuleChange>) -> ApiResult {
-    check_origin(&headers)?;
-    if input.port == 0 || !["tcp", "udp"].contains(&input.protocol.as_str()) || !["add", "remove"].contains(&input.action.as_str()) {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid firewall rule"));
-    }
-    let actor = {
-        let db = state.lock().unwrap();
-        require_admin(&db, &headers)?
-    };
+struct FirewallRuleInput { port: u16, protocol: String, policy: String, enabled: bool }
+fn valid_firewall_rule(input: &FirewallRuleInput) -> bool {
+    input.port > 0 && ![22, 80, 443, 8282, 8443].contains(&input.port)
+        && ["tcp", "udp"].contains(&input.protocol.as_str())
+        && ["allow", "deny"].contains(&input.policy.as_str())
+}
+fn read_managed_rule(db: &Connection, id: i64) -> Result<ManagedFirewallRule, (StatusCode, Json<Value>)> {
+    db.query_row("SELECT id,port,protocol,policy,enabled FROM managed_firewall_rules WHERE id=?1", [id], |row| Ok(ManagedFirewallRule {
+        id: row.get(0)?, port: row.get(1)?, protocol: row.get(2)?, policy: row.get(3)?, enabled: row.get(4)?
+    })).map_err(|_| error(StatusCode::NOT_FOUND, "Firewall rule not found"))
+}
+fn run_firewall_helper(action: &str, port: u16, protocol: &str, policy: &str) -> Result<(), (StatusCode, Json<Value>)> {
     let output = std::process::Command::new("sudo")
-        .args(["-n", "/usr/local/lib/donatello/ufw-helper", &input.action, &input.port.to_string(), &input.protocol])
+        .args(["-n", "/usr/local/lib/donatello/ufw-helper", action, &port.to_string(), protocol, policy])
         .output()
-        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "UFW helper is unavailable; run sudo donatello update"))?;
-    if !output.status.success() {
-        return Err(error(StatusCode::BAD_REQUEST, "UFW change failed. Check that UFW is installed and this is a Donatello-managed rule."));
-    }
+        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "UFW helper unavailable; update Donatello"))?;
+    if output.status.success() { Ok(()) }
+    else { Err(error(StatusCode::BAD_REQUEST, "UFW change failed; check active rules and protected ports")) }
+}
+async fn managed_firewall_rules(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
-    audit(&db, &actor.username, "firewall.rule", &format!("{} {}/{}", input.action, input.port, input.protocol));
+    require_user(&db, &headers)?;
+    // Import rules created by earlier Donatello releases so they can be edited here.
+    if let Ok(output) = std::process::Command::new("sudo").args(["-n", "ufw", "status", "numbered"]).output() {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines().filter(|line| line.contains("# DONATELLO WEB")) {
+                let tokens: Vec<_> = line.split_whitespace().collect();
+                let port_protocol = tokens.iter().find(|token| token.contains('/')).copied().unwrap_or("");
+                if let Some((port, protocol)) = port_protocol.split_once('/') {
+                    if let Ok(port) = port.parse::<u16>() {
+                        let policy = if tokens.contains(&"DENY") { "deny" } else { "allow" };
+                        let input = FirewallRuleInput { port, protocol: protocol.to_lowercase(), policy: policy.into(), enabled: true };
+                        if valid_firewall_rule(&input) {
+                            let _ = db.execute("INSERT OR IGNORE INTO managed_firewall_rules(port,protocol,policy,enabled) VALUES (?1,?2,?3,1)", params![input.port,input.protocol,input.policy]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut stmt = db.prepare("SELECT id,port,protocol,policy,enabled FROM managed_firewall_rules ORDER BY port,protocol").map_err(db_error)?;
+    let rows = stmt.query_map([], |row| Ok(ManagedFirewallRule {
+        id: row.get(0)?, port: row.get(1)?, protocol: row.get(2)?, policy: row.get(3)?, enabled: row.get(4)?
+    })).map_err(db_error)?;
+    Ok(Json(json!({"rules": rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?})))
+}
+async fn add_firewall_rule(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<FirewallRuleInput>) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_firewall_rule(&input) { return Err(error(StatusCode::BAD_REQUEST, "Invalid or protected firewall port")); }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    if db.query_row("SELECT 1 FROM managed_firewall_rules WHERE port=?1 AND protocol=?2", params![input.port, input.protocol], |row| row.get::<_, i32>(0)).is_ok() {
+        return Err(error(StatusCode::CONFLICT, "A rule for this port and protocol already exists"));
+    }
+    if input.enabled { run_firewall_helper("add", input.port, &input.protocol, &input.policy)?; }
+    let changed = db.execute("INSERT INTO managed_firewall_rules(port,protocol,policy,enabled) VALUES (?1,?2,?3,?4)", params![input.port,input.protocol,input.policy,input.enabled]);
+    if changed.is_err() {
+        if input.enabled { let _ = run_firewall_helper("remove", input.port, &input.protocol, &input.policy); }
+        return Err(error(StatusCode::CONFLICT, "A rule for this port and protocol already exists"));
+    }
+    let rule = read_managed_rule(&db, db.last_insert_rowid())?;
+    audit(&db, &actor.username, "firewall.create", &format!("{}/{} {} enabled={}", rule.port, rule.protocol, rule.policy, rule.enabled));
+    Ok(Json(json!({"rule": rule})))
+}
+async fn update_firewall_rule(State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap, Json(input): Json<FirewallRuleInput>) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_firewall_rule(&input) { return Err(error(StatusCode::BAD_REQUEST, "Invalid or protected firewall port")); }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    let old = read_managed_rule(&db, id)?;
+    if db.query_row("SELECT 1 FROM managed_firewall_rules WHERE port=?1 AND protocol=?2 AND id<>?3", params![input.port, input.protocol, id], |row| row.get::<_, i32>(0)).is_ok() {
+        return Err(error(StatusCode::CONFLICT, "Port and protocol already used"));
+    }
+    let same = old.port == input.port && old.protocol == input.protocol && old.policy == input.policy;
+    if old.enabled && (!same || !input.enabled) { run_firewall_helper("remove", old.port, &old.protocol, &old.policy)?; }
+    if input.enabled && (!same || !old.enabled) {
+        if let Err(err) = run_firewall_helper("add", input.port, &input.protocol, &input.policy) {
+            if old.enabled && !same { let _ = run_firewall_helper("add", old.port, &old.protocol, &old.policy); }
+            return Err(err);
+        }
+    }
+    if let Err(err) = db.execute("UPDATE managed_firewall_rules SET port=?1,protocol=?2,policy=?3,enabled=?4 WHERE id=?5", params![input.port,input.protocol,input.policy,input.enabled,id]) {
+        if input.enabled && (!same || !old.enabled) { let _ = run_firewall_helper("remove", input.port, &input.protocol, &input.policy); }
+        if old.enabled && (!same || !input.enabled) { let _ = run_firewall_helper("add", old.port, &old.protocol, &old.policy); }
+        return Err(if matches!(&err, rusqlite::Error::SqliteFailure(_, _)) { error(StatusCode::CONFLICT, "Port and protocol already used") } else { db_error(err) });
+    }
+    let rule = read_managed_rule(&db, id)?;
+    audit(&db, &actor.username, "firewall.update", &format!("id={id} {}/{} {} enabled={}", rule.port, rule.protocol, rule.policy, rule.enabled));
+    Ok(Json(json!({"rule": rule})))
+}
+async fn delete_firewall_rule(State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    let rule = read_managed_rule(&db, id)?;
+    if rule.enabled { run_firewall_helper("remove", rule.port, &rule.protocol, &rule.policy)?; }
+    db.execute("DELETE FROM managed_firewall_rules WHERE id=?1", [id]).map_err(db_error)?;
+    audit(&db, &actor.username, "firewall.delete", &format!("id={id} {}/{}", rule.port, rule.protocol));
     Ok(Json(json!({"ok": true})))
 }
 async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -922,6 +1081,23 @@ async fn firewall(State(state): State<AppState>, headers: HeaderMap) -> ApiResul
         Err(_) => json!({"available":false,"status":"UFW timed out"}),
     }))
 }
+#[derive(Deserialize)]
+struct FirewallStateInput { enabled: bool }
+async fn update_firewall_state(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<FirewallStateInput>) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    let action = if input.enabled { "enable" } else { "disable" };
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/lib/donatello/ufw-helper", action])
+        .output()
+        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "UFW helper unavailable; update Donatello"))?;
+    if !output.status.success() {
+        return Err(error(StatusCode::BAD_REQUEST, "UFW state change failed; check SSH and panel access rules"));
+    }
+    audit(&db, &actor.username, "firewall.state", action);
+    Ok(Json(json!({"enabled": input.enabled})))
+}
 async fn static_file(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let file = if path.is_empty() { "index.html" } else { path };
@@ -966,7 +1142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL);")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol));")?;
     let has_users = initialized(&db);
     let configured_setup_token = env::var("DONATELLO_SETUP_TOKEN")
         .ok()
@@ -993,12 +1169,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/dashboard", get(dashboard))
         .route("/api/history", get(history))
         .route("/api/monitoring/alerts", get(alert_settings).put(update_alert_settings))
+        .route("/api/monitoring/config", get(get_monitoring_config).put(put_monitoring_config))
+        .route("/api/settings/port", get(get_panel_port).put(change_panel_port))
         .route("/api/network/probe", post(port_probe))
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))
         .route("/api/audit", get(audit_log))
-        .route("/api/firewall", get(firewall))
-        .route("/api/firewall/rules", post(firewall_rule))
+        .route("/api/firewall", get(firewall).put(update_firewall_state))
+        .route("/api/firewall/rules", get(managed_firewall_rules).post(add_firewall_rule))
+        .route("/api/firewall/rules/{id}", put(update_firewall_rule).delete(delete_firewall_rule))
         .fallback(get(static_file))
         .with_state(state);
     let bind = env::var("DONATELLO_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());

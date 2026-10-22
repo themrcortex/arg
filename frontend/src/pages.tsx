@@ -11,9 +11,11 @@ import {
   HardDrive,
   Info,
   KeyRound,
-  LockKeyhole,
   Network,
   Plus,
+  Pencil,
+  Search,
+  Trash2,
   Radio,
   RefreshCw,
   ScrollText,
@@ -30,6 +32,7 @@ import {
   type AuditEvent,
   type Dashboard,
   type Firewall,
+  type ManagedFirewallRule,
   type User,
   type Role,
 } from './lib/api'
@@ -62,13 +65,15 @@ type StoredSample = { at: number; cpu: number; memory: number; disk: number; rx:
 function useDashboard(notify: (message: string) => void) {
   const [data, setData] = useState<Dashboard | null>(null)
   const [samples, setSamples] = useState<StoredSample[]>([])
+  const [historyEnabled, setHistoryEnabled] = useState(true)
   const [range, setRange] = useState<'5m' | '1h' | '24h'>('5m')
   const [loading, setLoading] = useState(true)
   const refresh = useCallback(async () => {
     try {
-      const [next, history] = await Promise.all([api<Dashboard>('dashboard'), api<{ samples: StoredSample[] }>(`history?range=${range}`)])
+      const [next, history] = await Promise.all([api<Dashboard>('dashboard'), api<{ samples: StoredSample[]; config: MonitoringConfig }>(`history?range=${range}`)])
       setData(next)
       setSamples(history.samples)
+      setHistoryEnabled(history.config.enabled)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'خواندن اطلاعات سرور ناموفق بود')
     } finally {
@@ -82,7 +87,7 @@ function useDashboard(notify: (message: string) => void) {
   }, [refresh])
   const history = samples.map((sample) => ({ at: sample.at, time: new Date(sample.at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }), rx: sample.rx, tx: sample.tx }))
   const resourceHistory = samples.map(({ at, cpu, memory, disk }) => ({ at, cpu, memory, disk }))
-  return { data, history, resourceHistory, cpu: samples.at(-1)?.cpu ?? null, loading, refresh, range, setRange }
+  return { data, history, resourceHistory, cpu: samples.at(-1)?.cpu ?? null, loading, refresh, range, setRange, historyEnabled }
 }
 
 function SectionCard({
@@ -204,7 +209,7 @@ function DashboardMetric({ icon: Icon, label, value, subtitle, progress, samples
 }
 
 export function DashboardPage({ user, notify }: { user: User } & Common) {
-  const { data, history, resourceHistory, cpu, loading, refresh, range, setRange } = useDashboard(notify)
+  const { data, history, resourceHistory, cpu, loading, refresh, range, setRange, historyEnabled } = useDashboard(notify)
   const memory = data?.memory_kib ? Math.round((1 - data.available_kib / data.memory_kib) * 100) : 0
   const disk = data?.disk_total_bytes ? Math.round((1 - (data.disk_free_bytes || 0) / data.disk_total_bytes) * 100) : 0
   const throughput = history.at(-1) ? history[history.length - 1].rx + history[history.length - 1].tx : 0
@@ -225,9 +230,9 @@ export function DashboardPage({ user, notify }: { user: User } & Common) {
       <DashboardMetric icon={Activity} tone="blue" label="ترافیک لحظه‌ای" value={`${formatBytes(throughput)}/s`} subtitle="مجموع دریافت و ارسال" samples={history.map((s) => s.rx + s.tx)}/>
     </section>}
 
-    <section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-[10px] font-bold tracking-[.16em] text-[#9ee4d6]" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-[#69e2cc]"/> RESOURCE HISTORY</div><h2 className="text-xl font-bold text-white">روند مصرف منابع</h2><p className="mt-1 text-xs text-[#9492a6]">تاریخچهٔ ثبت‌شدهٔ CPU، حافظه و دیسک روی سرور</p></div><div className="flex gap-1 rounded-xl border border-white/10 bg-[#10111b] p-1" aria-label="بازه زمانی نمودار">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`min-w-12 rounded-lg px-3 py-2 text-xs font-semibold transition ${range === item ? 'bg-[#553d7d] text-white shadow-lg' : 'text-[#9690a9] hover:text-white'}`} dir="ltr">{item}</button>)}</div></div><ResourceChart samples={resourceHistory}/></section>
+    <section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-[10px] font-bold tracking-[.16em] text-[#9ee4d6]" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-[#69e2cc]"/> RESOURCE HISTORY</div><h2 className="text-xl font-bold text-white">روند مصرف منابع</h2><p className="mt-1 text-xs text-[#9492a6]">تاریخچهٔ ثبت‌شدهٔ CPU، حافظه و دیسک روی سرور</p></div><div className="flex gap-1 rounded-xl border border-white/10 bg-[#10111b] p-1" aria-label="بازه زمانی نمودار">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`min-w-12 rounded-lg px-3 py-2 text-xs font-semibold transition ${range === item ? 'bg-[#553d7d] text-white shadow-lg' : 'text-[#9690a9] hover:text-white'}`} dir="ltr">{item}</button>)}</div></div>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></section>
 
-    <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]"><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-5"><h2 className="text-xl font-bold text-white">جریان شبکه</h2><p className="mt-1 text-xs text-[#9492a6]">نرخ دریافت و ارسال، با همان بازهٔ نمودار منابع</p></div><TrafficChart history={history}/></section><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4 flex items-start justify-between"><div><h2 className="text-xl font-bold text-white">وضعیت کارت‌ها</h2><p className="mt-1 text-xs text-[#9492a6]">رابط‌های شبکهٔ شناسایی‌شده</p></div><Network size={18} className="text-[#8fdfd3]"/></div><div className="space-y-2">{data?.interfaces.slice(0, 5).map((item) => <div key={item.name} className="flex items-center justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] px-4 py-3"><div className="min-w-0"><div className="truncate font-mono text-sm text-white" dir="ltr">{item.name}</div><div className="mt-1 truncate font-mono text-[10px] text-[#89899e]" dir="ltr">{item.addresses?.join(' · ') || item.mac}</div></div><span className={`h-2 w-2 shrink-0 rounded-full ${item.state === 'up' ? 'bg-[#6bdfbf] shadow-[0_0_10px_#6bdfbf]' : 'bg-[#77758e]'}`}/></div>)}{!data?.interfaces.length && <p className="py-9 text-center text-xs text-muted-foreground">کارت شبکه‌ای پیدا نشد.</p>}</div></section></div>
+    <div className="grid gap-5 xl:grid-cols-[1.4fr_1fr]"><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-5"><h2 className="text-xl font-bold text-white">جریان شبکه</h2><p className="mt-1 text-xs text-[#9492a6]">نرخ دریافت و ارسال، با همان بازهٔ نمودار منابع</p></div>{!historyEnabled && <HistoryPaused/>}<TrafficChart history={history}/></section><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4 flex items-start justify-between"><div><h2 className="text-xl font-bold text-white">وضعیت کارت‌ها</h2><p className="mt-1 text-xs text-[#9492a6]">رابط‌های شبکهٔ شناسایی‌شده</p></div><Network size={18} className="text-[#8fdfd3]"/></div><div className="space-y-2">{data?.interfaces.slice(0, 5).map((item) => <div key={item.name} className="flex items-center justify-between gap-3 rounded-xl border border-white/[.07] bg-white/[.025] px-4 py-3"><div className="min-w-0"><div className="truncate font-mono text-sm text-white" dir="ltr">{item.name}</div><div className="mt-1 truncate font-mono text-[10px] text-[#89899e]" dir="ltr">{item.addresses?.join(' · ') || item.mac}</div></div><span className={`h-2 w-2 shrink-0 rounded-full ${item.state === 'up' ? 'bg-[#6bdfbf] shadow-[0_0_10px_#6bdfbf]' : 'bg-[#77758e]'}`}/></div>)}{!data?.interfaces.length && <p className="py-9 text-center text-xs text-muted-foreground">کارت شبکه‌ای پیدا نشد.</p>}</div></section></div>
 
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]"><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4"><h2 className="text-xl font-bold text-white">مصرف خود Donatello</h2><p className="mt-1 text-xs text-[#9492a6]">اندازه‌گیری مستقیم فرایند پنل</p></div><div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-white/[.07] bg-white/[.025] p-4"><span className="text-xs text-muted-foreground">CPU</span><div className="mt-3 text-2xl font-bold text-white tabular-nums" dir="ltr">{formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%</div></div><div className="rounded-xl border border-white/[.07] bg-white/[.025] p-4"><span className="text-xs text-muted-foreground">RAM</span><div className="mt-3 text-2xl font-bold text-white tabular-nums" dir="ltr">{formatBytes(data?.process_rss_bytes || 0)}</div></div></div><p className="mt-4 text-[11px] leading-6 text-[#8f8da1]">RAM برابر حافظهٔ مقیم فرایند است؛ CPU نسبت به توان کل هسته‌ها محاسبه می‌شود.</p></section><section className="overview-section rounded-[24px] border border-white/[.08] p-5 md:p-7"><div className="mb-4"><h2 className="text-xl font-bold text-white">پورت‌های فعال</h2><p className="mt-1 text-xs text-[#9492a6]">نمونه‌ای از شنونده‌های TCP و UDP</p></div><div className="flex flex-wrap gap-2">{data?.ports.slice(0, 12).map((port, index) => <span key={`${port.port}-${port.protocol}-${index}`} className="rounded-lg border border-white/10 bg-white/[.035] px-3 py-2 font-mono text-xs text-[#c8bfd9]" dir="ltr">{port.port}<span className="text-[#8e85a2]">/{port.protocol.toLowerCase()}</span></span>)}{!data?.ports.length && <p className="py-5 text-xs text-muted-foreground">پورت شنونده‌ای پیدا نشد.</p>}</div></section></div>
     <AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/>
@@ -239,7 +244,7 @@ function DataRows({ rows }: { rows: { label: string; value: string; detail?: str
 }
 
 export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
-  const { data, resourceHistory, cpu, range, setRange, loading, refresh } = useDashboard(notify)
+  const { data, resourceHistory, cpu, range, setRange, loading, refresh, historyEnabled } = useDashboard(notify)
   const totalMemory = (data?.memory_kib || 0) * 1024
   const availableMemory = (data?.available_kib || 0) * 1024
   const memoryPercent = totalMemory ? Math.round((1 - availableMemory / totalMemory) * 100) : 0
@@ -252,7 +257,7 @@ export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
     <Heading title="سیستم و منابع" description="پردازنده، حافظه و دیسک را با جزئیات واقعی سرور بررسی کن." action={<Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>}/>
     {loading && !data ? <LoadingCards/> : <>
       <div className="grid gap-4 md:grid-cols-3"><Metric icon={Cpu} label="CPU" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={`بار 1/5/15 دقیقه: ${data?.load || '—'}`} progress={cpu || 0}/><Metric icon={Database} label="حافظه" value={`${formatNumber(memoryPercent)}%`} detail={`${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}`} progress={memoryPercent}/><Metric icon={HardDrive} label="دیسک ریشه" value={`${formatNumber(diskPercent)}%`} detail={`${formatBytes(totalDisk - freeDisk)} از ${formatBytes(totalDisk)}`} progress={diskPercent}/></div>
-      <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}><ResourceChart samples={resourceHistory}/></SectionCard></div>
+      <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: formatNumber(data?.cpu_cores || 0) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: `${formatNumber(Math.floor((data?.uptime_seconds || 0) / 86400))}d ${formatNumber(Math.floor(((data?.uptime_seconds || 0) % 86400) / 3600))}h` }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: formatBytes(totalMemory) }, { label: 'مصرف‌شده', value: formatBytes(totalMemory - availableMemory), detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: formatBytes(availableMemory) }, { label: 'Cache', value: formatBytes((memoryDetail?.cached_kib || 0) * 1024) }, { label: 'Buffer', value: formatBytes((memoryDetail?.buffers_kib || 0) * 1024) }, { label: 'Swap کل', value: formatBytes((data?.swap_total_kib || 0) * 1024) }, { label: 'Swap مصرف‌شده', value: formatBytes(((data?.swap_total_kib || 0) - (data?.swap_free_kib || 0)) * 1024) }]}/></SectionCard></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="فضای فایل‌سیستم ریشه"><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk ? formatBytes(totalDisk) : '—' }, { label: 'مصرف‌شده', value: totalDisk ? formatBytes(totalDisk - freeDisk) : '—' }, { label: 'آزاد', value: totalDisk ? formatBytes(freeDisk) : '—' }, { label: 'درصد مصرف', value: totalDisk ? `${formatNumber(diskPercent)}%` : '—' }]}/></SectionCard><SectionCard title="مصرف Donatello" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: `${formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%` }, { label: 'RAM پنل', value: formatBytes(data?.process_rss_bytes || 0), detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
       <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memoryPercent} disk={diskPercent} notify={notify}/></div>
@@ -270,10 +275,18 @@ export function PortsPage({ Heading, notify }: Common) {
     <Heading title="پورت‌های شنونده" description="پورت‌های باز در خود سرور را پیدا کن و اتصال TCP را آزمایش کن." action={<Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>}/>
     <div className="grid gap-4 sm:grid-cols-3"><Metric icon={Radio} label="همهٔ شنونده‌ها" value={formatNumber(data?.ports.length || 0)} detail="TCP و UDP روی IPv4 و IPv6"/><Metric icon={Network} label="TCP" value={formatNumber(data?.ports.filter((port) => port.protocol === 'TCP').length || 0)} detail="در حالت LISTEN"/><Metric icon={Wifi} label="UDP" value={formatNumber(data?.ports.filter((port) => port.protocol === 'UDP').length || 0)} detail="سوکت‌های UDP ثبت‌شده"/></div>
     <div className="mt-5"><PortProbeControls notify={notify}/></div>
-    <div className="mt-5"><SectionCard title="فهرست پورت‌ها" description="فیلتر و جست‌وجو در خروجی فعلی کرنل" right={<Badge variant="outline">{formatNumber(ports.length)} مورد</Badge>}><div className="mb-5 flex flex-wrap gap-3"><label className="min-w-[180px] flex-1"><span className="mb-1 block text-xs text-muted-foreground">جست‌وجوی شمارهٔ پورت</span><Input inputMode="numeric" lang="en" dir="ltr" value={query} onChange={(event) => setQuery(event.target.value.replace(/[^0-9]/g, ''))} placeholder="443, 8080..."/></label><div><span className="mb-1 block text-xs text-muted-foreground">پروتکل</span><Select value={protocol} onValueChange={(value) => setProtocol(value as typeof protocol)}><SelectTrigger className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">همه</SelectItem><SelectItem value="TCP">TCP</SelectItem><SelectItem value="UDP">UDP</SelectItem></SelectContent></Select></div><div><span className="mb-1 block text-xs text-muted-foreground">نسخهٔ IP</span><Select value={ipVersion} onValueChange={(value) => setIpVersion(value as typeof ipVersion)}><SelectTrigger className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">همه</SelectItem><SelectItem value="IPv4">IPv4</SelectItem><SelectItem value="IPv6">IPv6</SelectItem></SelectContent></Select></div></div>{loading && !data ? <Skeleton className="h-48"/> : <PortsTable ports={ports}/>}</SectionCard></div>
+    <div className="mt-5"><SectionCard title="فهرست پورت‌ها" description="جست‌وجو و فیلتر مستقیم در فهرست کرنل" right={<Badge variant="outline">{formatNumber(ports.length)} مورد</Badge>}>
+      <div className="mb-5 space-y-3 rounded-2xl border border-white/[.08] bg-[#11131e] p-3">
+        <label className="relative block"><span className="sr-only">جست‌وجوی شمارهٔ پورت</span><Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"/><Input className="pr-9" inputMode="numeric" lang="en" value={query} onChange={(event) => setQuery(event.target.value.replace(/[^0-9]/g, ''))} placeholder="شمارهٔ پورت را جست‌وجو کن…"/></label>
+        <div className="flex flex-wrap items-center gap-3"><div className="flex flex-wrap gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1" aria-label="فیلتر پروتکل">{(['all','TCP','UDP'] as const).map((value) => <button key={value} onClick={() => setProtocol(value)} aria-pressed={protocol === value} className={`rounded-lg px-3 py-1.5 text-xs transition ${protocol === value ? 'bg-primary/25 text-white' : 'text-muted-foreground hover:text-white'}`}>{value === 'all' ? 'همهٔ پروتکل‌ها' : value}</button>)}</div><div className="flex flex-wrap gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1" aria-label="فیلتر نسخهٔ IP">{(['all','IPv4','IPv6'] as const).map((value) => <button key={value} onClick={() => setIpVersion(value)} aria-pressed={ipVersion === value} className={`rounded-lg px-3 py-1.5 text-xs transition ${ipVersion === value ? 'bg-primary/25 text-white' : 'text-muted-foreground hover:text-white'}`}>{value === 'all' ? 'همهٔ IPها' : value}</button>)}</div>{(query || protocol !== 'all' || ipVersion !== 'all') && <button className="text-xs text-[#bda0ec] hover:text-white" onClick={() => { setQuery(''); setProtocol('all'); setIpVersion('all') }}>پاک‌کردن فیلترها</button>}</div>
+      </div>
+      {loading && !data ? <Skeleton className="h-48"/> : <PortsTable ports={ports}/>}
+    </SectionCard></div>
     <Alert className="mt-5"><Info size={17} className="mb-2 text-primary"/><AlertTitle>شنود محلی و دسترسی بیرونی</AlertTitle><AlertDescription>وجود پورت در این فهرست به معنی دسترسی از اینترنت نیست. قانون UFW و فایروال ارائه‌دهنده را نیز بررسی کن. حجم ترافیک به‌تفکیک پورت هنوز اندازه‌گیری نمی‌شود.</AlertDescription></Alert>
   </>
 }
+
+function HistoryPaused() { return <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-400/20 bg-amber-400/[.06] px-4 py-3 text-xs text-amber-200"><span className="h-2 w-2 rounded-full bg-amber-400"/> ثبت تاریخچه متوقف است. برای ادامه، از تنظیمات پنل آن را فعال کن.</div> }
 
 function ResourceChart({ samples }: { samples: ResourceSample[] }) {
   return <TimeSeriesChart samples={samples} series={[{ key: 'cpu', label: 'پردازنده', color: '#be9bff' }, { key: 'memory', label: 'حافظه', color: '#55d8cb' }, { key: 'disk', label: 'دیسک', color: '#f1bb8a' }]} max={100} unit="%" />
@@ -282,7 +295,7 @@ function ResourceChart({ samples }: { samples: ResourceSample[] }) {
 type ChartSeries = { key: string; label: string; color: string }
 function TimeSeriesChart({ samples, series, max, unit }: { samples: (ResourceSample | Sample)[]; series: ChartSeries[]; max: number; unit: string }) {
   const [hover, setHover] = useState<number | null>(null)
-  if (!samples.length) return <div className="grid h-[290px] place-items-center rounded-2xl border border-dashed border-white/10 bg-[#10111a] p-6 text-center text-sm text-muted-foreground">سرویس در حال ثبت نخستین نمونه است. نمودار با دادهٔ ذخیره‌شده نمایش داده می‌شود.</div>
+  if (!samples.length) return <div className="grid h-[290px] place-items-center rounded-2xl border border-dashed border-white/10 bg-[#10111a] p-6 text-center text-sm text-muted-foreground">داده‌ای در این بازه ثبت نشده است.</div>
   const width = 760, left = 50, right = 15, top = 20, bottom = 235
   const x = (index: number) => left + index * (width - left - right) / Math.max(samples.length - 1, 1)
   const y = (value: number) => bottom - Math.min(Math.max(value / max, 0), 1) * (bottom - top)
@@ -354,7 +367,7 @@ function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
 }
 
 export function NetworkPage({ Heading, notify }: Common) {
-  const { data, history, loading, refresh, range, setRange } = useDashboard(notify)
+  const { data, history, loading, refresh, range, setRange, historyEnabled } = useDashboard(notify)
   return (
     <>
       <Heading
@@ -417,7 +430,7 @@ export function NetworkPage({ Heading, notify }: Common) {
           <div className="mt-5">
             <DistributionBars title="توزیع ترافیک کارت‌ها" description="جمع بایت‌های دریافت و ارسال هر رابط از زمان شروع آن" items={(data?.interfaces || []).map((item) => ({ label: item.name, value: item.rx_bytes + item.tx_bytes, display: formatBytes(item.rx_bytes + item.tx_bytes) }))} />
           </div>
-          <div className="mt-5"><SectionCard title="نرخ ترافیک شبکه" description="نمونه‌های ذخیره‌شده توسط سرویس" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}><TrafficChart history={history}/></SectionCard></div>
+          <div className="mt-5"><SectionCard title="نرخ ترافیک شبکه" description="نمونه‌های ذخیره‌شده توسط سرویس" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}>{!historyEnabled && <HistoryPaused/>}<TrafficChart history={history}/></SectionCard></div>
           <div className="mt-5"><SectionCard title="جزئیات رابط‌ها" description="شمارنده‌های فعلی هر کارت از کرنل خوانده می‌شوند"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>رابط</TableHead><TableHead>وضعیت</TableHead><TableHead>MTU</TableHead><TableHead>سرعت لینک</TableHead><TableHead>بستهٔ دریافتی</TableHead><TableHead>بستهٔ ارسالی</TableHead><TableHead>خطا / حذف</TableHead></TableRow></TableHeader><TableBody>{(data?.interfaces || []).map((item) => <TableRow key={item.name}><TableCell className="font-mono text-white" dir="ltr">{item.name}</TableCell><TableCell>{item.state || '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.mtu ?? '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.speed_mbps ? `${formatNumber(item.speed_mbps)} Mbps` : '—'}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.rx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.tx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber((item.rx_errors || 0) + (item.tx_errors || 0) + (item.rx_dropped || 0) + (item.tx_dropped || 0))}</TableCell></TableRow>)}</TableBody></Table></div></SectionCard></div>
         </>
       )}
@@ -427,83 +440,69 @@ export function NetworkPage({ Heading, notify }: Common) {
 
 export function FirewallPage({ Heading, notify, user }: Common & { user: User }) {
   const [data, setData] = useState<Firewall | null>(null)
-  const [rulePort, setRulePort] = useState('8080')
-  const [ruleProtocol, setRuleProtocol] = useState<'tcp' | 'udp'>('tcp')
-  const [changing, setChanging] = useState(false)
+  const [rules, setRules] = useState<ManagedFirewallRule[]>([])
   const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editing, setEditing] = useState<number | null>(null)
+  const [form, setForm] = useState<{ port: string; protocol: 'tcp' | 'udp'; policy: 'allow' | 'deny'; enabled: boolean }>({ port: '', protocol: 'tcp', policy: 'allow', enabled: true })
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all')
   const refresh = useCallback(async () => {
-    try {
-      setData(await api<Firewall>('firewall'))
-    } catch (e) {
-      notify(e instanceof Error ? e.message : 'خواندن UFW ناموفق بود')
-    } finally {
-      setLoading(false)
-    }
+    try { const [firewall, managed] = await Promise.all([api<Firewall>('firewall'), api<{ rules: ManagedFirewallRule[] }>('firewall/rules')]); setData(firewall); setRules(managed.rules) }
+    catch (error) { notify(error instanceof Error ? error.message : 'دریافت قوانین ناموفق بود') }
+    finally { setLoading(false) }
   }, [notify])
-  useEffect(() => {
-    void refresh()
-  }, [refresh])
-  async function changeRule(action: 'add' | 'remove') {
-    if (action === 'remove' && !window.confirm(`قانون مدیریت‌شدهٔ ${rulePort}/${ruleProtocol} حذف شود؟`)) return
-    setChanging(true)
-    try { await api('firewall/rules', { method: 'POST', body: JSON.stringify({ action, port: Number(rulePort), protocol: ruleProtocol }) }); notify(action === 'add' ? 'قانون دسترسی اضافه شد.' : 'قانون دسترسی حذف شد.'); await refresh() }
-    catch (error) { notify(error instanceof Error ? error.message : 'تغییر قانون ناموفق بود') }
-    finally { setChanging(false) }
+  useEffect(() => { void refresh() }, [refresh])
+  const active = data?.available && /^Status: active/m.test(data.status)
+  const filtered = rules.filter((rule) => (statusFilter === 'all' || (statusFilter === 'enabled') === rule.enabled) && (!query.trim() || String(rule.port).includes(query.trim())))
+  function openEditor(rule?: ManagedFirewallRule) {
+    setEditing(rule?.id ?? null)
+    setForm(rule ? { port: String(rule.port), protocol: rule.protocol, policy: rule.policy, enabled: rule.enabled } : { port: '', protocol: 'tcp', policy: 'allow', enabled: true })
+    setDialogOpen(true)
   }
-  const rules = (data?.status || '').split('\n').filter((line) => /^\s*\[\s*\d+\]/.test(line))
-  return (
-    <>
-      <Heading
-        title="فایروال UFW"
-        description="وضعیت و قوانین ثبت‌شدهٔ فایروال سرور"
-        action={
-          <div className="flex gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button><Button variant="outline" size="sm" disabled={!data?.status} onClick={() => downloadText('donatello-ufw.txt', data?.status || '')}><Download size={15}/> دریافت قوانین</Button></div>
-        }
-      />
-      {user.role === 'admin' && <div className="mb-5"><SectionCard title="مدیریت قانون دسترسی" description="فقط قانون‌های دارای برچسب DONATELLO WEB از اینجا قابل حذف هستند"><div className="flex flex-wrap items-end gap-3"><div className="space-y-2"><Label htmlFor="rule-port">پورت</Label><Input id="rule-port" type="number" lang="en" dir="ltr" min={1} max={65535} value={rulePort} onChange={(event) => setRulePort(event.target.value)} className="w-32"/></div><div className="space-y-2"><Label htmlFor="rule-proto">پروتکل</Label><Select value={ruleProtocol} onValueChange={(value) => setRuleProtocol(value as 'tcp' | 'udp')}><SelectTrigger id="rule-proto" className="w-28"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="tcp">TCP</SelectItem><SelectItem value="udp">UDP</SelectItem></SelectContent></Select></div><Button disabled={changing || !rulePort} onClick={() => void changeRule('add')}>افزودن اجازه</Button><Button variant="outline" disabled={changing || !rulePort} onClick={() => void changeRule('remove')}>حذف قانون Donatello</Button></div></SectionCard></div>}
-      <div className="mb-5"><DistributionBars title="ترکیب قوانین UFW" description="بر اساس خروجی فعلی ufw status numbered" items={['ALLOW', 'DENY', 'REJECT', 'LIMIT'].map((action) => ({ label: action, value: rules.filter((line) => line.includes(action)).length }))} /></div>
-      <div className="grid gap-5 lg:grid-cols-[1.5fr_.85fr]">
-        <SectionCard
-          title="وضعیت قوانین"
-          description="خروجی دستور ufw status numbered"
-          right={
-            <Badge variant={data?.available ? 'success' : 'warning'}>
-              {loading ? 'در حال بررسی' : data?.available ? 'در دسترس' : 'در دسترس نیست'}
-            </Badge>
-          }
-        >
-          {loading ? (
-            <Skeleton className="h-48" />
-          ) : (
-            <pre
-              className="mono max-h-[540px] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-border bg-[#120e1b] p-5 text-left text-xs leading-7 text-[#d9cde8]"
-              dir="ltr"
-            >
-              {data?.status || 'خروجی‌ای دریافت نشد.'}
-              {data?.error && `\n${data.error}`}
-            </pre>
-          )}
-        </SectionCard>
-        <SectionCard title="حفاظت دسترسی" description="دسترسی به پنل را همیشه حفظ کنید">
-          <div className="space-y-4">
-            <div className="flex gap-3">
-              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-400/10 text-emerald-300">
-                <ShieldCheck size={20} />
-              </div>
-              <p className="text-sm leading-7 text-muted-foreground">
-                پیش از هر تغییر، قوانین دسترسی SSH و پورت پنل باید بررسی شوند.
-              </p>
-            </div>
-            <Alert>
-              <AlertDescription>
-                ساخت و حذف قوانین فقط برای مدیر و از مسیر محدود Donatello انجام می‌شود. حذف قوانین دیگر سرور از این صفحه مجاز نیست.
-              </AlertDescription>
-            </Alert>
-          </div>
-        </SectionCard>
-      </div>
-    </>
-  )
+  async function save(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    try {
+      const path = editing === null ? 'firewall/rules' : `firewall/rules/${editing}`
+      await api(path, { method: editing === null ? 'POST' : 'PUT', body: JSON.stringify({ ...form, port: Number(form.port) }) })
+      setDialogOpen(false)
+      notify(editing === null ? 'قانون فایروال ساخته شد.' : 'قانون فایروال ویرایش شد.')
+      await refresh()
+    } catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ قانون ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  async function toggleFirewall() {
+    setBusy(true)
+    try { await api('firewall', { method: 'PUT', body: JSON.stringify({ enabled: !active }) }); notify(active ? 'فایروال UFW غیرفعال شد.' : 'فایروال UFW فعال شد.'); await refresh() }
+    catch (error) { notify(error instanceof Error ? error.message : 'تغییر وضعیت UFW ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  async function toggle(rule: ManagedFirewallRule) {
+    setBusy(true)
+    try { await api(`firewall/rules/${rule.id}`, { method: 'PUT', body: JSON.stringify({ port: rule.port, protocol: rule.protocol, policy: rule.policy, enabled: !rule.enabled }) }); notify(rule.enabled ? 'قانون غیرفعال شد.' : 'قانون فعال شد.'); await refresh() }
+    catch (error) { notify(error instanceof Error ? error.message : 'تغییر وضعیت ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  async function remove(rule: ManagedFirewallRule) {
+    if (!window.confirm(`قانون ${rule.port}/${rule.protocol} حذف شود؟`)) return
+    setBusy(true)
+    try { await api(`firewall/rules/${rule.id}`, { method: 'DELETE' }); notify('قانون حذف شد.'); await refresh() }
+    catch (error) { notify(error instanceof Error ? error.message : 'حذف قانون ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  return <>
+    <Heading title="فایروال UFW" description="قوانین Donatello را بساز، ویرایش کن یا موقتاً غیرفعال کن." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>{user.role === 'admin' && <Button size="sm" onClick={() => openEditor()}><Plus size={15}/> قانون جدید</Button>}</div>}/>
+    <div className="mb-5 grid gap-3 sm:grid-cols-3"><div className="rounded-2xl border border-white/10 bg-[#171824] p-5"><div className="text-xs text-muted-foreground">وضعیت UFW</div><div className="mt-3 flex items-center gap-2 text-xl font-bold text-white"><span className={`h-2 w-2 rounded-full ${active ? 'bg-emerald-400' : 'bg-amber-400'}`}/>{loading ? 'در حال بررسی' : active ? 'فعال' : 'غیرفعال'}</div>{user.role === 'admin' && data?.available && <div className="mt-4 flex items-center gap-2 border-t border-white/10 pt-3 text-xs text-muted-foreground"><Switch checked={!!active} disabled={busy} onCheckedChange={() => void toggleFirewall()} aria-label="تغییر وضعیت UFW"/> تغییر وضعیت کلی UFW</div>}</div><div className="rounded-2xl border border-white/10 bg-[#171824] p-5"><div className="text-xs text-muted-foreground">قوانین فعال Donatello</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => rule.enabled).length)}</div></div><div className="rounded-2xl border border-white/10 bg-[#171824] p-5"><div className="text-xs text-muted-foreground">قوانین غیرفعال</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => !rule.enabled).length)}</div></div></div>
+    <SectionCard title="قوانین مدیریت‌شده" description="تغییر وضعیت و ویرایش فقط روی قوانین ساخته‌شده توسط Donatello اعمال می‌شود" right={<Badge variant="outline">{formatNumber(filtered.length)} قانون</Badge>}>
+      <div className="mb-5 flex flex-wrap items-center gap-3"><label className="relative min-w-[180px] flex-1"><span className="sr-only">جست‌وجوی پورت</span><Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"/><Input lang="en" inputMode="numeric" value={query} onChange={(event) => setQuery(event.target.value.replace(/[^0-9]/g, ''))} placeholder="جست‌وجوی شمارهٔ پورت" className="pr-9"/></label><div className="flex gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1">{([['all','همه'], ['enabled','فعال'], ['disabled','غیرفعال']] as const).map(([value, label]) => <button key={value} onClick={() => setStatusFilter(value)} aria-pressed={statusFilter === value} className={`rounded-lg px-3 py-2 text-xs transition ${statusFilter === value ? 'bg-primary/20 text-white' : 'text-muted-foreground hover:text-white'}`}>{label}</button>)}</div></div>
+      {loading ? <Skeleton className="h-48"/> : filtered.length ? <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>پورت</TableHead><TableHead>پروتکل</TableHead><TableHead>رفتار</TableHead><TableHead>وضعیت</TableHead>{user.role === 'admin' && <TableHead>مدیریت</TableHead>}</TableRow></TableHeader><TableBody>{filtered.map((rule) => <TableRow key={rule.id}><TableCell className="font-mono text-white" dir="ltr">{rule.port}</TableCell><TableCell className="font-mono uppercase">{rule.protocol}</TableCell><TableCell><Badge variant={rule.policy === 'allow' ? 'success' : 'warning'}>{rule.policy === 'allow' ? 'اجازه' : 'مسدود'}</Badge></TableCell><TableCell>{user.role === 'admin' ? <div className="flex items-center gap-2"><Switch checked={rule.enabled} disabled={busy} onCheckedChange={() => void toggle(rule)} aria-label={`${rule.enabled ? 'غیرفعال‌کردن' : 'فعال‌کردن'} قانون ${rule.port}`}/><span className="text-xs text-muted-foreground">{rule.enabled ? 'فعال' : 'غیرفعال'}</span></div> : <Badge variant={rule.enabled ? 'success' : 'outline'}>{rule.enabled ? 'فعال' : 'غیرفعال'}</Badge>}</TableCell>{user.role === 'admin' && <TableCell><div className="flex gap-1"><Button variant="ghost" size="icon" disabled={busy} onClick={() => openEditor(rule)} aria-label={`ویرایش قانون ${rule.port}`}><Pencil size={15}/></Button><Button variant="ghost" size="icon" disabled={busy} onClick={() => void remove(rule)} aria-label={`حذف قانون ${rule.port}`}><Trash2 size={15}/></Button></div></TableCell>}</TableRow>)}</TableBody></Table></div> : <div className="rounded-xl border border-dashed border-white/10 py-12 text-center text-sm text-muted-foreground">{query || statusFilter !== 'all' ? 'قانونی مطابق فیلتر پیدا نشد.' : 'هنوز قانونی با Donatello ساخته نشده است.'}</div>}
+    </SectionCard>
+    <details className="mt-5 rounded-2xl border border-white/10 bg-[#14151f] p-5"><summary className="cursor-pointer text-sm font-semibold text-white">همهٔ قوانین UFW و خروجی خام</summary><div className="mt-4 flex justify-end"><Button variant="outline" size="sm" disabled={!data?.status} onClick={() => downloadText('donatello-ufw.txt', data?.status || '')}><Download size={14}/> دریافت خروجی</Button></div><pre className="mt-3 max-h-[480px] overflow-auto whitespace-pre-wrap rounded-xl bg-[#0e101a] p-4 text-left font-mono text-xs leading-6 text-muted-foreground" dir="ltr">{data?.status || data?.error || 'UFW unavailable'}</pre></details>
+    <Alert className="mt-5"><ShieldCheck size={17} className="mb-2 text-primary"/><AlertTitle>حفاظت دسترسی</AlertTitle><AlertDescription>پورت‌های SSH، HTTP، HTTPS و پورت‌های پنل از ویرایش در این بخش محافظت می‌شوند. هنگام فعال‌کردن UFW، دسترسی SSH و پنل ابتدا مجاز می‌شود.</AlertDescription></Alert>
+    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}><DialogContent><DialogHeader><DialogTitle>{editing === null ? 'قانون جدید' : 'ویرایش قانون'}</DialogTitle><DialogDescription>قانون در UFW اعمال می‌شود و می‌توانی بعداً آن را غیرفعال کنی.</DialogDescription></DialogHeader><form onSubmit={save} className="space-y-4"><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="firewall-port">پورت</Label><Input id="firewall-port" type="number" lang="en" dir="ltr" min={1} max={65535} required value={form.port} onChange={(event) => setForm((old) => ({ ...old, port: event.target.value }))}/></div><div className="space-y-2"><Label htmlFor="firewall-protocol">پروتکل</Label><Select value={form.protocol} onValueChange={(value) => setForm((old) => ({ ...old, protocol: value as 'tcp' | 'udp' }))}><SelectTrigger id="firewall-protocol"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="tcp">TCP</SelectItem><SelectItem value="udp">UDP</SelectItem></SelectContent></Select></div></div><div className="space-y-2"><Label htmlFor="firewall-policy">رفتار</Label><Select value={form.policy} onValueChange={(value) => setForm((old) => ({ ...old, policy: value as 'allow' | 'deny' }))}><SelectTrigger id="firewall-policy"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="allow">اجازه</SelectItem><SelectItem value="deny">مسدود</SelectItem></SelectContent></Select></div><label className="flex items-center justify-between rounded-xl border border-white/10 p-3 text-sm"><span>قانون فعال باشد</span><Switch checked={form.enabled} onCheckedChange={(checked) => setForm((old) => ({ ...old, enabled: checked }))}/></label><Button type="submit" disabled={busy || !form.port} className="w-full">{busy ? 'در حال ذخیره…' : 'ذخیرهٔ قانون'}</Button></form></DialogContent></Dialog>
+  </>
 }
 
 const roleNames: Record<Role, string> = { admin: 'مدیر', operator: 'اپراتور', viewer: 'ناظر' }
@@ -794,62 +793,59 @@ export function AuditPage({ Heading, notify }: Common) {
   )
 }
 
-export function SettingsPage({
-  Heading,
-  logout,
-  notify,
-}: {
-  Heading: Heading
-  logout: () => void
-  notify: (message: string) => void
-}) {
-  const sections = [
-    {
-      icon: Radio,
-      title: 'پورت پنل',
-      value: location.port || (location.protocol === 'https:' ? '443' : '80'),
-      description: 'پورت فعلی در آدرس مرورگر',
-    },
-    { icon: LockKeyhole, title: 'امنیت نشست', value: '24 ساعت', description: 'کوکی HttpOnly و SameSite' },
-    { icon: Gauge, title: 'دورهٔ مانیتورینگ', value: '5 ثانیه', description: 'به‌روزرسانی خودکار داشبورد' },
-  ]
-  return (
-    <>
-      <Heading title="تنظیمات" description="امنیت حساب، نشانی پنل و وضعیت تنظیمات اجرایی" />
-      <div className="grid gap-5 lg:grid-cols-[1.1fr_.9fr]">
-        <SectionCard title="وضعیت فعلی پنل" description="پیکربندی و امنیت">
-          <div className="space-y-1">
-            {sections.map((item) => (
-              <div
-                key={item.title}
-                className="flex items-center justify-between gap-4 border-b border-border/70 py-4 last:border-0"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="grid h-10 w-10 place-items-center rounded-xl bg-primary/15 text-primary">
-                    <item.icon size={19} />
-                  </span>
-                  <div>
-                    <div className="text-sm font-semibold">{item.title}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">{item.description}</div>
-                  </div>
-                </div>
-                <Badge variant="outline">{item.value}</Badge>
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-        <SectionCard title="نشانی پنل" description="دسترسی و مدیریت اتصال">
-          <div className="space-y-4"><div className="rounded-xl border border-white/10 bg-white/[.03] p-4"><div className="mb-2 text-xs text-muted-foreground">آدرس فعلی</div><div className="break-all font-mono text-sm text-white" dir="ltr">{location.origin}</div></div><Button variant="outline" onClick={() => void navigator.clipboard.writeText(location.origin).then(() => notify('آدرس پنل کپی شد.')).catch(() => notify('کپی آدرس ناموفق بود.'))}>کپی آدرس پنل</Button><p className="text-xs leading-6 text-muted-foreground">برای تغییر پورت و گواهی SSL از منوی سرور با دستور <code className="font-mono text-white" dir="ltr">sudo donatello</code> استفاده کن.</p></div>
-        </SectionCard>
-      </div>
-      <div className="mt-5">
-        <PasswordCard notify={notify} />
-      </div>
-      <Button variant="outline" className="mt-7" onClick={logout}>
-        <X size={16} /> خروج از حساب
-      </Button>
-    </>
-  )
+type MonitoringConfig = { enabled: boolean; interval_seconds: number; retention_days: number; session_hours: number }
+
+export function SettingsPage({ Heading, logout, notify, user }: { Heading: Heading; logout: () => void; notify: (message: string) => void; user: User }) {
+  const [config, setConfig] = useState<MonitoringConfig | null>(null)
+  const [port, setPort] = useState(location.port || (location.protocol === 'https:' ? '443' : '80'))
+  const [busy, setBusy] = useState(false)
+  const [scheduledPort, setScheduledPort] = useState<number | null>(null)
+  const isAdmin = user.role === 'admin'
+  useEffect(() => { void api<MonitoringConfig>('monitoring/config').then(setConfig).catch((error) => notify(error instanceof Error ? error.message : 'دریافت تنظیمات ناموفق بود')) }, [notify])
+  useEffect(() => { void api<{port: number}>('settings/port').then((result) => setPort(String(result.port))).catch(() => undefined) }, [])
+  async function saveConfig(event: FormEvent) {
+    event.preventDefault()
+    if (!config) return
+    setBusy(true)
+    try { setConfig(await api<MonitoringConfig>('monitoring/config', { method: 'PUT', body: JSON.stringify(config) })); notify('تنظیمات تاریخچه و نشست ذخیره شد.') }
+    catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ تنظیمات ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  async function changePort(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    try {
+      const value = Number(port)
+      await api('settings/port', { method: 'PUT', body: JSON.stringify({ port: value }) })
+      setScheduledPort(value)
+      notify('تغییر پورت زمان‌بندی شد. پس از راه‌اندازی مجدد، آدرس جدید را باز کن.')
+    } catch (error) { notify(error instanceof Error ? error.message : 'تغییر پورت ناموفق بود') }
+    finally { setBusy(false) }
+  }
+  function selector(label: string, key: 'interval_seconds' | 'retention_days' | 'session_hours', values: number[], unit: string) {
+    return <label className="space-y-2 text-sm"><span className="block font-medium text-white">{label}</span><Select disabled={!isAdmin} value={String(config?.[key] ?? values[0])} onValueChange={(value) => setConfig((old) => old && { ...old, [key]: Number(value) })}><SelectTrigger dir="ltr"><SelectValue/></SelectTrigger><SelectContent>{values.map((value) => <SelectItem key={value} value={String(value)}>{value} {unit}</SelectItem>)}</SelectContent></Select></label>
+  }
+  return <>
+    <Heading title="تنظیمات" description="زمان نمونه‌برداری، نگه‌داری تاریخچه، امنیت نشست و پورت دسترسی" />
+    <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]">
+      <SectionCard title="ثبت تاریخچه" description="تنظیمات روی سرویس Rust ذخیره و بدون نصب دوباره اعمال می‌شود" right={<Badge variant={config?.enabled ? 'success' : 'outline'}>{config?.enabled ? 'در حال ثبت' : 'متوقف'}</Badge>}>
+        {config ? <form onSubmit={saveConfig} className="space-y-5">
+          <label className="flex items-center justify-between gap-4 rounded-2xl border border-primary/20 bg-primary/[.06] p-4"><span><span className="block text-sm font-semibold text-white">ثبت داده‌های CPU، حافظه، دیسک و شبکه</span><span className="mt-1 block text-xs text-muted-foreground">در صورت غیرفعال‌کردن، داده‌های قبلی تا پایان مدت نگه‌داری باقی می‌مانند.</span></span><Switch disabled={!isAdmin} checked={config.enabled} onCheckedChange={(checked) => setConfig((old) => old && { ...old, enabled: checked })}/></label>
+          <div className="grid gap-4 sm:grid-cols-3">{selector('فاصلهٔ نمونه‌برداری', 'interval_seconds', [5,10,15,30,60], 'ثانیه')}{selector('مدت نگه‌داری', 'retention_days', [1,3,7,14,30], 'روز')}{selector('اعتبار نشست', 'session_hours', [1,6,12,24,72], 'ساعت')}</div>
+          <p className="text-xs leading-6 text-muted-foreground">تغییر اعتبار نشست روی ورودهای بعدی اعمال می‌شود. جمع‌آوری داده در پس‌زمینه انجام می‌شود و به بازبودن این صفحه وابسته نیست.</p>
+          {isAdmin && <Button type="submit" disabled={busy}>{busy ? 'در حال ذخیره…' : 'ذخیرهٔ تنظیمات'}</Button>}
+        </form> : <Skeleton className="h-48"/>}
+      </SectionCard>
+      <SectionCard title="دسترسی به پنل" description="نشانی جاری و تغییر پورت HTTP">
+        <div className="rounded-xl border border-white/10 bg-white/[.03] p-4"><div className="mb-2 text-xs text-muted-foreground">آدرس فعلی</div><div className="break-all font-mono text-sm text-white" dir="ltr">{location.origin}</div></div>
+        <Button variant="outline" className="mt-3" onClick={() => void navigator.clipboard.writeText(location.origin).then(() => notify('آدرس پنل کپی شد.')).catch(() => notify('کپی آدرس ناموفق بود.'))}>کپی آدرس</Button>
+        {isAdmin && <form onSubmit={changePort} className="mt-6 space-y-3 border-t border-white/10 pt-5"><Label htmlFor="panel-port">پورت HTTP پنل</Label><div className="flex gap-2"><Input id="panel-port" type="number" min={1024} max={65535} required dir="ltr" lang="en" value={port} onChange={(event) => setPort(event.target.value)}/><Button type="submit" disabled={busy}>تغییر پورت</Button></div><p className="text-xs leading-6 text-muted-foreground">پورت HTTPS مستقل است. پس از تغییر، سرویس دوباره راه‌اندازی می‌شود و اتصال HTTP فعلی قطع خواهد شد.</p></form>}
+        {scheduledPort && <Alert className="mt-4"><AlertDescription>نشانی HTTP جدید: <a className="font-mono text-primary underline" dir="ltr" href={`http://${location.hostname}:${scheduledPort}`}>http://{location.hostname}:{scheduledPort}</a></AlertDescription></Alert>}
+      </SectionCard>
+    </div>
+    <div className="mt-5"><PasswordCard notify={notify}/></div>
+    <Button variant="outline" className="mt-7" onClick={logout}><X size={16}/> خروج از حساب</Button>
+  </>
 }
 
 function PasswordCard({ notify }: { notify: (message: string) => void }) {
