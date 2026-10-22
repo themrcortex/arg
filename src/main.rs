@@ -474,7 +474,24 @@ fn network() -> Vec<Value> {
                     .trim()
                     .to_owned()
             };
-            result.push(json!({"name": name, "state": read("operstate"), "mac": read("address"), "rx_bytes": read("statistics/rx_bytes").parse::<u64>().unwrap_or(0), "tx_bytes": read("statistics/tx_bytes").parse::<u64>().unwrap_or(0), "addresses": addresses.remove(&name).unwrap_or_default()}));
+            let counter = |key: &str| read(key).parse::<u64>().unwrap_or(0);
+            result.push(json!({
+                "name": name,
+                "state": read("operstate"),
+                "mac": read("address"),
+                "mtu": read("mtu").parse::<u64>().ok(),
+                "speed_mbps": read("speed").parse::<u64>().ok(),
+                "carrier": read("carrier") == "1",
+                "rx_bytes": counter("statistics/rx_bytes"),
+                "tx_bytes": counter("statistics/tx_bytes"),
+                "rx_packets": counter("statistics/rx_packets"),
+                "tx_packets": counter("statistics/tx_packets"),
+                "rx_errors": counter("statistics/rx_errors"),
+                "tx_errors": counter("statistics/tx_errors"),
+                "rx_dropped": counter("statistics/rx_dropped"),
+                "tx_dropped": counter("statistics/tx_dropped"),
+                "addresses": addresses.remove(&name).unwrap_or_default()
+            }));
         }
     }
     result
@@ -609,9 +626,33 @@ async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     let (cpu_total, cpu_idle) = cpu_ticks();
     let (process_rss_bytes, process_cpu_percent) = process_usage();
     let (disk_total_bytes, disk_free_bytes) = disk_usage();
-    Ok(Json(
-        json!({"hostname": hostname, "uptime_seconds": uptime as u64, "load": load, "memory_kib": mem.get("MemTotal"), "available_kib": mem.get("MemAvailable"), "swap_total_kib": mem.get("SwapTotal"), "swap_free_kib": mem.get("SwapFree"), "cpu_total": cpu_total, "cpu_idle": cpu_idle, "process_rss_bytes": process_rss_bytes, "process_cpu_percent": process_cpu_percent, "disk_total_bytes": disk_total_bytes, "disk_free_bytes": disk_free_bytes, "interfaces": network(), "ports": listening_ports()}),
-    ))
+    Ok(Json(json!({
+        "hostname": hostname,
+        "uptime_seconds": uptime as u64,
+        "load": load,
+        "memory_kib": mem.get("MemTotal"),
+        "available_kib": mem.get("MemAvailable"),
+        "memory_details": {
+            "free_kib": mem.get("MemFree"),
+            "buffers_kib": mem.get("Buffers"),
+            "cached_kib": mem.get("Cached"),
+            "active_kib": mem.get("Active"),
+            "inactive_kib": mem.get("Inactive"),
+            "dirty_kib": mem.get("Dirty"),
+            "slab_kib": mem.get("Slab")
+        },
+        "swap_total_kib": mem.get("SwapTotal"),
+        "swap_free_kib": mem.get("SwapFree"),
+        "cpu_total": cpu_total,
+        "cpu_idle": cpu_idle,
+        "cpu_cores": std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1),
+        "process_rss_bytes": process_rss_bytes,
+        "process_cpu_percent": process_cpu_percent,
+        "disk_total_bytes": disk_total_bytes,
+        "disk_free_bytes": disk_free_bytes,
+        "interfaces": network(),
+        "ports": listening_ports()
+    })))
 }
 async fn users(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();

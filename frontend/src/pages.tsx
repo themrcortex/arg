@@ -61,10 +61,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
 type Sample = { time: string; rx: number; tx: number }
+type ResourceSample = { cpu: number; memory: number; disk: number }
 
 function useDashboard(notify: (message: string) => void) {
   const [data, setData] = useState<Dashboard | null>(null)
   const [history, setHistory] = useState<Sample[]>([])
+  const [resourceHistory, setResourceHistory] = useState<ResourceSample[]>([])
   const [cpu, setCpu] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const last = useRef<{ rx: number; tx: number; total: number; idle: number; at: number } | null>(null)
@@ -90,7 +92,15 @@ function useDashboard(notify: (message: string) => void) {
         )
         const total = (next.cpu_total || 0) - prev.total
         const idle = (next.cpu_idle || 0) - prev.idle
-        if (total > 0) setCpu(Math.max(0, Math.min(100, Math.round((1 - idle / total) * 100))))
+        if (total > 0) {
+          const cpuValue = Math.max(0, Math.min(100, Math.round((1 - idle / total) * 100)))
+          setCpu(cpuValue)
+          setResourceHistory((items) => [...items, {
+            cpu: cpuValue,
+            memory: next.memory_kib ? Math.max(0, (1 - next.available_kib / next.memory_kib) * 100) : 0,
+            disk: next.disk_total_bytes ? Math.max(0, (1 - (next.disk_free_bytes || 0) / next.disk_total_bytes) * 100) : 0,
+          }].slice(-24))
+        }
       }
       last.current = { rx, tx, total: next.cpu_total || 0, idle: next.cpu_idle || 0, at }
     } catch (e) {
@@ -104,7 +114,7 @@ function useDashboard(notify: (message: string) => void) {
     const timer = window.setInterval(refresh, 5000)
     return () => window.clearInterval(timer)
   }, [refresh])
-  return { data, history, cpu, loading, refresh }
+  return { data, history, resourceHistory, cpu, loading, refresh }
 }
 
 function SectionCard({
@@ -175,7 +185,7 @@ function LoadingCards() {
 }
 
 export function DashboardPage({ user, Heading, notify }: { user: User } & Common) {
-  const { data, history, cpu, loading, refresh } = useDashboard(notify)
+  const { data, history, resourceHistory, cpu, loading, refresh } = useDashboard(notify)
   const memory = data && data.memory_kib ? Math.round((1 - data.available_kib / data.memory_kib) * 100) : 0
   const disk =
     data && data.disk_total_bytes
@@ -192,13 +202,15 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
           </Button>
         }
       />
-      <div className="hero-glow mb-5 flex min-h-40 items-center justify-between overflow-hidden rounded-[24px] border border-[#6d4c91] p-7 md:p-8">
-        <div>
-          <Badge variant="success" className="mb-3">
+      <div className="hero-glow relative mb-5 flex min-h-[220px] items-center justify-between overflow-hidden rounded-[26px] border border-[#67517f] p-7 md:p-9">
+        <div className="relative z-10">
+          <Badge variant="success" className="mb-4">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> سیستم فعال
           </Badge>
-          <h2 className="text-xl font-extrabold md:text-[27px]">خوش آمدی، {user.username} 👋</h2>
-          <p className="mt-2 text-sm text-[#cbb8e0]">
+          <div className="brand-text text-[38px] font-black leading-none sm:text-[52px] lg:text-[66px]" dir="ltr">DONATELLO</div>
+          <div className="mt-3 flex items-center gap-3" dir="ltr"><span className="h-[2px] w-9 bg-[#63e4cb]"/><span className="font-mono text-[10px] tracking-[.22em] text-[#a6eddf]">YOUR SERVER. CLEARLY.</span></div>
+          <h2 className="mt-6 text-lg font-extrabold md:text-xl">خوش آمدی، {user.username}</h2>
+          <p className="mt-1.5 text-sm text-[#cbb8e0]">
             {data ? (
               <>
                 سرور <span className="mono text-white">{data.hostname || 'Linux'}</span> آمادهٔ مدیریت است.
@@ -208,8 +220,9 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
             )}
           </p>
         </div>
-        <div className="hidden h-24 w-24 place-items-center rounded-[28px] border border-white/10 bg-white/5 text-[#d1afff] md:grid">
-          <Server size={44} strokeWidth={1.2} />
+        <div className="relative hidden h-36 w-36 shrink-0 place-items-center rounded-[36px] border border-white/10 bg-white/5 text-[#d1afff] shadow-[0_0_65px_#8b5cf633] md:grid">
+          <div className="absolute inset-3 rounded-[28px] border border-dashed border-white/10"/>
+          <Server size={66} strokeWidth={1.1} />
         </div>
       </div>
       {loading && !data ? (
@@ -253,6 +266,11 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
           />
         </div>
       )}
+      <div className="mt-5">
+        <SectionCard title="نبض منابع سرور" description="تغییرات CPU، حافظه و دیسک در همین نشست مرورگر · هر ۵ ثانیه" right={<Activity size={18} className="text-primary" />}>
+          <ResourceChart samples={resourceHistory} />
+        </SectionCard>
+      </div>
       {data && (
         <div className="mt-5 grid gap-5 md:grid-cols-2">
           <SectionCard title="مصرف خود Donatello" description="اندازه‌گیری فرایند پنل · به‌روزرسانی هر ۵ ثانیه">
@@ -355,6 +373,36 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
       </div>
     </>
   )
+}
+
+function ResourceChart({ samples }: { samples: ResourceSample[] }) {
+  if (samples.length < 2) return <div className="grid h-44 place-items-center text-sm text-muted-foreground">نمودار پس از چند نمونه‌برداری نمایش داده می‌شود.</div>
+  const points = (key: keyof ResourceSample) => samples.map((sample, index) => `${12 + index * 476 / Math.max(samples.length - 1, 1)},${170 - sample[key] * 1.4}`).join(' ')
+  return <div>
+    <div className="h-44" dir="ltr"><svg viewBox="0 0 500 190" preserveAspectRatio="none" width="100%" height="100%" role="img" aria-label="روند مصرف CPU، حافظه و دیسک">
+      {[30, 100, 170].map((y) => <line key={y} x1="12" x2="488" y1={y} y2={y} stroke="#473851" strokeDasharray="3 6" />)}
+      <polyline points={points('cpu')} fill="none" stroke="#b487ff" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
+      <polyline points={points('memory')} fill="none" stroke="#59d3bc" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
+      <polyline points={points('disk')} fill="none" stroke="#e0ac72" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
+    </svg></div>
+    <div className="mt-2 flex flex-wrap gap-5 text-xs text-muted-foreground"><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#b487ff]"/>CPU</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#59d3bc]"/>حافظه</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-full bg-[#e0ac72]"/>دیسک</span></div>
+  </div>
+}
+
+function DistributionBars({ title, description, items }: {
+  title: string
+  description: string
+  items: { label: string; value: number; display?: string }[]
+}) {
+  const max = Math.max(1, ...items.map((item) => item.value))
+  return <SectionCard title={title} description={description} right={<Activity size={18} className="text-primary" />}>
+    {items.length ? <div className="grid gap-4 sm:grid-cols-2">
+      {items.map((item, index) => <div key={`${item.label}-${index}`}>
+        <div className="mb-2 flex items-center justify-between gap-2 text-xs"><span className="truncate text-muted-foreground">{item.label}</span><span className="font-mono text-foreground">{item.display || formatNumber(item.value)}</span></div>
+        <div className="h-2 overflow-hidden rounded-full bg-white/5"><div className="h-full rounded-full" style={{ width: `${item.value ? Math.max(3, item.value / max * 100) : 0}%`, background: index % 2 ? '#59d3bc' : '#a987ff' }}/></div>
+      </div>)}
+    </div> : <p className="py-6 text-center text-sm text-muted-foreground">داده‌ای برای نمایش نمودار وجود ندارد.</p>}
+  </SectionCard>
 }
 
 function TrafficChart({ history }: { history: Sample[] }) {
@@ -506,6 +554,9 @@ export function NetworkPage({ Heading, notify }: Common) {
             )}
           </div>
           <div className="mt-5">
+            <DistributionBars title="توزیع ترافیک کارت‌ها" description="جمع بایت‌های دریافت و ارسال هر رابط از زمان شروع آن" items={(data?.interfaces || []).map((item) => ({ label: item.name, value: item.rx_bytes + item.tx_bytes, display: formatBytes(item.rx_bytes + item.tx_bytes) }))} />
+          </div>
+          <div className="mt-5">
             <SectionCard
               title="پورت‌های شنونده"
               description="داده‌ها مستقیماً از اطلاعات کرنل خوانده می‌شوند"
@@ -558,6 +609,7 @@ export function FirewallPage({ Heading, notify }: Common) {
   useEffect(() => {
     void refresh()
   }, [refresh])
+  const rules = (data?.status || '').split('\n').filter((line) => /^\s*\[\s*\d+\]/.test(line))
   return (
     <>
       <Heading
@@ -569,6 +621,7 @@ export function FirewallPage({ Heading, notify }: Common) {
           </Button>
         }
       />
+      <div className="mb-5"><DistributionBars title="ترکیب قوانین UFW" description="بر اساس خروجی فعلی ufw status numbered" items={['ALLOW', 'DENY', 'REJECT', 'LIMIT'].map((action) => ({ label: action, value: rules.filter((line) => line.includes(action)).length }))} /></div>
       <div className="grid gap-5 lg:grid-cols-[1.5fr_.85fr]">
         <SectionCard
           title="وضعیت قوانین"
@@ -747,6 +800,7 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
           detail="امکان ورود به پنل"
         />
       </div>
+      <div className="mt-5"><DistributionBars title="ترکیب نقش‌ها" description="تعداد حساب‌ها در هر سطح دسترسی" items={(['admin', 'operator', 'viewer'] as Role[]).map((role) => ({ label: roleNames[role], value: users.filter((item) => item.role === role).length }))} /></div>
       <div className="mt-5">
         <SectionCard title="فهرست کاربران" description="تغییر نقش یا غیرفعال‌سازی در گزارش عملیات ثبت می‌شود">
           {loading ? (
@@ -851,6 +905,7 @@ export function AuditPage({ Heading, notify }: Common) {
           </Button>
         }
       />
+      <div className="mb-5"><DistributionBars title="ترکیب عملیات اخیر" description="از میان ۱۰۰ رویداد آخر ثبت‌شده" items={['login', 'logout', 'account.password', 'user.create', 'user.update'].map((action) => ({ label: action, value: events.filter((event) => event.action === action).length }))} /></div>
       <SectionCard
         title="آخرین رویدادها"
         description="۱۰۰ رویداد اخیر"

@@ -6,6 +6,15 @@ export type Interface = {
   mac: string
   rx_bytes: number
   tx_bytes: number
+  rx_packets?: number
+  tx_packets?: number
+  rx_errors?: number
+  tx_errors?: number
+  rx_dropped?: number
+  tx_dropped?: number
+  mtu?: number | null
+  speed_mbps?: number | null
+  carrier?: boolean
   addresses?: string[]
 }
 export type Port = { port: number; protocol: string; ipv6: boolean }
@@ -19,6 +28,16 @@ export type Dashboard = {
   swap_free_kib?: number
   cpu_total?: number
   cpu_idle?: number
+  cpu_cores?: number
+  memory_details?: {
+    free_kib?: number
+    buffers_kib?: number
+    cached_kib?: number
+    active_kib?: number
+    inactive_kib?: number
+    dirty_kib?: number
+    slab_kib?: number
+  }
   process_rss_bytes: number
   process_cpu_percent: number
   disk_total_bytes?: number

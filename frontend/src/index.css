@@ -30,26 +30,33 @@
   font-weight: 100 900;
   font-display: swap;
 }
+@font-face {
+  font-family: 'Oxanium';
+  src: url('./assets/fonts/oxanium-extrabold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 800;
+  font-display: swap;
+}
 
 @layer base {
   :root {
-    --background: 260 31% 7%;
+    --background: 231 32% 6%;
     --foreground: 270 30% 96%;
-    --card: 260 27% 12%;
+    --card: 235 26% 11%;
     --card-foreground: 270 30% 96%;
-    --popover: 260 26% 16%;
+    --popover: 238 25% 14%;
     --popover-foreground: 270 30% 96%;
     --primary: 266 89% 70%;
     --primary-foreground: 260 30% 9%;
-    --secondary: 260 25% 18%;
+    --secondary: 242 20% 17%;
     --secondary-foreground: 270 28% 95%;
-    --muted: 260 20% 19%;
-    --muted-foreground: 260 13% 66%;
-    --accent: 265 31% 25%;
+    --muted: 238 18% 18%;
+    --muted-foreground: 235 12% 66%;
+    --accent: 263 28% 23%;
     --accent-foreground: 270 30% 98%;
     --destructive: 352 80% 60%;
-    --border: 261 22% 25%;
-    --input: 261 22% 29%;
+    --border: 242 18% 23%;
+    --input: 242 18% 28%;
     --ring: 266 89% 70%;
     --radius: 1.25rem;
   }
@@ -85,24 +92,58 @@
 
 body {
   background-image:
-    radial-gradient(ellipse 45% 45% at 9% 4%, rgba(109, 58, 184, 0.19), transparent 75%),
-    radial-gradient(ellipse 38% 48% at 98% 92%, rgba(67, 46, 110, 0.17), transparent 75%);
+    radial-gradient(circle, rgba(178, 147, 255, .065) .7px, transparent 1px),
+    radial-gradient(ellipse 45% 45% at 9% 4%, rgba(109, 58, 184, 0.16), transparent 75%),
+    radial-gradient(ellipse 38% 48% at 98% 92%, rgba(46, 102, 108, 0.12), transparent 75%);
+  background-size: 24px 24px, auto, auto;
   background-attachment: fixed;
 }
 .brand-text {
-  font-family: Georgia, 'Times New Roman', serif;
-  letter-spacing: -0.06em;
+  font-family: 'Oxanium', 'Arial Black', ui-sans-serif, sans-serif;
+  letter-spacing: -.045em;
+  background: linear-gradient(180deg, #fff 8%, #d4d0e3 47%, #a8a7bb 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: 0 0 30px rgba(156, 109, 240, .08);
 }
 .soft-panel {
-  background: linear-gradient(145deg, hsl(260 27% 14% / 0.98), hsl(260 27% 11% / 0.98));
+  background: linear-gradient(145deg, hsl(235 26% 14% / 0.98), hsl(235 26% 10% / 0.98));
 }
 .metric-card {
-  background: linear-gradient(145deg, hsl(260 28% 15%), hsl(260 26% 12%));
+  background: linear-gradient(145deg, hsl(237 26% 14%), hsl(235 26% 10%));
 }
 .hero-glow {
   background:
-    radial-gradient(circle at 90% 12%, rgba(190, 143, 255, 0.22), transparent 38%),
-    linear-gradient(115deg, #3e285d, #24192f 72%);
+    radial-gradient(circle at 90% 12%, rgba(190, 143, 255, 0.2), transparent 38%),
+    radial-gradient(circle, rgba(224, 212, 255, .075) .7px, transparent 1px),
+    linear-gradient(115deg, #31224b, #151723 72%);
+  background-size: auto, 18px 18px, auto;
+}
+.app-sidebar {
+  background: linear-gradient(155deg, #10121d 0%, #11111d 62%, #141022 100%);
+}
+.sidebar-scroll {
+  scrollbar-color: #51466a transparent;
+  scrollbar-width: thin;
+}
+.nav-group:hover {
+  background: rgba(255, 255, 255, .035);
+}
+.nav-leaf[aria-current="page"] {
+  box-shadow: inset -2px 0 #a987ff;
+}
+.dot-grid {
+  background-image: radial-gradient(circle, rgba(178, 147, 255, .17) .8px, transparent 1px);
+  background-size: 20px 20px;
+}
+.insight-hero {
+  background-color: #121521;
+  background-image:
+    radial-gradient(circle, rgba(178, 147, 255, .12) .8px, transparent 1px),
+    radial-gradient(circle at 85% 5%, rgba(123, 88, 214, .24), transparent 34%),
+    linear-gradient(115deg, #181b2a, #11131e);
+  background-size: 20px 20px, auto, auto;
 }
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;

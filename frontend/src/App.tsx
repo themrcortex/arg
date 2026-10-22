@@ -3,19 +3,16 @@ import {
   Activity,
   ArrowLeft,
   ChevronDown,
+  ChevronLeft,
   Eye,
   EyeOff,
-  LayoutDashboard,
   LogOut,
   Menu,
-  Network,
-  ScrollText,
+  Search,
   Settings,
-  Shield,
-  Users,
   X,
 } from 'lucide-react'
-import { api, type User } from './lib/api'
+import { api, formatNumber, type User } from './lib/api'
 import { cn } from './lib/utils'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
@@ -32,16 +29,8 @@ import {
 } from './components/ui/dropdown-menu'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { AuditPage, DashboardPage, FirewallPage, NetworkPage, SettingsPage, UsersPage } from './pages'
-
-type Page = 'dashboard' | 'network' | 'firewall' | 'users' | 'audit' | 'settings'
-const pages = [
-  { key: 'dashboard' as Page, name: 'نمای کلی', icon: LayoutDashboard },
-  { key: 'network' as Page, name: 'شبکه و پورت‌ها', icon: Network },
-  { key: 'firewall' as Page, name: 'فایروال', icon: Shield },
-  { key: 'users' as Page, name: 'کاربران', icon: Users, admin: true },
-  { key: 'audit' as Page, name: 'گزارش عملیات', icon: ScrollText, admin: true },
-  { key: 'settings' as Page, name: 'تنظیمات', icon: Settings },
-]
+import { ExplorerPage } from './explorer/ExplorerPage'
+import { entryById, explorerGroups } from './explorer/catalog'
 const developer = (
   <a
     className="font-semibold text-[#c4a1ff] transition hover:text-white hover:underline"
@@ -76,11 +65,11 @@ function Brand({ large = false }: { large?: boolean }) {
         </svg>
       </span>
       <div>
-        <div className={cn('brand-text font-bold leading-none text-white', large ? 'text-3xl' : 'text-2xl')}>
-          Donatello
+        <div className={cn('brand-text font-black leading-none text-white', large ? 'text-[31px]' : 'text-[21px]')} dir="ltr">
+          DONATELLO
         </div>
-        <div className="mt-1 text-[10px] font-semibold uppercase tracking-[.19em] text-muted-foreground">
-          Server manager
+        <div className="mt-1 text-[9px] font-semibold uppercase tracking-[.25em] text-[#a6eddf]" dir="ltr">
+          VPS CONTROL CENTER
         </div>
       </div>
     </div>
@@ -243,7 +232,8 @@ function PageHeading({
   return (
     <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
       <div>
-        <h1 className="text-2xl font-extrabold tracking-tight text-white md:text-[29px]">{title}</h1>
+        <div className="mb-3 flex items-center gap-2 text-[10px] font-bold tracking-[.17em] text-[#a6eddf]" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-[#71e4cf]"/> LIVE SERVER DATA</div>
+        <h1 className="text-3xl font-extrabold tracking-tight text-white md:text-[34px]">{title}</h1>
         <p className="mt-2 text-sm text-muted-foreground">{description}</p>
       </div>
       {action}
@@ -255,8 +245,14 @@ export default function App() {
   const [boot, setBoot] = useState(true)
   const [installed, setInstalled] = useState(false)
   const [user, setUser] = useState<User | null>(null)
-  const [page, setPage] = useState<Page>('dashboard')
+  const [page, setPage] = useState(() => {
+    const fromHash = window.location.hash.replace(/^#\/?/, '')
+    return entryById.has(fromHash) ? fromHash : 'dashboard'
+  })
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [navQuery, setNavQuery] = useState('')
+  const [openGroups, setOpenGroups] = useState<string[]>(['overview'])
+  const [openCategories, setOpenCategories] = useState<string[]>(['overview-main'])
   const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
   const refresh = useCallback(async () => {
@@ -277,6 +273,24 @@ export default function App() {
     void refresh()
   }, [refresh])
   useEffect(() => {
+    const onHash = () => {
+      const id = window.location.hash.replace(/^#\/?/, '')
+      if (entryById.has(id)) setPage(id)
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+  useEffect(() => {
+    for (const group of explorerGroups) {
+      const category = group.categories.find((section) => section.items.some((entry) => entry.id === page))
+      if (category) {
+        setOpenGroups((items) => items.includes(group.id) ? items : [...items, group.id])
+        setOpenCategories((items) => items.includes(category.id) ? items : [...items, category.id])
+        break
+      }
+    }
+  }, [page])
+  useEffect(() => {
     if (notice) {
       const timer = window.setTimeout(() => setNotice(''), 4000)
       return () => window.clearTimeout(timer)
@@ -287,6 +301,7 @@ export default function App() {
       await api('logout', { method: 'POST' })
       setUser(null)
       setPage('dashboard')
+      window.location.hash = '/dashboard'
     } catch (e) {
       setNotice(e instanceof Error ? e.message : 'خروج ناموفق بود')
     }
@@ -312,19 +327,31 @@ export default function App() {
       </div>
     )
   if (!installed || !user) return <Auth installer={!installed} onSuccess={refresh} />
-  const visiblePages = pages.filter((p) => !p.admin || user.role === 'admin')
-  const active = pages.find((p) => p.key === page) || pages[0]
-  function selectPage(next: Page) {
+  const allowedGroups = explorerGroups.filter((group) => !group.admin || user.role === 'admin')
+  const allowedIds = new Set(allowedGroups.flatMap((group) => group.categories.flatMap((category) => category.items.map((entry) => entry.id))))
+  const currentPage = allowedIds.has(page) ? page : 'dashboard'
+  const active = entryById.get(currentPage) || entryById.get('dashboard')!
+  const activeGroup = allowedGroups.find((group) => group.categories.some((category) => category.items.some((entry) => entry.id === currentPage)))
+  const filter = navQuery.trim().toLocaleLowerCase('fa-IR')
+  function toggleGroup(id: string) {
+    setOpenGroups((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id])
+  }
+  function toggleCategory(id: string) {
+    setOpenCategories((items) => items.includes(id) ? items.filter((item) => item !== id) : [...items, id])
+  }
+  function selectPage(next: string) {
+    if (!allowedIds.has(next)) return
     setPage(next)
+    window.location.hash = `/${next}`
     setMobileOpen(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="min-h-screen lg:grid lg:grid-cols-[260px_minmax(0,1fr)]">
+      <div className="app-shell min-h-screen lg:grid lg:grid-cols-[310px_minmax(0,1fr)]">
         <aside
           className={cn(
-            'fixed inset-y-0 right-0 z-40 flex w-[260px] flex-col border-l border-border bg-[#191323] px-4 py-7 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0',
+            'app-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(88vw,310px)] flex-col border-l border-white/10 px-4 py-6 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[310px] lg:translate-x-0',
             mobileOpen ? 'translate-x-0' : 'translate-x-full',
           )}
         >
@@ -340,34 +367,43 @@ export default function App() {
               <X size={18} />
             </Button>
           </div>
-          <div className="mt-11 px-3 text-[11px] font-bold tracking-wide text-muted-foreground/70">
-            فضای کاری
+          <div className="mt-8 rounded-2xl border border-white/10 bg-white/[.035] p-3">
+            <label className="relative block">
+              <Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <input value={navQuery} onChange={(event) => setNavQuery(event.target.value)} placeholder={`جست‌وجو در ${formatNumber(allowedIds.size)} نما…`} aria-label="جست‌وجو در گزینه‌ها" className="h-10 w-full rounded-xl border border-white/10 bg-[#11121c] pr-9 pl-3 text-xs text-foreground outline-none transition focus:border-primary/60" />
+            </label>
+            <div className="mt-2 flex items-center justify-between px-1 text-[10px] text-muted-foreground"><span>فضای کاری</span><span className="font-mono" dir="ltr">{allowedIds.size} VIEWS</span></div>
           </div>
-          <nav className="mt-3 space-y-1" aria-label="ناوبری اصلی">
-            {visiblePages.map((item) => (
-              <button
-                key={item.key}
-                onClick={() => selectPage(item.key)}
-                className={cn(
-                  'flex w-full items-center gap-3 rounded-xl px-4 py-3 text-right text-sm font-medium transition-colors hover:bg-accent hover:text-white',
-                  page === item.key
-                    ? 'bg-[#44305f] text-white shadow-[inset_-3px_0_#ad81ff]'
-                    : 'text-muted-foreground',
-                )}
-                aria-current={page === item.key ? 'page' : undefined}
-              >
-                <item.icon size={18} strokeWidth={1.9} />
-                {item.name}
-              </button>
-            ))}
+          <nav className="sidebar-scroll mt-3 min-h-0 flex-1 space-y-1 overflow-y-auto pl-1" aria-label="ناوبری اصلی">
+            {allowedGroups.map((group) => {
+              const categories = group.categories.map((category) => ({ ...category, items: category.items.filter((item) => !filter || `${item.label} ${item.description} ${item.value}`.toLocaleLowerCase('fa-IR').includes(filter)) })).filter((category) => category.items.length)
+              if (!categories.length) return null
+              const expanded = Boolean(filter) || openGroups.includes(group.id)
+              const count = group.categories.reduce((total, category) => total + category.items.length, 0)
+              return <div key={group.id} className="rounded-xl">
+                <button onClick={() => toggleGroup(group.id)} className={cn('nav-group flex w-full items-center gap-3 rounded-xl px-3 py-3 text-right text-sm font-semibold transition', activeGroup?.id === group.id ? 'text-white' : 'text-[#a8a9be] hover:text-white')} aria-expanded={expanded}>
+                  <span className={cn('grid h-8 w-8 shrink-0 place-items-center rounded-lg', activeGroup?.id === group.id ? 'bg-primary/15 text-primary' : 'bg-white/[.035] text-[#8c91a8]')}><group.icon size={17}/></span>
+                  <span className="flex-1">{group.label}</span><span className="font-mono text-[10px] text-muted-foreground">{formatNumber(count)}</span><ChevronLeft size={15} className={cn('text-muted-foreground transition-transform', expanded && '-rotate-90')}/>
+                </button>
+                {expanded && <div className="mr-7 border-r border-white/10 pb-2 pr-3">
+                  {categories.map((category) => {
+                    const catOpen = Boolean(filter) || openCategories.includes(category.id)
+                    return <div key={category.id} className="mt-1">
+                      <button onClick={() => toggleCategory(category.id)} className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-2 text-right text-[11px] font-semibold text-[#777d96] transition hover:text-white" aria-expanded={catOpen}><span>{category.label}</span><ChevronDown size={13} className={cn('transition-transform', !catOpen && 'rotate-90')}/></button>
+                      {catOpen && <div className="space-y-0.5">{category.items.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} title={item.description || item.label} aria-current={currentPage === item.id ? 'page' : undefined} className={cn('nav-leaf flex w-full items-center gap-2 rounded-lg px-3 py-2 text-right text-xs transition', currentPage === item.id ? 'bg-[#302446] font-semibold text-white' : 'text-[#a7a8ba] hover:bg-white/[.055] hover:text-white')}><span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', currentPage === item.id ? 'bg-[#a6eddf] shadow-[0_0_10px_#a6eddf]' : 'bg-[#55546e]')}/><span className="min-w-0 flex-1 truncate">{item.label}</span>{currentPage === item.id && <ArrowLeft size={13} className="text-primary"/>}</button>)}</div>}
+                    </div>
+                  })}
+                </div>}
+              </div>
+            })}
           </nav>
-          <div className="mt-auto space-y-4">
-            <div className="rounded-2xl border border-border bg-[#281e38] p-4">
+          <div className="mt-3 space-y-3 border-t border-white/10 pt-3">
+            <div className="rounded-2xl border border-white/10 bg-white/[.035] p-3">
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_12px_#4ade80]" />
                 پنل آنلاین است
               </div>
-              <p className="mt-1.5 text-xs text-muted-foreground">Donatello v0.2.0</p>
+              <p className="mt-1.5 font-mono text-[10px] text-muted-foreground" dir="ltr">DONATELLO / LIVE SERVER</p>
             </div>
             <p className="px-2 text-center text-[11px] text-muted-foreground">ساخته‌شده توسط {developer}</p>
           </div>
@@ -380,7 +416,7 @@ export default function App() {
           />
         )}
         <div className="min-w-0">
-          <header className="sticky top-0 z-20 flex h-[78px] items-center justify-between gap-3 border-b border-border/70 bg-background/80 px-5 backdrop-blur-xl md:px-9">
+          <header className="sticky top-0 z-20 flex h-[78px] items-center justify-between gap-3 border-b border-white/10 bg-background/85 px-5 backdrop-blur-xl md:px-9">
             <div className="flex items-center gap-3">
               <Button
                 variant="ghost"
@@ -393,7 +429,7 @@ export default function App() {
               </Button>
               <div className="text-xs text-muted-foreground">
                 Donatello <span className="mx-2 text-border">/</span>{' '}
-                <span className="font-semibold text-foreground">{active.name}</span>
+                <span className="font-semibold text-foreground">{active.label}</span>
               </div>
             </div>
             <div className="flex items-center gap-3">
@@ -429,16 +465,17 @@ export default function App() {
             </div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
-            {page === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}
-            {page === 'network' && <NetworkPage Heading={PageHeading} notify={setNotice} />}
-            {page === 'firewall' && <FirewallPage Heading={PageHeading} notify={setNotice} />}
-            {page === 'users' && user.role === 'admin' && (
+            {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}
+            {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={setNotice} />}
+            {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={setNotice} />}
+            {currentPage === 'users' && user.role === 'admin' && (
               <UsersPage current={user} Heading={PageHeading} notify={setNotice} />
             )}
-            {page === 'audit' && user.role === 'admin' && (
+            {currentPage === 'audit' && user.role === 'admin' && (
               <AuditPage Heading={PageHeading} notify={setNotice} />
             )}
-            {page === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} />}
+            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} />}
+            {active.kind !== 'page' && <ExplorerPage key={currentPage} item={active} user={user} onNavigate={selectPage} notify={setNotice} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} Donatello · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
