@@ -122,7 +122,7 @@ normalize_menu_digits() {
 
 valid_menu_choice() {
   case "$1" in
-    0|1|2|3|4|5|6|7|8|9|10|11) return 0 ;;
+    0|1|2|3|4|5|6|7|8|9|10|11|12) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -446,6 +446,27 @@ show_setup_code_if_needed() {
   say "FIRST ADMINISTRATOR SETUP"
   info "One-time setup code: $code"
   info "Use this code on the HTTPS panel setup screen. Keep it private."
+}
+
+get_setup_code() {
+  require_root setup-code
+  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Install it before requesting the setup code."
+  local state code
+  state="$(curl --connect-timeout 1 --max-time 2 -fsS "http://127.0.0.1:$(panel_port)/api/state" 2>/dev/null || true)"
+  [[ -n "$state" ]] || die "The panel is not responding. Check the service with 'sudo donatello status'."
+  if [[ "$state" != *'"installed":false'* ]]; then
+    say "ADMINISTRATOR SETUP IS COMPLETE"
+    info "A one-time setup code is no longer needed."
+    return 0
+  fi
+  code="$(awk -F= '$1 == "DONATELLO_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  if [[ -z "$code" ]] && has journalctl; then
+    code="$(journalctl -u "$SERVICE_NAME" -n 100 --no-pager 2>/dev/null | sed -n 's/.*DONATELLO_SETUP_CODE=//p' | tail -n 1)"
+  fi
+  [[ -n "$code" ]] || die "The setup code is unavailable. Run 'sudo donatello update' and request it again."
+  say "FIRST ADMINISTRATOR SETUP"
+  info "One-time setup code: $code"
+  info "Enter this code on the HTTPS panel setup screen. Keep it private."
 }
 
 sync_ufw_rules() {
@@ -982,6 +1003,7 @@ draw_control_center() {
   draw_menu_item "$selected" 9 'Update Donatello' 'Fetch and install the latest version'
   draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove Donatello and retain its data'
   draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove Donatello and all its data'
+  draw_menu_item "$selected" 12 'Get one-time setup code' 'Display the first-admin code'
   printf '\n  Type option%s%s%s then %sEnter%s   %s↑%s / %s↓%s move   %sq%s quit' \
     "$([[ -n "$digit_buffer" ]] && printf ' [' || true)" "$digit_buffer" "$([[ -n "$digit_buffer" ]] && printf ']' || true)" \
     "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
@@ -1025,6 +1047,7 @@ run_menu_action() {
     9) update_app ;;
     10) delete_app "" ;;
     11) delete_app "--purge" ;;
+    12) get_setup_code ;;
   esac
 }
 
@@ -1046,13 +1069,13 @@ main_menu() {
       key="$(read_menu_key)" || interactive=0
       if (( interactive )); then
         case "$key" in
-          up|k) (( selected > 1 )) && ((selected--)) || selected=11 ;;
-          down|j) (( selected < 11 )) && ((selected++)) || selected=1 ;;
+          up|k) (( selected > 1 )) && ((selected--)) || selected=12 ;;
+          down|j) (( selected < 12 )) && ((selected++)) || selected=1 ;;
           enter)
             if [[ -n "$digit_buffer" ]]; then
               [[ "$digit_buffer" != "0" ]] || { printf '\033[0m\n'; return 0; }
               selection="$digit_buffer"
-              [[ "$selection" =~ ^([1-9]|10|11)$ ]] || { warn 'Choose a menu option from 1 to 11.'; selection=""; digit_buffer=""; continue; }
+              [[ "$selection" =~ ^([1-9]|1[0-2])$ ]] || { warn 'Choose a menu option from 1 to 12.'; selection=""; digit_buffer=""; continue; }
             else
               selection="$selected"
             fi
@@ -1084,11 +1107,12 @@ main_menu() {
       esac
       printf '  1 Install / repair     2 Status       3 Start          4 Stop\n'
       printf '  5 Restart              6 Logs         7 Change port    8 HTTPS / SSL\n'
-      printf '  9 Update              10 Uninstall    11 Purge data     0 Exit\n\n'
+      printf '  9 Update              10 Uninstall    11 Purge data\n'
+      printf ' 12 Get setup code      0 Exit\n\n'
       read -r -p 'Select an option: ' selection || return 0
       selection="$(normalize_menu_digits "${selection//$'\r'/}")"
       [[ "$selection" == "0" ]] && return 0
-      valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 11.'; continue; }
+      valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 12.'; continue; }
       action_ready=1
     fi
 

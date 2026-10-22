@@ -3,6 +3,8 @@ import {
   Activity,
   ArrowLeft,
   ChevronDown,
+  Eye,
+  EyeOff,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -78,7 +80,7 @@ function Brand({ large = false }: { large?: boolean }) {
 function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => void }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [confirm, setConfirm] = useState('')
+  const [passwordVisible, setPasswordVisible] = useState(false)
   const [setupToken, setSetupToken] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -86,10 +88,6 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
   async function submit(event: FormEvent) {
     event.preventDefault()
     setError('')
-    if (installer && password !== confirm) {
-      setError('تکرار گذرواژه با گذرواژه برابر نیست.')
-      return
-    }
     setBusy(true)
     try {
       await api(installer ? 'setup' : 'login', {
@@ -99,7 +97,6 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
       if (installer) {
         setCreated(true)
         setPassword('')
-        setConfirm('')
         setSetupToken('')
       } else onSuccess()
     } catch (e) {
@@ -168,16 +165,28 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password">گذرواژه</Label>
-                <Input
-                  id="password"
-                  type="password"
-                  autoComplete={installer ? 'new-password' : 'current-password'}
-                  required
-                  minLength={installer ? 12 : 1}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="حداقل ۱۲ نویسه"
-                />
+                <div className="relative">
+                  <Input
+                    id="password"
+                    className="pl-12"
+                    type={passwordVisible ? 'text' : 'password'}
+                    autoComplete={installer ? 'new-password' : 'current-password'}
+                    required
+                    minLength={installer ? 12 : 1}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={installer ? 'حداقل ۱۲ نویسه' : 'گذرواژهٔ حساب'}
+                  />
+                  <button
+                    type="button"
+                    className="absolute left-3 top-1/2 grid h-8 w-8 -translate-y-1/2 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label={passwordVisible ? 'مخفی‌کردن گذرواژه' : 'نمایش گذرواژه'}
+                    aria-pressed={passwordVisible}
+                    onClick={() => setPasswordVisible((visible) => !visible)}
+                  >
+                    {passwordVisible ? <EyeOff size={17} /> : <Eye size={17} />}
+                  </button>
+                </div>
               </div>
               {installer && (
                 <div className="space-y-2">
@@ -189,20 +198,6 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
                     value={setupToken}
                     onChange={(e) => setSetupToken(e.target.value)}
                     placeholder="برای ورود عمومی، کد کنسول سرور را وارد کنید"
-                  />
-                </div>
-              )}
-              {installer && (
-                <div className="space-y-2">
-                  <Label htmlFor="confirm">تکرار گذرواژه</Label>
-                  <Input
-                    id="confirm"
-                    type="password"
-                    autoComplete="new-password"
-                    required
-                    value={confirm}
-                    onChange={(e) => setConfirm(e.target.value)}
-                    placeholder="گذرواژه را دوباره وارد کنید"
                   />
                 </div>
               )}
