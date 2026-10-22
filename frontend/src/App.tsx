@@ -58,12 +58,22 @@ function Brand({ large = false }: { large?: boolean }) {
   return (
     <div className="flex items-center gap-3">
       <span
+        role="img"
+        aria-label="لوگوی دوناتلو"
         className={cn(
-          'grid shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-[#cb9fff] via-[#9c6df0] to-[#633cc0] font-black text-white shadow-glow',
+          'grid shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-[#cb9fff] via-[#9c6df0] to-[#633cc0] text-white shadow-glow',
           large ? 'h-14 w-14 text-3xl' : 'h-11 w-11 text-2xl',
         )}
       >
-        D
+        <svg viewBox="0 0 64 64" className={large ? 'h-11 w-11' : 'h-9 w-9'} fill="none" aria-hidden="true">
+          <path
+            d="M9 23 3 17l3 13-3 10 8-4 5-5-5-7 6-3 9 2 6 4 6-4 9-2 6 3-5 7 5 5 8 4-3-10 3-13-6 6-8-4-10 1-5 4-5-4-10-1-8 4Z"
+            fill="#54258C"
+          />
+          <path d="M12 25c5-4 11-5 17-2l2 4-3 5c-6 2-11 1-15-2l-1-5Zm40 0c-5-4-11-5-17-2l-2 4 3 5c6 2 11 1 15-2l1-5Z" fill="#F4EAFE" />
+          <path d="M22 25.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Zm20 0a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z" fill="#32104F" />
+          <path d="m31 29 1-2 1 2-1 2-1-2Z" fill="#CB9FFF" />
+        </svg>
       </span>
       <div>
         <div className={cn('brand-text font-bold leading-none text-white', large ? 'text-3xl' : 'text-2xl')}>
