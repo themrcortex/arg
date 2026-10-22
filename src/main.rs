@@ -1098,6 +1098,39 @@ async fn update_firewall_state(State(state): State<AppState>, headers: HeaderMap
     audit(&db, &actor.username, "firewall.state", action);
     Ok(Json(json!({"enabled": input.enabled})))
 }
+fn update_status() -> Value {
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/lib/donatello/update-helper", "check"])
+        .output();
+    let Ok(output) = output else { return json!({"status":"unavailable"}); };
+    if !output.status.success() { return json!({"status":"unavailable"}); }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let revisions: Vec<_> = stdout.split_whitespace().collect();
+    if revisions.len() != 2 { return json!({"status":"unavailable"}); }
+    let local = revisions[0];
+    let remote = revisions[1];
+    if local.len() != 40 || remote.len() != 40 { return json!({"status":"unavailable"}); }
+    json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7]})
+}
+async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    Ok(Json(update_status()))
+}
+async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/local/lib/donatello/update-helper", "run"])
+        .output()
+        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Update helper unavailable; update Donatello from SSH once"))?;
+    if !output.status.success() {
+        return Err(error(StatusCode::BAD_REQUEST, "Update could not be scheduled; check service logs"));
+    }
+    audit(&db, &actor.username, "panel.update", "scheduled from web panel");
+    Ok(Json(json!({"scheduled": true})))
+}
 async fn static_file(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let file = if path.is_empty() { "index.html" } else { path };
@@ -1171,6 +1204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/monitoring/alerts", get(alert_settings).put(update_alert_settings))
         .route("/api/monitoring/config", get(get_monitoring_config).put(put_monitoring_config))
         .route("/api/settings/port", get(get_panel_port).put(change_panel_port))
+        .route("/api/update", get(panel_update_status).post(schedule_panel_update))
         .route("/api/network/probe", post(port_probe))
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))

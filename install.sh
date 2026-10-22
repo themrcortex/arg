@@ -15,6 +15,7 @@ readonly SERVICE_FILE="/etc/systemd/system/donatello.service"
 readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
 readonly UFW_HELPER="/usr/local/lib/donatello/ufw-helper"
 readonly PORT_HELPER="/usr/local/lib/donatello/port-helper"
+readonly UPDATE_HELPER="/usr/local/lib/donatello/update-helper"
 readonly ENV_DIR="/etc/donatello"
 readonly ENV_FILE="/etc/donatello/donatello.env"
 readonly DOMAIN_FILE="/etc/donatello/https-domain"
@@ -257,6 +258,7 @@ configure_ufw_status() {
   ufw="$(command -v ufw || true)"
   has visudo || die "visudo is required to configure restricted panel management."
   install -o root -g root -m 0755 "$SOURCE_DIR/scripts/port-helper.sh" "$PORT_HELPER"
+  install -o root -g root -m 0755 "$SOURCE_DIR/scripts/update-helper.sh" "$UPDATE_HELPER"
   if [[ -n "$ufw" ]]; then
     install -o root -g root -m 0755 "$SOURCE_DIR/scripts/ufw-helper.sh" "$UFW_HELPER"
   else
@@ -264,6 +266,7 @@ configure_ufw_status() {
   fi
   sudoers_tmp="$(mktemp /etc/sudoers.d/.donatello-ufw.XXXXXX)"
   printf '%s ALL=(root) NOPASSWD: %s *\n' "$SERVICE_USER" "$PORT_HELPER" > "$sudoers_tmp"
+  printf '%s ALL=(root) NOPASSWD: %s check, %s run\n' "$SERVICE_USER" "$UPDATE_HELPER" "$UPDATE_HELPER" >> "$sudoers_tmp"
   if [[ -n "$ufw" ]]; then
     printf '%s ALL=(root) NOPASSWD: %s status numbered, %s *\n' "$SERVICE_USER" "$ufw" "$UFW_HELPER" >> "$sudoers_tmp"
   fi
@@ -1240,7 +1243,7 @@ delete_app() {
   fi
   systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
   rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
-  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER" "$PORT_HELPER"
+  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER"
   if [[ -n "$domain" ]]; then
     rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$CERT_DEPLOY_HOOK"
     if [[ -x /snap/bin/certbot ]]; then

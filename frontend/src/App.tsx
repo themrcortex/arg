@@ -5,9 +5,11 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
+  Github,
   LifeBuoy,
   LogOut,
   Menu,
+  RefreshCw,
   Settings,
   X,
 } from 'lucide-react'
@@ -246,6 +248,8 @@ export default function App() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
+  const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string }>({ status: 'unavailable' })
+  const [updating, setUpdating] = useState(false)
   const refresh = useCallback(async () => {
     setBoot(true)
     setLoadError('')
@@ -276,6 +280,29 @@ export default function App() {
       return () => window.clearTimeout(timer)
     }
   }, [notice])
+  const checkUpdate = useCallback(async () => {
+    if (!installed || !user) return
+    try { setUpdate(await api<typeof update>('update')) } catch { setUpdate({ status: 'unavailable' }) }
+  }, [installed, user])
+  useEffect(() => {
+    void checkUpdate()
+    const timer = window.setInterval(() => void checkUpdate(), 300000)
+    return () => window.clearInterval(timer)
+  }, [checkUpdate])
+  useEffect(() => {
+    if (update.status === 'available') setNotice(`نسخهٔ جدید Donatello (${update.remote}) آماده است.`)
+  }, [update.status, update.remote])
+  async function runUpdate() {
+    if (user?.role !== 'admin' || updating) return
+    setUpdating(true)
+    try {
+      await api('update', { method: 'POST' })
+      setNotice('آپدیت شروع شد. پنل چند لحظه دیگر دوباره در دسترس خواهد بود.')
+      setUpdate((old) => ({ ...old, status: 'current' }))
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : 'شروع آپدیت ناموفق بود')
+    } finally { setUpdating(false) }
+  }
   async function logout() {
     try {
       await api('logout', { method: 'POST' })
@@ -339,7 +366,7 @@ export default function App() {
         <div className="min-w-0">
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
             <div className="flex items-center gap-2"><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO <span className="text-[#7f768f]">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
-            <div className="flex items-center gap-1.5"><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+            <div className="flex items-center gap-1.5">{update.status === 'available' && <Button size="sm" className="hidden gap-2 sm:inline-flex" disabled={updating || user.role !== 'admin'} onClick={() => void runUpdate()} title={`نسخهٔ جدید ${update.remote} آماده است`}><RefreshCw size={15} className={updating ? 'animate-spin' : ''}/>{updating ? 'در حال شروع…' : 'آپدیت جدید'}</Button>}<a href="https://github.com/themrcortex/donatello" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}
