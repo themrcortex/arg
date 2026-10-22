@@ -829,8 +829,8 @@ ProtectControlGroups=true
 ReadWritePaths=/var/lib/donatello
 RestrictSUIDSGID=true
 LockPersonality=true
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
 LimitNOFILE=65536
 
 [Install]
