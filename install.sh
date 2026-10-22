@@ -185,9 +185,58 @@ prepare_source() {
 
 build_release() {
   [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the repository and main branch."
-  say "Building the optimized release"
-  (cd "$SOURCE_DIR" && cargo +stable build --locked --release)
+  run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"
   [[ -x "$SOURCE_DIR/target/release/donatello" ]] || die "The Donatello binary was not created."
+}
+
+run_with_progress() {
+  local label="$1" log_file spinner_index=0 started elapsed minutes seconds pid result
+  shift
+  log_file="$(mktemp /tmp/donatello-build.XXXXXX)"
+
+  if [[ ! -t 1 || ! -t 2 ]]; then
+    say "$label"
+    if "$@" >"$log_file" 2>&1; then
+      info "Build completed successfully."
+      rm -f "$log_file"
+      return 0
+    else
+      result=$?
+      cat "$log_file" >&2
+      rm -f "$log_file"
+      return "$result"
+    fi
+  fi
+
+  say "$label"
+  "$@" >"$log_file" 2>&1 &
+  pid=$!
+  started=$SECONDS
+  local -a frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  while kill -0 "$pid" 2>/dev/null; do
+    elapsed=$((SECONDS - started))
+    minutes=$((elapsed / 60))
+    seconds=$((elapsed % 60))
+    printf '\r  %s%s%s  Building Donatello… %02d:%02d' \
+      "$C_CYAN" "${frames[spinner_index]}" "$C_RESET" "$minutes" "$seconds"
+    spinner_index=$(((spinner_index + 1) % ${#frames[@]}))
+    sleep 0.12
+  done
+
+  if wait "$pid"; then
+    elapsed=$((SECONDS - started))
+    minutes=$((elapsed / 60))
+    seconds=$((elapsed % 60))
+    printf '\r  %s✓%s  Build completed successfully in %02d:%02d.\n' \
+      "$C_GREEN" "$C_RESET" "$minutes" "$seconds"
+    rm -f "$log_file"
+  else
+    result=$?
+    printf '\r  %s✗%s  Build failed. Compiler output follows:\n' "$C_RED" "$C_RESET" >&2
+    cat "$log_file" >&2
+    rm -f "$log_file"
+    return "$result"
+  fi
 }
 
 ensure_service_account() {

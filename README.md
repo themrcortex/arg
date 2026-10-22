@@ -46,6 +46,8 @@ sudo donatello
 
 > نصب خودکار برای Debian و Ubuntu دارای systemd طراحی شده و برای دریافت وابستگی‌ها و build به اینترنت نیاز دارد.
 
+هنگام کامپایل، نصب‌کننده نشانگر زنده و زمان سپری‌شده را نمایش می‌دهد. اگر build خطا کند، خروجی کامل کامپایلر برای عیب‌یابی چاپ می‌شود.
+
 ## فهرست
 
 - [قابلیت‌ها](#قابلیت‌ها)
@@ -146,19 +148,37 @@ journalctl -u donatello -f
 
 ## توسعه
 
-برای build محلی به Rust stable و Node.js 20 یا جدیدتر نیاز دارید:
+برای build محلی به Rust stable و Node.js 20 یا جدیدتر نیاز دارید. مراحل را جداگانه اجرا کنید تا خروجی هر بخش روشن باشد:
 
 ```bash
 git clone https://github.com/parsasajjadi2008/donatello.git
 cd donatello
+```
+
+### ۱. آماده‌سازی رابط وب
+
+```bash
 cd frontend
 npm ci
 npm run build
 cd ..
+```
+
+### ۲. اجرای بک‌اند Rust
+
+```bash
 cargo run
 ```
 
-برای اجرای محیط توسعهٔ فرانت‌اند:
+برای کامپایل نسخهٔ بهینه‌شده به‌جای اجرای توسعه:
+
+```bash
+cargo build --locked --release
+```
+
+### توسعهٔ فرانت‌اند
+
+برای اجرای رابط در حالت توسعه، از پوشهٔ `frontend` اجرا کنید:
 
 ```bash
 cd frontend
