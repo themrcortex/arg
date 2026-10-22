@@ -961,6 +961,19 @@ fn valid_firewall_rule(input: &FirewallRuleInput) -> bool {
         && ["tcp", "udp"].contains(&input.protocol.as_str())
         && ["allow", "deny"].contains(&input.policy.as_str())
 }
+fn firewall_rule_validation_error(input: &FirewallRuleInput) -> Option<&'static str> {
+    if input.port == 0 {
+        Some("شمارهٔ پورت باید بین 1 تا 65535 باشد.")
+    } else if [22, 80, 443, 8282, 8443].contains(&input.port) {
+        Some("این پورت برای دسترسی SSH، وب یا پنل Donatello محافظت شده است.")
+    } else if !["tcp", "udp"].contains(&input.protocol.as_str()) {
+        Some("پروتکل TCP یا UDP را انتخاب کن.")
+    } else if !["allow", "deny"].contains(&input.policy.as_str()) {
+        Some("مشخص کن این قانون ترافیک را مجاز یا مسدود کند.")
+    } else {
+        None
+    }
+}
 fn read_managed_rule(
     db: &Connection,
     id: i64,
@@ -1100,11 +1113,8 @@ async fn add_firewall_rule(
     Json(input): Json<FirewallRuleInput>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    if !valid_firewall_rule(&input) {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Invalid or protected firewall port",
-        ));
+    if let Some(message) = firewall_rule_validation_error(&input) {
+        return Err(error(StatusCode::BAD_REQUEST, message));
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
@@ -1156,11 +1166,8 @@ async fn update_firewall_rule(
     Json(input): Json<FirewallRuleInput>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    if !valid_firewall_rule(&input) {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Invalid or protected firewall port",
-        ));
+    if let Some(message) = firewall_rule_validation_error(&input) {
+        return Err(error(StatusCode::BAD_REQUEST, message));
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
