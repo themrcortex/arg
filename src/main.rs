@@ -1117,18 +1117,19 @@ fn update_status() -> Value {
     let output = std::process::Command::new("sudo")
         .args(["-n", "/usr/local/lib/donatello/update-helper", "check"])
         .output();
-    let stdout = match output {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).to_string(),
-        _ => {
-        // Keep update notifications working on installations created before update-helper.
+    let (stdout, helper_error) = match output {
+        Ok(output) if output.status.success() => (String::from_utf8_lossy(&output.stdout).to_string(), String::new()),
+        Ok(output) => (String::new(), String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        Err(error) => (String::new(), error.to_string()),
+    };
+    let stdout = if stdout.is_empty() {
         let local = std::process::Command::new("git").args(["-C", "/opt/donatello/source", "rev-parse", "HEAD"]).output();
         let remote = std::process::Command::new("git").args(["-c", "credential.helper=", "ls-remote", "https://github.com/themrcortex/donatello.git", "refs/heads/main"]).output();
         match (local, remote) {
             (Ok(local), Ok(remote)) if local.status.success() && remote.status.success() => format!("{} {}", String::from_utf8_lossy(&local.stdout).trim(), String::from_utf8_lossy(&remote.stdout).split_whitespace().next().unwrap_or("")),
-            _ => return json!({"status":"unavailable"}),
+            _ => return json!({"status":"unavailable", "error": if helper_error.is_empty() { "Could not read the local source or GitHub main branch" } else { &helper_error }}),
         }
-        }
-    };
+    } else { stdout };
     let revisions: Vec<_> = stdout.split_whitespace().collect();
     if revisions.len() != 2 { return json!({"status":"unavailable"}); }
     let local = revisions[0];

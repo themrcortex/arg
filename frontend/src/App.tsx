@@ -248,7 +248,7 @@ export default function App() {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
-  const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string }>({ status: 'unavailable' })
+  const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }>({ status: 'unavailable' })
   const [updating, setUpdating] = useState(false)
   const refresh = useCallback(async () => {
     setBoot(true)
@@ -285,7 +285,7 @@ export default function App() {
     try {
       const result = await api<typeof update>('update')
       setUpdate(result)
-      if (announce) setNotice(result.status === 'available' ? `نسخهٔ جدید Donatello (${result.remote}) آماده است.` : result.status === 'current' ? 'Donatello به‌روز است.' : 'بررسی نسخه انجام نشد؛ اتصال و دسترسی helper را بررسی کن.')
+      if (announce) setNotice(result.status === 'available' ? `نسخهٔ جدید Donatello (${result.remote}) آماده است.` : result.status === 'current' ? 'Donatello به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
     } catch (error) {
       setUpdate({ status: 'unavailable' })
       if (announce) setNotice(error instanceof Error ? error.message : 'بررسی آپدیت ناموفق بود')
