@@ -40,7 +40,17 @@ const pages = [
   { key: 'audit' as Page, name: 'گزارش عملیات', icon: ScrollText, admin: true },
   { key: 'settings' as Page, name: 'تنظیمات', icon: Settings },
 ]
-const developer = <span className="font-semibold text-[#c4a1ff]">مستر کورتکس</span>
+const developer = (
+  <a
+    className="font-semibold text-[#c4a1ff] transition hover:text-white hover:underline"
+    href="https://t.me/mrc0rtex"
+    target="_blank"
+    rel="noopener noreferrer"
+    dir="ltr"
+  >
+    𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁
+  </a>
+)
 
 function Brand({ large = false }: { large?: boolean }) {
   return (

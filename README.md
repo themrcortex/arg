@@ -1,146 +1,142 @@
 <div align="center">
 
-# ◈ Donatello
+# ◈ DONATELLO
 
-### مدیریت سرور، ساده و خوش‌ساخت
+### مدیریت VPS با یک دستور
 
-پنل فارسی مدیریت VPS با **Rust + React + TypeScript** و رابط اختصاصی بنفش بر پایهٔ الگوهای **shadcn/ui**.
+پنل فارسی و راست‌چین مدیریت سرور، ساخته‌شده با **Rust، React و TypeScript**؛ سبک، یکپارچه و آمادهٔ اجرا به‌صورت سرویس systemd.
 
-![Rust](https://img.shields.io/badge/backend-Rust-9868de?style=for-the-badge&logo=rust&logoColor=white)
-![React](https://img.shields.io/badge/frontend-React%20%2B%20TypeScript-9868de?style=for-the-badge&logo=react&logoColor=white)
-![Status](https://img.shields.io/badge/status-early%20development-563776?style=for-the-badge)
+![Rust](https://img.shields.io/badge/Rust-backend-8b5cf6?style=for-the-badge&logo=rust&logoColor=white)
+![React](https://img.shields.io/badge/React-frontend-8b5cf6?style=for-the-badge&logo=react&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu-8b5cf6?style=for-the-badge&logo=linux&logoColor=white)
 
-**توسعه‌دهنده: مستر کورتکس**
+**توسعه‌دهنده: [𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex)**
 
 </div>
 
 ---
 
-## Donatello چیست؟
+## Quick Install · نصب سریع
 
-Donatello یک پنل وب راست‌به‌چپ برای دیدن وضعیت و مدیریت پایهٔ سرور Linux است. سرور API و فایل‌های ساخته‌شدهٔ React را در یک باینری Rust ارائه می‌کند. پنل در نصب اولیه حساب مدیر می‌سازد و به‌صورت پیش‌فرض فقط روی `127.0.0.1` گوش می‌دهد.
+**[⬇ دریافت مستقیم فایل Bash نصب Donatello](https://github.com/parsasajjadi2008/donatello/releases/latest/download/donatello-install.sh)**
 
-### قابلیت‌های آماده
+روی Debian یا Ubuntu دارای systemd، فایل را دریافت و اجرا کنید. نیازی نیست پیش از نصب مخزن را دستی clone کنید؛ اسکریپت پیش‌نیازها را نصب می‌کند، سورس را دریافت و build می‌کند، سپس سرویس Donatello را راه می‌اندازد.
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/parsasajjadi2008/donatello/main/install.sh \
+  -o donatello.sh
+sudo bash donatello.sh install
+```
+
+اگر لینک دانلود بالا را مستقیم باز کردید، فایل `donatello-install.sh` دریافت‌شده را این‌طور اجرا کنید: `sudo bash /path/to/donatello-install.sh install`.
+
+بعد از نصب، برنامه به‌صورت خودکار با systemd فعال می‌شود و با روشن‌شدن سرور دوباره اجرا خواهد شد.
+
+```bash
+sudo donatello status
+sudo donatello manage
+```
+
+پنل به‌صورت پیش‌فرض فقط روی `127.0.0.1:8282` گوش می‌دهد. از سرور به رایانهٔ خود SSH tunnel بسازید:
+
+```bash
+ssh -L 8282:127.0.0.1:8282 user@SERVER_IP
+```
+
+سپس [http://127.0.0.1:8282](http://127.0.0.1:8282) را باز کنید و حساب مدیر را بسازید.
+
+> نصب خودکار فعلاً برای Debian و Ubuntu با systemd است و برای build به اتصال اینترنت نیاز دارد.
+
+## دستورات Donatello
+
+تمام عملیات روزمره از دستور کوتاه `donatello` انجام می‌شود:
+
+| دستور | کار |
+| --- | --- |
+| `sudo donatello manage` | بازکردن منوی مدیریت تعاملی |
+| `sudo donatello status` | دیدن وضعیت سرویس |
+| `sudo donatello start` | شروع سرویس |
+| `sudo donatello stop` | توقف سرویس |
+| `sudo donatello restart` | راه‌اندازی دوباره |
+| `sudo donatello logs` | دیدن ۱۰۰ خط آخر گزارش |
+| `sudo donatello logs 300` | دیدن تعداد دلخواه خط از گزارش |
+| `sudo donatello manage port` | تغییر پورت داخلی پنل |
+| `sudo donatello update` | دریافت نسخهٔ جدید، build و به‌روزرسانی سرویس |
+| `sudo donatello delete` | حذف سرویس و برنامه با حفظ داده‌ها |
+| `sudo donatello delete --purge` | حذف کامل، شامل تنظیمات و داده‌ها |
+
+حذف برای تأیید، عبارت خواسته‌شده را در ترمینال دریافت می‌کند. در حالت معمول پایگاه‌داده و تنظیمات حفظ می‌شوند؛ گزینهٔ `--purge` همهٔ آن‌ها را حذف می‌کند.
+
+## اجرای سرویس
+
+Donatello یک سرویس systemd به نام `donatello.service` نصب می‌کند. سرویس با کاربر سیستمی محدود اجرا می‌شود، پس از خطا دوباره بالا می‌آید و هنگام boot فعال است.
+
+```bash
+systemctl status donatello
+journalctl -u donatello -f
+```
+
+فایل تنظیمات سرویس در `/etc/donatello/donatello.env` و داده‌های برنامه در `/var/lib/donatello` قرار دارند. پورت پیش‌فرض از طریق دستور `sudo donatello manage port` قابل تغییر است.
+
+## قابلیت‌ها
 
 | بخش | قابلیت |
 | --- | --- |
-| نصب و امنیت | نصب‌گر وب، حساب مدیر اولیه، Argon2، نشست HttpOnly، محافظت Origin، محدودسازی تلاش ورود، تغییر گذرواژه و بستن نشست‌های دیگر |
-| کاربران | افزودن حساب، نقش‌های مدیر/اپراتور/ناظر، فعال‌سازی یا غیرفعال‌سازی، جلوگیری از حذف آخرین مدیر |
-| مانیتورینگ | مصرف CPU، حافظه، دیسک، uptime، load average، نرخ زندهٔ ترافیک شبکه و مصرف RAM/CPU خود پنل |
-| شبکه | نام، MAC، IPv4/IPv6، وضعیت و بایت‌های هر کارت؛ پورت‌های شنوندهٔ TCP/UDP |
-| فایروال | نمایش خروجی واقعی `ufw status numbered` با مهلت اجرای محدود |
-| حسابرسی | آخرین ۱۰۰ رویداد ورود و تغییرات مدیریتی |
-| رابط | React و TypeScript، تم بنفش، طراحی واکنش‌گرا، فارسی و راست‌به‌چپ، کامپوننت‌های سفارشی shadcn/ui و Radix |
+| داشبورد | وضعیت سیستم، CPU، حافظه، دیسک، uptime، بار سیستم و منابع مصرفی خود پنل |
+| شبکه | کارت‌های شبکه، نام، MAC، آدرس‌های IP، وضعیت، شمارندهٔ RX/TX و پورت‌های شنونده |
+| کاربران | حساب مدیر، اپراتور و ناظر با امکان فعال‌سازی و غیرفعال‌سازی |
+| امنیت | هش گذرواژه با Argon2، نشست امن، محدودیت تلاش ورود و گزارش عملیات |
+| پنل | React و TypeScript، رابط فارسی RTL و تم بنفش واکنش‌گرا بر اساس الگوهای shadcn/ui |
+| نصب | فایل Bash مستقل، دستور `donatello` و سرویس systemd |
 
-> [!IMPORTANT]
-> ترمینال وب، تغییر قوانین UFW، تست سرعت، شمارندهٔ ترافیک هر پورت و صدور/تمدید خودکار SSL هنوز پیاده‌سازی نشده‌اند. صفحات پنل این مرز را مشخص می‌کنند. [نقشهٔ کامل ۴۰ قابلیتی](PLAN.md) در دسترس است.
+## امنیت و دسترسی
 
-## شروع سریع
-
-**پیش‌نیاز:** Linux، Rust stable و Node.js 20 یا جدیدتر برای توسعهٔ فرانت.
-
-اجرای مستقیم از سورس:
-
-```bash
-git clone https://github.com/parsasajjadi2008/donatello.git
-cd donatello
-cargo run --release
-```
-
-بستهٔ ساخته‌شدهٔ React داخل `frontend/dist` نگه‌داری می‌شود تا اجرای معمول Rust به npm نیاز نداشته باشد. پس از اجرای برنامه، با SSH tunnel به آن وصل شوید:
-
-```bash
-ssh -L 8282:127.0.0.1:8282 user@your-server
-```
-
-سپس **http://127.0.0.1:8282** را باز کنید و در نصب‌گر حساب مدیر را بسازید.
-
-### تنظیمات اجرا
-
-| متغیر | پیش‌فرض | توضیح |
-| --- | --- | --- |
-| `DONATELLO_BIND` | `127.0.0.1:8282` | آدرس و پورت پنل |
-| `DONATELLO_DB` | `data/donatello.db` | مسیر پایگاه دادهٔ SQLite |
-
-```bash
-DONATELLO_BIND=127.0.0.1:9000 \
-DONATELLO_DB=/var/lib/donatello/donatello.db \
-cargo run --release
-```
-
-برای دسترسی عمومی، پنل را پشت reverse proxy دارای HTTPS قرار دهید و پورت داخلی Donatello را عمومی نکنید. صدور خودکار گواهی در خود پنل هنوز آماده نیست.
-
-## نصب سرویس با Bash
-
-`install.sh` سرویس systemd را نصب می‌کند و یک منوی مدیریت برای سرویس، لاگ، پورت، به‌روزرسانی و حذف دارد. این نصب‌گر فعلاً روی Debian و Ubuntu دارای systemd پشتیبانی می‌شود.
-
-```bash
-git clone https://github.com/parsasajjadi2008/donatello.git
-cd donatello
-sudo bash install.sh install
-```
-
-پس از نصب:
-
-```bash
-sudo donatello-installer manage       # منوی تعاملی
-sudo donatello-installer manage logs  # لاگ‌های اخیر
-sudo donatello-installer manage port  # تغییر پورت loopback پنل
-sudo donatello-installer update       # دریافت، ساخت و به‌روزرسانی
-sudo donatello-installer delete       # حذف برنامه با حفظ داده‌ها
-```
-
-حذف کامل داده‌ها فقط با دستور `sudo donatello-installer delete --purge` و واردکردن عبارت تأیید انجام می‌شود. پنل روی `127.0.0.1` می‌ماند؛ از SSH tunnel یا reverse proxy دارای HTTPS استفاده کنید.
+- پنل به‌طور پیش‌فرض روی loopback است و پورت آن را مستقیماً روی اینترنت باز نکنید.
+- برای دسترسی بیرونی از SSH tunnel یا reverse proxy با HTTPS استفاده کنید.
+- UFW در نسخهٔ فعلی فقط خوانده می‌شود؛ عملیات تغییردهندهٔ فایروال هنوز پیاده‌سازی نشده است.
+- ترمینال وب، تست سرعت، شمارش ترافیک به تفکیک پورت و صدور خودکار گواهی SSL در برنامهٔ فعلی آماده نیستند.
 
 ## توسعه
 
-```bash
-# ترمینال اول: API و فایل‌های ساخته‌شده
-cargo run
+برای توسعهٔ محلی به Rust stable و Node.js 20 یا جدیدتر نیاز دارید:
 
-# ترمینال دوم: توسعهٔ React با proxy به API
+```bash
+git clone https://github.com/parsasajjadi2008/donatello.git
+cd donatello
+cd frontend && npm ci && npm run build
+cd .. && cargo run
+```
+
+برای کار روی فرانت‌اند، در ترمینال جداگانه اجرا کنید:
+
+```bash
 cd frontend
-npm ci
 npm run dev
 ```
 
-برای تولید نسخهٔ نهایی:
+فایل‌های تولیدشدهٔ `frontend/dist` داخل باینری Rust قرار می‌گیرند؛ بعد از هر تغییر فرانت‌اند، پیش از build بک‌اند `npm run build` را اجرا کنید.
 
-```bash
-cd frontend && npm ci && npm run build
-cd .. && cargo build --release
-```
-
-پس از هر تغییر در فرانت، `npm run build` را پیش از ساخت باینری Rust اجرا کنید؛ فایل‌های `frontend/dist` هنگام ساخت داخل باینری قرار می‌گیرند.
-
-### ساختار پروژه
+### ساختار
 
 ```text
 src/main.rs                 API، نشست‌ها و خواندن اطلاعات Linux
-frontend/src/App.tsx        نصب‌گر، ورود و پوستهٔ پنل
-frontend/src/pages.tsx      داشبورد و صفحه‌های مدیریتی
-frontend/src/components/ui  اجزای سفارشی shadcn/ui و Radix
-frontend/dist               خروجی React که در Rust قرار می‌گیرد
-PLAN.md                     برنامهٔ ۴۰ قابلیتی
+install.sh                  نصب، مدیریت systemd، به‌روزرسانی و حذف
+frontend/src/App.tsx        پوسته، ورود و نصب اولیه
+frontend/src/pages.tsx      داشبورد و صفحات مدیریتی
+frontend/src/components/ui  کامپوننت‌های سفارشی shadcn/ui و Radix
+frontend/dist               رابط ساخته‌شده و جاسازی‌شده در باینری
+PLAN.md                     نقشهٔ ۴۰ قابلیتی پروژه
 ```
 
-## اصول امنیتی
+## نقشهٔ راه
 
-- پیش‌فرض شبکه فقط `127.0.0.1:8282` است؛ برای دسترسی راه دور از SSH tunnel یا HTTPS reverse proxy استفاده کنید.
-- گذرواژه‌ها با Argon2 هش می‌شوند. نشست‌ها در کوکی `HttpOnly; SameSite=Strict` و با زمان انقضا ذخیره می‌شوند.
-- درخواست‌های تغییردهنده باید Origin همان میزبان را داشته باشند.
-- تغییر گذرواژه، سایر نشست‌های کاربر را می‌بندد؛ تلاش‌های ورود متعدد برای ده دقیقه محدود می‌شوند.
-- فایل پایگاه داده روی Unix با مجوز `0600` تنظیم می‌شود. سرویس را با کاربر سیستم محدود اجرا کنید.
-- UFW در نسخهٔ فعلی فقط خوانده می‌شود تا تغییر ناخواسته دسترسی SSH یا پنل را قطع نکند.
-
-## نقشهٔ ادامه
-
-نقشهٔ کامل در [PLAN.md](PLAN.md) آمده است. اولویت‌های بعدی: مجوزهای دقیق برای عملیات، ترمینال وب محدود، مدیریت امن UFW، تست سرعت، ترافیک هر پورت، تنظیم پورت در پنل و ACME با توقف موقت سرویس مجاز و راه‌اندازی قطعی دوبارهٔ آن.
+وضعیت قابلیت‌ها و برنامهٔ توسعه در [PLAN.md](PLAN.md) آمده است.
 
 ---
 
 <div align="center">
 
-ساخته‌شده توسط **مستر کورتکس**
+ساخته‌شده توسط **[𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex)**
 
 </div>

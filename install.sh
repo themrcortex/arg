@@ -4,11 +4,13 @@ set -Eeuo pipefail
 readonly APP_NAME="Donatello"
 readonly SERVICE_NAME="donatello"
 readonly REPOSITORY="https://github.com/parsasajjadi2008/donatello.git"
+readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/parsasajjadi2008/donatello/main/install.sh"
 readonly BRANCH="main"
 readonly INSTALL_DIR="/opt/donatello"
 readonly SOURCE_DIR="/opt/donatello/source"
-readonly BINARY="/usr/local/bin/donatello"
-readonly INSTALLER="/usr/local/sbin/donatello-installer"
+readonly BINARY="/usr/local/lib/donatello/donatello"
+readonly CLI="/usr/local/bin/donatello"
+readonly LEGACY_INSTALLER="/usr/local/sbin/donatello-installer"
 readonly SERVICE_FILE="/etc/systemd/system/donatello.service"
 readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
 readonly ENV_DIR="/etc/donatello"
@@ -32,7 +34,7 @@ die() { printf '\033[1;31mخطا: %s\033[0m\n' "$*" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
 require_root() {
-  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "این دستور را با sudo اجرا کنید: sudo bash install.sh $1"
+  [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "این دستور را با sudo اجرا کنید: sudo bash donatello.sh $1"
 }
 
 require_systemd() {
@@ -142,7 +144,7 @@ User=donatello
 Group=donatello
 WorkingDirectory=/var/lib/donatello
 EnvironmentFile=/etc/donatello/donatello.env
-ExecStart=/usr/local/bin/donatello
+ExecStart=/usr/local/lib/donatello/donatello
 Restart=on-failure
 RestartSec=3
 UMask=0027
@@ -167,9 +169,20 @@ UNIT
 activate_binary() {
   local built="$SOURCE_DIR/target/release/donatello"
   local staged
-  staged="$(mktemp /usr/local/bin/.donatello.XXXXXX)"
+  install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
+  staged="$(mktemp /usr/local/lib/donatello/.donatello.XXXXXX)"
   install -o root -g root -m 0755 "$built" "$staged"
   mv -f "$staged" "$BINARY"
+}
+
+install_cli() {
+  local staged
+  staged="$(mktemp /usr/local/bin/.donatello-cli.XXXXXX)"
+  curl --proto '=https' --tlsv1.2 -fsSL "$INSTALL_SCRIPT_URL" -o "$staged"
+  chmod 0755 "$staged"
+  chown root:root "$staged"
+  mv -f "$staged" "$CLI"
+  rm -f "$LEGACY_INSTALLER"
 }
 
 install_app() {
@@ -184,16 +197,17 @@ install_app() {
   write_default_config
   activate_binary
   write_service_unit
-  install -o root -g root -m 0755 "$(readlink -f "$0")" "$INSTALLER"
-  systemctl enable --now "$SERVICE_NAME"
+  install_cli
+  systemctl enable "$SERVICE_NAME"
+  systemctl restart "$SERVICE_NAME"
   if ! systemctl is-active --quiet "$SERVICE_NAME"; then
     systemctl --no-pager --full status "$SERVICE_NAME" || true
     journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
     die "سرویس بالا نیامد؛ گزارش بالا را بررسی کنید."
   fi
   say "نصب Donatello کامل شد"
-  info "وضعیت سرویس: systemctl status donatello"
-  info "مدیریت: sudo donatello-installer manage"
+  info "وضعیت سرویس: sudo donatello status"
+  info "مدیریت: sudo donatello manage"
   info "آدرس پیش‌فرض پنل: http://127.0.0.1:8282"
   info "برای اتصال امن از SSH tunnel استفاده کنید؛ پنل به‌صورت پیش‌فرض عمومی نیست."
 }
@@ -215,7 +229,8 @@ update_app() {
   build_release
   local previous staged
   previous="$(mktemp /var/tmp/donatello.previous.XXXXXX)"
-  staged="$(mktemp /usr/local/bin/.donatello.XXXXXX)"
+  install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
+  staged="$(mktemp /usr/local/lib/donatello/.donatello.XXXXXX)"
   if [[ -x "$BINARY" ]]; then
     cp -p "$BINARY" "$previous"
   else
@@ -223,6 +238,8 @@ update_app() {
   fi
   install -o root -g root -m 0755 "$SOURCE_DIR/target/release/donatello" "$staged"
   mv -f "$staged" "$BINARY"
+  write_service_unit
+  install_cli
   systemctl restart "$SERVICE_NAME"
   if wait_until_active; then
     rm -f "$previous"
@@ -320,7 +337,8 @@ delete_app() {
     [[ "$confirmation" == "DELETE DONATELLO" ]] || die "حذف لغو شد."
   fi
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$SERVICE_FILE" "$BINARY" "$SUDOERS_FILE"
+  rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE"
+  rmdir /usr/local/lib/donatello 2>/dev/null || true
   rm -rf "$SOURCE_DIR"
   systemctl daemon-reload
   systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
@@ -328,7 +346,6 @@ delete_app() {
     rm -rf "$INSTALL_DIR" "$DATA_DIR" "$ENV_DIR"
     userdel "$SERVICE_USER" 2>/dev/null || true
     groupdel "$SERVICE_GROUP" 2>/dev/null || true
-    rm -f "$INSTALLER"
     say "Donatello و همهٔ داده‌هایش پاک شدند."
   else
     say "Donatello حذف شد؛ داده‌ها و تنظیمات برای نصب دوباره نگه داشته شدند."
@@ -337,13 +354,13 @@ delete_app() {
 
 usage() {
   cat <<'HELP'
-Donatello installer and service manager
+Donatello · installer and system service manager
 
 Usage:
-  sudo bash install.sh install
-  sudo bash install.sh manage [status|start|stop|restart|logs|port|update|delete]
-  sudo bash install.sh update
-  sudo bash install.sh delete [--purge]
+  sudo bash donatello.sh install
+  sudo donatello manage [status|start|stop|restart|logs|port|update|delete]
+  sudo donatello update
+  sudo donatello delete [--purge]
 
 Commands:
   install          Build Donatello and install its systemd service
@@ -359,6 +376,18 @@ HELP
 case "${1:-help}" in
   install) install_app ;;
   manage) manage_app "$@" ;;
+  status) show_status ;;
+  start|stop|restart)
+    require_root "$1"
+    require_systemd
+    [[ -f "$SERVICE_FILE" ]] || die "Donatello نصب نیست."
+    systemctl "$1" "$SERVICE_NAME"
+    ;;
+  logs)
+    require_root logs
+    require_systemd
+    journalctl -u "$SERVICE_NAME" -n "${2:-100}" --no-pager
+    ;;
   update) update_app ;;
   delete) delete_app "${2:-}" ;;
   help|-h|--help) usage ;;
