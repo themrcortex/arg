@@ -10,6 +10,7 @@ import {
   Gauge,
   HardDrive,
   Info,
+  Github,
   KeyRound,
   Network,
   Plus,
@@ -801,7 +802,8 @@ export function AuditPage({ Heading, notify }: Common) {
 
 type MonitoringConfig = { enabled: boolean; interval_seconds: number; retention_days: number; session_hours: number }
 
-export function SettingsPage({ Heading, logout, notify, user }: { Heading: Heading; logout: () => void; notify: (message: string) => void; user: User }) {
+type UpdateInfo = { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string }
+export function SettingsPage({ Heading, logout, notify, user, update, checkUpdate, runUpdate, updating }: { Heading: Heading; logout: () => void; notify: (message: string) => void; user: User; update: UpdateInfo; checkUpdate: () => Promise<void>; runUpdate: () => Promise<void>; updating: boolean }) {
   const [config, setConfig] = useState<MonitoringConfig | null>(null)
   const [port, setPort] = useState(location.port || (location.protocol === 'https:' ? '443' : '80'))
   const [busy, setBusy] = useState(false)
@@ -849,6 +851,12 @@ export function SettingsPage({ Heading, logout, notify, user }: { Heading: Headi
         {scheduledPort && <Alert className="mt-4"><AlertDescription>نشانی HTTP جدید: <a className="font-mono text-primary underline" dir="ltr" href={`http://${location.hostname}:${scheduledPort}`}>http://{location.hostname}:{scheduledPort}</a></AlertDescription></Alert>}
       </SectionCard>
     </div>
+    <div className="mt-5"><SectionCard title="درباره و به‌روزرسانی" description="نسخهٔ Donatello، وضعیت مخزن و تغییرات اخیر" right={<Badge variant={update.status === 'available' ? 'warning' : update.status === 'current' ? 'success' : 'outline'}>{update.status === 'available' ? 'نسخهٔ جدید' : update.status === 'current' ? 'به‌روز' : 'بررسی ناموفق'}</Badge>}>
+      <div className="grid gap-5 lg:grid-cols-[.8fr_1.2fr]">
+        <div className="space-y-3"><div className="rounded-2xl border border-white/10 bg-white/[.03] p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 font-mono text-2xl font-bold text-white" dir="ltr">0.2.0</div><div className="mt-1 text-xs text-muted-foreground" dir="ltr">commit {update.local || '—'}</div></div><div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => void checkUpdate()}><RefreshCw size={15}/> بررسی دوباره</Button>{isAdmin && update.status === 'available' && <Button size="sm" disabled={updating} onClick={() => void runUpdate()}>{updating ? 'در حال شروع…' : 'به‌روزرسانی پنل'}</Button>}<a href="https://github.com/themrcortex/donatello" target="_blank" rel="noopener noreferrer"><Button variant="ghost" size="sm"><Github size={15}/> GitHub</Button></a></div>{update.status === 'available' && <Alert className="border-primary/30 bg-primary/10"><AlertDescription>نسخهٔ جدید <code className="font-mono text-white" dir="ltr">{update.remote}</code> آمادهٔ نصب است.</AlertDescription></Alert>}{update.status === 'unavailable' && <p className="text-xs leading-6 text-amber-200/80">بررسی نسخه انجام نشد؛ اتصال سرور و دسترسی helper را بررسی کن.</p>}</div>
+        <div className="rounded-2xl border border-white/10 bg-[#11131e] p-5"><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold text-white">تغییرات اخیر</h3><span className="font-mono text-[11px] text-muted-foreground" dir="ltr">main</span></div><ul className="space-y-3 text-sm leading-6 text-muted-foreground"><li className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary"/>کنترل کامل UFW: نصب، فعال‌سازی، غیرفعال‌سازی و مدیریت قوانین</li><li className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary"/>اعلان نسخهٔ جدید و به‌روزرسانی امن از داخل پنل</li><li className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary"/>تنظیمات قابل تغییر برای تاریخچه، نشست، پورت پنل و فیلترهای شبکه</li><li className="flex gap-2"><span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-primary"/>نمودارهای منابع و ترافیک با ثبت پس‌زمینه در Rust</li></ul></div>
+      </div>
+    </SectionCard></div>
     <div className="mt-5"><PasswordCard notify={notify}/></div>
     <Button variant="outline" className="mt-7" onClick={logout}><X size={16}/> خروج از حساب</Button>
   </>

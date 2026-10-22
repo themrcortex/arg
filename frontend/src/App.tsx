@@ -380,7 +380,7 @@ export default function App() {
             {currentPage === 'audit' && user.role === 'admin' && (
               <AuditPage Heading={PageHeading} notify={setNotice} />
             )}
-            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} user={user} />}
+            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} user={user} update={update} checkUpdate={checkUpdate} runUpdate={runUpdate} updating={updating} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} Donatello · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
