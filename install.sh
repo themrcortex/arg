@@ -66,7 +66,7 @@ warn() { printf '%s  WARNING: %s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
 die() { printf '%s  ERROR: %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
-show_banner() {
+show_wordmark() {
   printf '%s' "$C_PURPLE"
   cat <<'BANNER'
   ██████╗  ██████╗ ███╗   ██╗ █████╗ ████████╗███████╗██╗     ██╗      ██████╗
@@ -76,7 +76,11 @@ show_banner() {
   ██████╔╝╚██████╔╝██║ ╚████║██║  ██║   ██║   ███████╗███████╗███████╗╚██████╔╝
   ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚══════╝ ╚═════╝
 BANNER
-  printf '%s\n' "$C_RESET"
+  printf '%s' "$C_RESET"
+}
+
+show_banner() {
+  show_wordmark
   printf '  %sVPS MANAGEMENT%s  %s·%s  %sINSTALLER & SERVICE CONSOLE%s\n' \
     "$C_BOLD" "$C_RESET" "$C_DIM" "$C_RESET" "$C_CYAN" "$C_RESET"
   printf '  %s\n\n' '────────────────────────────────────────────────────────────────────────────'
@@ -918,16 +922,7 @@ draw_control_center() {
   fi
 
   printf '\033[2J\033[H'
-  printf '%s' "$C_PURPLE"
-  cat <<'BANNER'
-  ██████╗  ██████╗ ███╗   ██╗ █████╗ ████████╗███████╗██╗     ██╗      ██████╗
-  ██╔══██╗██╔═══██╗████╗  ██║██╔══██╗╚══██╔══╝██╔════╝██║     ██║     ██╔═══██╗
-  ██║  ██║██║   ██║██╔██╗ ██║███████║   ██║   █████╗  ██║     ██║     ██║   ██║
-  ██║  ██║██║   ██║██║╚██╗██║██╔══██║   ██║   ██╔══╝  ██║     ██║     ██║   ██║
-  ██████╔╝╚██████╔╝██║ ╚████║██║  ██║   ██║   ███████╗███████╗███████╗╚██████╔╝
-  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚══════╝ ╚═════╝
-BANNER
-  printf '%s' "$C_RESET"
+  show_wordmark
   printf '  %sVPS CONTROL CENTER%s\n' "$C_DIM" "$C_RESET"
   printf '  %s────────────────────────────────────────────────────────────────────%s\n' "$C_PURPLE" "$C_RESET"
   printf '  Service  %s● %s%s\n' "$state_color" "$state" "$C_RESET"
@@ -1039,8 +1034,9 @@ main_menu() {
         esac
       fi
     else
-    SERVER_PUBLIC_IP="${SERVER_PUBLIC_IP:-$(detect_public_ipv4 || true)}"
-      printf '\n%s%s  DONATELLO CONTROL CENTER%s\n' "$C_BOLD" "$C_CYAN" "$C_RESET"
+      SERVER_PUBLIC_IP="${SERVER_PUBLIC_IP:-$(detect_public_ipv4 || true)}"
+      show_wordmark
+      printf '  %sVPS CONTROL CENTER%s\n' "$C_DIM" "$C_RESET"
       printf '  Service: %s\n  Panel: %s\n\n' \
         "$( [[ -f "$SERVICE_FILE" ]] && systemctl is-active "$SERVICE_NAME" 2>/dev/null || printf 'not installed' )" \
       "$( [[ -s "$DOMAIN_FILE" ]] && printf 'https://%s' "$(<"$DOMAIN_FILE")" || printf 'http://%s:%s' "${SERVER_PUBLIC_IP:-<SERVER_IP>}" "$(panel_port 2>/dev/null || printf '8282')" )"
@@ -1179,7 +1175,9 @@ Supported systems: Debian and Ubuntu with systemd.
 HELP
 }
 
-show_banner
+if [[ "${1:-menu}" != "menu" && !( "${1:-menu}" == "manage" && -z "${2:-}" ) ]]; then
+  show_banner
+fi
 
 case "${1:-menu}" in
   install) install_app ;;
