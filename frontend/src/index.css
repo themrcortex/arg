@@ -1,7 +1,35 @@
-@import '@fontsource-variable/vazirmatn/wght.css';
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@font-face {
+  font-family: 'Peyda';
+  src: url('./assets/fonts/peyda-regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Peyda';
+  src: url('./assets/fonts/peyda-medium.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Peyda';
+  src: url('./assets/fonts/peyda-bold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Abar';
+  src: url('./assets/fonts/abar-variable.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
 
 @layer base {
   :root {
@@ -33,8 +61,17 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Vazirmatn Variable', ui-sans-serif, system-ui, sans-serif;
+    font-family: 'Peyda', ui-sans-serif, system-ui, sans-serif;
     min-width: 320px;
+  }
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6,
+  .title-font {
+    font-family: 'Abar', 'Peyda', ui-sans-serif, system-ui, sans-serif;
   }
   button,
   input,
