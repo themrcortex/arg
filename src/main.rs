@@ -361,9 +361,8 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     let mut username = String::new();
-    let mut current_password = String::new();
     let mut new_password = String::new();
-    for value in [&mut username, &mut current_password, &mut new_password] {
+    for value in [&mut username, &mut new_password] {
         if reader.read_line(value)? == 0 {
             return Err(
                 io::Error::new(io::ErrorKind::UnexpectedEof, "Missing password input").into(),
@@ -384,13 +383,13 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = env::var("DONATELLO_DB").unwrap_or_else(|_| "data/donatello.db".into());
     let db = Connection::open(db_path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
-    let user = db.query_row(
-        "SELECT id,password_hash FROM users WHERE username=?1 AND enabled=1",
+    let user_id = db.query_row(
+        "SELECT id FROM users WHERE username=?1 AND enabled=1",
         [&username],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        |row| row.get::<_, i64>(0),
     );
-    let (user_id, current_hash) = match user {
-        Ok(user) => user,
+    let user_id = match user_id {
+        Ok(user_id) => user_id,
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -400,18 +399,6 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(error) => return Err(error.into()),
     };
-    let parsed = PasswordHash::new(&current_hash)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid stored password hash"))?;
-    if Argon2::default()
-        .verify_password(current_password.as_bytes(), &parsed)
-        .is_err()
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Current password is incorrect",
-        )
-        .into());
-    }
     let new_hash = Argon2::default()
         .hash_password(new_password.as_bytes(), &SaltString::generate(&mut OsRng))
         .map_err(|_| io::Error::other("Password hashing failed"))?
@@ -425,9 +412,9 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
         &db,
         &username,
         "account.password",
-        "Password changed; all sessions revoked",
+        "Password reset by root; all sessions revoked",
     );
-    println!("Password changed successfully. Sign in again with the new password.");
+    println!("Password reset successfully. Sign in again with the new password.");
     Ok(())
 }
 async fn logout(

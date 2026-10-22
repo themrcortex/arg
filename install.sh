@@ -473,25 +473,17 @@ change_account_password() {
   require_root password
   require_systemd
   [[ -f "$SERVICE_FILE" && -x "$BINARY" ]] || die "DONATELLO is not installed."
-  local username current_password new_password confirm_password db_path
+  local username new_password db_path
   read -r -p 'Account username: ' username </dev/tty
   [[ -n "$username" ]] || die "Username cannot be empty."
-  IFS= read -r -s -p 'Current password: ' current_password </dev/tty
-  printf '\n'
   IFS= read -r -s -p 'New password (at least 12 characters): ' new_password </dev/tty
   printf '\n'
-  IFS= read -r -s -p 'Confirm new password: ' confirm_password </dev/tty
-  printf '\n'
-  if [[ "$new_password" != "$confirm_password" ]]; then
-    unset current_password new_password confirm_password
-    die "The new passwords do not match."
-  fi
   db_path="$(configured_db_path)"
-  if printf '%s\n' "$username" "$current_password" "$new_password" | DONATELLO_DB="$db_path" "$BINARY" change-password; then
-    unset current_password new_password confirm_password
+  if printf '%s\n' "$username" "$new_password" | DONATELLO_DB="$db_path" "$BINARY" change-password; then
+    unset new_password
   else
-    unset current_password new_password confirm_password
-    die "Password change failed. Verify the username and current password."
+    unset new_password
+    die "Password reset failed. Verify the username and use at least 12 characters."
   fi
 }
 
@@ -1030,7 +1022,7 @@ draw_control_center() {
   draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove Donatello and retain its data'
   draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove Donatello and all its data'
   draw_menu_item "$selected" 12 'Get one-time setup code' 'Display the first-admin code'
-  draw_menu_item "$selected" 13 'Change account password' 'Verify current password and update it'
+  draw_menu_item "$selected" 13 'Reset account password' 'Root reset; no old password needed'
   printf '\n  Type option%s%s%s then %sEnter%s   %s↑%s / %s↓%s move   %sq%s quit' \
     "$([[ -n "$digit_buffer" ]] && printf ' [' || true)" "$digit_buffer" "$([[ -n "$digit_buffer" ]] && printf ']' || true)" \
     "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
@@ -1263,7 +1255,7 @@ Commands:
   restart          Restart the systemd service
   logs [count]     Show recent service logs
   update           Fetch main, build, replace the binary, and roll back on failure
-  password         Change an account password after verifying the current password
+  password         Reset an account password as root
   ssl              Obtain a Let's Encrypt certificate and enable Rust TLS
   delete           Uninstall the service while preserving application data
   delete --purge   Uninstall and remove all configuration and application data
