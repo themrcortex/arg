@@ -253,6 +253,32 @@ export function DashboardPage({ user, Heading, notify }: { user: User } & Common
           />
         </div>
       )}
+      {data && (
+        <div className="mt-5 grid gap-5 md:grid-cols-2">
+          <SectionCard title="مصرف خود Donatello" description="اندازه‌گیری فرایند پنل · به‌روزرسانی هر ۵ ثانیه">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Metric
+                icon={Cpu}
+                label="CPU پنل"
+                value={`${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}٪`}
+                detail="سهم از توان کل پردازنده‌های سرور"
+                progress={data.process_cpu_percent}
+              />
+              <Metric
+                icon={Database}
+                label="RAM پنل"
+                value={formatBytes(data.process_rss_bytes)}
+                detail="حافظهٔ مقیم فرایند (RSS)، شامل کتابخانه‌های مشترک"
+              />
+            </div>
+          </SectionCard>
+          <SectionCard title="روش اندازه‌گیری" description="مقدار واقعی فرایند Donatello در همین سرور">
+            <p className="text-sm leading-7 text-muted-foreground">
+              RAM از حافظهٔ مقیم فرایند خوانده می‌شود. CPU از اختلاف نمونه‌های زمان پردازنده محاسبه شده و بر تعداد هسته‌ها تقسیم می‌شود؛ بنابراین مصرف کل سرور در کارت‌های بالا جداگانه نمایش داده می‌شود.
+            </p>
+          </SectionCard>
+        </div>
+      )}
       <div className="mt-5 grid gap-5 xl:grid-cols-[1.55fr_1fr]">
         <SectionCard
           title="ترافیک لحظه‌ای شبکه"

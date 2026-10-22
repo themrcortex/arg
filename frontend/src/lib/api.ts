@@ -19,6 +19,8 @@ export type Dashboard = {
   swap_free_kib?: number
   cpu_total?: number
   cpu_idle?: number
+  process_rss_bytes: number
+  process_cpu_percent: number
   disk_total_bytes?: number
   disk_free_bytes?: number
   interfaces: Interface[]

@@ -10,7 +10,7 @@
 ![React](https://img.shields.io/badge/frontend-React%20%2B%20TypeScript-9868de?style=for-the-badge&logo=react&logoColor=white)
 ![Status](https://img.shields.io/badge/status-early%20development-563776?style=for-the-badge)
 
-**توسعه‌دهنده: [𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex) · [@mrc0rtex](https://t.me/mrc0rtex)**
+**توسعه‌دهنده: مستر کورتکس**
 
 </div>
 
@@ -26,7 +26,7 @@ Donatello یک پنل وب راست‌به‌چپ برای دیدن وضعیت �
 | --- | --- |
 | نصب و امنیت | نصب‌گر وب، حساب مدیر اولیه، Argon2، نشست HttpOnly، محافظت Origin، محدودسازی تلاش ورود، تغییر گذرواژه و بستن نشست‌های دیگر |
 | کاربران | افزودن حساب، نقش‌های مدیر/اپراتور/ناظر، فعال‌سازی یا غیرفعال‌سازی، جلوگیری از حذف آخرین مدیر |
-| مانیتورینگ | مصرف CPU، حافظه، دیسک، uptime، load average و نرخ زندهٔ ترافیک شبکه |
+| مانیتورینگ | مصرف CPU، حافظه، دیسک، uptime، load average، نرخ زندهٔ ترافیک شبکه و مصرف RAM/CPU خود پنل |
 | شبکه | نام، MAC، IPv4/IPv6، وضعیت و بایت‌های هر کارت؛ پورت‌های شنوندهٔ TCP/UDP |
 | فایروال | نمایش خروجی واقعی `ufw status numbered` با مهلت اجرای محدود |
 | حسابرسی | آخرین ۱۰۰ رویداد ورود و تغییرات مدیریتی |
@@ -141,6 +141,6 @@ PLAN.md                     برنامهٔ ۴۰ قابلیتی
 
 <div align="center">
 
-ساخته‌شده با دقت توسط **[𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex)** · Telegram: **[@mrc0rtex](https://t.me/mrc0rtex)**
+ساخته‌شده توسط **مستر کورتکس**
 
 </div>

@@ -40,17 +40,7 @@ const pages = [
   { key: 'audit' as Page, name: 'گزارش عملیات', icon: ScrollText, admin: true },
   { key: 'settings' as Page, name: 'تنظیمات', icon: Settings },
 ]
-const developer = (
-  <a
-    className="font-semibold text-[#c4a1ff] transition hover:text-white hover:underline"
-    href="https://t.me/mrc0rtex"
-    target="_blank"
-    rel="noopener noreferrer"
-    dir="ltr"
-  >
-    𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁
-  </a>
-)
+const developer = <span className="font-semibold text-[#c4a1ff]">مستر کورتکس</span>
 
 function Brand({ large = false }: { large?: boolean }) {
   return (
@@ -410,17 +400,7 @@ export default function App() {
             {page === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} Donatello · Rust + React</span>
-              <span>
-                طراحی و توسعه: {developer} ·{' '}
-                <a
-                  href="https://t.me/mrc0rtex"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hover:text-foreground"
-                >
-                  @mrc0rtex
-                </a>
-              </span>
+              <span>طراحی و توسعه: {developer}</span>
             </footer>
           </main>
         </div>

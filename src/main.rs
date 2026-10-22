@@ -19,8 +19,8 @@ use std::{
     collections::HashMap,
     env, fs,
     net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 type AppState = Arc<Mutex<Connection>>;
@@ -398,6 +398,51 @@ fn cpu_ticks() -> (u64, u64) {
         values.get(3).copied().unwrap_or(0) + values.get(4).copied().unwrap_or(0),
     )
 }
+static PROCESS_CPU_SAMPLE: OnceLock<Mutex<(u64, Instant)>> = OnceLock::new();
+fn process_usage() -> (u64, f64) {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
+    let resident_pages = fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|value| value.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .unwrap_or(0);
+    let rss_bytes = resident_pages.saturating_mul(page_size);
+
+    let ticks = fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|value| {
+            let end = value.rfind(')')?;
+            let fields: Vec<_> = value[end + 1..].split_whitespace().collect();
+            Some(
+                fields
+                    .get(11)?
+                    .parse::<u64>()
+                    .ok()?
+                    .saturating_add(fields.get(12)?.parse::<u64>().ok()?),
+            )
+        })
+        .unwrap_or(0);
+    let now = Instant::now();
+    let sample = PROCESS_CPU_SAMPLE.get_or_init(|| Mutex::new((ticks, now)));
+    let cpu_percent = sample
+        .lock()
+        .map(|mut previous| {
+            let elapsed = now.duration_since(previous.1).as_secs_f64();
+            let delta = ticks.saturating_sub(previous.0);
+            previous.0 = ticks;
+            previous.1 = now;
+            let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as f64;
+            let cores = std::thread::available_parallelism()
+                .map(|value| value.get())
+                .unwrap_or(1) as f64;
+            if elapsed > 0.0 {
+                ((delta as f64 / ticks_per_second / elapsed / cores) * 100.0).clamp(0.0, 100.0)
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
+    (rss_bytes, cpu_percent)
+}
 #[cfg(unix)]
 fn disk_usage() -> (u64, u64) {
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -466,9 +511,10 @@ async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         .trim()
         .to_owned();
     let (cpu_total, cpu_idle) = cpu_ticks();
+    let (process_rss_bytes, process_cpu_percent) = process_usage();
     let (disk_total_bytes, disk_free_bytes) = disk_usage();
     Ok(Json(
-        json!({"hostname": hostname, "uptime_seconds": uptime as u64, "load": load, "memory_kib": mem.get("MemTotal"), "available_kib": mem.get("MemAvailable"), "swap_total_kib": mem.get("SwapTotal"), "swap_free_kib": mem.get("SwapFree"), "cpu_total": cpu_total, "cpu_idle": cpu_idle, "disk_total_bytes": disk_total_bytes, "disk_free_bytes": disk_free_bytes, "interfaces": network(), "ports": listening_ports()}),
+        json!({"hostname": hostname, "uptime_seconds": uptime as u64, "load": load, "memory_kib": mem.get("MemTotal"), "available_kib": mem.get("MemAvailable"), "swap_total_kib": mem.get("SwapTotal"), "swap_free_kib": mem.get("SwapFree"), "cpu_total": cpu_total, "cpu_idle": cpu_idle, "process_rss_bytes": process_rss_bytes, "process_cpu_percent": process_cpu_percent, "disk_total_bytes": disk_total_bytes, "disk_free_bytes": disk_free_bytes, "interfaces": network(), "ports": listening_ports()}),
     ))
 }
 async fn users(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
