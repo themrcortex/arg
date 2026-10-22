@@ -1469,52 +1469,18 @@ async fn install_firewall(State(state): State<AppState>, headers: HeaderMap) -> 
     Ok(Json(json!({"installed": true})))
 }
 fn update_status() -> Value {
-    let output = std::process::Command::new("sudo")
-        .args(["-n", "/usr/local/lib/donatello/update-helper", "check"])
-        .output();
-    let (stdout, helper_error) = match output {
-        Ok(output) if output.status.success() => (
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::new(),
-        ),
-        Ok(output) => (
-            String::new(),
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ),
-        Err(error) => (String::new(), error.to_string()),
-    };
-    let stdout = if stdout.is_empty() {
-        let local = std::process::Command::new("git")
-            .args(["-C", "/opt/donatello/source", "rev-parse", "HEAD"])
-            .output();
-        let remote = std::process::Command::new("git")
-            .args([
-                "-c",
-                "credential.helper=",
-                "ls-remote",
-                "https://github.com/themrcortex/donatello.git",
-                "refs/heads/main",
-            ])
-            .output();
-        match (local, remote) {
-            (Ok(local), Ok(remote)) if local.status.success() && remote.status.success() => {
-                format!(
-                    "{} {}",
-                    String::from_utf8_lossy(&local.stdout).trim(),
-                    String::from_utf8_lossy(&remote.stdout)
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or("")
-                )
-            }
-            _ => {
-                return json!({"status":"unavailable", "error": if helper_error.is_empty() { "Could not read the local source or GitHub main branch" } else { &helper_error }})
-            }
+    let output = match privileged_request(json!({"action":"update-check"})) {
+        Ok(output) if output["ok"] == true => {
+            output["stdout"].as_str().unwrap_or_default().to_owned()
         }
-    } else {
-        stdout
+        Ok(output) => {
+            return json!({"status":"unavailable", "error":output["error"].as_str().unwrap_or("Update check failed")})
+        }
+        Err((_, detail)) => {
+            return json!({"status":"unavailable", "error":detail.0["error"].as_str().unwrap_or("Privileged manager unavailable")})
+        }
     };
-    let revisions: Vec<_> = stdout.split_whitespace().collect();
+    let revisions: Vec<_> = output.split_whitespace().collect();
     if revisions.len() != 2 {
         return json!({"status":"unavailable"});
     }
@@ -1534,16 +1500,8 @@ async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap
     check_origin(&headers)?;
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
-    let output = std::process::Command::new("sudo")
-        .args(["-n", "/usr/local/lib/donatello/update-helper", "run"])
-        .output()
-        .map_err(|_| {
-            error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Update helper unavailable; update Donatello from SSH once",
-            )
-        })?;
-    if !output.status.success() {
+    let output = privileged_request(json!({"action":"update-run"}))?;
+    if output["ok"] != true {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "Update could not be scheduled; check service logs",
@@ -1623,6 +1581,8 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("disable") => "disable",
         Some("add") => "add",
         Some("remove") => "remove",
+        Some("update-check") => "update-check",
+        Some("update-run") => "update-run",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
     let mut args = vec![action.to_owned()];
@@ -1647,8 +1607,19 @@ fn execute_privileged_request(request: &Value) -> Value {
         };
         args.extend([port.to_string(), protocol.to_owned(), policy.to_owned()]);
     }
-    let output = match std::process::Command::new("/usr/local/lib/donatello/ufw-helper")
-        .args(&args)
+    let (helper, helper_args) = if action.starts_with("update-") {
+        (
+            "/usr/local/lib/donatello/update-helper",
+            vec![action.trim_start_matches("update-")],
+        )
+    } else {
+        (
+            "/usr/local/lib/donatello/ufw-helper",
+            args.iter().map(String::as_str).collect(),
+        )
+    };
+    let output = match std::process::Command::new(helper)
+        .args(helper_args)
         .output()
     {
         Ok(output) => output,
@@ -1663,7 +1634,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         return json!({"ok":true,"available":installed,"installed":installed,"status":stdout,"error":if installed { "" } else { "UFW is not installed" }});
     }
     if output.status.success() {
-        json!({"ok":true})
+        json!({"ok":true,"stdout":stdout})
     } else {
         json!({"ok":false,"error":if stderr.is_empty() { "UFW operation failed" } else { &stderr }})
     }
