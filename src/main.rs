@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env, fs,
+    io::{self, BufRead, BufReader},
     net::SocketAddr,
     sync::{Arc, Mutex, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -354,6 +355,80 @@ async fn change_password(
         "Password changed; other sessions revoked",
     );
     Ok(Json(json!({"ok":true})))
+}
+
+fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
+    let stdin = io::stdin();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut username = String::new();
+    let mut current_password = String::new();
+    let mut new_password = String::new();
+    for value in [&mut username, &mut current_password, &mut new_password] {
+        if reader.read_line(value)? == 0 {
+            return Err(
+                io::Error::new(io::ErrorKind::UnexpectedEof, "Missing password input").into(),
+            );
+        }
+        while value.ends_with('\n') || value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    if new_password.len() < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "New password must have at least 12 characters",
+        )
+        .into());
+    }
+
+    let db_path = env::var("DONATELLO_DB").unwrap_or_else(|_| "data/donatello.db".into());
+    let db = Connection::open(db_path)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    let user = db.query_row(
+        "SELECT id,password_hash FROM users WHERE username=?1 AND enabled=1",
+        [&username],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    );
+    let (user_id, current_hash) = match user {
+        Ok(user) => user,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Account not found or disabled",
+            )
+            .into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let parsed = PasswordHash::new(&current_hash)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid stored password hash"))?;
+    if Argon2::default()
+        .verify_password(current_password.as_bytes(), &parsed)
+        .is_err()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Current password is incorrect",
+        )
+        .into());
+    }
+    let new_hash = Argon2::default()
+        .hash_password(new_password.as_bytes(), &SaltString::generate(&mut OsRng))
+        .map_err(|_| io::Error::other("Password hashing failed"))?
+        .to_string();
+    db.execute(
+        "UPDATE users SET password_hash=?1 WHERE id=?2",
+        params![new_hash, user_id],
+    )?;
+    db.execute("DELETE FROM sessions WHERE user_id=?1", [user_id])?;
+    audit(
+        &db,
+        &username,
+        "account.password",
+        "Password changed; all sessions revoked",
+    );
+    println!("Password changed successfully. Sign in again with the new password.");
+    Ok(())
 }
 async fn logout(
     State(state): State<AppState>,
@@ -718,6 +793,9 @@ fn static_file_index() -> Response {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env::args().nth(1).as_deref() == Some("change-password") {
+        return change_password_cli();
+    }
     let db_path = env::var("DONATELLO_DB").unwrap_or_else(|_| "data/donatello.db".into());
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         if !parent.as_os_str().is_empty() {

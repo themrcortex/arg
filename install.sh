@@ -122,7 +122,7 @@ normalize_menu_digits() {
 
 valid_menu_choice() {
   case "$1" in
-    0|1|2|3|4|5|6|7|8|9|10|11|12) return 0 ;;
+    0|1|2|3|4|5|6|7|8|9|10|11|12|13) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -467,6 +467,32 @@ get_setup_code() {
   say "FIRST ADMINISTRATOR SETUP"
   info "One-time setup code: $code"
   info "Enter this code on the HTTPS panel setup screen. Keep it private."
+}
+
+change_account_password() {
+  require_root password
+  require_systemd
+  [[ -f "$SERVICE_FILE" && -x "$BINARY" ]] || die "DONATELLO is not installed."
+  local username current_password new_password confirm_password db_path
+  read -r -p 'Account username: ' username </dev/tty
+  [[ -n "$username" ]] || die "Username cannot be empty."
+  IFS= read -r -s -p 'Current password: ' current_password </dev/tty
+  printf '\n'
+  IFS= read -r -s -p 'New password (at least 12 characters): ' new_password </dev/tty
+  printf '\n'
+  IFS= read -r -s -p 'Confirm new password: ' confirm_password </dev/tty
+  printf '\n'
+  if [[ "$new_password" != "$confirm_password" ]]; then
+    unset current_password new_password confirm_password
+    die "The new passwords do not match."
+  fi
+  db_path="$(configured_db_path)"
+  if printf '%s\n' "$username" "$current_password" "$new_password" | DONATELLO_DB="$db_path" "$BINARY" change-password; then
+    unset current_password new_password confirm_password
+  else
+    unset current_password new_password confirm_password
+    die "Password change failed. Verify the username and current password."
+  fi
 }
 
 sync_ufw_rules() {
@@ -1004,6 +1030,7 @@ draw_control_center() {
   draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove Donatello and retain its data'
   draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove Donatello and all its data'
   draw_menu_item "$selected" 12 'Get one-time setup code' 'Display the first-admin code'
+  draw_menu_item "$selected" 13 'Change account password' 'Verify current password and update it'
   printf '\n  Type option%s%s%s then %sEnter%s   %s↑%s / %s↓%s move   %sq%s quit' \
     "$([[ -n "$digit_buffer" ]] && printf ' [' || true)" "$digit_buffer" "$([[ -n "$digit_buffer" ]] && printf ']' || true)" \
     "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
@@ -1048,6 +1075,7 @@ run_menu_action() {
     10) delete_app "" ;;
     11) delete_app "--purge" ;;
     12) get_setup_code ;;
+    13) change_account_password ;;
   esac
 }
 
@@ -1069,13 +1097,13 @@ main_menu() {
       key="$(read_menu_key)" || interactive=0
       if (( interactive )); then
         case "$key" in
-          up|k) (( selected > 1 )) && ((selected--)) || selected=12 ;;
-          down|j) (( selected < 12 )) && ((selected++)) || selected=1 ;;
+          up|k) (( selected > 1 )) && ((selected--)) || selected=13 ;;
+          down|j) (( selected < 13 )) && ((selected++)) || selected=1 ;;
           enter)
             if [[ -n "$digit_buffer" ]]; then
               [[ "$digit_buffer" != "0" ]] || { printf '\033[0m\n'; return 0; }
               selection="$digit_buffer"
-              [[ "$selection" =~ ^([1-9]|1[0-2])$ ]] || { warn 'Choose a menu option from 1 to 12.'; selection=""; digit_buffer=""; continue; }
+              [[ "$selection" =~ ^([1-9]|1[0-3])$ ]] || { warn 'Choose a menu option from 1 to 13.'; selection=""; digit_buffer=""; continue; }
             else
               selection="$selected"
             fi
@@ -1108,11 +1136,12 @@ main_menu() {
       printf '  1 Install / repair     2 Status       3 Start          4 Stop\n'
       printf '  5 Restart              6 Logs         7 Change port    8 HTTPS / SSL\n'
       printf '  9 Update              10 Uninstall    11 Purge data\n'
-      printf ' 12 Get setup code      0 Exit\n\n'
+      printf ' 12 Get setup code      13 Change password\n'
+      printf '  0 Exit\n\n'
       read -r -p 'Select an option: ' selection || return 0
       selection="$(normalize_menu_digits "${selection//$'\r'/}")"
       [[ "$selection" == "0" ]] && return 0
-      valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 12.'; continue; }
+      valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 13.'; continue; }
       action_ready=1
     fi
 
@@ -1223,6 +1252,7 @@ Usage:
   sudo donatello manage [status|start|stop|restart|logs|port|ssl|update|delete]
   sudo donatello ssl
   sudo donatello update
+  sudo donatello password
   sudo donatello delete [--purge]
 
 Commands:
@@ -1233,6 +1263,7 @@ Commands:
   restart          Restart the systemd service
   logs [count]     Show recent service logs
   update           Fetch main, build, replace the binary, and roll back on failure
+  password         Change an account password after verifying the current password
   ssl              Obtain a Let's Encrypt certificate and enable Rust TLS
   delete           Uninstall the service while preserving application data
   delete --purge   Uninstall and remove all configuration and application data
@@ -1261,6 +1292,7 @@ case "${1:-menu}" in
     ;;
   update) update_app ;;
   ssl) configure_https ;;
+  password) change_account_password ;;
   delete) delete_app "${2:-}" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 2 ;;
