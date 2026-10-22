@@ -15,6 +15,9 @@ readonly SERVICE_FILE="/etc/systemd/system/donatello.service"
 readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
 readonly ENV_DIR="/etc/donatello"
 readonly ENV_FILE="/etc/donatello/donatello.env"
+readonly DOMAIN_FILE="/etc/donatello/https-domain"
+readonly NGINX_SITE="/etc/nginx/sites-available/donatello"
+readonly NGINX_SITE_LINK="/etc/nginx/sites-enabled/donatello"
 readonly DATA_DIR="/var/lib/donatello"
 readonly SERVICE_USER="donatello"
 readonly SERVICE_GROUP="donatello"
@@ -70,9 +73,19 @@ BANNER
 }
 
 pause_menu() {
-  if [[ -t 0 ]]; then
-    read -r -p 'Press Enter to continue...' _ || true
+  [[ -r /dev/tty ]] || return 0
+  local _answer
+  IFS= read -r -p 'Press Enter to continue...' _answer </dev/tty || true
+}
+
+read_answer() {
+  local prompt="$1" variable="$2" default="${3:-}" answer=""
+  if [[ -r /dev/tty ]]; then
+    IFS= read -r -p "$prompt" answer </dev/tty || true
+  else
+    IFS= read -r -p "$prompt" answer || true
   fi
+  printf -v "$variable" '%s' "${answer:-$default}"
 }
 
 require_root() {
@@ -168,12 +181,181 @@ configure_ufw_status() {
 }
 
 write_default_config() {
+  local db_path
+  db_path="$(configured_db_path)"
   if [[ ! -f "$ENV_FILE" ]]; then
     install -o root -g "$SERVICE_GROUP" -m 0640 /dev/null "$ENV_FILE"
-    printf 'DONATELLO_BIND=%s\nDONATELLO_DB=%s\n' "$DEFAULT_BIND" "$DEFAULT_DB" > "$ENV_FILE"
+    printf 'DONATELLO_BIND=%s\nDONATELLO_DB=%s\n' "$DEFAULT_BIND" "$db_path" > "$ENV_FILE"
   fi
   chown root:"$SERVICE_GROUP" "$ENV_FILE"
   chmod 0640 "$ENV_FILE"
+}
+
+configured_db_path() {
+  local db_path=""
+  if [[ -f "$ENV_FILE" ]]; then
+    db_path="$(awk -F= '$1 == "DONATELLO_DB" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
+  elif [[ -f "$DATA_DIR/.database-path" ]]; then
+    db_path="$(<"$DATA_DIR/.database-path")"
+  fi
+  [[ -n "$db_path" ]] || db_path="$DEFAULT_DB"
+  [[ "$db_path" == /* ]] || db_path="$DATA_DIR/$db_path"
+  printf '%s\n' "$db_path"
+}
+
+take_database_ownership() {
+  local db_path file
+  db_path="$(configured_db_path)"
+  for file in "$db_path" "$db_path-wal" "$db_path-shm"; do
+    [[ -f "$file" ]] || continue
+    chown "$SERVICE_USER:$SERVICE_GROUP" "$file"
+    chmod 0600 "$file"
+  done
+}
+
+panel_port() {
+  local bind
+  bind="$(awk -F= '$1 == "DONATELLO_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  bind="${bind:-$DEFAULT_BIND}"
+  printf '%s\n' "${bind##*:}"
+}
+
+detect_public_ipv4() {
+  local address
+  address="$(curl -4 --connect-timeout 3 --max-time 6 -fsS https://api.ipify.org 2>/dev/null || true)"
+  [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  printf '%s\n' "$address"
+}
+
+write_bind_config() {
+  local bind="$1" db_path temp
+  db_path="$(configured_db_path)"
+  temp="$(mktemp /etc/donatello/.donatello.env.XXXXXX)"
+  printf 'DONATELLO_BIND=%s\nDONATELLO_DB=%s\n' "$bind" "$db_path" > "$temp"
+  chown root:"$SERVICE_GROUP" "$temp"
+  chmod 0640 "$temp"
+  mv -f "$temp" "$ENV_FILE"
+}
+
+install_https_dependencies() {
+  say "Installing Nginx and Let's Encrypt tools"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends nginx certbot python3-certbot-nginx
+}
+
+write_nginx_proxy() {
+  local domain="$1" port="$2" temp
+  [[ ! -e "$NGINX_SITE" || -f "$DOMAIN_FILE" ]] || die "$NGINX_SITE already exists and is not managed by DONATELLO."
+  install -d -o root -g root -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
+  temp="$(mktemp /etc/nginx/sites-available/.donatello.XXXXXX)"
+  cat > "$temp" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+
+    location / {
+        proxy_pass http://127.0.0.1:$port;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+NGINX
+  chmod 0644 "$temp"
+  mv -f "$temp" "$NGINX_SITE"
+  ln -sfn "$NGINX_SITE" "$NGINX_SITE_LINK"
+  nginx -t
+  systemctl enable --now nginx
+  systemctl reload nginx
+}
+
+configure_https() {
+  require_root ssl
+  require_systemd
+  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Install it before configuring HTTPS."
+
+  local address confirmed domain email dns_matches port existing_domain
+  address="$(detect_public_ipv4 || true)"
+  if [[ -n "$address" ]]; then
+    info "Detected public IPv4 address: $address"
+    read_answer "Is this the public IP address of this server? [Y/n]: " confirmed "y"
+    if [[ "${confirmed,,}" == "n" || "${confirmed,,}" == "no" ]]; then
+      warn "Address confirmation declined. HTTPS setup was skipped."
+      return 0
+    fi
+  else
+    warn "A public IPv4 address could not be detected."
+  fi
+
+  existing_domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
+  if [[ -n "$existing_domain" ]]; then
+    say "HTTPS is already configured for $existing_domain"
+    info "Panel URL: https://$existing_domain"
+    info "Certificate renewal is managed by Certbot."
+    return 0
+  fi
+
+  read_answer 'Domain name pointed to this server (leave blank to skip): ' domain
+  [[ -n "$domain" ]] || {
+    info "HTTPS setup skipped. The panel remains private on localhost."
+    return 0
+  }
+  [[ "$domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die "Enter a valid fully qualified domain name."
+
+  dns_matches="$(getent ahostsv4 "$domain" | awk '{print $1}' | sort -u || true)"
+  if [[ -z "$dns_matches" || ( -n "$address" && " $dns_matches " != *" $address "* ) ]]; then
+    warn "The domain does not currently resolve to the detected server IP."
+    info "Domain addresses: ${dns_matches:-none}"
+    [[ -z "$address" ]] || info "Detected server IP: $address"
+    read_answer 'Continue and let certificate validation decide? [y/N]: ' confirmed 'n'
+    [[ "${confirmed,,}" == "y" || "${confirmed,,}" == "yes" ]] || return 0
+  fi
+
+  read_answer 'Email address for certificate expiry notices: ' email
+  [[ "$email" == *@*.* ]] || die "Enter a valid email address for the certificate."
+  port="$(panel_port)"
+
+  install_https_dependencies
+  write_nginx_proxy "$domain" "$port"
+  if certbot --nginx --non-interactive --agree-tos --redirect --email "$email" -d "$domain"; then
+    printf '%s\n' "$domain" > "$DOMAIN_FILE"
+    chown root:"$SERVICE_GROUP" "$DOMAIN_FILE"
+    chmod 0640 "$DOMAIN_FILE"
+    if systemctl list-unit-files certbot.timer --no-legend 2>/dev/null | rg -q '^certbot\.timer'; then
+      systemctl enable --now certbot.timer
+    fi
+    say "HTTPS is active"
+    info "Panel URL: https://$domain"
+    info "Automatic renewal: certbot.timer"
+    warn "Make sure inbound TCP ports 80 and 443 are allowed by your provider firewall."
+  else
+    rm -f "$NGINX_SITE_LINK" "$NGINX_SITE"
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+    warn "Certificate issuance failed. The panel remains available only through localhost or an SSH tunnel."
+  fi
+}
+
+show_access_summary() {
+  local address domain port
+  address="$(detect_public_ipv4 || true)"
+  domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
+  port="$(panel_port)"
+  if [[ -n "$address" ]]; then
+    info "Detected server public IP: $address"
+  else
+    info "Could not detect a public IP address."
+  fi
+  if [[ -n "$domain" ]]; then
+    info "Panel URL: https://$domain"
+  else
+    info "Panel is listening locally on port $port."
+    info "To access it remotely, use: ssh -L $port:localhost:$port user@SERVER_IP"
+    info "Configure HTTPS later with: sudo donatello ssl"
+  fi
 }
 
 write_service_unit() {
@@ -241,6 +423,7 @@ install_app() {
   ensure_service_account
   configure_ufw_status
   write_default_config
+  take_database_ownership
   activate_binary
   write_service_unit
   install_cli
@@ -251,17 +434,33 @@ install_app() {
     journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
     die "The service did not start. Review the service status and logs above."
   fi
+  if ! wait_for_panel; then
+    journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+    die "The service is running but the web panel did not answer on 127.0.0.1:$(panel_port)."
+  fi
   say "DONATELLO is installed and running"
   info "Service status: sudo donatello status"
   info "Management menu: sudo donatello manage"
-  info "Default panel URL: http://127.0.0.1:8282"
-  info "The panel listens on localhost by default. Use an SSH tunnel for remote access."
+  configure_https
+  show_access_summary
 }
 
 wait_until_active() {
   local attempt
   for attempt in {1..15}; do
     systemctl is-active --quiet "$SERVICE_NAME" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+wait_for_panel() {
+  local attempt port
+  port="$(panel_port)"
+  for attempt in {1..20}; do
+    if curl --connect-timeout 1 --max-time 2 -fsS "http://127.0.0.1:$port/api/state" -o /dev/null; then
+      return 0
+    fi
     sleep 1
   done
   return 1
@@ -318,17 +517,16 @@ change_port() {
   local port
   read -r -p "New panel port (1-65535): " port
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 )) || die "Invalid port. Enter a number from 1 to 65535."
-  local db_path
-  db_path="$(awk -F= '$1 == "DONATELLO_DB" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
-  [[ -n "$db_path" ]] || db_path="$DEFAULT_DB"
-  local temp
-  temp="$(mktemp /etc/donatello/.donatello.env.XXXXXX)"
-  printf 'DONATELLO_BIND=127.0.0.1:%s\nDONATELLO_DB=%s\n' "$port" "$db_path" > "$temp"
-  chown root:"$SERVICE_GROUP" "$temp"
-  chmod 0640 "$temp"
-  mv -f "$temp" "$ENV_FILE"
+  write_bind_config "127.0.0.1:$port"
   systemctl restart "$SERVICE_NAME"
   wait_until_active || die "The service did not start after changing the port."
+  wait_for_panel || die "The service is running but the web panel did not answer on the new port."
+  local domain
+  domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
+  if [[ -n "$domain" && -f "$NGINX_SITE" ]]; then
+    sed -E -i "s#proxy_pass http://127\\.0\\.0\\.1:[0-9]+;#proxy_pass http://127.0.0.1:$port;#" "$NGINX_SITE"
+    nginx -t && systemctl reload nginx || die "The panel port changed, but the HTTPS proxy could not be updated."
+  fi
   say "The panel port is now 127.0.0.1:$port"
 }
 
@@ -344,6 +542,7 @@ manage_app() {
         ;;
       logs) journalctl -u "$SERVICE_NAME" -n "${3:-100}" --no-pager ;;
       port) change_port ;;
+      ssl) configure_https ;;
       update) update_app ;;
       delete) delete_app "${3:-}" ;;
       *) die "Unknown management action: $2" ;;
@@ -385,8 +584,9 @@ main_menu() {
     printf '   4) Stop service         5) Restart service\n'
     printf '   6) View service logs    7) Change panel port\n\n'
     printf '  %sMAINTENANCE%s\n' "$C_DIM" "$C_RESET"
-    printf '   8) Update DONATELLO     9) Uninstall (keep data)\n'
-    printf '  10) Uninstall and purge all data\n\n'
+    printf '   8) Update DONATELLO     9) Configure HTTPS / SSL\n'
+    printf '  10) Uninstall (keep data)\n'
+    printf '  11) Uninstall and purge all data\n\n'
     printf '   H) Help                 0) Exit\n\n'
     read -r -p 'Select an option: ' selection || return 0
     case "$selection" in
@@ -398,8 +598,9 @@ main_menu() {
       6) view_logs 100; pause_menu ;;
       7) change_port; pause_menu ;;
       8) update_app; pause_menu ;;
-      9) delete_app ""; pause_menu ;;
-      10) delete_app "--purge"; pause_menu ;;
+      9) configure_https; pause_menu ;;
+      10) delete_app ""; pause_menu ;;
+      11) delete_app "--purge"; pause_menu ;;
       h|H) usage; pause_menu ;;
       0) return 0 ;;
       *) warn "Invalid selection. Choose an option from the menu."; pause_menu ;;
@@ -411,28 +612,71 @@ delete_app() {
   require_root delete
   require_systemd
   local purge="${1:-}"
+  local keep_database="n" db_path entry answer domain
   if [[ "$purge" == "--purge" ]]; then
-    warn "This will remove the service, source, configuration, and all DONATELLO data."
-    read -r -p 'Type PURGE DONATELLO to confirm: ' confirmation
+    warn "This removes the service, installer, source, configuration, and database."
+    read_answer 'Type PURGE DONATELLO to confirm: ' confirmation
     [[ "$confirmation" == "PURGE DONATELLO" ]] || die "Purge cancelled."
   else
-    warn "The service and application will be removed. Database and configuration will be kept."
-    read -r -p 'Type DELETE DONATELLO to confirm: ' confirmation
+    warn "DONATELLO services, binaries, source, system account, and configuration will be removed."
+    read_answer 'Keep the database for the next installation? [Y/n]: ' answer 'y'
+    case "${answer,,}" in
+      n|no) keep_database="n" ;;
+      y|yes) keep_database="y" ;;
+      *) die "Choose Y to keep the database or N to remove it." ;;
+    esac
+    read_answer 'Type DELETE DONATELLO to confirm: ' confirmation
     [[ "$confirmation" == "DELETE DONATELLO" ]] || die "Uninstall cancelled."
+  fi
+  db_path="$(configured_db_path)"
+  domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
+  if [[ "$keep_database" == "y" ]]; then
+    install -d -o root -g root -m 0750 "$DATA_DIR"
+    printf '%s\n' "$db_path" > "$DATA_DIR/.database-path"
+    chmod 0600 "$DATA_DIR/.database-path"
   fi
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
   rm -f "$SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE"
+  if [[ -n "$domain" ]]; then
+    rm -f "$NGINX_SITE_LINK" "$NGINX_SITE"
+    if has certbot; then
+      certbot delete --cert-name "$domain" --non-interactive >/dev/null 2>&1 || true
+    fi
+    if has nginx; then
+      nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
+    fi
+  fi
   rmdir /usr/local/lib/donatello 2>/dev/null || true
   rm -rf "$SOURCE_DIR"
+  rmdir "$INSTALL_DIR" 2>/dev/null || true
+  rm -rf "$ENV_DIR"
   systemctl daemon-reload
   systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
-  if [[ "$purge" == "--purge" ]]; then
-    rm -rf "$INSTALL_DIR" "$DATA_DIR" "$ENV_DIR"
-    userdel "$SERVICE_USER" 2>/dev/null || true
-    groupdel "$SERVICE_GROUP" 2>/dev/null || true
-    say "DONATELLO and all application data have been removed."
+  userdel "$SERVICE_USER" 2>/dev/null || true
+  groupdel "$SERVICE_GROUP" 2>/dev/null || true
+  if [[ "$purge" == "--purge" || "$keep_database" != "y" ]]; then
+    rm -rf "$DATA_DIR"
+    if [[ "$purge" == "--purge" ]]; then
+      say "DONATELLO and all application data have been removed."
+    else
+      say "DONATELLO has been uninstalled and its database was removed."
+    fi
   else
-    say "DONATELLO has been removed. Data and configuration were preserved."
+    for entry in "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?*; do
+      [[ -e "$entry" || -L "$entry" ]] || continue
+      [[ "$entry" == "$DATA_DIR/.database-path" || "$entry" == "$db_path" ||
+        "$db_path" == "$entry/"* || "$entry" == "$db_path-wal" || "$entry" == "$db_path-shm" ]] && continue
+      rm -rf -- "$entry"
+    done
+    for entry in "$db_path" "$db_path-wal" "$db_path-shm"; do
+      [[ -f "$entry" ]] || continue
+      chown root:root "$entry"
+      chmod 0600 "$entry"
+    done
+    chown root:root "$DATA_DIR"
+    chmod 0750 "$DATA_DIR"
+    say "DONATELLO has been uninstalled. The database is kept for the next installation."
+    info "Retained database: $db_path"
   fi
 }
 
@@ -445,7 +689,8 @@ Usage:
   sudo donatello menu             Open the interactive control center
   sudo bash install.sh             Open the interactive installer menu
   sudo bash install.sh install     Install DONATELLO
-  sudo donatello manage [status|start|stop|restart|logs|port|update|delete]
+  sudo donatello manage [status|start|stop|restart|logs|port|ssl|update|delete]
+  sudo donatello ssl
   sudo donatello update
   sudo donatello delete [--purge]
 
@@ -457,6 +702,7 @@ Commands:
   restart          Restart the systemd service
   logs [count]     Show recent service logs
   update           Fetch main, build, replace the binary, and roll back on failure
+  ssl              Configure HTTPS with Nginx and Let's Encrypt
   delete           Uninstall the service while preserving application data
   delete --purge   Uninstall and remove all configuration and application data
 
@@ -481,6 +727,7 @@ case "${1:-menu}" in
     view_logs "${2:-100}"
     ;;
   update) update_app ;;
+  ssl) configure_https ;;
   delete) delete_app "${2:-}" ;;
   help|-h|--help) usage ;;
   *) usage >&2; exit 2 ;;
