@@ -33,6 +33,7 @@ readonly DEFAULT_DB="/var/lib/donatello/donatello.db"
 SERVER_PUBLIC_IP=""
 PORT80_STOPPED_UNIT=""
 CERTBOT_BIN=""
+MENU_ACTIVE=0
 
 readonly RUST_HOME="${RUSTUP_HOME:-/root/.rustup}"
 readonly CARGO_HOME_DIR="${CARGO_HOME:-/root/.cargo}"
@@ -808,6 +809,9 @@ update_app() {
     say "DONATELLO was updated successfully"
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
     show_setup_code_if_needed
+    if (( MENU_ACTIVE )); then
+      exec "$CLI" menu
+    fi
     return
   fi
   if [[ -s "$previous" ]]; then
@@ -998,6 +1002,7 @@ main_menu() {
   local selection="" key interactive=0 action_ready=0
   local digit_buffer=""
   local selected=1
+  MENU_ACTIVE=1
   [[ -f "$SERVICE_FILE" ]] && selected=2
   if [[ -z "$SERVER_PUBLIC_IP" && -f "$SERVICE_FILE" ]]; then SERVER_PUBLIC_IP="$(detect_public_ipv4 || true)"; fi
   if [[ -r /dev/tty && -t 1 && -t 0 && "${TERM:-dumb}" != "dumb" ]] && has stty; then
