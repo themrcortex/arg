@@ -456,7 +456,7 @@ export default function App() {
   }
   return (
       <div className="app-shell min-h-screen lg:grid" inert={updating} aria-hidden={updating} style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 76 : 272}px` }}>
-        <aside id="arg-sidebar" role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(84vw,292px)] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-auto lg:translate-x-0', sidebarCollapsed && 'arg-sidebar-collapsed', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
+        <aside id="arg-sidebar" role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(84vw,292px)] max-w-[100vw] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0', sidebarCollapsed ? 'arg-sidebar-collapsed lg:w-[76px]' : 'lg:w-[272px]', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
           <div className="arg-sidebar-pattern" aria-hidden="true" />
           <div className="arg-sidebar-corner" aria-hidden="true" />
           <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-2 px-2">
