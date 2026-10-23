@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
   ArrowLeft,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Eye,
   EyeOff,
   Github,
@@ -245,6 +247,11 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [page, setPage] = useState<PageId>(() => pageFromHash(window.location.hash))
   const [mobileOpen, setMobileOpen] = useState(false)
+  const mobileMenuButton = useRef<HTMLButtonElement>(null)
+  const mobileCloseButton = useRef<HTMLButtonElement>(null)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return window.localStorage.getItem('donatello.arg-sidebar-collapsed') === 'true' } catch { return false }
+  })
   const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
   const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }>({ status: 'unavailable' })
@@ -269,10 +276,24 @@ export default function App() {
   useEffect(() => {
     const onHash = () => {
       setPage(pageFromHash(window.location.hash))
+      setMobileOpen(false)
     }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
+  useEffect(() => {
+    try { window.localStorage.setItem('donatello.arg-sidebar-collapsed', String(sidebarCollapsed)) } catch { /* Storage can be disabled by browser policy. */ }
+  }, [sidebarCollapsed])
+  useEffect(() => {
+    if (!mobileOpen) return
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setMobileOpen(false) }
+    window.addEventListener('keydown', onKeyDown)
+    mobileCloseButton.current?.focus()
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      mobileMenuButton.current?.focus()
+    }
+  }, [mobileOpen])
   useEffect(() => {
     if (notice) {
       const timer = window.setTimeout(() => setNotice(''), 4000)
@@ -384,17 +405,32 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
-      <div className="app-shell min-h-screen lg:grid lg:grid-cols-[248px_minmax(0,1fr)]">
-        <aside className={cn('app-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(82vw,270px)] flex-col border-l border-white/10 px-4 py-6 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-[248px] lg:translate-x-0', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
-          <div className="flex items-center justify-between px-2"><Brand /><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button></div>
-          <div className="mt-9 flex-1 space-y-6 overflow-y-auto pb-5">
+      <div className="app-shell min-h-screen lg:grid" style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 76 : 272}px` }}>
+        <aside id="arg-sidebar" role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(84vw,292px)] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-auto lg:translate-x-0', sidebarCollapsed && 'arg-sidebar-collapsed', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
+          <div className="arg-sidebar-pattern" aria-hidden="true" />
+          <div className="arg-sidebar-corner" aria-hidden="true" />
+          <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-2 px-2">
+            <div className="arg-brand-lockup flex min-w-0 items-center gap-3" aria-label="ARG ارگ VPS Control Center">
+              <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-12 w-12 shrink-0" />
+              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-persian-name">ارگ</div><div className="arg-product-label" dir="ltr">VPS CONTROL CENTER</div></div>
+            </div>
+            <Button variant="ghost" size="icon" className="arg-collapse hidden shrink-0 lg:inline-flex" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{sidebarCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
+            <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button>
+          </div>
+          <div className="arg-divider relative z-10 mx-2 my-3" aria-hidden="true" />
+          <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
               { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx'].includes(item.id)) },
               { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings'].includes(item.id)) },
-            ].map((section) => <nav key={section.title} aria-label={section.title}><div className="mb-2 px-3 text-[10px] font-bold tracking-[.12em] text-[#76778d]">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} className={cn('flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-right text-[13px] transition', currentPage === item.id ? 'border border-primary/25 bg-primary/[.13] font-semibold text-white shadow-[inset_-3px_0_#a987ff]' : 'border border-transparent text-[#a6a6bb] hover:bg-white/[.055] hover:text-white')}><item.icon size={17} strokeWidth={1.8}/><span className="flex-1">{item.label}</span>{currentPage === item.id && <span className="h-1.5 w-1.5 rounded-full bg-[#bd9aff]"/>}</button>)}</div></nav>)}
+            ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} title={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>)}</div></nav>)}
           </div>
-          <div className="space-y-3 border-t border-white/10 pt-4"><div className="flex items-center gap-2 px-2 text-[11px] text-[#a9aabc]"><span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_9px_#4ade80]"/> سرویس متصل</div><button onClick={() => selectPage('settings')} className="flex w-full items-center gap-2 rounded-xl border border-white/10 bg-white/[.03] p-2.5 text-right transition hover:bg-white/[.07]"><Avatar className="h-9 w-9"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="min-w-0 flex-1"><span className="block truncate text-xs font-semibold text-white">{user.username}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{user.role === 'admin' ? 'مدیر' : user.role === 'operator' ? 'اپراتور' : 'ناظر'}</span></span><Settings size={14} className="text-muted-foreground"/></button></div>
+          <div className="arg-sidebar-footer relative z-10 mt-auto pt-2">
+            <div className="arg-divider mx-2 mb-3" aria-hidden="true" />
+            <div className={cn('arg-service-status mb-2 flex min-h-8 items-center gap-2 px-3 text-[11px]', sidebarCollapsed && 'justify-center px-0')} title={sidebarCollapsed ? 'سرویس متصل' : undefined}><span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400"/><span className="arg-nav-label">سرویس متصل</span></div>
+            <DropdownMenu><DropdownMenuTrigger asChild><button className="arg-account flex min-h-[54px] w-full items-center gap-2.5 rounded-[11px] border px-2.5 text-right transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]" title={sidebarCollapsed ? user.username : undefined}><Avatar className="h-9 w-9 shrink-0"><AvatarFallback className="arg-avatar-fallback">{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="arg-account-copy min-w-0 flex-1"><span className="block truncate text-xs font-semibold">{user.username}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{user.role === 'admin' ? 'مدیر سیستم' : user.role === 'operator' ? 'اپراتور' : 'ناظر'}</span></span><ChevronDown className="arg-account-chevron" size={15}/></button></DropdownMenuTrigger><DropdownMenuContent align="end" side="top" className="w-52"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات حساب</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج از حساب</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+          </div>
+          <img className="arg-fortress" src="/arg/illustrations/arg-fortress-minimal.svg" alt="" aria-hidden="true" />
         </aside>
         {mobileOpen && (
           <button
@@ -405,7 +441,7 @@ export default function App() {
         )}
         <div className="min-w-0">
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
-            <div className="flex items-center gap-2"><Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO <span className="text-[#7f768f]">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
+            <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO <span className="text-[#7f768f]">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
             <div className="flex items-center gap-1.5"><a href="https://github.com/themrcortex/donatello" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">

@@ -123,6 +123,70 @@ body {
 .app-sidebar {
   background: linear-gradient(155deg, #11111b 0%, #101019 62%, #15111f 100%);
 }
+.arg-sidebar {
+  --arg-bg: #0e141b;
+  --arg-surface: #141c24;
+  --arg-hover: #1b252f;
+  --arg-border: #2a333c;
+  --arg-accent: #dda46f;
+  --arg-accent-subtle: rgba(221, 164, 111, .10);
+  --arg-text: #eae8e3;
+  --arg-muted: #929da9;
+  --arg-transition: 200ms ease;
+  overflow: hidden;
+  isolation: isolate;
+  color: var(--arg-text);
+  border-color: var(--arg-border);
+  background: linear-gradient(155deg, #10171e 0%, var(--arg-bg) 62%, #11171e 100%);
+  transition: width var(--arg-transition), transform var(--arg-transition), padding var(--arg-transition);
+}
+.arg-sidebar-pattern, .arg-sidebar-corner { position: absolute; z-index: -1; pointer-events: none; }
+.arg-sidebar-pattern { inset: 5% 0 14% auto; width: 44px; background: url('/arg/patterns/arg-edge-right.svg') center / 44px 560px repeat-y; opacity: .20; }
+.arg-sidebar-corner { top: 0; right: 0; width: 190px; height: 190px; background: url('/arg/patterns/arg-corner-top.svg') top right / contain no-repeat; opacity: .25; }
+.arg-sidebar .arg-brand-mark { filter: saturate(.9); }
+.arg-wordmark { color: var(--arg-accent); font-family: 'Oxanium', sans-serif; font-size: 21px; font-weight: 800; line-height: 1; letter-spacing: .25em; }
+.arg-persian-name { margin-top: 3px; color: var(--arg-text); font-family: 'Abar', 'Peyda', sans-serif; font-weight: 700; line-height: 1; }
+.arg-product-label { margin-top: 7px; color: #7f8b97; font-family: 'Oxanium', sans-serif; font-size: 8px; letter-spacing: .19em; white-space: nowrap; }
+.arg-collapse, .arg-mobile-close { color: var(--arg-accent); }
+.arg-collapse:hover, .arg-mobile-close:hover { background: var(--arg-hover); color: var(--arg-text); }
+.arg-divider { height: 16px; background: url('/arg/patterns/arg-divider.svg') center / 100% 16px no-repeat; opacity: .8; }
+.arg-section-label { color: #83909c; font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.arg-nav-item { position: relative; color: #b0b8c0; }
+.arg-nav-item:hover { color: var(--arg-text); background: rgba(255,255,255,.045); }
+.arg-nav-item.is-active { color: var(--arg-text); border: 1px solid rgba(221,164,111,.19); background: linear-gradient(90deg, rgba(221,164,111,.12), rgba(221,164,111,.045)); }
+.arg-nav-item.is-active::after { position: absolute; top: 10px; right: -1px; width: 3px; height: 24px; border-radius: 2px 0 0 2px; background: var(--arg-accent); content: ''; }
+.arg-nav-item.is-active .arg-nav-icon { color: var(--arg-accent); }
+.arg-service-status { color: #a5b1ba; }
+.arg-account { position: relative; border-color: rgba(255,255,255,.08); background: rgba(255,255,255,.025); }
+.arg-account:hover { background: rgba(255,255,255,.055); }
+.arg-account .arg-avatar-fallback { border: 1px solid rgba(221,164,111,.28); color: var(--arg-accent); background: rgba(221,164,111,.08); }
+.arg-account-copy { display: block; }
+.arg-account-chevron { color: var(--arg-muted); }
+.arg-fortress { position: absolute; z-index: -1; right: 2px; bottom: 64px; width: calc(100% - 4px); opacity: .24; pointer-events: none; }
+.arg-navigation { scrollbar-width: thin; scrollbar-color: #39434c transparent; }
+@media (min-width: 1024px) {
+  .arg-sidebar-collapsed { padding-inline: 8px; }
+  .arg-sidebar-collapsed .arg-brand-row { justify-content: center; padding-inline: 0; }
+  .arg-sidebar-collapsed .arg-brand-lockup { justify-content: center; }
+  .arg-sidebar-collapsed .arg-brand-mark { width: 42px; height: 42px; }
+  .arg-sidebar-collapsed .arg-brand-copy, .arg-sidebar-collapsed .arg-nav-label,
+  .arg-sidebar-collapsed .arg-section-label, .arg-sidebar-collapsed .arg-account-copy,
+  .arg-sidebar-collapsed .arg-account-chevron { display: none; }
+  .arg-sidebar-collapsed .arg-brand-row { min-height: 60px; flex-wrap: wrap; }
+  .arg-sidebar-collapsed .arg-collapse { display: inline-flex; width: 100%; height: 28px; }
+  .arg-sidebar-collapsed .arg-navigation { margin-top: 4px; }
+  .arg-sidebar-collapsed .arg-nav-item { justify-content: center; padding-inline: 0; }
+  .arg-sidebar-collapsed .arg-nav-item.is-active::after { right: -9px; }
+  .arg-sidebar-collapsed .arg-account { justify-content: center; padding-inline: 0; }
+  .arg-sidebar-collapsed .arg-fortress { bottom: 52px; opacity: .13; }
+}
+@media (max-height: 700px) {
+  .arg-fortress { display: none; }
+  .arg-sidebar-footer { padding-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .arg-sidebar { --arg-transition: 0ms; }
+}
 .app-rail {
   background: #0c0d14;
 }

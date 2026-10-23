@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="168" viewBox="0 0 400 168" fill="none" role="img" aria-label="Minimal fortress silhouette">
+ <defs>
+  <linearGradient id="walls" x1="200" y1="53" x2="200" y2="164" gradientUnits="userSpaceOnUse"><stop stop-color="#2B2828"/><stop offset="1" stop-color="#121920"/></linearGradient>
+  <linearGradient id="gate" x1="200" y1="82" x2="200" y2="150" gradientUnits="userSpaceOnUse"><stop stop-color="#F2C38F" stop-opacity=".9"/><stop offset="1" stop-color="#BA7347" stop-opacity=".12"/></linearGradient>
+  <linearGradient id="mist" x1="200" y1="40" x2="200" y2="168" gradientUnits="userSpaceOnUse"><stop stop-color="#E9A86F" stop-opacity=".14"/><stop offset="1" stop-color="#E9A86F" stop-opacity="0"/></linearGradient>
+ </defs>
+ <ellipse cx="200" cy="144" rx="180" ry="95" fill="url(#mist)"/>
+ <path d="M0 146L35 138L69 144L93 128L117 133L150 126L186 132L223 120L263 136L293 131L340 142L400 139V168H0Z" fill="#0D1319"/>
+ <path d="M48 140V98H58V89H69V98H80V89H92V98H101V79H112V70H128V79H139V137H165V68H177V60H188V68H200V60H212V68H223V112H252V88H263V80H274V88H285V80H297V88H309V140H335V103H347V95H360V103H372V95H383V103H390V154H48Z" fill="url(#walls)" stroke="#B27B50" stroke-opacity=".4" stroke-width="1.25"/>
+ <path d="M181 151V117C181 105 190 97 200 97C210 97 219 105 219 117V151" fill="url(#gate)"/>
+ <path d="M181 151V117C181 105 190 97 200 97C210 97 219 105 219 117V151" stroke="#C89162" stroke-opacity=".65" stroke-width="1.2"/>
+ <path d="M99 93V104M121 78V91M174 74V83M191 74V83M208 74V83M266 95V105M288 95V105M350 107V118" stroke="#D8A06C" stroke-opacity=".4" stroke-width="3" stroke-linecap="square"/>
+ <path d="M12 151L54 144L91 150L119 143M291 146L340 150L385 145" stroke="#B27B50" stroke-opacity=".25"/>
+</svg>

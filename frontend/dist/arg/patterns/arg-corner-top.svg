@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="260" height="260" viewBox="0 0 260 260" fill="none" aria-hidden="true">
+ <defs>
+  <pattern id="tile" width="64" height="64" patternUnits="userSpaceOnUse"><g stroke="#CB8F5C" stroke-width="1.1" opacity=".65"><path d="M32 1L63 32L32 63L1 32Z M32 16L48 32L32 48L16 32Z"/><path d="M0 0L32 32L64 0M0 64L32 32L64 64"/></g></pattern>
+  <linearGradient id="fade" x1="1" y1="0" x2="0" y2="1"><stop stop-color="white"/><stop offset=".9" stop-color="black"/></linearGradient>
+  <mask id="mask"><rect width="260" height="260" fill="url(#fade)"/></mask>
+ </defs>
+ <g mask="url(#mask)" opacity=".35"><rect width="260" height="260" fill="url(#tile)"/></g>
+ <path d="M256 16H225L238 29M256 48H202L215 61M256 80H236" stroke="#D79B62" stroke-width="1" opacity=".33"/>
+</svg>

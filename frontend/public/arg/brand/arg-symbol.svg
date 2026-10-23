@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80" viewBox="0 0 80 80" fill="none" role="img" aria-label="ARG fortress symbol">
+ <path d="M8 65V32H16V20H27V32H33V14H47V32H53V20H64V32H72V65H8Z" fill="#DBA36C"/>
+ <path d="M31 65V48C31 43 35 39 40 39C45 39 49 43 49 48V65" fill="#10151C"/>
+ <path d="M21 42H26V49H21ZM54 42H59V49H54Z" fill="#10151C"/>
+ <path d="M6 69H74" stroke="#DBA36C" stroke-width="2" stroke-linecap="square"/>
+</svg>
