@@ -264,10 +264,10 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
   </DialogContent></Dialog>
 }
 
-function UpdateOverlay({ active }: { active: boolean }) {
+function UpdateOverlay({ active, restarted }: { active: boolean; restarted: boolean }) {
   if (!active) return null
   return <div className="fixed inset-0 z-[100] grid place-items-center bg-[#080d12]/95 p-5 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-labelledby="update-overlay-title" aria-describedby="update-overlay-description" onKeyDown={(event) => event.preventDefault()}>
-    <div className="w-full max-w-md rounded-2xl border border-border bg-card p-7 text-center shadow-2xl"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary"><RefreshCw size={25} className="animate-spin"/></div><h2 id="update-overlay-title" className="mt-5 text-xl font-bold text-foreground">در حال به‌روزرسانی ARG</h2><p id="update-overlay-description" className="mt-2 text-sm leading-7 text-muted-foreground">درخواست نصب ثبت شد. سرویس در حال دریافت و نصب نسخهٔ جدید است و پس از راه‌اندازی، پنل خودکار تازه می‌شود.</p><div className="mt-6 h-2 overflow-hidden rounded-full bg-secondary"><div className="arg-update-progress h-full w-1/3 rounded-full bg-primary"/></div><p className="mt-3 text-xs text-muted-foreground" role="status" aria-live="polite">لطفاً تا پایان فرایند این صفحه را نبند.</p></div>
+    <div className="w-full max-w-md rounded-2xl border border-border bg-card p-7 text-center shadow-2xl"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary"><RefreshCw size={25} className="animate-spin"/></div><h2 id="update-overlay-title" className="mt-5 text-xl font-bold text-foreground">در حال به‌روزرسانی ARG</h2><p id="update-overlay-description" className="mt-2 text-sm leading-7 text-muted-foreground">{restarted ? 'نسخهٔ جدید نصب شد؛ سرویس در حال راه‌اندازی و بررسی نهایی است.' : 'دریافت و ساخت نسخهٔ جدید در حال انجام است. این مرحله ممکن است چند دقیقه طول بکشد.'}</p><div className="mt-6 h-2 overflow-hidden rounded-full bg-secondary" role="progressbar" aria-label="پیشرفت به‌روزرسانی" aria-valuetext={restarted ? 'راه‌اندازی مجدد سرویس' : 'دریافت و ساخت نسخه'}><div className="arg-update-progress h-full w-full rounded-full"/></div><p className="mt-3 text-xs text-muted-foreground" role="status" aria-live="polite">لطفاً تا پایان فرایند این صفحه را نبند.</p></div>
   </div>
 }
 
@@ -306,8 +306,10 @@ export default function App() {
     try { return window.localStorage.getItem('arg.arg-sidebar-collapsed') === 'true' } catch { return false }
   })
   const [loadError, setLoadError] = useState('')
-  const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }>({ status: 'unavailable' })
+  const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string; instance?: string }>({ status: 'unavailable' })
   const [updating, setUpdating] = useState(false)
+  const [updateRestarted, setUpdateRestarted] = useState(false)
+  const updateStartInstance = useRef<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
   const [updateFinished, setUpdateFinished] = useState(() => {
@@ -397,6 +399,8 @@ export default function App() {
   }
   async function runUpdate() {
     if (user?.role !== 'admin' || updating) return
+    updateStartInstance.current = update.instance || null
+    setUpdateRestarted(false)
     setUpdating(true)
     try {
       await api('update', { method: 'POST' })
@@ -420,16 +424,20 @@ export default function App() {
         const result = await api<typeof update>('update')
         if (cancelled) return
         setUpdate(result)
-        if (result.status === 'current') {
+        if (updateStartInstance.current && result.instance && result.instance !== updateStartInstance.current) {
+          serviceRestartSeen = true
+          setUpdateRestarted(true)
+        }
+        if (result.status === 'current' && serviceRestartSeen) {
           currentSince ??= Date.now()
-          if (serviceRestartSeen || Date.now() - currentSince >= 45000) {
+          if (Date.now() - currentSince >= 5000) {
             try { window.sessionStorage.setItem('arg-update-finished', 'true') } catch { /* Session storage may be disabled. */ }
             setUpdating(false)
             void forceFreshPanelReload()
             return
           }
         } else currentSince = null
-      } catch { serviceRestartSeen = true /* The service may briefly restart while the update is installed. */ }
+      } catch { /* Wait for the restarted panel API; an unavailable status is not proof the update completed. */ }
       if (attempts >= 200) {
         setUpdating(false)
         notifyUser('وضعیت آپدیت پس از 10 دقیقه مشخص نشد. صفحه را تازه کن و گزارش سرویس را بررسی کن.')
@@ -543,7 +551,7 @@ export default function App() {
           </main>
         </div>
         <Toaster />
-        <UpdateOverlay active={updating}/>
+        <UpdateOverlay active={updating} restarted={updateRestarted}/>
         <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updating) setUpdateDialogOpen(open); if (!open) setUpdateFinished(false) }} update={update} checking={checkingUpdate} updating={updating} finished={updateFinished} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()} onForceRefresh={() => void forceFreshPanelReload()}/>
       </div>
   )

@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.7 — 2026-10-23
+
+### Changed
+- Replaced the jumping update bar with a smooth continuous indeterminate indicator and phase-specific status text.
+- Update completion now waits for the panel process to restart and return with its new process identity, instead of treating a synchronized source revision as a completed installation.
+
 ## v0.4.6 — 2026-10-23
 
 ### Changed

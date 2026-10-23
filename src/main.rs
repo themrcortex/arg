@@ -38,6 +38,7 @@ const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
 static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 static TERMINAL_SESSION_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+static PROCESS_INSTANCE_ID: OnceLock<String> = OnceLock::new();
 
 type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -571,6 +572,16 @@ fn process_usage() -> (u64, f64) {
         })
         .unwrap_or(0.0);
     (rss_bytes, cpu_percent)
+}
+fn process_instance_id() -> &'static str {
+    PROCESS_INSTANCE_ID.get_or_init(|| {
+        let start_ticks = fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|stat| stat.rsplit_once(')').map(|(_, rest)| rest.to_owned()))
+            .and_then(|rest| rest.split_whitespace().nth(19).map(str::to_owned))
+            .unwrap_or_else(|| now().to_string());
+        format!("{}-{start_ticks}", std::process::id())
+    })
 }
 #[cfg(unix)]
 fn disk_usage() -> (u64, u64) {
@@ -1666,7 +1677,9 @@ fn update_status() -> Value {
 async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
-    Ok(Json(update_status()))
+    let mut status = update_status();
+    status["instance"] = json!(process_instance_id());
+    Ok(Json(status))
 }
 async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     check_origin(&headers)?;
