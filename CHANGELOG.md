@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.4.11 — 2026-10-23
+
+### Added
+- Shared update reservations and live progress polling so every signed-in panel session sees the same update overlay and is temporarily locked.
+- Serialized panel mutations with update startup, rejected conflicting write requests, and closed active web terminal sessions when an update begins.
+- Kept an explicit cache-clearing full refresh action available in the completion dialog if the automatic refresh does not restore the panel correctly.
+
 ## v0.4.10 — 2026-10-23
 
 ### Fixed

@@ -4,6 +4,25 @@ set -Eeuo pipefail
 readonly source_dir="${ARG_SOURCE_DIR:-/opt/arg/source}"
 readonly repository="${ARG_REPOSITORY:-https://github.com/themrcortex/arg.git}"
 readonly branch="${ARG_BRANCH:-main}"
+readonly update_lock_dir="/run/arg-update.lock"
+readonly update_status_file="/run/arg-update-in-progress"
+
+clear_stale_update_lock() {
+  [[ -d "$update_lock_dir" ]] || return 0
+  local started current lock_time stale_after=60
+  started="$(awk 'NR==1 {print $1}' "$update_status_file" 2>/dev/null || true)"
+  current="$(date +%s)"
+  if [[ "$started" =~ ^[0-9]+$ ]]; then
+    stale_after=21600
+    lock_time="$started"
+  else
+    lock_time="$(stat -c %Y "$update_lock_dir" 2>/dev/null || echo "$current")"
+  fi
+  if (( current - lock_time > stale_after )); then
+    rm -f "$update_status_file"
+    rmdir "$update_lock_dir" 2>/dev/null || true
+  fi
+}
 
 case "${1:-}" in
   check)
@@ -17,7 +36,18 @@ case "${1:-}" in
     printf '%s %s\n' "$local_rev" "$remote_rev"
     ;;
   run)
-    exec systemd-run --quiet --collect --unit="arg-web-update-$$" --on-active=2s /usr/local/bin/arg update
+    clear_stale_update_lock
+    if ! mkdir "$update_lock_dir" 2>/dev/null; then
+      echo "ARG_UPDATE_IN_PROGRESS: another update is already running." >&2
+      exit 5
+    fi
+    printf '%s %s\n' "$(date +%s)" "$$" > "$update_status_file"
+    chmod 0644 "$update_status_file"
+    if ! systemd-run --quiet --collect --unit="arg-web-update-$$" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 /usr/local/bin/arg update; then
+      rm -f "$update_status_file"
+      rmdir "$update_lock_dir" 2>/dev/null || true
+      exit 1
+    fi
     ;;
   *) exit 2 ;;
 esac

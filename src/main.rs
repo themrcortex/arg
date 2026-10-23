@@ -5,9 +5,10 @@ use argon2::{
 use axum::{
     extract::{ws::{Message, WebSocket, WebSocketUpgrade}, ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
-    Json, Router,
+    extract::Request, Json, Router,
 };
 use rand::RngCore;
 use futures_util::{SinkExt, StreamExt};
@@ -36,7 +37,9 @@ use tokio::{
 const PRIVILEGED_SOCKET: &str = "/run/arg-privileged/manager.sock";
 const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
+const UPDATE_STATUS_FILE: &str = "/run/arg-update-in-progress";
 static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
+static UPDATE_OPERATION_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 static TERMINAL_SESSION_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 static PROCESS_INSTANCE_ID: OnceLock<String> = OnceLock::new();
 
@@ -89,6 +92,28 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn update_started_at() -> Option<i64> {
+    let value = fs::read_to_string(UPDATE_STATUS_FILE).ok()?;
+    let started = value.split_whitespace().next()?.parse::<i64>().ok()?;
+    (now().saturating_sub(started) <= 21600).then_some(started)
+}
+
+async fn update_guard(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path();
+    let exempt = matches!(path, "/api/update" | "/api/update/progress" | "/api/state" | "/api/logout" | "/api/login");
+    let writes_api = method != axum::http::Method::GET && method != axum::http::Method::HEAD && path.starts_with("/api/") && !exempt;
+    let opens_terminal = path == "/api/terminal";
+    if writes_api || opens_terminal {
+        let _operation = UPDATE_OPERATION_GATE.read().await;
+        if update_started_at().is_some() {
+            return (StatusCode::CONFLICT, Json(json!({"error":"ARG_UPDATE_IN_PROGRESS","message":"ARG is being updated. Please wait until the update finishes."}))).into_response();
+        }
+        return next.run(request).await;
+    }
+    next.run(request).await
 }
 fn session_hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -995,8 +1020,10 @@ async fn run_terminal(socket: WebSocket) {
         }
     });
     let (mut sender, mut receiver) = socket.split();
+    let mut update_check = tokio::time::interval(std::time::Duration::from_secs(1));
     loop {
         tokio::select! {
+            _ = update_check.tick() => if update_started_at().is_some() { break; },
             output = output_rx.recv() => match output {
                 Some(bytes) => if sender.send(Message::Binary(bytes.into())).await.is_err() { break; },
                 None => break,
@@ -1675,22 +1702,37 @@ fn update_status() -> Value {
     json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7]})
 }
 async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
-    let db = state.lock().unwrap();
-    require_user(&db, &headers)?;
-    let mut status = update_status();
+    {
+        let db = state.lock().unwrap();
+        require_user(&db, &headers)?;
+    }
+    let mut status = if update_started_at().is_some() {
+        json!({"status":"unavailable","error":"ARG_UPDATE_IN_PROGRESS"})
+    } else {
+        update_status()
+    };
     status["instance"] = json!(process_instance_id());
     Ok(Json(status))
 }
+async fn panel_update_progress(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    let started_at = update_started_at();
+    Ok(Json(json!({"updating":started_at.is_some(),"started_at":started_at,"instance":process_instance_id()})))
+}
 async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     check_origin(&headers)?;
+    let _exclusive = UPDATE_OPERATION_GATE.write().await;
+    if update_started_at().is_some() {
+        return Err(error(StatusCode::CONFLICT, "ARG_UPDATE_IN_PROGRESS: another update is already running."));
+    }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
     let output = privileged_request(json!({"action":"update-run"}))?;
     if output["ok"] != true {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Update could not be scheduled; check service logs",
-        ));
+        let detail = output["error"].as_str().unwrap_or("Update could not be scheduled; check service logs");
+        let status = if detail.contains("ARG_UPDATE_IN_PROGRESS") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
+        return Err(error(status, detail));
     }
     audit(
         &db,
@@ -2847,6 +2889,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/api/update",
             get(panel_update_status).post(schedule_panel_update),
         )
+        .route("/api/update/progress", get(panel_update_progress))
         .route("/api/network/probe", post(port_probe))
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))
@@ -2876,6 +2919,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             put(update_firewall_rule).delete(delete_firewall_rule),
         )
         .fallback(get(static_file))
+        .layer(middleware::from_fn(update_guard))
         .with_state(state);
     let bind = env::var("ARG_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
     let addr: SocketAddr = bind.parse()?;

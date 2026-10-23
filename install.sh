@@ -22,6 +22,8 @@ readonly SUDOERS_FILE="/etc/sudoers.d/arg-ufw-status"
 readonly UFW_HELPER="/usr/local/lib/arg/ufw-helper"
 readonly PORT_HELPER="/usr/local/lib/arg/port-helper"
 readonly UPDATE_HELPER="/usr/local/lib/arg/update-helper"
+readonly UPDATE_LOCK_DIR="/run/arg-update.lock"
+readonly UPDATE_STATUS_FILE="/run/arg-update-in-progress"
 readonly ENV_DIR="/etc/arg"
 readonly ENV_FILE="/etc/arg/arg.env"
 readonly DOMAIN_FILE="/etc/arg/https-domain"
@@ -1053,6 +1055,30 @@ update_app() {
   local was_installed=0
   [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
   (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
+  if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" ]]; then
+    [[ -d "$UPDATE_LOCK_DIR" && -r "$UPDATE_STATUS_FILE" ]] || die "The scheduled update reservation is missing. Please retry from the panel."
+  else
+    if [[ -d "$UPDATE_LOCK_DIR" ]]; then
+      local reserved_at now_at lock_time stale_after=60
+      reserved_at="$(awk 'NR==1 {print $1}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
+      now_at="$(date +%s)"
+      if [[ "$reserved_at" =~ ^[0-9]+$ ]]; then
+        stale_after=21600
+        lock_time="$reserved_at"
+      else
+        lock_time="$(stat -c %Y "$UPDATE_LOCK_DIR" 2>/dev/null || echo "$now_at")"
+      fi
+      if (( now_at - lock_time > stale_after )); then
+        rm -f "$UPDATE_STATUS_FILE"
+        rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
+      fi
+    fi
+    mkdir "$UPDATE_LOCK_DIR" 2>/dev/null || die "Another ARG update is already running. Please wait for it to finish."
+    printf '%s %s\n' "$(date +%s)" "$$" > "$UPDATE_STATUS_FILE"
+  fi
+  chmod 0644 "$UPDATE_STATUS_FILE"
+  cleanup_update_reservation() { rm -f "$UPDATE_STATUS_FILE"; rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true; }
+  trap cleanup_update_reservation EXIT
   migrate_legacy_install
   ensure_setup_token
   ensure_public_bind
@@ -1086,6 +1112,8 @@ update_app() {
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
     show_setup_code_if_needed
     if (( MENU_ACTIVE )); then
+      cleanup_update_reservation
+      trap - EXIT
       exec "$CLI" menu
     fi
     return
