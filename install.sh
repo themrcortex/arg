@@ -115,13 +115,13 @@ pause_menu() {
 }
 
 read_answer() {
-  local prompt="$1" variable="$2" default="${3:-}" answer=""
-  if [[ -r /dev/tty ]]; then
-    IFS= read -r -p "$prompt" answer </dev/tty || true
+  local prompt="$1" variable="$2" default="${3:-}" _answer_value=""
+  if [[ -r /dev/tty && -t 1 ]]; then
+    IFS= read -r -p "$prompt" _answer_value </dev/tty || true
   else
-    IFS= read -r -p "$prompt" answer || true
+    IFS= read -r -p "$prompt" _answer_value || true
   fi
-  printf -v "$variable" '%s' "${answer:-$default}"
+  printf -v "$variable" '%s' "${_answer_value:-$default}"
 }
 
 normalize_menu_digits() {
@@ -170,7 +170,7 @@ install_os_dependencies() {
   say "Installing build dependencies"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl git build-essential pkg-config iproute2 ripgrep
+  apt-get install -y --no-install-recommends ca-certificates curl git sudo build-essential pkg-config iproute2 ripgrep
 }
 
 ensure_firewall_dependency() {
@@ -1364,7 +1364,8 @@ delete_app() {
   require_root delete
   require_systemd
   local purge="${1:-}"
-  local keep_database="n" db_path entry answer domain
+  local keep_database="n" db_path entry answer
+  local cert_name
   if [[ "$purge" == "--purge" ]]; then
     warn "This removes the service, installer, source, configuration, and database."
     read_answer 'Type PURGE ARG to confirm: ' confirmation
@@ -1380,48 +1381,59 @@ delete_app() {
     read_answer 'Type DELETE ARG to confirm: ' confirmation
     [[ "$confirmation" == "DELETE ARG" ]] || die "Uninstall cancelled."
   fi
+  # Normalize earlier DONATELLO paths first, so uninstall removes the old
+  # service/config/source too and the keep-database option preserves its DB.
+  migrate_legacy_install
   db_path="$(configured_db_path)"
-  domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   if [[ "$keep_database" == "y" ]]; then
     install -d -o root -g root -m 0750 "$DATA_DIR"
     printf '%s\n' "$db_path" > "$DATA_DIR/.database-path"
     chmod 0600 "$DATA_DIR/.database-path"
   fi
-  systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  systemctl disable --now arg-privileged.service 2>/dev/null || true
+  systemctl disable --now "$SERVICE_NAME" "$LEGACY_SERVICE_NAME" 2>/dev/null || true
+  systemctl disable --now arg-privileged.service donatello-privileged.service 2>/dev/null || true
   if has ufw && ufw status 2>/dev/null | rg -q '^Status: active'; then
     while IFS= read -r rule_id; do
       [[ -n "$rule_id" ]] || continue
       ufw --force delete "$rule_id" >/dev/null 2>&1 || true
     done < <(ufw status numbered 2>/dev/null | awk '/# ARG / || /# DONATELLO / {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
   fi
-  systemctl disable --now arg-certbot-renew.timer 2>/dev/null || true
-  rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
-  rm -f "$SERVICE_FILE" "$PRIVILEGED_SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER"
-  if [[ -n "$domain" ]]; then
-    rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$CERT_DEPLOY_HOOK"
-    if [[ -x /snap/bin/certbot ]]; then
-      /snap/bin/certbot delete --cert-name "$CERT_NAME" --non-interactive >/dev/null 2>&1 || true
-    elif has certbot; then
-      if [[ -d "/etc/letsencrypt/live/$CERT_NAME" ]]; then
-        certbot delete --cert-name "$CERT_NAME" --non-interactive >/dev/null 2>&1 || true
-      elif [[ -d "/etc/letsencrypt/live/$domain" ]]; then
-        certbot delete --cert-name "$domain" --non-interactive >/dev/null 2>&1 || true
-      fi
-    fi
-    if has nginx; then
-      nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
-    fi
+  systemctl disable --now arg-certbot-renew.timer donatello-certbot-renew.timer 2>/dev/null || true
+  rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT" \
+    "$OLD_CERTBOT_TIMER_SERVICE" "$OLD_CERTBOT_TIMER_UNIT"
+  rm -f "$SERVICE_FILE" "$PRIVILEGED_SERVICE_FILE" "$OLD_SERVICE_FILE" "$OLD_PRIVILEGED_SERVICE_FILE" \
+    "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$OLD_CLI" "$OLD_LEGACY_INSTALLER" \
+    "$SUDOERS_FILE" /etc/sudoers.d/donatello-ufw-status \
+    "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER" /usr/local/lib/donatello/ufw-helper
+  rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$OLD_NGINX_SITE_LINK" "$OLD_NGINX_SITE" \
+    "$CERT_DEPLOY_HOOK" "$OLD_CERT_DEPLOY_HOOK"
+  if [[ -x /snap/bin/certbot ]]; then
+    for cert_name in "$CERT_NAME" "$LEGACY_SERVICE_NAME"; do
+      [[ -d "/etc/letsencrypt/live/$cert_name" ]] || continue
+      /snap/bin/certbot delete --cert-name "$cert_name" --non-interactive >/dev/null 2>&1 || true
+    done
+  elif has certbot; then
+    for cert_name in "$CERT_NAME" "$LEGACY_SERVICE_NAME"; do
+      [[ -d "/etc/letsencrypt/live/$cert_name" ]] || continue
+      certbot delete --cert-name "$cert_name" --non-interactive >/dev/null 2>&1 || true
+    done
   fi
+  if has nginx; then
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
+  fi
+  rm -rf /usr/local/lib/donatello
   rmdir /usr/local/lib/arg 2>/dev/null || true
-  rm -rf "$SOURCE_DIR"
-  rmdir "$INSTALL_DIR" 2>/dev/null || true
-  rm -rf "$ENV_DIR"
+  rm -rf "$SOURCE_DIR" "$OLD_SOURCE_DIR"
+  rmdir "$INSTALL_DIR" "$OLD_INSTALL_DIR" 2>/dev/null || true
+  rm -rf "$ENV_DIR" "$OLD_ENV_DIR" "$OLD_DATA_DIR"
   systemctl daemon-reload
   systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
   userdel "$SERVICE_USER" 2>/dev/null || true
+  userdel "$LEGACY_SERVICE_NAME" 2>/dev/null || true
   groupdel "$SERVICE_GROUP" 2>/dev/null || true
+  groupdel "$LEGACY_SERVICE_NAME" 2>/dev/null || true
   if [[ "$purge" == "--purge" || "$keep_database" != "y" ]]; then
+    rm -f "$db_path" "$db_path-wal" "$db_path-shm"
     rm -rf "$DATA_DIR"
     if [[ "$purge" == "--purge" ]]; then
       say "ARG and all application data have been removed."
