@@ -214,8 +214,8 @@
 .arg-range [aria-pressed="true"] { color: var(--arg-accent); background: rgba(221,164,111,.13); }
 .arg-range [aria-pressed="false"] { color: var(--arg-muted); }
 .arg-range [aria-pressed="false"]:hover { color: #f2f0eb; }
-.arg-update-progress { background: linear-gradient(90deg, hsl(var(--primary) / .3), hsl(var(--primary)), hsl(var(--primary) / .3)); background-size: 200% 100%; animation: arg-update-flow 1.8s linear infinite; }
-@keyframes arg-update-flow { to { background-position: -200% 0; } }
+.arg-update-progress { position: relative; left: -32%; width: 30%; background: linear-gradient(90deg, hsl(var(--primary) / .15), hsl(var(--primary)), hsl(var(--primary) / .15)); animation: arg-update-flow 1.8s ease-in-out infinite; will-change: left; }
+@keyframes arg-update-flow { 0% { left: -32%; } 50% { left: 35%; } 100% { left: 102%; } }
 .arg-kpi-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
 .arg-chart-grid, .arg-operation-grid { grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 480px) { .arg-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

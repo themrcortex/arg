@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.4.10 — 2026-10-23
+
+### Fixed
+- Refresh the updater's server instance ID immediately before scheduling installation so restart detection does not rely on stale update-check state.
+- Replaced the full-width gradient animation with a bounded, smoothly moving progress indicator and explicit update stages with elapsed time.
+- Aligned updater polling timeout with its 10-minute status message.
+
 ## v0.4.9 — 2026-10-23
 
 ### Added
