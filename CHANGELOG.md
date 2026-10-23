@@ -1,3 +1,8 @@
+## v0.12.0 — 2026-10-23
+
+### Changed
+- Added a subtle fade-up transition when switching between panel pages, while respecting reduced-motion preferences.
+
 ## v0.11.0 — 2026-10-23
 
 ### Changed

@@ -501,6 +501,7 @@ export default function App() {
             <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} aria-label="بررسی و به‌روزرسانی پنل" title="بررسی و به‌روزرسانی پنل" className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
+            <div key={currentPage} className="arg-page-enter">
             {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'system' && <SystemPage user={user} Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={setNotice} />}
@@ -518,6 +519,7 @@ export default function App() {
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
             </footer>
+            </div>
           </main>
         </div>
         {notice && (
