@@ -1,6 +1,6 @@
-import { Cpu, Globe, LayoutDashboard, Network, Radio, ScrollText, Settings, Shield, Users, type LucideIcon } from 'lucide-react'
+import { Cpu, Globe, LayoutDashboard, Network, Radio, ScrollText, Settings, Shield, Terminal, Users, type LucideIcon } from 'lucide-react'
 
-export type PageId = 'dashboard' | 'system' | 'network' | 'ports' | 'firewall' | 'nginx' | 'users' | 'audit' | 'settings'
+export type PageId = 'dashboard' | 'system' | 'network' | 'ports' | 'firewall' | 'nginx' | 'terminal' | 'users' | 'audit' | 'settings'
 export type NavigationItem = { id: PageId; label: string; icon: LucideIcon; admin?: boolean }
 
 export const navigation: NavigationItem[] = [
@@ -10,6 +10,7 @@ export const navigation: NavigationItem[] = [
   { id: 'ports', label: 'پورت‌ها', icon: Radio },
   { id: 'firewall', label: 'فایروال UFW', icon: Shield },
   { id: 'nginx', label: 'سایت‌های Nginx', icon: Globe, admin: true },
+  { id: 'terminal', label: 'ترمینال سرور', icon: Terminal, admin: true },
   { id: 'users', label: 'کاربران', icon: Users, admin: true },
   { id: 'audit', label: 'گزارش عملیات', icon: ScrollText, admin: true },
   { id: 'settings', label: 'تنظیمات', icon: Settings },

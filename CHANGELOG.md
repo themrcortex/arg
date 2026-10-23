@@ -1,3 +1,10 @@
+## v0.13.0 — 2026-10-23
+
+### Added
+- Added an interactive xterm.js server terminal backed by a real PTY with live input, output, resize, reconnect, and scrollback.
+- Restricted terminal sessions to administrators, same-origin WebSocket connections, and four concurrent sessions.
+- Terminal shells run as the ARG service account with ambient capabilities cleared and no-new-privileges enabled; session process groups are terminated on disconnect.
+
 ## v0.12.0 — 2026-10-23
 
 ### Changed

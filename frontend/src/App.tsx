@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
   ArrowLeft,
@@ -35,6 +35,7 @@ import {
 import { AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import changelog from '../../CHANGELOG.md?raw'
+const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
 const developer = (
   <a
     className="font-semibold text-primary transition hover:text-white hover:underline"
@@ -477,7 +478,7 @@ export default function App() {
           <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx'].includes(item.id)) },
+              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'terminal'].includes(item.id)) },
               { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} title={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>)}</div></nav>)}
           </div>
@@ -508,6 +509,7 @@ export default function App() {
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={setNotice} />}
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={setNotice} user={user} />}
             {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={setNotice} />}
+            {currentPage === 'terminal' && user.role === 'admin' && <Suspense fallback={<div className="py-20 text-center text-sm text-muted-foreground">در حال آماده‌سازی ترمینال…</div>}><TerminalPage Heading={PageHeading} /></Suspense>}
             {currentPage === 'users' && user.role === 'admin' && (
               <UsersPage current={user} Heading={PageHeading} notify={setNotice} />
             )}

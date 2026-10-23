@@ -3,19 +3,21 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::{ConnectInfo, Path, Query, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, ConnectInfo, Path, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
 };
 use rand::RngCore;
+use futures_util::{SinkExt, StreamExt};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use rusqlite::{params, Connection};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::os::unix::{fs::PermissionsExt, io::AsRawFd};
 use std::{
@@ -35,6 +37,7 @@ const PRIVILEGED_SOCKET: &str = "/run/arg-privileged/manager.sock";
 const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
 static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
+static TERMINAL_SESSION_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
 type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -874,6 +877,147 @@ async fn history(
     Ok(Json(
         json!({"samples": samples, "config": monitoring_config(&db)}),
     ))
+}
+async fn terminal_socket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let origin_matches = origin
+        .and_then(|value| value.parse::<Uri>().ok())
+        .is_some_and(|uri| {
+            uri.authority()
+                .is_some_and(|authority| Some(authority.as_str()) == host)
+                && uri
+                    .scheme_str()
+                    .is_some_and(|origin_scheme| origin_scheme == scheme)
+        });
+    if !origin_matches {
+        return (StatusCode::FORBIDDEN, "Invalid WebSocket origin").into_response();
+    }
+    {
+        let db = state.lock().unwrap();
+        if require_admin(&db, &headers).is_err() {
+            return (StatusCode::FORBIDDEN, "Administrator access required").into_response();
+        }
+    }
+    let permit = match TERMINAL_SESSION_LIMIT.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Terminal session limit reached",
+            )
+                .into_response()
+        }
+    };
+    ws.max_message_size(16 * 1024)
+        .max_frame_size(16 * 1024)
+        .on_upgrade(move |socket| async move {
+            let _permit = permit;
+            run_terminal(socket).await;
+        })
+}
+
+async fn run_terminal(socket: WebSocket) {
+    let pty = native_pty_system();
+    let pair = match pty.openpty(PtySize {
+        rows: 28,
+        cols: 100,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
+        Ok(pair) => pair,
+        Err(_) => return,
+    };
+    let master = Arc::new(Mutex::new(pair.master));
+    let executable = match env::current_exe() {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    let mut command = CommandBuilder::new(executable);
+    command.arg("terminal-shell");
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.cwd(env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/arg")));
+    let mut child = match pair.slave.spawn_command(command) {
+        Ok(child) => child,
+        Err(_) => return,
+    };
+    drop(pair.slave);
+    let writer = match master.lock().unwrap().take_writer() {
+        Ok(writer) => Arc::new(Mutex::new(writer)),
+        Err(_) => {
+            let _ = child.kill();
+            return;
+        }
+    };
+    let reader = match master.lock().unwrap().try_clone_reader() {
+        Ok(reader) => reader,
+        Err(_) => {
+            let _ = child.kill();
+            return;
+        }
+    };
+    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buffer = [0u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(size) => {
+                    if output_tx.blocking_send(buffer[..size].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let (mut sender, mut receiver) = socket.split();
+    loop {
+        tokio::select! {
+            output = output_rx.recv() => match output {
+                Some(bytes) => if sender.send(Message::Binary(bytes.into())).await.is_err() { break; },
+                None => break,
+            },
+            incoming = receiver.next() => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                        if value.get("type").and_then(Value::as_str) == Some("resize") {
+                            let cols = value.get("cols").and_then(Value::as_u64).unwrap_or(100).clamp(20, 300) as u16;
+                            let rows = value.get("rows").and_then(Value::as_u64).unwrap_or(28).clamp(5, 120) as u16;
+                            let _ = master.lock().unwrap().resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+                            continue;
+                        }
+                    }
+                    if writer.lock().unwrap().write_all(text.as_bytes()).is_err() { break; }
+                },
+                Some(Ok(Message::Binary(bytes))) => if writer.lock().unwrap().write_all(&bytes).is_err() { break; },
+                Some(Ok(Message::Ping(bytes))) => if sender.send(Message::Pong(bytes)).await.is_err() { break; },
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                _ => {},
+            }
+        }
+    }
+    if let Some(pid) = child.process_id().filter(|pid| *pid > 1) {
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    } else {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 #[derive(Deserialize)]
 struct AlertSettings {
@@ -2520,8 +2664,35 @@ async fn run_privileged_helper() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn run_terminal_shell() -> Result<(), Box<dyn std::error::Error>> {
+    unsafe {
+        if libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL,
+            0,
+            0,
+            0,
+        ) != 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+    }
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new("/bin/bash")
+        .arg("--login")
+        .arg("-i")
+        .exec();
+    Err(error.into())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env::args().nth(1).as_deref() == Some("terminal-shell") {
+        return run_terminal_shell();
+    }
     if env::args().nth(1).as_deref() == Some("privileged-helper") {
         return run_privileged_helper().await;
     }
@@ -2564,6 +2735,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/account/password", post(change_password))
+        .route("/api/terminal", get(terminal_socket))
         .route("/api/dashboard", get(dashboard))
         .route("/api/history", get(history))
         .route(
