@@ -40,6 +40,7 @@ const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
 const UPDATE_STATUS_FILE: &str = "/run/arg-update-in-progress";
 static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 static UPDATE_OPERATION_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+static APT_OPERATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static TERMINAL_SESSION_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 static PROCESS_INSTANCE_ID: OnceLock<String> = OnceLock::new();
 
@@ -1202,7 +1203,7 @@ fn privileged_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)
         )
     })?;
     stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(180)))
+        .set_read_timeout(Some(std::time::Duration::from_secs(1800)))
         .ok();
     stream
         .set_write_timeout(Some(std::time::Duration::from_secs(5)))
@@ -1234,6 +1235,11 @@ fn privileged_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)
             "Invalid response from privileged manager",
         )
     })
+}
+async fn privileged_request_async(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
+    tokio::task::spawn_blocking(move || privileged_request(request))
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "Privileged operation task failed"))?
 }
 fn run_firewall_helper(
     action: &str,
@@ -1733,6 +1739,60 @@ async fn panel_update_logs(State(state): State<AppState>, headers: HeaderMap) ->
         ));
     }
     Ok(Json(json!({"logs":output["stdout"].as_str().unwrap_or("")})))
+}
+
+#[derive(Deserialize)]
+struct AptOperation { action: String, #[serde(default)] packages: Vec<String> }
+#[derive(Deserialize)]
+struct ServiceOperation { action: String, unit: String }
+
+async fn list_packages(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    { let db = state.lock().unwrap(); require_admin(&db, &headers)?; }
+    let result = privileged_request_async(json!({"action":"apt-list"})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::SERVICE_UNAVAILABLE, result["error"].as_str().unwrap_or("Package list unavailable"))); }
+    Ok(Json(result["data"].clone()))
+}
+async fn run_apt_operation(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<AptOperation>) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = { let db = state.lock().unwrap(); require_admin(&db, &headers)? };
+    let _update_guard = UPDATE_OPERATION_GATE.read().await;
+    let _apt_guard = APT_OPERATION_LOCK.lock().await;
+    let allowed = ["update", "upgrade", "full-upgrade", "autoremove", "clean", "autoclean", "install", "remove"];
+    if !allowed.contains(&input.action.as_str()) || input.packages.len() > 25 || input.packages.iter().any(|p| !valid_package_name(p)) {
+        return Err(error(StatusCode::BAD_REQUEST, "Invalid APT action or package name"));
+    }
+    if ["install", "remove"].contains(&input.action.as_str()) && input.packages.is_empty() { return Err(error(StatusCode::BAD_REQUEST, "Select at least one package")); }
+    let result = privileged_request_async(json!({"action":"apt-run","operation":input.action,"packages":input.packages})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("APT operation failed"))); }
+    { let db = state.lock().unwrap(); audit(&db, &actor.username, "apt.operation", &input.action); }
+    Ok(Json(json!({"output":result["stdout"].as_str().unwrap_or("")})))
+}
+async fn list_system_services(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    { let db = state.lock().unwrap(); require_admin(&db, &headers)?; }
+    let result = privileged_request_async(json!({"action":"service-list"})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::SERVICE_UNAVAILABLE, result["error"].as_str().unwrap_or("Service list unavailable"))); }
+    Ok(Json(result["data"].clone()))
+}
+async fn run_service_operation(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<ServiceOperation>) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = { let db = state.lock().unwrap(); require_admin(&db, &headers)? };
+    let _update_guard = UPDATE_OPERATION_GATE.read().await;
+    let allowed = ["start", "stop", "restart", "try-restart", "reload", "reload-or-restart", "enable", "disable", "enable-now", "disable-now", "reenable", "mask", "unmask", "reset-failed", "status", "logs", "daemon-reload"];
+    if !allowed.contains(&input.action.as_str()) || (input.action != "daemon-reload" && !valid_service_unit(&input.unit)) { return Err(error(StatusCode::BAD_REQUEST, "Invalid service action or unit")); }
+    let result = privileged_request_async(json!({"action":"service-action","operation":input.action,"unit":input.unit})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("Service operation failed"))); }
+    { let db = state.lock().unwrap(); audit(&db, &actor.username, "systemd.service.action", &format!("{} {}", input.action, input.unit)); }
+    Ok(Json(json!({"output":result["stdout"].as_str().unwrap_or("")})))
+}
+fn valid_package_name(name: &str) -> bool {
+    let (base, arch) = name.split_once(':').unwrap_or((name, ""));
+    let valid_base = !base.is_empty() && base.len() <= 128 && base.as_bytes()[0].is_ascii_alphanumeric()
+        && base.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+.-".contains(&b));
+    let valid_arch = !name.contains(':') || (!arch.is_empty() && arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-".contains(&b)));
+    valid_base && valid_arch
+}
+fn valid_service_unit(unit: &str) -> bool {
+    unit.len() <= 255 && unit.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && unit.ends_with(".service") && unit.bytes().all(|b| b.is_ascii_alphanumeric() || b"@_.:-".contains(&b)) && !unit.contains("..")
 }
 async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     check_origin(&headers)?;
@@ -2721,8 +2781,14 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-rename") => "nginx-rename",
         Some("nginx-site-logs") => "nginx-site-logs",
         Some("nginx-browse") => "nginx-browse",
+        Some("apt-list") => "apt-list",
+        Some("apt-run") => "apt-run",
+        Some("service-list") => "service-list",
+        Some("service-action") => "service-action",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
+    if action.starts_with("apt-") { return execute_apt_request(action, request); }
+    if action.starts_with("service-") { return execute_service_request(action, request); }
     if action.starts_with("nginx-") {
         let _guard = NGINX_OPERATION_LOCK
             .lock()
@@ -2784,6 +2850,78 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
 }
 
+fn command_result(command: &mut std::process::Command) -> Result<(bool, String), String> {
+    let output = command.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let result = if stderr.trim().is_empty() { stdout } else if stdout.trim().is_empty() { stderr } else { format!("{stdout}\n{stderr}") };
+    Ok((output.status.success(), result))
+}
+fn execute_apt_request(action: &str, request: &Value) -> Value {
+    if action == "apt-list" {
+        let mut command = std::process::Command::new("dpkg-query");
+        command.args(["-W", "-f=${binary:Package}\t${Version}\t${db:Status-Abbrev}\t${binary:Summary}\n"]);
+        return match command_result(&mut command) {
+            Ok((true, output)) => {
+                let packages: Vec<Value> = output.lines().filter_map(|line| {
+                    let mut fields = line.splitn(4, '\t');
+                    let name = fields.next()?; let version = fields.next()?; let status = fields.next()?; let summary = fields.next().unwrap_or("");
+                    status.starts_with("ii").then(|| json!({"name":name,"version":version,"summary":summary}))
+                }).collect();
+                json!({"ok":true,"data":{"packages":packages}})
+            }
+            Ok((false, output)) => json!({"ok":false,"error":output}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
+    }
+    let Some(operation) = request["operation"].as_str() else { return json!({"ok":false,"error":"Missing APT operation"}); };
+    let allowed = ["update", "upgrade", "full-upgrade", "autoremove", "clean", "autoclean", "install", "remove"];
+    if !allowed.contains(&operation) { return json!({"ok":false,"error":"Unsupported APT operation"}); }
+    let packages: Vec<&str> = request["packages"].as_array().map(|items| items.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    if packages.len() > 25 || packages.iter().any(|name| !valid_package_name(name)) || ["install", "remove"].contains(&operation) && packages.is_empty() { return json!({"ok":false,"error":"Invalid package list"}); }
+    let mut command = std::process::Command::new("apt-get");
+    command.env("DEBIAN_FRONTEND", "noninteractive").env("APT_LISTCHANGES_FRONTEND", "none").arg("-y");
+    match operation { "full-upgrade" => { command.arg("full-upgrade"); }, "autoremove" => { command.arg("autoremove"); }, _ => { command.arg(operation); } }
+    if operation == "install" || operation == "remove" { command.arg("--").args(packages); }
+    match command_result(&mut command) { Ok((true, output)) => json!({"ok":true,"stdout":output}), Ok((false, output)) => json!({"ok":false,"error":output}), Err(error) => json!({"ok":false,"error":error}) }
+}
+fn execute_service_request(action: &str, request: &Value) -> Value {
+    if action == "service-list" {
+        let mut files = std::process::Command::new("systemctl"); files.args(["list-unit-files", "--type=service", "--no-legend", "--no-pager"]);
+        let mut units = std::process::Command::new("systemctl"); units.args(["list-units", "--all", "--type=service", "--no-legend", "--no-pager"]);
+        let (Ok((true, file_output)), Ok((true, active_output))) = (command_result(&mut files), command_result(&mut units)) else { return json!({"ok":false,"error":"Could not list systemd services"}); };
+        let active: HashMap<String, (String,String,String)> = active_output.lines().filter_map(|line| {
+            let mut f=line.split_whitespace(); let unit=f.next()?; let _load=f.next()?; let state=f.next()?; let sub=f.next()?;
+            let desc=line.splitn(5, char::is_whitespace).nth(4).unwrap_or("").trim().to_owned();
+            Some((unit.to_owned(),(state.to_owned(),sub.to_owned(),desc)))
+        }).collect();
+        let services: Vec<Value> = file_output.lines().filter_map(|line| {
+            let mut f=line.split_whitespace(); let unit=f.next()?; let enabled=f.next()?;
+            if !valid_service_unit(unit) { return None; }
+            let (state,sub,description)=active.get(unit).cloned().unwrap_or_else(||("inactive".into(),"dead".into(),String::new()));
+            Some(json!({"unit":unit,"enabled":enabled,"state":state,"sub_state":sub,"description":if description.is_empty(){"System service"}else{description.as_str()}}))
+        }).collect();
+        return json!({"ok":true,"data":{"services":services}});
+    }
+    let Some(operation)=request["operation"].as_str() else { return json!({"ok":false,"error":"Missing systemd action"}); };
+    let allowed=["start","stop","restart","try-restart","reload","reload-or-restart","enable","disable","enable-now","disable-now","reenable","mask","unmask","reset-failed","status","logs","daemon-reload"];
+    if !allowed.contains(&operation) { return json!({"ok":false,"error":"Unsupported systemd action"}); }
+    if operation == "daemon-reload" {
+        let mut command=std::process::Command::new("systemctl"); command.arg("daemon-reload");
+        return match command_result(&mut command) { Ok((true,output))=>json!({"ok":true,"stdout":output}),Ok((false,output))=>json!({"ok":false,"error":output}),Err(error)=>json!({"ok":false,"error":error}) };
+    }
+    let Some(unit)=request["unit"].as_str().filter(|u|valid_service_unit(u)) else { return json!({"ok":false,"error":"Invalid service unit"}); };
+    if operation == "logs" {
+        let mut command=std::process::Command::new("journalctl"); command.args(["--no-pager","--output=short-iso","--lines=100","--unit",unit]);
+        return match command_result(&mut command) { Ok((true,output))=>json!({"ok":true,"stdout":output}),Ok((false,output))=>json!({"ok":false,"error":output}),Err(error)=>json!({"ok":false,"error":error}) };
+    }
+    let mut command=std::process::Command::new("systemctl");
+    if operation == "status" { command.args(["--no-pager","--full","status",unit]); return match command_result(&mut command) { Ok((_,output))=>json!({"ok":true,"stdout":output}),Err(error)=>json!({"ok":false,"error":error}) }; }
+    match operation { "enable-now"=>{command.arg("enable").arg("--now");},"disable-now"=>{command.arg("disable").arg("--now");},_=>{command.arg(operation);} }
+    command.arg(unit);
+    match command_result(&mut command) { Ok((true,output))=>json!({"ok":true,"stdout":output}),Ok((false,output))=>json!({"ok":false,"error":output}),Err(error)=>json!({"ok":false,"error":error}) }
+}
+
 async fn serve_privileged_connection(mut stream: UnixStream) {
     if !privileged_peer_allowed(&stream) {
         return;
@@ -2792,7 +2930,8 @@ async fn serve_privileged_connection(mut stream: UnixStream) {
     let response = match AsyncBufReader::new(&mut stream).read_line(&mut line).await {
         Ok(size) if size > 0 && size <= 4 * 1024 * 1024 => {
             match serde_json::from_str::<Value>(&line) {
-                Ok(request) => execute_privileged_request(&request),
+                Ok(request) => tokio::task::spawn_blocking(move || execute_privileged_request(&request))
+                    .await.unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"})),
                 Err(_) => json!({"ok":false,"error":"Invalid request"}),
             }
         }
@@ -2906,6 +3045,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/update/progress", get(panel_update_progress))
         .route("/api/update/logs", get(panel_update_logs))
+        .route("/api/packages", get(list_packages))
+        .route("/api/packages/action", post(run_apt_operation))
+        .route("/api/services", get(list_system_services))
+        .route("/api/services/action", post(run_service_operation))
         .route("/api/network/probe", post(port_probe))
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))

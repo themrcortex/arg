@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.4.16 — 2026-10-23
+
+### Added
+- Added an APT operations page for repository refresh, upgrade, full upgrade, package install and removal, and cache cleanup, with installed package search and version details.
+- Added a systemd services page with service discovery, status filters, start/stop/restart/reload, enable/disable, mask/unmask, reset-failed, status inspection, and journal logs.
+- Serialized APT transactions and coordinated package and service operations with panel updates; privileged command arguments are allowlisted and validated.
+
+### Fixed
+- Corrected the locked checksum for `slab 0.4.11`, which prevented Cargo from verifying and building the project.
+
 ## v0.4.15 — 2026-10-23
 
 ### Added
