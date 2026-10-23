@@ -1557,6 +1557,10 @@ struct NginxSiteLogInput {
     kind: String,
 }
 #[derive(Deserialize)]
+struct NginxDomainCheckQuery {
+    hosts: String,
+}
+#[derive(Deserialize)]
 struct NginxBrowseQuery {
     path: Option<String>,
 }
@@ -1734,6 +1738,39 @@ async fn api_nginx_site_logs(
     Ok(Json(result))
 }
 
+async fn check_nginx_domains(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<NginxDomainCheckQuery>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    if query.hosts.len() > 2048 {
+        return Err(error(StatusCode::BAD_REQUEST, "فهرست دامنه‌ها بیش از حد طولانی است."));
+    }
+    let hosts: Vec<String> = query.hosts.split(|ch: char| ch == ',' || ch.is_whitespace()).filter(|host| !host.is_empty()).map(str::to_owned).collect();
+    if hosts.is_empty() || hosts.len() > 20 || hosts.iter().any(|host| !valid_domain_name(host)) {
+        return Err(error(StatusCode::BAD_REQUEST, "دامنه نامعتبر است یا تعداد دامنه‌ها از 20 بیشتر شده است."));
+    }
+    let mut results = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        let query_host = host.strip_prefix("*.").unwrap_or(&host);
+        match tokio::net::lookup_host((query_host, 80)).await {
+            Ok(addresses) => {
+                let mut values: Vec<String> = addresses.map(|address| address.ip().to_string()).collect();
+                values.sort();
+                values.dedup();
+                results.push(json!({"host":host,"resolved":!values.is_empty(),"addresses":values}));
+            }
+            Err(err) => results.push(json!({"host":host,"resolved":false,"addresses":[],"error":err.to_string()})),
+        }
+    }
+    Ok(Json(json!({"domains":results})))
+}
+
 async fn get_nginx_site(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -1869,6 +1906,19 @@ fn valid_nginx_site_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn valid_domain_name(host: &str) -> bool {
+    let host = host.strip_prefix("*.").unwrap_or(host);
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 fn nginx_site_paths(name: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
@@ -2523,6 +2573,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/nginx/sites/{name}/rename", post(rename_nginx_site))
         .route("/api/nginx/sites/{name}/metadata", put(update_nginx_site_metadata))
         .route("/api/nginx/sites/{name}/logs", post(api_nginx_site_logs))
+        .route("/api/nginx/domains/check", get(check_nginx_domains))
         .route("/api/nginx/status", get(nginx_status))
         .route("/api/nginx/files", get(api_nginx_browse_files))
         .route("/api/nginx/action", post(nginx_action))

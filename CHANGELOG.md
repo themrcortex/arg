@@ -1,3 +1,10 @@
+## v0.8.0 — 2026-10-23
+
+### Added
+- Added per-site domain management for a primary hostname and aliases, including wildcard hostnames.
+- Added DNS A/AAAA resolution checks and clear guidance when domains do not resolve.
+- Domain changes update every `server_name` directive in the site and are applied only after Nginx configuration validation succeeds.
+
 # ARG Change Log
 
 ## v0.7.0 — 2026-10-23
