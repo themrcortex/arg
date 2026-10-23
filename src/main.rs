@@ -1159,14 +1159,14 @@ struct FirewallRuleInput {
 }
 fn valid_firewall_rule(input: &FirewallRuleInput) -> bool {
     input.port > 0
-        && ![22, 80, 443, 8282, 8443].contains(&input.port)
+        && ![22, 80, 8282, 8443].contains(&input.port)
         && ["tcp", "udp"].contains(&input.protocol.as_str())
         && ["allow", "deny"].contains(&input.policy.as_str())
 }
 fn firewall_rule_validation_error(input: &FirewallRuleInput) -> Option<&'static str> {
     if input.port == 0 {
         Some("شمارهٔ پورت باید بین 1 تا 65535 باشد.")
-    } else if [22, 80, 443, 8282, 8443].contains(&input.port) {
+    } else if [22, 80, 8282, 8443].contains(&input.port) {
         Some("این پورت برای دسترسی SSH، وب یا پنل ARG محافظت شده است.")
     } else if !["tcp", "udp"].contains(&input.protocol.as_str()) {
         Some("پروتکل TCP یا UDP را انتخاب کن.")
