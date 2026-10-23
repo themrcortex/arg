@@ -29,5 +29,9 @@ awk -v heading="## $tag " 'index($0, heading) == 1 { found=1; next } found && /^
   echo "No changelog section found for $tag." >&2
   exit 1
 }
+if grep -Eq 'Add release notes before publishing\.' "$notes"; then
+  echo "Replace the changelog placeholder for $tag before publishing." >&2
+  exit 1
+fi
 
 gh release create "$tag" --title "ARG $tag" --notes-file "$notes" --target "$(git rev-parse HEAD)" install.sh --latest

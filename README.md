@@ -222,13 +222,13 @@ PLAN.md                      نقشهٔ راه قابلیت‌ها
 
 ## نسخه‌بندی و انتشار
 
-نسخهٔ ARG با قالب `MAJOR.MINOR.PATCH` و به‌صورت هماهنگ در Rust و فرانت‌اند نگهداری می‌شود. برای آماده‌کردن نسخهٔ بعدی:
+نسخهٔ ARG از قالب `MAJOR.MINOR.PATCH` پیروی می‌کند و در Rust و فرانت‌اند هماهنگ است: اصلاح‌های کوچک و رفع باگ `PATCH` را بالا می‌برند (مثل `0.4.1` به `0.4.2`)، قابلیت‌های سازگار `MINOR` را (مثل `0.4.2` به `0.5.0`) و تغییرهای ناسازگار `MAJOR` را. هر نسخه باید یک بخش مستقل در `CHANGELOG.md` داشته باشد. اسکریپت به‌صورت پیش‌فرض patch بعدی را می‌سازد و یک یادداشت اولیهٔ changelog درج می‌کند:
 
 ```bash
-scripts/bump-version.sh 0.4.0
+scripts/bump-version.sh
 ```
 
-سپس بخش `v0.4.0` را در `CHANGELOG.md` تکمیل، نسخه را build و تغییرات را commit و push کنید. برای ساخت GitHub Release از نسخهٔ جاری:
+برای ارتقای نسخهٔ minor یا major، از `scripts/bump-version.sh minor` یا `scripts/bump-version.sh major` استفاده کنید. همچنین می‌توان نسخهٔ بعدی را صریح نوشت؛ اسکریپت فقط اجازهٔ نسخهٔ بعدی معتبر را می‌دهد. پیش از انتشار، متن placeholder در changelog را با جزئیات واقعی جایگزین کنید. ساخت GitHub Release بدون changelog کامل رد می‌شود:
 
 ```bash
 scripts/release.sh
