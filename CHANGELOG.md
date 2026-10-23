@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.13 — 2026-10-23
+
+### Changed
+- Moved CPU, memory, and disk alert threshold controls to the main Settings page and removed them from the dashboard and System page.
+- Added a shared top-of-page resource alert that polls live server metrics and shows warning or critical status when configured thresholds or the critical level are reached.
+
 ## v0.4.12 — 2026-10-23
 
 ### Changed

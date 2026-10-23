@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
+  AlertTriangle,
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
@@ -16,14 +17,14 @@ import {
   Settings,
   X,
 } from 'lucide-react'
-import { api, type User } from './lib/api'
+import { api, type Dashboard, type User } from './lib/api'
 import { cn } from './lib/utils'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
-import { Alert, AlertDescription } from './components/ui/alert'
+import { Alert, AlertDescription, AlertTitle } from './components/ui/alert'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
 import { Avatar, AvatarFallback } from './components/ui/avatar'
 import {
@@ -41,6 +42,65 @@ const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ def
 const notifyUser = (message: string) => {
   if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد/.test(message)) toast.error(message)
   else toast.success(message)
+}
+
+type AlertThresholds = { cpu: number; memory: number; disk: number }
+type ResourceAlert = { key: string; label: string; value: number; threshold: number; critical: boolean }
+
+function ResourceAlertNotice() {
+  const [alerts, setAlerts] = useState<ResourceAlert[]>([])
+  const previousCpu = useRef<{ total: number; idle: number } | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const [dashboard, thresholds] = await Promise.all([
+          api<Dashboard>('dashboard'),
+          api<AlertThresholds>('monitoring/alerts'),
+        ])
+        if (cancelled) return
+        const previous = previousCpu.current
+        const totalDelta = previous && typeof dashboard.cpu_total === 'number'
+          ? dashboard.cpu_total - previous.total
+          : 0
+        const idleDelta = previous && typeof dashboard.cpu_idle === 'number'
+          ? dashboard.cpu_idle - previous.idle
+          : 0
+        if (typeof dashboard.cpu_total === 'number' && typeof dashboard.cpu_idle === 'number') {
+          previousCpu.current = { total: dashboard.cpu_total, idle: dashboard.cpu_idle }
+        }
+        const cpu = totalDelta > 0 ? Math.min(100, Math.max(0, (1 - idleDelta / totalDelta) * 100)) : null
+        const memory = dashboard.memory_kib > 0
+          ? Math.min(100, Math.max(0, (1 - dashboard.available_kib / dashboard.memory_kib) * 100))
+          : null
+        const disk = (dashboard.disk_total_bytes || 0) > 0 && typeof dashboard.disk_free_bytes === 'number'
+          ? Math.min(100, Math.max(0, (1 - dashboard.disk_free_bytes / dashboard.disk_total_bytes!) * 100))
+          : null
+        const readings = [
+          { key: 'cpu', label: 'CPU', value: cpu, threshold: thresholds.cpu },
+          { key: 'memory', label: 'حافظه', value: memory, threshold: thresholds.memory },
+          { key: 'disk', label: 'دیسک', value: disk, threshold: thresholds.disk },
+        ]
+        setAlerts(readings.flatMap((reading) => reading.value !== null && (reading.value >= reading.threshold || reading.value >= 95)
+          ? [{ key: reading.key, label: reading.label, value: reading.value, threshold: reading.threshold, critical: reading.value >= 95 }]
+          : []))
+      } catch { /* An unavailable metrics read should not block or interrupt panel navigation. */ }
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 15000)
+    }
+    void poll()
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [])
+
+  if (!alerts.length) return null
+  const critical = alerts.some((alert) => alert.critical)
+  return <Alert role="status" className={critical ? 'mb-5 border-rose-400/30 bg-rose-400/[.08] text-rose-100' : 'mb-5 border-amber-400/30 bg-amber-400/[.07] text-amber-100'}>
+    <AlertTriangle size={17} className={critical ? 'text-rose-300' : 'text-amber-300'}/>
+    <AlertTitle>{critical ? 'وضعیت بحرانی منابع سرور' : 'عبور از آستانهٔ هشدار'}</AlertTitle>
+    <AlertDescription className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+      {alerts.map((alert) => <span key={alert.key}>{alert.label}: <b className="font-mono" dir="ltr">{alert.value.toFixed(1)}%</b> <span className="text-current/70">(آستانهٔ تنظیم‌شده: <b className="font-mono" dir="ltr">{alert.threshold}%</b>)</span></span>)}
+    </AlertDescription>
+  </Alert>
 }
 async function forceFreshPanelReload(showComplete = true) {
   const clearCaches = async () => {
@@ -628,9 +688,10 @@ export default function App() {
             <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
+            <ResourceAlertNotice />
             <div key={currentPage} className="arg-page-enter">
-            {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'system' && <SystemPage user={user} Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}

@@ -222,7 +222,7 @@ function LoadingCards() {
   )
 }
 
-function AlertControls({ user, cpu, memory, disk, notify }: { user: User; cpu: number | null; memory: number | null; disk: number | null; notify: (message: string) => void }) {
+function AlertControls({ user, notify }: { user: User; notify: (message: string) => void }) {
   const [limits, setLimits] = useState({ cpu: 85, memory: 85, disk: 85 })
   const [busy, setBusy] = useState(false)
   useEffect(() => { void api<typeof limits>('monitoring/alerts').then(setLimits).catch(() => undefined) }, [])
@@ -233,8 +233,8 @@ function AlertControls({ user, cpu, memory, disk, notify }: { user: User; cpu: n
     catch (error) { notify(error instanceof Error ? error.message : 'ذخیره ناموفق بود') }
     finally { setBusy(false) }
   }
-  return <SectionCard title="آستانه‌های هشدار" description="تنظیمات در سرور ذخیره می‌شوند و وضعیت فعلی با آنها سنجیده می‌شود">
-    <form onSubmit={save} className="grid gap-4 md:grid-cols-3">{([['cpu', 'پردازنده', cpu], ['memory', 'حافظه', memory], ['disk', 'دیسک', disk]] as const).map(([key, label, value]) => <div key={key} className="rounded-xl border border-white/10 bg-white/[.025] p-4"><div className="mb-3 flex items-center justify-between text-xs"><Label htmlFor={`limit-${key}`}>{label}</Label><Badge variant={value !== null && value >= limits[key] ? 'warning' : 'success'}>{value !== null && value >= limits[key] ? 'بالاتر از حد' : 'عادی'}</Badge></div><div className="flex items-center gap-2"><Input id={`limit-${key}`} type="number" lang="en" dir="ltr" min={1} max={100} value={limits[key]} disabled={user.role !== 'admin'} onChange={(event) => setLimits((old) => ({ ...old, [key]: Number(event.target.value) }))}/><span className="text-sm">٪</span></div></div>)}{user.role === 'admin' && <Button type="submit" disabled={busy} className="md:col-span-3 md:w-fit">ذخیرهٔ آستانه‌ها</Button>}</form>
+  return <SectionCard title="آستانه‌های هشدار" description="وقتی مصرف CPU، حافظه یا دیسک از این مقدار عبور کند، اعلان بالای صفحات نمایش داده می‌شود.">
+    <form onSubmit={save} className="grid gap-4 md:grid-cols-3">{([['cpu', 'پردازنده'], ['memory', 'حافظه'], ['disk', 'دیسک']] as const).map(([key, label]) => <div key={key} className="rounded-xl border border-white/10 bg-white/[.025] p-4"><div className="mb-3 flex items-center justify-between text-xs"><Label htmlFor={`limit-${key}`}>{label}</Label><Badge variant="outline">آستانهٔ اعلان</Badge></div><div className="flex items-center gap-2"><Input id={`limit-${key}`} type="number" lang="en" dir="ltr" min={1} max={100} value={limits[key]} disabled={user.role !== 'admin'} onChange={(event) => setLimits((old) => ({ ...old, [key]: Number(event.target.value) }))}/><span className="text-sm">٪</span></div></div>)}{user.role === 'admin' && <Button type="submit" disabled={busy} className="md:col-span-3 md:w-fit">ذخیرهٔ آستانه‌ها</Button>}</form>
   </SectionCard>
 }
 
@@ -277,7 +277,7 @@ function ArgChartPanel({ title, icon, children, description }: { title: string; 
   </section>
 }
 
-export function DashboardPage({ user, notify }: { user: User } & Common) {
+export function DashboardPage({ notify }: Common) {
   const { data, history, resourceHistory, cpu, loading, refresh, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, historyEnabled, dashboardError, historyError } = useDashboard(notify)
   const [firewall, setFirewall] = useState<Firewall | null>(null)
   const [ruleCount, setRuleCount] = useState<number | null>(null)
@@ -325,7 +325,6 @@ export function DashboardPage({ user, notify }: { user: User } & Common) {
       <section className="arg-dashboard-panel min-w-0 rounded-[14px] border p-4"><div className="mb-4 flex items-center justify-between gap-2"><h2 className="font-bold text-foreground">پورت‌های شنونده</h2><a href="#/ports" className="text-xs text-primary hover:underline">جزئیات</a></div>{data?.ports.length ? <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="border-b border-border text-muted-foreground"><th className="pb-3 text-right">پورت</th><th className="pb-3 text-right">پروتکل</th><th className="pb-3 text-left">نسخهٔ IP</th></tr></thead><tbody>{data.ports.slice(0, 4).map((port, index) => <tr key={`${port.port}-${port.protocol}-${port.ipv6}-${index}`} className="border-b border-border/60 last:border-0"><td className="py-3 font-mono" dir="ltr">{port.port}</td><td className="py-3 font-mono">{port.protocol}</td><td className="py-3 text-left font-mono">{port.ipv6 ? 'IPv6' : 'IPv4'}</td></tr>)}</tbody></table></div> : <p className="py-6 text-sm text-muted-foreground">پورت شنونده‌ای گزارش نشده است.</p>}</section>
       <section className="arg-dashboard-panel min-w-0 rounded-[14px] border p-4"><div className="mb-4 flex items-center justify-between gap-2"><h2 className="font-bold text-foreground">وضعیت فایروال</h2><a href="#/firewall" className="text-xs text-primary hover:underline">جزئیات</a></div><div className="grid grid-cols-2 gap-3"><div className="rounded-lg border border-border bg-secondary/40 p-3"><span className="text-xs text-muted-foreground">وضعیت UFW</span><div className={`mt-3 font-bold ${firewall?.available ? firewallActive ? 'text-emerald-300' : 'text-amber-300' : 'text-muted-foreground'}`}>{firewall ? firewall.available ? firewallActive ? 'فعال' : 'غیرفعال' : 'نصب نشده' : 'نامشخص'}</div></div><div className="rounded-lg border border-border bg-secondary/40 p-3"><span className="text-xs text-muted-foreground">قوانین مدیریت‌شده</span><div className="mt-3 font-mono text-lg font-bold" dir="ltr">{ruleCount === null ? '—' : formatNumber(ruleCount)}</div></div></div></section>
     </div>
-    {data && <AlertControls user={user} cpu={cpu} memory={memory} disk={disk} notify={notify}/>}
   </div>
 }
 
@@ -333,7 +332,7 @@ function DataRows({ rows }: { rows: { label: string; value: string; detail?: str
   return <Table><TableHeader><TableRow><TableHead>شاخص</TableHead><TableHead>مقدار</TableHead><TableHead className="hidden md:table-cell">توضیح</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={row.label}><TableCell className="font-medium">{row.label}</TableCell><TableCell><span className="font-mono font-semibold text-white tabular-nums" dir="ltr">{row.value}</span></TableCell><TableCell className="hidden text-xs text-muted-foreground md:table-cell">{row.detail || '—'}</TableCell></TableRow>)}</TableBody></Table>
 }
 
-export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
+export function SystemPage({ Heading, notify }: Common) {
   const { data, resourceHistory, cpu, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, loading, refresh, historyEnabled } = useDashboard(notify)
   const totalMemory = (data?.memory_kib || 0) * 1024
   const availableMemory = (data?.available_kib || 0) * 1024
@@ -350,7 +349,6 @@ export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
       <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: formatNumber(data?.cpu_cores || 0) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: `${formatNumber(Math.floor((data?.uptime_seconds || 0) / 86400))}d ${formatNumber(Math.floor(((data?.uptime_seconds || 0) % 86400) / 3600))}h` }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: formatBytes(totalMemory) }, { label: 'مصرف‌شده', value: formatBytes(totalMemory - availableMemory), detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: formatBytes(availableMemory) }, { label: 'Cache', value: formatBytes((memoryDetail?.cached_kib || 0) * 1024) }, { label: 'Buffer', value: formatBytes((memoryDetail?.buffers_kib || 0) * 1024) }, { label: 'Swap کل', value: formatBytes((data?.swap_total_kib || 0) * 1024) }, { label: 'Swap مصرف‌شده', value: formatBytes(((data?.swap_total_kib || 0) - (data?.swap_free_kib || 0)) * 1024) }]}/></SectionCard></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="فضای فایل‌سیستم ریشه"><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk ? formatBytes(totalDisk) : '—' }, { label: 'مصرف‌شده', value: totalDisk ? formatBytes(totalDisk - freeDisk) : '—' }, { label: 'آزاد', value: totalDisk ? formatBytes(freeDisk) : '—' }, { label: 'درصد مصرف', value: totalDisk ? `${formatNumber(diskPercent)}%` : '—' }]}/></SectionCard><SectionCard title="مصرف پنل ARG" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: `${formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%` }, { label: 'RAM پنل', value: formatBytes(data?.process_rss_bytes || 0), detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
-      <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memoryPercent} disk={diskPercent} notify={notify}/></div>
     </>}
   </>
 }
@@ -1343,6 +1341,7 @@ export function SettingsPage({ Heading, logout, notify, user, update, openUpdate
   }
   return <>
     <Heading title="تنظیمات" description="زمان نمونه‌برداری، نگه‌داری تاریخچه، امنیت نشست و پورت دسترسی" />
+    <div className="mb-5"><AlertControls user={user} notify={notify}/></div>
     <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]">
       <SectionCard title="ثبت تاریخچه" description="تنظیمات روی سرویس Rust ذخیره و بدون نصب دوباره اعمال می‌شود" right={<Badge variant={config?.enabled ? 'success' : 'outline'}>{config?.enabled ? 'در حال ثبت' : 'متوقف'}</Badge>}>
         {config ? <form onSubmit={saveConfig} className="space-y-5">
