@@ -255,11 +255,13 @@ function PageHeading({
   action?: ReactNode
 }) {
   return (
-    <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
-      <div>
-        <div className="mb-3 flex items-center gap-2 text-xs font-bold tracking-[.12em] text-primary" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/> SERVER CONTROL</div>
-        <h1 className="text-3xl font-extrabold tracking-tight text-white md:text-[34px]">{title}</h1>
-        <p className="mt-2 text-sm text-muted-foreground">{description}</p>
+    <div className="mb-7 flex flex-wrap items-end justify-between gap-4" dir="rtl">
+      <div className="min-w-0 text-right" dir="rtl">
+        <div className="mb-4 flex min-h-5 items-center justify-start text-xs font-bold tracking-[.12em] text-primary">
+          <span className="inline-flex items-center gap-2 leading-5" dir="ltr" style={{ unicodeBidi: 'isolate' }}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"/>SERVER CONTROL</span>
+        </div>
+        <h1 dir="rtl" className="mt-0 block text-3xl font-extrabold leading-[1.4] tracking-tight text-white md:text-[34px]">{title}</h1>
+        <p dir="rtl" className="mt-2 text-sm leading-7 text-muted-foreground">{description}</p>
       </div>
       {action}
     </div>
