@@ -364,6 +364,7 @@ configure_ufw_status() {
   local ufw sudoers_tmp
   ufw="$(command -v ufw || true)"
   has visudo || die "visudo is required to configure restricted panel management."
+  install -d -o root -g root -m 0755 "$(dirname "$PORT_HELPER")"
   install -o root -g root -m 0755 "$SOURCE_DIR/scripts/port-helper.sh" "$PORT_HELPER"
   install -o root -g root -m 0755 "$SOURCE_DIR/scripts/update-helper.sh" "$UPDATE_HELPER"
   if [[ -n "$ufw" ]]; then
