@@ -314,6 +314,11 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
   useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    document.documentElement.scrollTop = 0
+    document.body.scrollTop = 0
+  }, [page])
+  useEffect(() => {
     try { window.localStorage.setItem('arg.arg-sidebar-collapsed', String(sidebarCollapsed)) } catch { /* Storage can be disabled by browser policy. */ }
   }, [sidebarCollapsed])
   useEffect(() => {
@@ -454,7 +459,6 @@ export default function App() {
     setPage(next)
     window.location.hash = `/${next}`
     setMobileOpen(false)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
       <div className="app-shell min-h-screen lg:grid" inert={updating} aria-hidden={updating} style={{ gridTemplateColumns: `${sidebarCollapsed ? 56 : 224}px minmax(0, 1fr)` }}>

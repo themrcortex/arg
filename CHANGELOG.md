@@ -1,3 +1,8 @@
+## v0.11.0 — 2026-10-23
+
+### Changed
+- Reset the page scroll position whenever navigation changes the active page, including browser hash navigation.
+
 ## v0.10.0 — 2026-10-23
 
 ### Changed
