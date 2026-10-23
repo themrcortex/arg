@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.4.4 — 2026-10-23
+
+### Changed
+- Redesigned distribution information cards used for role counts, network traffic, and recent audit events with clearer hierarchy, spacing, and proportional bars.
+
 ## v0.4.3 — 2026-10-23
 
 ### Changed

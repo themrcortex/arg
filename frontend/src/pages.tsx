@@ -395,14 +395,20 @@ function DistributionBars({ title, description, items }: {
   items: { label: string; value: number; display?: string }[]
 }) {
   const max = Math.max(1, ...items.map((item) => item.value))
-  return <SectionCard title={title} description={description} right={<Activity size={18} className="text-primary" />}>
-    {items.length ? <div className="grid gap-4 sm:grid-cols-2">
-      {items.map((item, index) => <div key={`${item.label}-${index}`}>
-        <div className="mb-2 flex items-center justify-between gap-2 text-xs"><span className="truncate text-muted-foreground">{item.label}</span><span className="font-mono text-foreground">{item.display || formatNumber(item.value)}</span></div>
-        <div className="h-2 overflow-hidden rounded-full bg-white/5"><div className="h-full rounded-full" style={{ width: `${item.value ? Math.max(3, item.value / max * 100) : 0}%`, background: index % 2 ? '#53c992' : '#dda46f' }}/></div>
-      </div>)}
-    </div> : <p className="py-6 text-center text-sm text-muted-foreground">داده‌ای برای نمایش نمودار وجود ندارد.</p>}
-  </SectionCard>
+  return <Card className="overflow-hidden rounded-2xl border-border/80 bg-card/90 shadow-[0_16px_48px_-36px_rgba(0,0,0,.9)]">
+    <CardHeader className="flex-row items-start justify-between gap-6 space-y-0 px-6 pb-5 pt-6 sm:px-7">
+      <div className="min-w-0 text-right"><CardTitle className="text-[17px]">{title}</CardTitle><CardDescription className="mt-2 leading-6">{description}</CardDescription></div>
+      <span className="grid h-9 w-9 shrink-0 place-items-center text-primary/90"><Activity size={21} strokeWidth={1.7}/></span>
+    </CardHeader>
+    <CardContent className="px-6 pb-7 pt-0 sm:px-7">
+      {items.length ? <div className="grid gap-x-5 gap-y-5 sm:grid-cols-2">
+        {items.map((item, index) => <div key={`${item.label}-${index}`} className="min-w-0">
+          <div className="mb-2.5 flex items-center justify-between gap-3 text-xs"><span className="truncate text-muted-foreground">{item.label}</span><span className="font-mono font-medium tabular-nums text-foreground" dir="ltr">{item.display || formatNumber(item.value)}</span></div>
+          <div className="h-2 overflow-hidden rounded-full bg-secondary/80"><div className="h-full rounded-full transition-[width] duration-500" style={{ width: `${item.value > 0 ? Math.max(2, item.value / max * 100) : 0}%`, background: index % 3 === 1 ? '#53c992' : index % 3 === 2 ? '#67b4d8' : '#dda46f' }}/></div>
+        </div>)}
+      </div> : <p className="py-6 text-center text-sm text-muted-foreground">داده‌ای برای نمایش نمودار وجود ندارد.</p>}
+    </CardContent>
+  </Card>
 }
 
 function TrafficChart({ history }: { history: Sample[] }) {
