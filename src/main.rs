@@ -865,15 +865,14 @@ async fn history(
         }
         _ => return Err(error(StatusCode::BAD_REQUEST, "برای بازهٔ دلخواه، زمان شروع و پایان لازم است.")),
     };
-    let mut stmt = db.prepare("SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM metric_samples WHERE at>=?1 AND at<=?2 ORDER BY at").map_err(db_error)?;
-    let rows = stmt.query_map(params![from, to], |row| Ok(json!({
+    let mut stmt = db.prepare(
+        "SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM (SELECT at,cpu,memory,disk,rx_rate,tx_rate,ROW_NUMBER() OVER (ORDER BY at) AS sample_index FROM metric_samples WHERE at>=?1 AND at<=?2) WHERE (sample_index - 1) % ?3 = 0 ORDER BY at",
+    ).map_err(db_error)?;
+    let rows = stmt.query_map(params![from, to, step as i64], |row| Ok(json!({
         "at": row.get::<_, i64>(0)?, "cpu": row.get::<_, f64>(1)?, "memory": row.get::<_, f64>(2)?, "disk": row.get::<_, f64>(3)?,
         "rx": row.get::<_, f64>(4)?, "tx": row.get::<_, f64>(5)?
     }))).map_err(db_error)?;
-    let samples: Vec<Value> = rows
-        .enumerate()
-        .filter_map(|(index, row)| if index % step == 0 { row.ok() } else { None })
-        .collect();
+    let samples: Vec<Value> = rows.filter_map(Result::ok).collect();
     Ok(Json(
         json!({"samples": samples, "config": monitoring_config(&db)}),
     ))

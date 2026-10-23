@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.3 — 2026-10-23
+
+### Changed
+- Reduced CPU work for long history ranges by sampling rows in SQLite before converting them to JSON, and changed live dashboard polling from every 5 seconds to every 15 seconds.
+- Added an update completion fallback that clears browser Cache Storage and Service Worker registrations, then reloads the panel with a cache-busting URL.
+
 ## v0.4.2 — 2026-10-23
 
 ### Changed

@@ -119,7 +119,7 @@ function useDashboard(notify: (message: string) => void) {
   }, [notify, range, appliedCustom])
   useEffect(() => {
     void refresh()
-    const timer = window.setInterval(refresh, 5000)
+    const timer = window.setInterval(refresh, 15000)
     return () => window.clearInterval(timer)
   }, [refresh])
   const history = samples.map((sample) => ({ at: sample.at, time: new Date(sample.at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }), rx: sample.rx, tx: sample.tx }))

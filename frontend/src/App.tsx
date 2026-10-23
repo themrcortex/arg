@@ -42,6 +42,24 @@ const notifyUser = (message: string) => {
   if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد/.test(message)) toast.error(message)
   else toast.success(message)
 }
+async function forceFreshPanelReload() {
+  try {
+    if ('caches' in window) {
+      const cacheNames = await window.caches.keys()
+      await Promise.all(cacheNames.map((name) => window.caches.delete(name)))
+    }
+  } catch { /* Cache Storage may be unavailable; a cache-busting navigation still follows. */ }
+  try {
+    if ('serviceWorker' in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(registrations.map((registration) => registration.unregister()))
+    }
+  } catch { /* Service Workers may be unavailable in this browser context. */ }
+  try { window.sessionStorage.setItem('arg-update-finished', 'true') } catch { /* Keep the reload available when storage is blocked. */ }
+  const url = new URL(window.location.href)
+  url.searchParams.set('_arg_refresh', Date.now().toString())
+  window.location.replace(url.toString())
+}
 const developer = (
   <a
     className="font-semibold text-primary transition hover:text-white hover:underline"
@@ -224,7 +242,7 @@ function ChangelogView({ content }: { content: string }) {
   })}</div>
 }
 
-function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, canInstall, changelog, onCheck, onInstall }: {
+function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, canInstall, changelog, onCheck, onInstall, onForceRefresh }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   update: { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }
@@ -235,9 +253,10 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
   changelog: string
   onCheck: () => void
   onInstall: () => void
+  onForceRefresh: () => void
 }) {
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{finished ? 'به‌روزرسانی کامل شد' : 'به‌روزرسانی ARG'}</DialogTitle><DialogDescription>{finished ? 'نسخهٔ جدید نصب و سرویس دوباره راه‌اندازی شد. تغییرات این نسخه:' : 'نسخهٔ نصب‌شده را با آخرین نسخهٔ GitHub بررسی کن.'}</DialogDescription></DialogHeader>
-    {finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>به‌روزرسانی با موفقیت انجام شد.</div><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><Button className="w-full" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div> : <div className="space-y-4">
+    {finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>به‌روزرسانی با موفقیت انجام شد.</div><p className="text-xs leading-6 text-muted-foreground">اگر صفحه هنوز نسخهٔ قبلی را نشان می‌دهد، کش را پاک کن و رفرش کامل انجام بده.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><div className="grid gap-2 sm:grid-cols-2"><Button onClick={onForceRefresh}><RefreshCw size={15}/>پاک‌سازی کش و رفرش کامل</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">آخرین نسخه</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.remote || '—'}</div></div></div>
       {checking ? <div role="status" className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground"><RefreshCw size={16} className="animate-spin text-primary"/>در حال بررسی نسخهٔ GitHub…</div> : update.status === 'available' ? <div className="rounded-xl border border-amber-400/25 bg-amber-400/[.06] p-4 text-sm text-amber-100">نسخهٔ جدید {update.remote} آمادهٔ نصب است.</div> : update.status === 'current' ? <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[.06] p-4 text-sm text-emerald-200">پنل به‌روز است.</div> : <div className="rounded-xl border border-rose-400/20 bg-rose-400/[.06] p-4 text-sm text-rose-200">{update.error || 'بررسی نسخه انجام نشد. اتصال سرور و دسترسی helper را بررسی کن.'}</div>}
       <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>نصب نسخهٔ جدید</Button>}</div>
@@ -406,7 +425,7 @@ export default function App() {
           if (serviceRestartSeen || Date.now() - currentSince >= 45000) {
             try { window.sessionStorage.setItem('arg-update-finished', 'true') } catch { /* Session storage may be disabled. */ }
             setUpdating(false)
-            window.location.reload()
+            void forceFreshPanelReload()
             return
           }
         } else currentSince = null
@@ -525,7 +544,7 @@ export default function App() {
         </div>
         <Toaster />
         <UpdateOverlay active={updating}/>
-        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updating) setUpdateDialogOpen(open); if (!open) setUpdateFinished(false) }} update={update} checking={checkingUpdate} updating={updating} finished={updateFinished} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()}/>
+        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updating) setUpdateDialogOpen(open); if (!open) setUpdateFinished(false) }} update={update} checking={checkingUpdate} updating={updating} finished={updateFinished} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()} onForceRefresh={() => void forceFreshPanelReload()}/>
       </div>
   )
 }
