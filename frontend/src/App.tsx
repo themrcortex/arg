@@ -455,7 +455,7 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
-      <div className="app-shell min-h-screen lg:grid" inert={updating} aria-hidden={updating} style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 56 : 224}px` }}>
+      <div className="app-shell min-h-screen lg:grid" inert={updating} aria-hidden={updating} style={{ gridTemplateColumns: `${sidebarCollapsed ? 56 : 224}px minmax(0, 1fr)` }}>
         <aside id="arg-sidebar" role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(80vw,260px)] max-w-[100vw] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0', sidebarCollapsed ? 'arg-sidebar-collapsed lg:w-[56px]' : 'lg:w-[224px]', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
           <div className="arg-sidebar-pattern" aria-hidden="true" />
           <div className="arg-sidebar-corner" aria-hidden="true" />
