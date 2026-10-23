@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.17 — 2026-10-23
+
+### Fixed
+- Finalize the update flow from confirmed version and process changes even when the update marker lingers, then release the blocking overlay before a cache-busting full reload.
+- Keep the completion dialog visible with the changelog briefly before refresh; show a completion toast after reload instead of reopening the same modal.
+
 ## v0.4.16 — 2026-10-23
 
 ### Added

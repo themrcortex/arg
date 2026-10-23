@@ -434,10 +434,13 @@ export default function App() {
   const sharedUpdateStartVersion = useRef<string | null>(null)
   const localUpdateStarted = useRef(false)
   const updateStartInstance = useRef<string | null>(null)
+  const updateStartVersion = useRef<string | null>(null)
+  const reloadScheduled = useRef(false)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
   const [reloadQueued, setReloadQueued] = useState(false)
-  const [updateFinished, setUpdateFinished] = useState(() => {
+  const [updateFinished, setUpdateFinished] = useState(false)
+  const [updateReloadNotice] = useState(() => {
     try { const done = window.sessionStorage.getItem('arg-update-finished') === 'true'; window.sessionStorage.removeItem('arg-update-finished'); return done } catch { return false }
   })
   const refresh = useCallback(async () => {
@@ -457,6 +460,7 @@ export default function App() {
   useEffect(() => {
     void refresh()
   }, [refresh])
+  useEffect(() => { if (updateReloadNotice) notifyUser('به‌روزرسانی کامل شد و صفحه با نسخهٔ تازه بارگذاری شد.') }, [updateReloadNotice])
   useEffect(() => {
     const onHash = () => {
       setPage(pageFromHash(window.location.hash))
@@ -545,11 +549,7 @@ export default function App() {
               const restarted = progress.instance !== previousInstance
               const versionChanged = Boolean(previousVersion && latest.local && latest.local !== previousVersion)
               if (latest.status === 'current' && (restarted || versionChanged || !previousVersion)) {
-                setUpdateFailure(null)
-                setUpdateFinished(true)
-                setReloadQueued(true)
-                setUpdateDialogOpen(true)
-                window.setTimeout(() => void forceFreshPanelReload(), 2200)
+                finishUpdateAndRefresh()
               } else if (restarted) {
                 setUpdateFinished(false)
                 setUpdateFailure(latest.status === 'available' ? 'نسخهٔ جدید نصب یا فعال نشد. گزارش فرایند را برای جزئیات بررسی کن.' : latest.error || 'سرویس دوباره راه‌اندازی شد اما نسخهٔ جدید تأیید نشد.')
@@ -573,7 +573,7 @@ export default function App() {
   useEffect(() => {
     if (update.status === 'available' && !updating && !sharedUpdate.updating) notifyUser(`نسخهٔ جدید پنل ARG (${update.remote}) آماده است.`)
   }, [update.status, update.remote, updating, sharedUpdate.updating])
-  useEffect(() => { if (updateFinished) { setUpdateDialogOpen(true); notifyUser('به‌روزرسانی کامل شد.') } }, [updateFinished])
+  useEffect(() => { if (updateFinished) notifyUser('به‌روزرسانی کامل شد؛ صفحه تا چند لحظهٔ دیگر تازه می‌شود.') }, [updateFinished])
   async function openUpdateDialog() {
     setUpdateFailure(null)
     setUpdateDialogOpen(true)
@@ -581,16 +581,33 @@ export default function App() {
     await checkUpdate()
     setCheckingUpdate(false)
   }
+  function finishUpdateAndRefresh() {
+    if (reloadScheduled.current) return
+    reloadScheduled.current = true
+    setUpdating(false)
+    setUpdateStartedAt(null)
+    setUpdateFailure(null)
+    setUpdateFinished(true)
+    setReloadQueued(true)
+    setUpdateDialogOpen(true)
+    window.setTimeout(() => void forceFreshPanelReload(), 3000)
+  }
   async function runUpdate() {
     if (user?.role !== 'admin' || updating) return
     setUpdateFailure(null)
+    setUpdateFinished(false)
+    setReloadQueued(false)
+    reloadScheduled.current = false
     let baselineInstance = update.instance || null
+    let baselineVersion = update.local || null
     try {
       const fresh = await api<typeof update>('update')
       setUpdate(fresh)
       baselineInstance = fresh.instance || baselineInstance
+      baselineVersion = fresh.local || baselineVersion
     } catch { /* The update endpoint may still schedule the helper if status checking is temporarily unavailable. */ }
     updateStartInstance.current = baselineInstance
+    updateStartVersion.current = baselineVersion
     localUpdateStarted.current = true
     setUpdateStage(1)
     setUpdateStartedAt(Date.now())
@@ -628,17 +645,15 @@ export default function App() {
         if (updateStartInstance.current && progress.instance && progress.instance !== updateStartInstance.current) {
           setUpdateStage(3)
         }
-        if (!progress.updating && result.status === 'current') {
+        const processRestarted = Boolean(updateStartInstance.current && progress.instance && progress.instance !== updateStartInstance.current)
+        const versionChanged = Boolean(updateStartVersion.current && result.local && result.local !== updateStartVersion.current)
+        const updateConfirmed = !progress.updating || (processRestarted && versionChanged)
+        if (result.status === 'current' && updateConfirmed) {
           setUpdateStage(3)
           currentSince ??= Date.now()
           if (Date.now() - currentSince >= 5000) {
             try { window.sessionStorage.setItem('arg-update-finished', 'true') } catch { /* Session storage may be disabled. */ }
-            setUpdating(false)
-            setUpdateStartedAt(null)
-            setUpdateFinished(true)
-            setReloadQueued(true)
-            setUpdateDialogOpen(true)
-            window.setTimeout(() => void forceFreshPanelReload(), 2200)
+            finishUpdateAndRefresh()
             return
           }
         } else currentSince = null
@@ -702,7 +717,7 @@ export default function App() {
   if (!installed || !user) return <Auth installer={!installed} onSuccess={refresh} />
   const allowedPages = navigation.filter((item) => !item.admin || user.role === 'admin')
   const currentPage = allowedPages.some((item) => item.id === page) ? page : 'dashboard'
-  const updateLocked = updating || sharedUpdate.updating
+  const updateLocked = updating || (!reloadScheduled.current && sharedUpdate.updating)
   const activeUpdateStage = updating ? updateStage : sharedUpdateStage
   const activeUpdateStartedAt = updating ? updateStartedAt : sharedUpdate.started_at ? sharedUpdate.started_at * 1000 : null
   function selectPage(next: PageId) {
