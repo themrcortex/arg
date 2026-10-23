@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.7.0 — 2026-10-23
+
+### Added
+- Added site-specific tools for viewing detected Nginx settings, downloading config, and duplicating a site as a disabled draft.
+- Added per-site access and error log viewing, restricted to files under `/var/log/nginx`.
+
 ## v0.6.0 — 2026-10-23
 
 ### Added

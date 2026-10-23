@@ -1553,6 +1553,10 @@ struct NginxSiteMetadataInput {
     description: String,
 }
 #[derive(Deserialize)]
+struct NginxSiteLogInput {
+    kind: String,
+}
+#[derive(Deserialize)]
 struct NginxBrowseQuery {
     path: Option<String>,
 }
@@ -1708,6 +1712,26 @@ async fn update_nginx_site_metadata(
     db.execute("INSERT INTO nginx_site_metadata(name,description) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET description=excluded.description", params![name, input.description.trim()]).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.metadata", &format!("site={name}"));
     Ok(Json(json!({"name":name,"description":input.description.trim(),"message":"توضیحات سایت ذخیره شد."})))
+}
+
+async fn api_nginx_site_logs(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxSiteLogInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) || !["access", "error"].contains(&input.kind.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "نوع لاگ یا نام سایت معتبر نیست."));
+    }
+    let result = nginx_manager_request(json!({"action":"nginx-site-logs", "name":name, "kind":input.kind}))?;
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "nginx.site.logs", &format!("site={name} kind={}", input.kind));
+    Ok(Json(result))
 }
 
 async fn get_nginx_site(
@@ -2208,6 +2232,33 @@ fn nginx_rename_site(name: &str, new_name: &str) -> Result<Value, String> {
     Ok(json!({"name":new_name,"enabled":was_enabled,"message":"نام فایل سایت تغییر کرد."}))
 }
 
+fn nginx_site_logs(name: &str, kind: &str) -> Result<Value, String> {
+    if !valid_nginx_site_name(name) || !["access", "error"].contains(&kind) {
+        return Err("نام سایت یا نوع لاگ معتبر نیست.".into());
+    }
+    let (available, _) = nginx_site_paths(name)?;
+    let config = fs::read_to_string(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    let directive = if kind == "access" { "access_log" } else { "error_log" };
+    let configured = config.lines().filter_map(|line| {
+        let mut parts = line.trim().trim_end_matches(';').split_whitespace();
+        (parts.next()? == directive).then(|| parts.next().unwrap_or("").trim_matches('"').to_owned())
+    }).find(|value| !value.is_empty());
+    let path = configured.unwrap_or_else(|| format!("/var/log/nginx/{}.log", if kind == "access" { "access" } else { "error" }));
+    if path == "off" { return Ok(json!({"name":name,"kind":kind,"path":"off","logs":"این سایت ثبت لاگ را غیرفعال کرده است."})); }
+    if !path.starts_with('/') || path.contains('$') { return Err("مسیر لاگ متغیر یا نسبی است و از پنل قابل خواندن نیست.".into()); }
+    let allowed_root = fs::canonicalize("/var/log/nginx").map_err(|_| "پوشهٔ لاگ استاندارد Nginx پیدا نشد.")?;
+    let requested = std::path::PathBuf::from(&path);
+    let canonical = fs::canonicalize(&requested).map_err(|_| format!("فایل لاگ پیدا نشد: {path}"))?;
+    if !canonical.starts_with(&allowed_root) || !canonical.is_file() {
+        return Err("برای محافظت از فایل‌های سیستم، فقط فایل‌های داخل /var/log/nginx قابل مشاهده‌اند.".into());
+    }
+    let output = std::process::Command::new("tail").args(["-n", "100", "--", canonical.to_string_lossy().as_ref()]).output().map_err(|error| error.to_string())?;
+    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()); }
+    let start = output.stdout.len().saturating_sub(512 * 1024);
+    let logs = String::from_utf8_lossy(&output.stdout[start..]).into_owned();
+    Ok(json!({"name":name,"kind":kind,"path":path,"logs":logs}))
+}
+
 fn nginx_browse_files(path: Option<&str>) -> Result<Value, String> {
     const ROOTS: &[&str] = &["/etc/letsencrypt", "/etc/ssl", "/etc/nginx", "/var/www"];
     let roots: Vec<String> = ROOTS.iter().filter(|root| std::path::Path::new(root).is_dir()).map(|root| (*root).to_owned()).collect();
@@ -2244,6 +2295,7 @@ fn execute_nginx_request(action: &str, request: &Value) -> Value {
         "nginx-create" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(|name| request["content"].as_str().ok_or_else(|| "محتوای سایت ارسال نشده است.".to_owned()).and_then(|content| nginx_create_site(name, content))),
         "nginx-delete" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(nginx_delete_site).map(|_| json!({"message":"فایل سایت حذف شد."})),
         "nginx-rename" => request["name"].as_str().ok_or_else(|| "نام فعلی ارسال نشده است.".to_owned()).and_then(|name| request["new_name"].as_str().ok_or_else(|| "نام جدید ارسال نشده است.".to_owned()).and_then(|new_name| nginx_rename_site(name, new_name))),
+        "nginx-site-logs" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(|name| request["kind"].as_str().ok_or_else(|| "نوع لاگ ارسال نشده است.".to_owned()).and_then(|kind| nginx_site_logs(name, kind))),
         "nginx-browse" => nginx_browse_files(request["path"].as_str()),
         "nginx-list" => nginx_list_sites().map(|sites| json!({"sites":sites})),
         "nginx-get" => request["name"]
@@ -2306,6 +2358,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-create") => "nginx-create",
         Some("nginx-delete") => "nginx-delete",
         Some("nginx-rename") => "nginx-rename",
+        Some("nginx-site-logs") => "nginx-site-logs",
         Some("nginx-browse") => "nginx-browse",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
@@ -2469,6 +2522,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/nginx/sites", get(nginx_sites).post(create_nginx_site))
         .route("/api/nginx/sites/{name}/rename", post(rename_nginx_site))
         .route("/api/nginx/sites/{name}/metadata", put(update_nginx_site_metadata))
+        .route("/api/nginx/sites/{name}/logs", post(api_nginx_site_logs))
         .route("/api/nginx/status", get(nginx_status))
         .route("/api/nginx/files", get(api_nginx_browse_files))
         .route("/api/nginx/action", post(nginx_action))
