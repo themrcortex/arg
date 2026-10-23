@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
   ArrowDownLeft,
@@ -384,8 +384,24 @@ function ResourceChart({ samples }: { samples: ResourceSample[] }) {
 type ChartSeries = { key: string; label: string; color: string }
 function TimeSeriesChart({ samples, series, max, unit }: { samples: (ResourceSample | Sample)[]; series: ChartSeries[]; max: number; unit: string }) {
   const [hover, setHover] = useState<number | null>(null)
+  const chartHost = useRef<HTMLDivElement>(null)
+  const [chartSize, setChartSize] = useState({ width: 760, height: 222 })
+  const hasSamples = samples.length > 0
+  useEffect(() => {
+    if (!hasSamples) return
+    const element = chartHost.current
+    if (!element) return
+    const observer = new ResizeObserver(([entry]) => {
+      const width = Math.max(240, Math.round(entry.contentRect.width))
+      const height = Math.max(160, Math.round(entry.contentRect.height))
+      setChartSize((current) => current.width === width && current.height === height ? current : { width, height })
+    })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [hasSamples])
   if (!samples.length) return <div className="flex h-[195px] flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-border bg-background p-6 text-center text-sm text-muted-foreground"><img src="/arg/illustrations/arg-empty-state.svg" alt="" aria-hidden="true" className="h-12 w-12 opacity-50"/>داده‌ای در این بازه ثبت نشده است.</div>
-  const width = 760, left = 50, right = 15, top = 20, bottom = 235
+  const { width, height } = chartSize
+  const left = Math.min(58, width * .16), right = 14, top = 18, bottom = height - 30
   const x = (index: number) => left + index * (width - left - right) / Math.max(samples.length - 1, 1)
   const y = (value: number) => bottom - Math.min(Math.max(value / max, 0), 1) * (bottom - top)
   const selected = hover === null ? samples.length - 1 : Math.max(0, Math.min(hover, samples.length - 1))
@@ -395,13 +411,13 @@ function TimeSeriesChart({ samples, series, max, unit }: { samples: (ResourceSam
   const stamp = (at: number) => new Date(at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
   return <div className="overflow-hidden rounded-xl border border-border bg-background">
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">{series.map((item) => <div key={item.key} className="flex items-center gap-2 rounded-lg bg-secondary/40 px-2 py-1 text-xs"><span className="h-1.5 w-1.5 rounded-full" style={{ background: item.color }}/><span className="text-muted-foreground">{item.label}</span><b className="font-mono font-semibold text-foreground tabular-nums" dir="ltr">{display(read(current, item.key))}</b></div>)}<span className="mr-auto font-mono text-xs text-muted-foreground" dir="ltr">{stamp(current.at)}</span></div>
-    <div className="h-[190px] px-2 pt-2 md:px-3" dir="ltr"><svg viewBox="0 0 760 276" width="100%" height="100%" preserveAspectRatio="none" onMouseLeave={() => setHover(null)} onMouseMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setHover(Math.round(((event.clientX - rect.left) / rect.width * width - left) / (width - left - right) * (samples.length - 1))) }} role="img" aria-label={`تاریخچهٔ ${series.map((item) => item.label).join('، ')}`}>
+    <div ref={chartHost} className="h-[230px] px-2 pt-2 md:px-3" dir="ltr"><svg viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" onMouseLeave={() => setHover(null)} onMouseMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setHover(Math.round(((event.clientX - rect.left) / rect.width * width - left) / (width - left - right) * (samples.length - 1))) }} role="img" aria-label={`تاریخچهٔ ${series.map((item) => item.label).join('، ')}`}>
       <defs><linearGradient id={`overview-fill-${series[0].key}`} x1="0" y1="0" x2="0" y2="1"><stop stopColor={series[0].color} stopOpacity=".24"/><stop offset="1" stopColor={series[0].color} stopOpacity="0"/></linearGradient></defs>
       {[0, .25, .5, .75, 1].map((fraction) => { const py = y(fraction * max); return <g key={fraction}><line x1={left} x2={width-right} y1={py} y2={py} stroke="#2a3540" strokeOpacity=".65" strokeDasharray="2 7"/><text x={left-11} y={py+4} fill="#93a0aa" fontSize="10" textAnchor="end">{unit === '%' ? `${Math.round(fraction * max)}%` : formatBytes(fraction * max)}</text></g> })}
       {series.map((item, lineIndex) => { const points = samples.map((sample, index) => `${x(index)},${y(read(sample, item.key))}`).join(' '); return <g key={item.key}>{lineIndex === 0 && <polygon points={`${left},${bottom} ${points} ${x(samples.length - 1)},${bottom}`} fill={`url(#overview-fill-${item.key})`}/>}<polyline points={points} fill="none" stroke={item.color} strokeOpacity={lineIndex === 0 ? 1 : .86} strokeWidth={lineIndex === 0 ? 3 : 2.4} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke"/></g> })}
       <line x1={x(selected)} x2={x(selected)} y1={top} y2={bottom} stroke="#dda46f" strokeOpacity=".42" strokeDasharray="3 6"/>
       {series.map((item) => <circle key={item.key} cx={x(selected)} cy={y(read(current, item.key))} r="4.8" fill={item.color} stroke="#0c1219" strokeWidth="2"/>)}
-      <text x={left} y="266" fill="#93a0aa" fontSize="11">{stamp(samples[0].at)}</text><text x={width-right} y="266" textAnchor="end" fill="#93a0aa" fontSize="11">{stamp(samples[samples.length - 1].at)}</text>
+      <text x={left} y={height - 4} fill="#93a0aa" fontSize="11">{stamp(samples[0].at)}</text><text x={width-right} y={height - 4} textAnchor="end" fill="#93a0aa" fontSize="11">{stamp(samples[samples.length - 1].at)}</text>
     </svg></div>
   </div>
 }

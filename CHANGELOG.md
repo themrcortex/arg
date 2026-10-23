@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.4.6 — 2026-10-23
+
+### Changed
+- Made chart SVG coordinates follow the rendered container size, preserving chart proportions across narrow and wide layouts instead of stretching to a fixed view box.
+
 ## v0.4.5 — 2026-10-23
 
 ### Changed
