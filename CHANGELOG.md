@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.4.8 — 2026-10-23
+
+### Changed
+- Fixed stale panel bundles after updates by content-hashing frontend assets and disabling browser and proxy caching for embedded panel files.
+
 ## v0.4.7 — 2026-10-23
 
 ### Changed

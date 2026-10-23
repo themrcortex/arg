@@ -4,7 +4,7 @@ use argon2::{
 };
 use axum::{
     extract::{ws::{Message, WebSocket, WebSocketUpgrade}, ConnectInfo, Path, Query, State},
-    http::{header, HeaderMap, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
@@ -2019,23 +2019,28 @@ async fn static_file(uri: Uri) -> Response {
     match Frontend::get(file) {
         Some(asset) => {
             let mime = mime_guess::from_path(file).first_or_octet_stream();
-            (
-                [(header::CONTENT_TYPE, mime.as_ref().to_owned())],
-                asset.data,
-            )
-                .into_response()
+            (frontend_headers(mime.as_ref()), asset.data).into_response()
         }
         None if !path.starts_with("api/") && !path.contains('.') => static_file_index(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
+fn frontend_headers(content_type: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+    );
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
+    headers
+}
 fn static_file_index() -> Response {
     match Frontend::get("index.html") {
-        Some(asset) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            asset.data,
-        )
-            .into_response(),
+        Some(asset) => (frontend_headers("text/html; charset=utf-8"), asset.data).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
