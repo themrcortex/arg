@@ -205,6 +205,8 @@
 .arg-range [aria-pressed="true"] { color: var(--arg-accent); background: rgba(221,164,111,.13); }
 .arg-range [aria-pressed="false"] { color: var(--arg-muted); }
 .arg-range [aria-pressed="false"]:hover { color: #f2f0eb; }
+.arg-update-progress { animation: arg-update-sweep 1.4s ease-in-out infinite; }
+@keyframes arg-update-sweep { from { transform: translateX(320%); } to { transform: translateX(-120%); } }
 .arg-kpi-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
 .arg-chart-grid, .arg-operation-grid { grid-template-columns: minmax(0, 1fr); }
 @media (min-width: 480px) { .arg-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNod
 import {
   Activity,
   ArrowLeft,
+  CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -11,6 +12,7 @@ import {
   LifeBuoy,
   LogOut,
   Menu,
+  RefreshCw,
   Settings,
   X,
 } from 'lucide-react'
@@ -22,6 +24,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Alert, AlertDescription } from './components/ui/alert'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
 import { Avatar, AvatarFallback } from './components/ui/avatar'
 import {
   DropdownMenu,
@@ -31,6 +34,7 @@ import {
 } from './components/ui/dropdown-menu'
 import { AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { navigation, pageFromHash, type PageId } from './navigation'
+import changelog from '../../CHANGELOG.md?raw'
 const developer = (
   <a
     className="font-semibold text-primary transition hover:text-white hover:underline"
@@ -202,6 +206,45 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
   )
 }
 
+function ChangelogView({ content }: { content: string }) {
+  const lines = content.trim().split('\n').filter(Boolean)
+  return <div className="space-y-2 text-sm leading-7 text-muted-foreground">{lines.map((line, index) => {
+    if (line.startsWith('# ')) return <h3 key={index} className="text-base font-bold text-foreground">{line.slice(2)}</h3>
+    if (line.startsWith('## ')) return <h4 key={index} className="pt-2 font-semibold text-primary">{line.slice(3)}</h4>
+    if (line.startsWith('### ')) return <h5 key={index} className="pt-1 font-semibold text-foreground">{line.slice(4)}</h5>
+    if (line.startsWith('- ')) return <div key={index} className="flex gap-2"><span className="mt-3 h-1.5 w-1.5 shrink-0 rounded-full bg-primary"/><span>{line.slice(2)}</span></div>
+    return <p key={index}>{line}</p>
+  })}</div>
+}
+
+function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, canInstall, changelog, onCheck, onInstall }: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  update: { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }
+  checking: boolean
+  updating: boolean
+  finished: boolean
+  canInstall: boolean
+  changelog: string
+  onCheck: () => void
+  onInstall: () => void
+}) {
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{finished ? 'به‌روزرسانی کامل شد' : 'به‌روزرسانی ARG'}</DialogTitle><DialogDescription>{finished ? 'نسخهٔ جدید نصب و سرویس دوباره راه‌اندازی شد. تغییرات این نسخه:' : 'نسخهٔ نصب‌شده را با آخرین نسخهٔ GitHub بررسی کن.'}</DialogDescription></DialogHeader>
+    {finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>به‌روزرسانی با موفقیت انجام شد.</div><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><Button className="w-full" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div> : <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">آخرین نسخه</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.remote || '—'}</div></div></div>
+      {checking ? <div role="status" className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground"><RefreshCw size={16} className="animate-spin text-primary"/>در حال بررسی نسخهٔ GitHub…</div> : update.status === 'available' ? <div className="rounded-xl border border-amber-400/25 bg-amber-400/[.06] p-4 text-sm text-amber-100">نسخهٔ جدید {update.remote} آمادهٔ نصب است.</div> : update.status === 'current' ? <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[.06] p-4 text-sm text-emerald-200">پنل به‌روز است.</div> : <div className="rounded-xl border border-rose-400/20 bg-rose-400/[.06] p-4 text-sm text-rose-200">{update.error || 'بررسی نسخه انجام نشد. اتصال سرور و دسترسی helper را بررسی کن.'}</div>}
+      <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>نصب نسخهٔ جدید</Button>}</div>
+    </div>}
+  </DialogContent></Dialog>
+}
+
+function UpdateOverlay({ active }: { active: boolean }) {
+  if (!active) return null
+  return <div className="fixed inset-0 z-[100] grid place-items-center bg-[#080d12]/95 p-5 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-labelledby="update-overlay-title" aria-describedby="update-overlay-description" onKeyDown={(event) => event.preventDefault()}>
+    <div className="w-full max-w-md rounded-2xl border border-border bg-card p-7 text-center shadow-2xl"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary"><RefreshCw size={25} className="animate-spin"/></div><h2 id="update-overlay-title" className="mt-5 text-xl font-bold text-foreground">در حال به‌روزرسانی ARG</h2><p id="update-overlay-description" className="mt-2 text-sm leading-7 text-muted-foreground">درخواست نصب ثبت شد. سرویس در حال دریافت و نصب نسخهٔ جدید است و پس از راه‌اندازی، پنل خودکار تازه می‌شود.</p><div className="mt-6 h-2 overflow-hidden rounded-full bg-secondary"><div className="arg-update-progress h-full w-1/3 rounded-full bg-primary"/></div><p className="mt-3 text-xs text-muted-foreground" role="status" aria-live="polite">لطفاً تا پایان فرایند این صفحه را نبند.</p></div>
+  </div>
+}
+
 function PageHeading({
   title,
   description,
@@ -238,6 +281,11 @@ export default function App() {
   const [loadError, setLoadError] = useState('')
   const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }>({ status: 'unavailable' })
   const [updating, setUpdating] = useState(false)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
+  const [updateFinished, setUpdateFinished] = useState(() => {
+    try { const done = window.sessionStorage.getItem('arg-update-finished') === 'true'; window.sessionStorage.removeItem('arg-update-finished'); return done } catch { return false }
+  })
   const refresh = useCallback(async () => {
     setBoot(true)
     setLoadError('')
@@ -314,12 +362,19 @@ export default function App() {
   useEffect(() => {
     if (update.status === 'available' && !updating) setNotice(`نسخهٔ جدید پنل ARG (${update.remote}) آماده است.`)
   }, [update.status, update.remote, updating])
+  useEffect(() => { if (updateFinished) { setUpdateDialogOpen(true); setNotice('به‌روزرسانی کامل شد.') } }, [updateFinished])
+  async function openUpdateDialog() {
+    setUpdateDialogOpen(true)
+    setCheckingUpdate(true)
+    await checkUpdate()
+    setCheckingUpdate(false)
+  }
   async function runUpdate() {
     if (user?.role !== 'admin' || updating) return
     setUpdating(true)
     try {
       await api('update', { method: 'POST' })
-      setNotice('آپدیت شروع شد. وضعیت آن را از بخش درباره و به‌روزرسانی دنبال کن.')
+      setUpdateDialogOpen(false)
     } catch (e) {
       setUpdating(false)
       setNotice(e instanceof Error ? e.message : 'شروع آپدیت ناموفق بود')
@@ -342,9 +397,9 @@ export default function App() {
         if (result.status === 'current') {
           currentSince ??= Date.now()
           if (serviceRestartSeen || Date.now() - currentSince >= 45000) {
-            setNotice('به‌روزرسانی کامل شد؛ پنل در حال تازه‌سازی است.')
+            try { window.sessionStorage.setItem('arg-update-finished', 'true') } catch { /* Session storage may be disabled. */ }
             setUpdating(false)
-            window.setTimeout(() => window.location.reload(), 1200)
+            window.location.reload()
             return
           }
         } else currentSince = null
@@ -400,7 +455,7 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
-      <div className="app-shell min-h-screen lg:grid" style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 76 : 272}px` }}>
+      <div className="app-shell min-h-screen lg:grid" inert={updating} aria-hidden={updating} style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 76 : 272}px` }}>
         <aside id="arg-sidebar" role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(84vw,292px)] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:w-auto lg:translate-x-0', sidebarCollapsed && 'arg-sidebar-collapsed', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
           <div className="arg-sidebar-pattern" aria-hidden="true" />
           <div className="arg-sidebar-corner" aria-hidden="true" />
@@ -437,7 +492,7 @@ export default function App() {
         <div className="min-w-0">
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
             <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-xs font-bold text-primary sm:inline" dir="ltr">ARG <span className="text-muted-foreground">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
-            <div className="flex items-center gap-1.5"><a href="https://github.com/themrcortex/donatello" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+            <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} aria-label="بررسی و به‌روزرسانی پنل" title="بررسی و به‌روزرسانی پنل" className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/donatello" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}
@@ -452,7 +507,7 @@ export default function App() {
             {currentPage === 'audit' && user.role === 'admin' && (
               <AuditPage Heading={PageHeading} notify={setNotice} />
             )}
-            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} user={user} update={update} checkUpdate={checkUpdate} runUpdate={runUpdate} updating={updating} />}
+            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updating} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
@@ -467,6 +522,8 @@ export default function App() {
             {notice}
           </div>
         )}
+        <UpdateOverlay active={updating}/>
+        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updating) setUpdateDialogOpen(open); if (!open) setUpdateFinished(false) }} update={update} checking={checkingUpdate} updating={updating} finished={updateFinished} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()}/>
       </div>
   )
 }
