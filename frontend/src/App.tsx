@@ -455,13 +455,13 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
   return (
-      <div className="app-shell min-h-screen lg:grid" inert={updating} aria-hidden={updating} style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 76 : 272}px` }}>
-        <aside id="arg-sidebar" role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(84vw,292px)] max-w-[100vw] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0', sidebarCollapsed ? 'arg-sidebar-collapsed lg:w-[76px]' : 'lg:w-[272px]', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
+      <div className="app-shell min-h-screen lg:grid" inert={updating} aria-hidden={updating} style={{ gridTemplateColumns: `minmax(0, 1fr) ${sidebarCollapsed ? 56 : 224}px` }}>
+        <aside id="arg-sidebar" role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(80vw,260px)] max-w-[100vw] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0', sidebarCollapsed ? 'arg-sidebar-collapsed lg:w-[56px]' : 'lg:w-[224px]', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
           <div className="arg-sidebar-pattern" aria-hidden="true" />
           <div className="arg-sidebar-corner" aria-hidden="true" />
           <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-2 px-2">
-            <div className="arg-brand-lockup flex min-w-0 items-center gap-3" aria-label="ARG ارگ VPS Control Center">
-              <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-12 w-12 shrink-0" />
+            <div className="arg-brand-lockup flex min-w-0 items-center gap-2" aria-label="ARG ارگ VPS Control Center">
+              <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-10 w-10 shrink-0" />
               <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-persian-name">ارگ</div><div className="arg-product-label" dir="ltr">VPS CONTROL CENTER</div></div>
             </div>
             <Button variant="ghost" size="icon" className="arg-collapse hidden shrink-0 lg:inline-flex" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{sidebarCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
