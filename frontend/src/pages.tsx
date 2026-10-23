@@ -222,6 +222,22 @@ function LoadingCards() {
   )
 }
 
+function FirewallPageSkeleton() {
+  return <div className="space-y-5" role="status" aria-label="در حال بارگذاری صفحهٔ فایروال">
+    <div className="grid gap-3 sm:grid-cols-3">{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-[124px] rounded-[14px]"/>)}</div>
+    <div className="rounded-[14px] border border-border bg-card p-5"><Skeleton className="mb-5 h-5 w-40"/><Skeleton className="mb-5 h-10 w-full"/><Skeleton className="h-48 w-full"/></div>
+    <div className="rounded-[14px] border border-border bg-card p-5"><Skeleton className="mb-4 h-5 w-48"/><Skeleton className="h-48 w-full"/></div>
+  </div>
+}
+
+function NginxPageSkeleton() {
+  return <div className="space-y-5" role="status" aria-label="در حال بارگذاری صفحهٔ Nginx">
+    <div className="rounded-[14px] border border-border bg-card p-5"><Skeleton className="mb-5 h-5 w-36"/><div className="grid gap-3 sm:grid-cols-3">{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-20"/>)}</div><Skeleton className="mt-4 h-10 w-full"/><Skeleton className="mt-4 h-20 w-full"/></div>
+    <div className="grid gap-3 sm:grid-cols-3">{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-[112px] rounded-[14px]"/>)}</div>
+    <div className="rounded-[14px] border border-border bg-card p-5"><Skeleton className="mb-5 h-5 w-44"/><Skeleton className="mb-5 h-10 w-full"/>{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="mb-3 h-28 w-full last:mb-0"/>)}</div>
+  </div>
+}
+
 function AlertControls({ user, notify }: { user: User; notify: (message: string) => void }) {
   const [limits, setLimits] = useState({ cpu: 85, memory: 85, disk: 85 })
   const [busy, setBusy] = useState(false)
@@ -546,6 +562,7 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
   const [data, setData] = useState<Firewall | null>(null)
   const [rules, setRules] = useState<ManagedFirewallRule[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState(false)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<number | null>(null)
@@ -553,8 +570,13 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all')
   const refresh = useCallback(async () => {
-    try { const [firewall, managed] = await Promise.all([api<Firewall>('firewall'), api<{ rules: ManagedFirewallRule[] }>('firewall/rules')]); setData(firewall); setRules(managed.rules) }
-    catch (error) { notify(error instanceof Error ? error.message : 'دریافت قوانین ناموفق بود') }
+    try {
+      const [firewall, managed] = await Promise.allSettled([api<Firewall>('firewall'), api<{ rules: ManagedFirewallRule[] }>('firewall/rules')])
+      if (firewall.status === 'fulfilled') { setData(firewall.value); setLoadError('') }
+      else { setLoadError(firewall.reason instanceof Error ? firewall.reason.message : 'وضعیت UFW دریافت نشد.') }
+      if (managed.status === 'fulfilled') setRules(managed.value.rules)
+      else notify(managed.reason instanceof Error ? managed.reason.message : 'دریافت قوانین ناموفق بود')
+    }
     finally { setLoading(false) }
   }, [notify])
   useEffect(() => { void refresh() }, [refresh])
@@ -611,6 +633,8 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
     catch (error) { notify(error instanceof Error ? error.message : 'حذف قانون ناموفق بود') }
     finally { setBusy(false) }
   }
+  if (loading) return <><Heading title="فایروال UFW" description="قوانین پنل را بساز، ویرایش کن یا موقتاً غیرفعال کن."/><FirewallPageSkeleton/></>
+  if (loadError && !data) return <><Heading title="فایروال UFW" description="وضعیت فایروال از سرور دریافت نشد." action={<RefreshButton onRefresh={refresh}/>}/><Alert className="border-amber-400/25 bg-amber-400/[.06]"><AlertTitle>دریافت وضعیت UFW ناموفق بود</AlertTitle><AlertDescription>{loadError}</AlertDescription></Alert></>
   return <>
     <Heading title="فایروال UFW" description="قوانین پنل را بساز، ویرایش کن یا موقتاً غیرفعال کن." action={<div className="flex flex-wrap gap-2"><RefreshButton onRefresh={refresh}/>{user.role === 'admin' && <Button size="sm" onClick={() => openEditor()}><Plus size={15}/> قانون جدید</Button>}</div>}/>
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">وضعیت UFW</div><div className="mt-3 flex items-center gap-2 text-xl font-bold text-white"><span className={`h-2 w-2 rounded-full ${active ? 'bg-emerald-400' : 'bg-amber-400'}`}/>{loading ? 'در حال بررسی' : data?.available ? active ? 'فعال' : 'غیرفعال' : 'نصب نشده'}</div>{user.role === 'admin' && data?.available && <div className="mt-4 flex items-center gap-2 border-t border-white/10 pt-3 text-xs text-muted-foreground"><Switch checked={!!active} disabled={busy} onCheckedChange={() => void toggleFirewall()} aria-label="تغییر وضعیت UFW"/> تغییر وضعیت کلی UFW</div>}{user.role === 'admin' && !data?.available && <div className="mt-4 border-t border-white/10 pt-3"><Button size="sm" disabled={busy} onClick={() => void installFirewall()}>{busy ? 'در حال نصب…' : 'نصب UFW'}</Button><p className="mt-2 text-[11px] leading-5 text-amber-200/80">{data?.error || 'UFW روی این سرور نصب نشده است.'}</p></div>}</div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین فعال پنل</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => rule.enabled).length)}</div></div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین غیرفعال</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => !rule.enabled).length)}</div></div></div>
@@ -640,6 +664,7 @@ export function NginxPage({ Heading, notify }: Common) {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState('')
+  const [statusError, setStatusError] = useState('')
   const [editing, setEditing] = useState<string | null>(null)
   const [content, setContent] = useState('')
   const [editorOpen, setEditorOpen] = useState(false)
@@ -682,7 +707,8 @@ export function NginxPage({ Heading, notify }: Common) {
       api<NginxStatus>('nginx/status'),
       api<{ sites: NginxSite[] }>('nginx/sites'),
     ])
-    if (serviceResult.status === 'fulfilled') setStatus(serviceResult.value)
+    if (serviceResult.status === 'fulfilled') { setStatus(serviceResult.value); setStatusError('') }
+    else setStatusError(serviceResult.reason instanceof Error ? serviceResult.reason.message : 'وضعیت سرویس Nginx دریافت نشد.')
     if (sitesResult.status === 'fulfilled') {
       setSites(sitesResult.value.sites)
       const drift = sitesResult.value.sites.find((site) => site.sync_mismatch)
@@ -958,14 +984,15 @@ export function NginxPage({ Heading, notify }: Common) {
   }
 
   const enabledCount = sites.filter((site) => site.enabled).length
+  if (loading) return <><Heading title="مدیریت کامل Nginx" description="وضعیت سرویس و سایت‌های Nginx در حال بارگذاری است."/><NginxPageSkeleton/></>
   return <>
     <Heading title="مدیریت کامل Nginx" description="نصب و کنترل سرویس، اعتبارسنجی پیکربندی، لاگ‌ها و مدیریت سایت‌ها را از همین صفحه انجام بده." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy || loading} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/> تازه‌سازی</Button>{status?.installed && <Button size="sm" disabled={busy} onClick={() => openBuilder('create')}><Sparkles size={15}/> سایت جدید</Button>}</div>}/>
-    <SectionCard title="سرویس Nginx" description="وضعیت سرویس، اجرای دستورهای مدیریتی و اعتبارسنجی پیکربندی" right={status?.installed ? <Badge variant={status.active ? 'success' : 'warning'}>{status.active ? 'فعال' : 'متوقف'}</Badge> : <Badge variant="outline">نصب نشده</Badge>}>
+    <SectionCard title="سرویس Nginx" description="وضعیت سرویس، اجرای دستورهای مدیریتی و اعتبارسنجی پیکربندی" right={status?.installed ? <Badge variant={status.active ? 'success' : 'warning'}>{status.active ? 'فعال' : 'متوقف'}</Badge> : statusError ? <Badge variant="warning">نامشخص</Badge> : <Badge variant="outline">نصب نشده</Badge>}>
       {status?.installed ? <>
         <div className="grid gap-3 sm:grid-cols-3"><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">وضعیت اجرا</p><p className="mt-2 font-semibold text-white">{status.active ? 'در حال اجرا' : 'متوقف'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">اجرا هنگام بوت</p><p className="mt-2 font-semibold text-white">{status.enabled ? 'فعال' : 'غیرفعال'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">نسخه</p><p dir="ltr" className="mt-2 truncate text-left font-mono text-xs text-white">{status.version || 'نامشخص'}</p></div></div>
         <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[.07] pt-4"><Button size="sm" disabled={busy || status.active} onClick={() => void runAction('start')}><Play size={14}/>شروع</Button><Button size="sm" variant="outline" disabled={busy || !status.active} onClick={() => void runAction('stop')}><Square size={14}/>توقف</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction('restart')}><RotateCw size={14}/>راه‌اندازی مجدد</Button><Button size="sm" variant="outline" disabled={busy || !status.active} onClick={() => void runAction('reload')}><RefreshCw size={14}/>Reload</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction('test')}><ShieldCheck size={14}/>بررسی تنظیمات</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void runAction(status.enabled ? 'disable' : 'enable')}>{status.enabled ? 'غیرفعال‌کردن اجرا هنگام بوت' : 'فعال‌کردن اجرا هنگام بوت'}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void runAction('logs')}><Terminal size={14}/>لاگ سرویس</Button></div>
         <div className={`mt-4 rounded-xl border p-3 text-xs ${status.config_test.ok ? 'border-emerald-400/20 bg-emerald-400/[.04] text-emerald-200' : 'border-amber-400/20 bg-amber-400/[.04] text-amber-100'}`}><div className="font-semibold">{status.config_test.ok ? 'پیکربندی معتبر است' : 'پیکربندی نیاز به بررسی دارد'}</div><pre dir="ltr" className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap text-left font-mono text-[11px] opacity-80">{status.config_test.output}</pre></div>
-      </> : <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-dashed border-white/10 p-4"><div><p className="font-medium text-white">Nginx نصب نشده است</p><p className="mt-1 text-xs text-muted-foreground">نصب از مخزن سیستم‌عامل با apt، dnf یا yum انجام می‌شود.</p></div><Button disabled={busy} onClick={() => void runAction('install')}><Download size={15}/>{busy ? 'در حال نصب…' : 'نصب Nginx'}</Button></div>}
+      </> : statusError ? <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-amber-400/20 bg-amber-400/[.04] p-4"><div><p className="font-medium text-amber-100">وضعیت نصب Nginx مشخص نشد</p><p className="mt-1 text-xs text-muted-foreground">{statusError}</p></div><Button variant="outline" size="sm" disabled={busy} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={14}/>تلاش دوباره</Button></div> : <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-dashed border-white/10 p-4"><div><p className="font-medium text-white">Nginx نصب نشده است</p><p className="mt-1 text-xs text-muted-foreground">نصب از مخزن سیستم‌عامل با apt، dnf یا yum انجام می‌شود.</p></div><Button disabled={busy} onClick={() => void runAction('install')}><Download size={15}/>{busy ? 'در حال نصب…' : 'نصب Nginx'}</Button></div>}
     </SectionCard>
     <div className="mb-5 grid gap-3 sm:grid-cols-3">
       <Metric icon={Globe} label="همهٔ سایت‌ها" value={formatNumber(sites.length)} detail="فایل‌های معتبر sites-available"/>

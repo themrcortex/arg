@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.14 — 2026-10-23
+
+### Fixed
+- Replaced premature UFW and Nginx not-installed states with page skeletons until initial status data loads.
+- Kept installation controls hidden when a service status request fails, and added a retry state for unavailable status.
+
 ## v0.4.13 — 2026-10-23
 
 ### Changed
