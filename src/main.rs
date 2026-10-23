@@ -1545,6 +1545,14 @@ struct NginxCreateSiteInput {
     content: String,
 }
 #[derive(Deserialize)]
+struct NginxSiteRenameInput {
+    new_name: String,
+}
+#[derive(Deserialize)]
+struct NginxSiteMetadataInput {
+    description: String,
+}
+#[derive(Deserialize)]
 struct NginxBrowseQuery {
     path: Option<String>,
 }
@@ -1568,7 +1576,16 @@ async fn nginx_sites(State(state): State<AppState>, headers: HeaderMap) -> ApiRe
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
     }
-    let result = nginx_manager_request(json!({"action":"nginx-list"}))?;
+    let mut result = nginx_manager_request(json!({"action":"nginx-list"}))?;
+    let db = state.lock().unwrap();
+    if let Some(sites) = result["sites"].as_array_mut() {
+        for site in sites {
+            if let Some(name) = site["name"].as_str() {
+                let description = db.query_row("SELECT description FROM nginx_site_metadata WHERE name=?1", [name], |row| row.get::<_, String>(0)).unwrap_or_default();
+                site["description"] = json!(description);
+            }
+        }
+    }
     Ok(Json(result))
 }
 
@@ -1628,6 +1645,7 @@ async fn create_nginx_site(
     }
     let result = nginx_manager_request(json!({"action":"nginx-create", "name":input.name, "content":input.content}))?;
     let db = state.lock().unwrap();
+    db.execute("INSERT OR IGNORE INTO nginx_site_metadata(name,description) VALUES (?1,'')", [&input.name]).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.create", &input.name);
     Ok(Json(result))
 }
@@ -1645,8 +1663,51 @@ async fn delete_nginx_site(
     if !valid_nginx_site_name(&name) { return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست.")); }
     let result = nginx_manager_request(json!({"action":"nginx-delete", "name":name}))?;
     let db = state.lock().unwrap();
+    db.execute("DELETE FROM nginx_site_metadata WHERE name=?1", [&name]).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.delete", &name);
     Ok(Json(result))
+}
+
+async fn rename_nginx_site(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxSiteRenameInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) || !valid_nginx_site_name(&input.new_name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام فایل سایت معتبر نیست."));
+    }
+    let mut result = nginx_manager_request(json!({"action":"nginx-rename", "name":name, "new_name":input.new_name}))?;
+    let db = state.lock().unwrap();
+    let old_description = db.query_row("SELECT description FROM nginx_site_metadata WHERE name=?1", [&name], |row| row.get::<_, String>(0)).unwrap_or_default();
+    db.execute("DELETE FROM nginx_site_metadata WHERE name=?1", [&name]).map_err(db_error)?;
+    db.execute("INSERT OR REPLACE INTO nginx_site_metadata(name,description) VALUES (?1,?2)", params![input.new_name, old_description]).map_err(db_error)?;
+    result["description"] = json!(old_description);
+    audit(&db, &actor, "nginx.site.rename", &format!("{name} -> {}", input.new_name));
+    Ok(Json(result))
+}
+
+async fn update_nginx_site_metadata(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxSiteMetadataInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_nginx_site_name(&name) || input.description.chars().count() > 500 {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت یا طول توضیحات معتبر نیست."));
+    }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?.username;
+    nginx_manager_request(json!({"action":"nginx-get", "name":name}))?;
+    db.execute("INSERT INTO nginx_site_metadata(name,description) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET description=excluded.description", params![name, input.description.trim()]).map_err(db_error)?;
+    audit(&db, &actor, "nginx.site.metadata", &format!("site={name}"));
+    Ok(Json(json!({"name":name,"description":input.description.trim(),"message":"توضیحات سایت ذخیره شد."})))
 }
 
 async fn get_nginx_site(
@@ -2109,6 +2170,44 @@ fn nginx_delete_site(name: &str) -> Result<Value, String> {
     Ok(json!({"message":"فایل سایت حذف شد."}))
 }
 
+fn nginx_rename_site(name: &str, new_name: &str) -> Result<Value, String> {
+    if name == "default" || new_name == "default" {
+        return Err("تغییر نام سایت پیش‌فرض سیستم مجاز نیست.".into());
+    }
+    if !valid_nginx_site_name(name) || !valid_nginx_site_name(new_name) {
+        return Err("نام فایل سایت معتبر نیست.".into());
+    }
+    let (old_available, old_enabled) = nginx_site_paths(name)?;
+    let (new_available, new_enabled) = nginx_site_paths(new_name)?;
+    let metadata = fs::symlink_metadata(&old_available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    if !metadata.file_type().is_file() { return Err("فقط فایل معمولی قابل تغییر نام است.".into()); }
+    if name == new_name { return Ok(json!({"name":name,"message":"نام سایت تغییری نکرد."})); }
+    if new_available.exists() || fs::symlink_metadata(&new_enabled).is_ok() {
+        return Err("یک فایل یا symlink با نام مقصد از قبل وجود دارد.".into());
+    }
+    let was_enabled = nginx_site_enabled(name)?;
+    fs::rename(&old_available, &new_available).map_err(|error| format!("تغییر نام فایل ناموفق بود: {error}"))?;
+    if was_enabled {
+        if let Err(error) = fs::remove_file(&old_enabled).and_then(|_| std::os::unix::fs::symlink(format!("../sites-available/{new_name}"), &new_enabled)) {
+            let _ = fs::rename(&new_available, &old_available);
+            if fs::symlink_metadata(&old_enabled).is_err() {
+                let _ = std::os::unix::fs::symlink(format!("../sites-available/{name}"), &old_enabled);
+            }
+            return Err(format!("تغییر نام symlink ناموفق بود: {error}"));
+        }
+    }
+    if let Err(error) = nginx_config_test().and_then(|_| nginx_reload_if_active()) {
+        if was_enabled {
+            let _ = fs::remove_file(&new_enabled);
+            let _ = std::os::unix::fs::symlink(format!("../sites-available/{name}"), &old_enabled);
+        }
+        let _ = fs::rename(&new_available, &old_available);
+        let _ = nginx_reload_if_active();
+        return Err(format!("تغییر نام اعمال نشد و نام قبلی بازگردانده شد: {error}"));
+    }
+    Ok(json!({"name":new_name,"enabled":was_enabled,"message":"نام فایل سایت تغییر کرد."}))
+}
+
 fn nginx_browse_files(path: Option<&str>) -> Result<Value, String> {
     const ROOTS: &[&str] = &["/etc/letsencrypt", "/etc/ssl", "/etc/nginx", "/var/www"];
     let roots: Vec<String> = ROOTS.iter().filter(|root| std::path::Path::new(root).is_dir()).map(|root| (*root).to_owned()).collect();
@@ -2144,6 +2243,7 @@ fn execute_nginx_request(action: &str, request: &Value) -> Value {
         "nginx-status" | "nginx-install" | "nginx-start" | "nginx-stop" | "nginx-restart" | "nginx-reload" | "nginx-enable" | "nginx-disable" | "nginx-test" | "nginx-logs" => nginx_manage(action),
         "nginx-create" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(|name| request["content"].as_str().ok_or_else(|| "محتوای سایت ارسال نشده است.".to_owned()).and_then(|content| nginx_create_site(name, content))),
         "nginx-delete" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(nginx_delete_site).map(|_| json!({"message":"فایل سایت حذف شد."})),
+        "nginx-rename" => request["name"].as_str().ok_or_else(|| "نام فعلی ارسال نشده است.".to_owned()).and_then(|name| request["new_name"].as_str().ok_or_else(|| "نام جدید ارسال نشده است.".to_owned()).and_then(|new_name| nginx_rename_site(name, new_name))),
         "nginx-browse" => nginx_browse_files(request["path"].as_str()),
         "nginx-list" => nginx_list_sites().map(|sites| json!({"sites":sites})),
         "nginx-get" => request["name"]
@@ -2205,6 +2305,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-logs") => "nginx-logs",
         Some("nginx-create") => "nginx-create",
         Some("nginx-delete") => "nginx-delete",
+        Some("nginx-rename") => "nginx-rename",
         Some("nginx-browse") => "nginx-browse",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
@@ -2319,7 +2420,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol));")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT '');")?;
     let has_users = initialized(&db);
     let configured_setup_token = env::var("ARG_SETUP_TOKEN")
         .ok()
@@ -2366,6 +2467,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/users/{id}", put(update_user))
         .route("/api/audit", get(audit_log))
         .route("/api/nginx/sites", get(nginx_sites).post(create_nginx_site))
+        .route("/api/nginx/sites/{name}/rename", post(rename_nginx_site))
+        .route("/api/nginx/sites/{name}/metadata", put(update_nginx_site_metadata))
         .route("/api/nginx/status", get(nginx_status))
         .route("/api/nginx/files", get(api_nginx_browse_files))
         .route("/api/nginx/action", post(nginx_action))

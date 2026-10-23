@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.0 — 2026-10-23
+
+### Added
+- Added persistent per-site descriptions and a dialog to edit a site's name and notes.
+- Added safe Nginx site renaming that updates the enabled symlink and validates the resulting configuration.
+
 ## v0.5.0 — 2026-10-23
 
 ### Added
