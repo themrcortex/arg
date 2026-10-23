@@ -72,18 +72,34 @@ type Common = { Heading: Heading; notify: (message: string) => void }
 type Sample = { at: number; time: string; rx: number; tx: number }
 type ResourceSample = { at: number; cpu: number; memory: number; disk: number }
 type StoredSample = { at: number; cpu: number; memory: number; disk: number; rx: number; tx: number }
+type HistoryRange = '5m' | '1h' | '24h' | '7d' | '30d' | 'custom'
+
+function localDateTime(timestamp: number) {
+  const date = new Date(timestamp)
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+}
+
+function TimeRangeFilter({ range, setRange, from, setFrom, to, setTo, applyCustom }: { range: HistoryRange; setRange: (range: HistoryRange) => void; from: string; setFrom: (value: string) => void; to: string; setTo: (value: string) => void; applyCustom: () => void }) {
+  const presets: HistoryRange[] = ['5m', '1h', '24h', '7d', '30d', 'custom']
+  const labels: Record<HistoryRange, string> = { '5m': '5 دقیقه', '1h': '1 ساعت', '24h': '24 ساعت', '7d': '7 روز', '30d': '30 روز', custom: 'دلخواه' }
+  return <div className="flex flex-wrap items-center gap-2" aria-label="فیلتر بازهٔ زمانی"><div className="flex flex-wrap gap-1 rounded-lg border border-border p-1">{presets.map((item) => <button key={item} type="button" onClick={() => setRange(item)} aria-pressed={range === item} className="min-h-8 rounded-md px-2 text-xs font-medium aria-pressed:bg-primary/20 aria-pressed:text-foreground">{labels[item]}</button>)}</div>{range === 'custom' && <div className="flex flex-wrap items-end gap-2"><label className="grid gap-1 text-[10px] text-muted-foreground">از تاریخ و ساعت<Input type="datetime-local" lang="en" dir="ltr" className="h-8 w-[190px] text-xs" value={from} max={to || undefined} onChange={(event) => setFrom(event.target.value)}/></label><label className="grid gap-1 text-[10px] text-muted-foreground">تا تاریخ و ساعت<Input type="datetime-local" lang="en" dir="ltr" className="h-8 w-[190px] text-xs" value={to} min={from || undefined} onChange={(event) => setTo(event.target.value)}/></label><Button size="sm" className="h-8" onClick={applyCustom}>اعمال بازه</Button></div>}</div>
+}
 
 function useDashboard(notify: (message: string) => void) {
   const [data, setData] = useState<Dashboard | null>(null)
   const [samples, setSamples] = useState<StoredSample[]>([])
   const [historyEnabled, setHistoryEnabled] = useState(true)
-  const [range, setRange] = useState<'5m' | '1h' | '24h'>('5m')
+  const [range, setRange] = useState<HistoryRange>('5m')
+  const [customFrom, setCustomFrom] = useState(() => localDateTime(Date.now() - 3600000))
+  const [customTo, setCustomTo] = useState(() => localDateTime(Date.now()))
+  const [appliedCustom, setAppliedCustom] = useState<{ from: number; to: number } | null>(null)
   const [loading, setLoading] = useState(true)
   const [dashboardError, setDashboardError] = useState(false)
   const [historyError, setHistoryError] = useState(false)
   const refresh = useCallback(async () => {
     try {
-      const [dashboardResult, historyResult] = await Promise.allSettled([api<Dashboard>('dashboard'), api<{ samples: StoredSample[]; config: MonitoringConfig }>(`history?range=${range}`)])
+      const query = range === 'custom' && appliedCustom ? `from=${appliedCustom.from}&to=${appliedCustom.to}` : `range=${range === 'custom' ? '5m' : range}`
+      const [dashboardResult, historyResult] = await Promise.allSettled([api<Dashboard>('dashboard'), api<{ samples: StoredSample[]; config: MonitoringConfig }>(`history?${query}`)])
       setDashboardError(dashboardResult.status === 'rejected')
       setHistoryError(historyResult.status === 'rejected')
       if (dashboardResult.status === 'fulfilled') setData(dashboardResult.value)
@@ -99,7 +115,7 @@ function useDashboard(notify: (message: string) => void) {
     } finally {
       setLoading(false)
     }
-  }, [notify, range])
+  }, [notify, range, appliedCustom])
   useEffect(() => {
     void refresh()
     const timer = window.setInterval(refresh, 5000)
@@ -107,7 +123,17 @@ function useDashboard(notify: (message: string) => void) {
   }, [refresh])
   const history = samples.map((sample) => ({ at: sample.at, time: new Date(sample.at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }), rx: sample.rx, tx: sample.tx }))
   const resourceHistory = samples.map(({ at, cpu, memory, disk }) => ({ at, cpu, memory, disk }))
-  return { data, history, resourceHistory, cpu: samples.at(-1)?.cpu ?? null, loading, refresh, range, setRange, historyEnabled, dashboardError, historyError }
+  function applyCustomRange() {
+    const from = new Date(customFrom).getTime()
+    const to = new Date(customTo).getTime()
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || to > Date.now() || to - from > 366 * 86400000) {
+      notify('بازهٔ دلخواه نامعتبر است؛ شروع و پایان را بررسی کن (حداکثر 366 روز).')
+      return
+    }
+    setAppliedCustom({ from: Math.floor(from / 1000), to: Math.floor(to / 1000) })
+    setRange('custom')
+  }
+  return { data, history, resourceHistory, cpu: samples.at(-1)?.cpu ?? null, loading, refresh, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, historyEnabled, dashboardError, historyError }
 }
 
 function SectionCard({
@@ -233,7 +259,7 @@ function ArgChartPanel({ title, icon, children, description }: { title: string; 
 }
 
 export function DashboardPage({ user, notify }: { user: User } & Common) {
-  const { data, history, resourceHistory, cpu, loading, refresh, range, setRange, historyEnabled, dashboardError, historyError } = useDashboard(notify)
+  const { data, history, resourceHistory, cpu, loading, refresh, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, historyEnabled, dashboardError, historyError } = useDashboard(notify)
   const [firewall, setFirewall] = useState<Firewall | null>(null)
   const [ruleCount, setRuleCount] = useState<number | null>(null)
   useEffect(() => {
@@ -268,7 +294,7 @@ export function DashboardPage({ user, notify }: { user: User } & Common) {
       <ArgKpi icon="metric-load" label="میانگین بار" value={load[0] || '—'} detail={load.length >= 3 ? `5 دقیقه: ${load[1]} · 15 دقیقه: ${load[2]}` : 'میانگین بار Linux'}/>
       <ArgKpi icon="metric-app" label="مصرف پنل ARG" value={data ? `${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}%` : '—'} detail={data ? `CPU · RAM ${formatBytes(data.process_rss_bytes)}` : 'داده‌ای در دسترس نیست'} tone="blue"/>
     </section>}
-    <div className="flex flex-wrap items-center justify-between gap-3 pt-2"><h2 className="text-base font-bold text-foreground">تاریخچهٔ منابع</h2><div className="arg-range flex rounded-lg border border-border p-0.5" aria-label="بازهٔ زمانی نمودار">{(['5m','1h','24h'] as const).map((item) => <button key={item} type="button" onClick={() => setRange(item)} aria-pressed={range === item} className="min-h-9 min-w-12 rounded-md px-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" dir="ltr">{item}</button>)}</div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3 pt-2"><h2 className="text-base font-bold text-foreground">تاریخچهٔ منابع</h2><TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/></div>
     {!historyEnabled && <HistoryPaused/>}
     <div className="arg-chart-grid grid gap-3">
       <ArgChartPanel icon="metric-cpu" title="استفاده از پردازنده" description="درصد مصرف CPU در بازهٔ انتخاب‌شده"><TimeSeriesChart samples={resourceHistory} series={[{ key: 'cpu', label: 'پردازنده', color: '#53C992' }]} max={100} unit="%"/></ArgChartPanel>
@@ -289,7 +315,7 @@ function DataRows({ rows }: { rows: { label: string; value: string; detail?: str
 }
 
 export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
-  const { data, resourceHistory, cpu, range, setRange, loading, refresh, historyEnabled } = useDashboard(notify)
+  const { data, resourceHistory, cpu, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, loading, refresh, historyEnabled } = useDashboard(notify)
   const totalMemory = (data?.memory_kib || 0) * 1024
   const availableMemory = (data?.available_kib || 0) * 1024
   const memoryPercent = totalMemory ? Math.round((1 - availableMemory / totalMemory) * 100) : 0
@@ -302,7 +328,7 @@ export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
     <Heading title="سیستم و منابع" description="پردازنده، حافظه و دیسک را با جزئیات واقعی سرور بررسی کن." action={<Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>}/>
     {loading && !data ? <LoadingCards/> : <>
       <div className="grid gap-4 md:grid-cols-3"><Metric icon={Cpu} label="CPU" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={`بار 1/5/15 دقیقه: ${data?.load || '—'}`} progress={cpu || 0}/><Metric icon={Database} label="حافظه" value={`${formatNumber(memoryPercent)}%`} detail={`${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}`} progress={memoryPercent}/><Metric icon={HardDrive} label="دیسک ریشه" value={`${formatNumber(diskPercent)}%`} detail={`${formatBytes(totalDisk - freeDisk)} از ${formatBytes(totalDisk)}`} progress={diskPercent}/></div>
-      <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
+      <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: formatNumber(data?.cpu_cores || 0) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: `${formatNumber(Math.floor((data?.uptime_seconds || 0) / 86400))}d ${formatNumber(Math.floor(((data?.uptime_seconds || 0) % 86400) / 3600))}h` }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: formatBytes(totalMemory) }, { label: 'مصرف‌شده', value: formatBytes(totalMemory - availableMemory), detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: formatBytes(availableMemory) }, { label: 'Cache', value: formatBytes((memoryDetail?.cached_kib || 0) * 1024) }, { label: 'Buffer', value: formatBytes((memoryDetail?.buffers_kib || 0) * 1024) }, { label: 'Swap کل', value: formatBytes((data?.swap_total_kib || 0) * 1024) }, { label: 'Swap مصرف‌شده', value: formatBytes(((data?.swap_total_kib || 0) - (data?.swap_free_kib || 0)) * 1024) }]}/></SectionCard></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="فضای فایل‌سیستم ریشه"><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk ? formatBytes(totalDisk) : '—' }, { label: 'مصرف‌شده', value: totalDisk ? formatBytes(totalDisk - freeDisk) : '—' }, { label: 'آزاد', value: totalDisk ? formatBytes(freeDisk) : '—' }, { label: 'درصد مصرف', value: totalDisk ? `${formatNumber(diskPercent)}%` : '—' }]}/></SectionCard><SectionCard title="مصرف پنل ARG" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: `${formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%` }, { label: 'RAM پنل', value: formatBytes(data?.process_rss_bytes || 0), detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
       <div className="mt-5"><AlertControls user={user} cpu={cpu} memory={memoryPercent} disk={diskPercent} notify={notify}/></div>
@@ -412,7 +438,7 @@ function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
 }
 
 export function NetworkPage({ Heading, notify }: Common) {
-  const { data, history, loading, refresh, range, setRange, historyEnabled } = useDashboard(notify)
+  const { data, history, loading, refresh, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, historyEnabled } = useDashboard(notify)
   return (
     <>
       <Heading
@@ -475,7 +501,7 @@ export function NetworkPage({ Heading, notify }: Common) {
           <div className="mt-5">
             <DistributionBars title="توزیع ترافیک کارت‌ها" description="جمع بایت‌های دریافت و ارسال هر رابط از زمان شروع آن" items={(data?.interfaces || []).map((item) => ({ label: item.name, value: item.rx_bytes + item.tx_bytes, display: formatBytes(item.rx_bytes + item.tx_bytes) }))} />
           </div>
-          <div className="mt-5"><SectionCard title="نرخ ترافیک شبکه" description="نمونه‌های ذخیره‌شده توسط سرویس" right={<div className="flex gap-1 rounded-lg border border-white/10 p-1">{(['5m','1h','24h'] as const).map((item) => <button key={item} onClick={() => setRange(item)} aria-pressed={range === item} className={`rounded-md px-3 py-1.5 text-xs ${range === item ? 'bg-primary/25 text-white' : 'text-muted-foreground'}`} dir="ltr">{item}</button>)}</div>}>{!historyEnabled && <HistoryPaused/>}<TrafficChart history={history}/></SectionCard></div>
+          <div className="mt-5"><SectionCard title="نرخ ترافیک شبکه" description="نمونه‌های ذخیره‌شده توسط سرویس" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<TrafficChart history={history}/></SectionCard></div>
           <div className="mt-5"><SectionCard title="جزئیات رابط‌ها" description="شمارنده‌های فعلی هر کارت از کرنل خوانده می‌شوند"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>رابط</TableHead><TableHead>وضعیت</TableHead><TableHead>MTU</TableHead><TableHead>سرعت لینک</TableHead><TableHead>بستهٔ دریافتی</TableHead><TableHead>بستهٔ ارسالی</TableHead><TableHead>خطا / حذف</TableHead></TableRow></TableHeader><TableBody>{(data?.interfaces || []).map((item) => <TableRow key={item.name}><TableCell className="font-mono text-white" dir="ltr">{item.name}</TableCell><TableCell>{item.state || '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.mtu ?? '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.speed_mbps ? `${formatNumber(item.speed_mbps)} Mbps` : '—'}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.rx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.tx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber((item.rx_errors || 0) + (item.tx_errors || 0) + (item.rx_dropped || 0) + (item.tx_dropped || 0))}</TableCell></TableRow>)}</TableBody></Table></div></SectionCard></div>
         </>
       )}

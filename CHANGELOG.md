@@ -1,3 +1,9 @@
+## v0.9.0 — 2026-10-23
+
+### Added
+- Expanded resource and network history filters to 5 minutes, 1 hour, 24 hours, 7 days, and 30 days.
+- Added custom start and end date/time filters for charts, with validation and bounded sample density for long ranges.
+
 ## v0.8.0 — 2026-10-23
 
 ### Added

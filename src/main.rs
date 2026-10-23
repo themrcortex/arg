@@ -831,6 +831,8 @@ async fn collect_metrics(state: AppState) {
 #[derive(Deserialize)]
 struct HistoryQuery {
     range: Option<String>,
+    from: Option<i64>,
+    to: Option<i64>,
 }
 async fn history(
     State(state): State<AppState>,
@@ -839,14 +841,29 @@ async fn history(
 ) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
-    let (seconds, step) = match query.range.as_deref() {
-        Some("1h") => (3600, 3),
-        Some("24h") => (86400, 24),
-        Some("7d") => (7 * 86400, 180),
-        _ => (300, 1),
+    let current = now();
+    let (from, to, step) = match (query.from, query.to) {
+        (Some(from), Some(to)) => {
+            let span = to.saturating_sub(from);
+            if from < 0 || to > current || from >= to || span > 366 * 86400 {
+                return Err(error(StatusCode::BAD_REQUEST, "بازهٔ دلخواه تاریخ معتبر نیست یا از 366 روز بیشتر است."));
+            }
+            (from, to, ((span / 5 + 2499) / 2500).max(1) as usize)
+        }
+        (None, None) => {
+            let (seconds, step) = match query.range.as_deref() {
+                Some("1h") => (3600, 3),
+                Some("24h") => (86400, 24),
+                Some("7d") => (7 * 86400, 180),
+                Some("30d") => (30 * 86400, 720),
+                _ => (300, 1),
+            };
+            (current - seconds, current, step)
+        }
+        _ => return Err(error(StatusCode::BAD_REQUEST, "برای بازهٔ دلخواه، زمان شروع و پایان لازم است.")),
     };
-    let mut stmt = db.prepare("SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM metric_samples WHERE at>=?1 ORDER BY at").map_err(db_error)?;
-    let rows = stmt.query_map([now() - seconds], |row| Ok(json!({
+    let mut stmt = db.prepare("SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM metric_samples WHERE at>=?1 AND at<=?2 ORDER BY at").map_err(db_error)?;
+    let rows = stmt.query_map(params![from, to], |row| Ok(json!({
         "at": row.get::<_, i64>(0)?, "cpu": row.get::<_, f64>(1)?, "memory": row.get::<_, f64>(2)?, "disk": row.get::<_, f64>(3)?,
         "rx": row.get::<_, f64>(4)?, "tx": row.get::<_, f64>(5)?
     }))).map_err(db_error)?;
