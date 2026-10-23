@@ -163,6 +163,23 @@ function SectionCard({
     </Card>
   )
 }
+
+function RefreshButton({ onRefresh, label = 'به‌روزرسانی', className = '' }: {
+  onRefresh: () => Promise<unknown> | void
+  label?: string
+  className?: string
+}) {
+  const [busy, setBusy] = useState(false)
+  async function run() {
+    if (busy) return
+    setBusy(true)
+    try { await onRefresh() } finally { setBusy(false) }
+  }
+  return <Button variant="outline" size="sm" className={className} onClick={() => void run()} disabled={busy} aria-busy={busy}>
+    <RefreshCw size={15} className={busy ? 'animate-spin' : ''}/>{busy ? 'در حال به‌روزرسانی…' : label}
+  </Button>
+}
+
 function Metric({
   icon: Icon,
   label,
@@ -281,12 +298,12 @@ export function DashboardPage({ user, notify }: { user: User } & Common) {
   const percent = (value: number | null) => value === null ? '—' : `${formatNumber(Math.round(value * 10) / 10)}%`
   const firewallActive = firewall?.available && /active/i.test(firewall.status) && !/inactive/i.test(firewall.status)
   return <div className="arg-dashboard space-y-3.5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="text-xs font-semibold text-primary" dir="ltr">ARG / ارگ</div><h1 className="mt-1 text-[27px] font-bold text-foreground">نمای کلی سرور</h1></div><Button variant="outline" size="sm" onClick={() => void refresh()}><RefreshCw size={15}/> تازه‌سازی</Button></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="text-xs font-semibold text-primary" dir="ltr">ARG / ارگ</div><h1 className="mt-1 text-[27px] font-bold text-foreground">نمای کلی سرور</h1></div><RefreshButton label="تازه‌سازی" onRefresh={refresh}/></div>
     <section className="arg-dashboard-hero relative min-h-[150px] overflow-hidden rounded-[14px] border p-5 md:p-6">
       <img src="/arg/illustrations/arg-dashboard-banner.svg" alt="" aria-hidden="true" className="arg-hero-art pointer-events-none absolute bottom-0 left-0 h-full w-[75%] object-cover opacity-[.28]"/>
       <div className="relative z-10"><div className="text-xs font-semibold text-primary" dir="ltr">ARG / SERVER OVERVIEW</div><h2 className="mt-4 text-xl font-bold text-foreground md:text-2xl">به ارگ خوش آمدید</h2><p className="mt-2 text-sm text-muted-foreground">وضعیت منابع، شبکه و امنیت سرور در یک نگاه.</p>{data?.hostname && <div className="mt-4 inline-flex max-w-full items-center gap-2 rounded-lg border border-border bg-background/60 px-3 py-1.5 text-xs"><span className="text-muted-foreground">سرور</span><span className="truncate font-mono text-foreground" dir="ltr">{data.hostname}</span></div>}</div>
     </section>
-    {(dashboardError || historyError) && <Alert className="border-amber-400/25 bg-amber-400/[.06]"><AlertDescription>{dashboardError && historyError ? 'دریافت وضعیت سرور و تاریخچه ناموفق بود.' : dashboardError ? 'دریافت وضعیت فعلی سرور ناموفق بود.' : 'دریافت تاریخچهٔ منابع ناموفق بود.'} <button type="button" className="mr-2 font-semibold text-primary underline" onClick={() => void refresh()}>تلاش دوباره</button></AlertDescription></Alert>}
+    {(dashboardError || historyError) && <Alert className="border-amber-400/25 bg-amber-400/[.06]"><AlertDescription>{dashboardError && historyError ? 'دریافت وضعیت سرور و تاریخچه ناموفق بود.' : dashboardError ? 'دریافت وضعیت فعلی سرور ناموفق بود.' : 'دریافت تاریخچهٔ منابع ناموفق بود.'} <RefreshButton className="mr-2 inline-flex h-auto border-0 p-0 font-semibold text-primary underline" label="تلاش دوباره" onRefresh={refresh}/></AlertDescription></Alert>}
     {loading && !data ? <div className="arg-kpi-grid grid gap-3">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-[142px]"/>)}</div> : <section className="arg-kpi-grid grid gap-3" aria-label="شاخص‌های سرور">
       <ArgKpi icon="metric-cpu" label="پردازنده" value={percent(cpu)} detail={cpu === null ? 'نمونهٔ CPU موجود نیست' : 'آخرین نمونهٔ ثبت‌شده'} progress={cpu ?? undefined} tone="green"/>
       <ArgKpi icon="metric-memory" label="حافظهٔ RAM" value={percent(memory)} detail={data?.memory_kib ? `${formatBytes((data.memory_kib - data.available_kib) * 1024)} از ${formatBytes(data.memory_kib * 1024)}` : 'داده‌ای در دسترس نیست'} progress={memory ?? undefined}/>
@@ -326,7 +343,7 @@ export function SystemPage({ user, Heading, notify }: { user: User } & Common) {
   const load = (data?.load || '').split(' ')
   const memoryDetail = data?.memory_details
   return <>
-    <Heading title="سیستم و منابع" description="پردازنده، حافظه و دیسک را با جزئیات واقعی سرور بررسی کن." action={<Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>}/>
+    <Heading title="سیستم و منابع" description="پردازنده، حافظه و دیسک را با جزئیات واقعی سرور بررسی کن." action={<RefreshButton onRefresh={refresh}/>}/>
     {loading && !data ? <LoadingCards/> : <>
       <div className="grid gap-4 md:grid-cols-3"><Metric icon={Cpu} label="CPU" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={`بار 1/5/15 دقیقه: ${data?.load || '—'}`} progress={cpu || 0}/><Metric icon={Database} label="حافظه" value={`${formatNumber(memoryPercent)}%`} detail={`${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}`} progress={memoryPercent}/><Metric icon={HardDrive} label="دیسک ریشه" value={`${formatNumber(diskPercent)}%`} detail={`${formatBytes(totalDisk - freeDisk)} از ${formatBytes(totalDisk)}`} progress={diskPercent}/></div>
       <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
@@ -344,7 +361,7 @@ export function PortsPage({ Heading, notify }: Common) {
   const [ipVersion, setIpVersion] = useState<'all' | 'IPv4' | 'IPv6'>('all')
   const ports = (data?.ports || []).filter((port) => (protocol === 'all' || port.protocol === protocol) && (ipVersion === 'all' || (port.ipv6 ? 'IPv6' : 'IPv4') === ipVersion) && (!query.trim() || String(port.port).includes(query.trim())))
   return <>
-    <Heading title="پورت‌های شنونده" description="پورت‌های باز در خود سرور را پیدا کن و اتصال TCP را آزمایش کن." action={<Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>}/>
+    <Heading title="پورت‌های شنونده" description="پورت‌های باز در خود سرور را پیدا کن و اتصال TCP را آزمایش کن." action={<RefreshButton onRefresh={refresh}/>}/>
     <div className="grid gap-4 sm:grid-cols-3"><Metric icon={Radio} label="همهٔ شنونده‌ها" value={formatNumber(data?.ports.length || 0)} detail="TCP و UDP روی IPv4 و IPv6"/><Metric icon={Network} label="TCP" value={formatNumber(data?.ports.filter((port) => port.protocol === 'TCP').length || 0)} detail="در حالت LISTEN"/><Metric icon={Wifi} label="UDP" value={formatNumber(data?.ports.filter((port) => port.protocol === 'UDP').length || 0)} detail="سوکت‌های UDP ثبت‌شده"/></div>
     <div className="mt-5"><PortProbeControls notify={notify}/></div>
     <div className="mt-5"><SectionCard title="فهرست پورت‌ها" description="جست‌وجو و فیلتر مستقیم در فهرست کرنل" right={<Badge variant="outline">{formatNumber(ports.length)} مورد</Badge>}>
@@ -455,11 +472,7 @@ export function NetworkPage({ Heading, notify }: Common) {
       <Heading
         title="شبکه"
         description="رابط‌های شبکه، آدرس‌ها و جریان ترافیک را بررسی کن."
-        action={
-          <Button variant="outline" size="sm" onClick={refresh}>
-            <RefreshCw size={15} /> به‌روزرسانی
-          </Button>
-        }
+        action={<RefreshButton onRefresh={refresh}/>}
       />
       {loading && !data ? (
         <LoadingCards />
@@ -584,7 +597,7 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
     finally { setBusy(false) }
   }
   return <>
-    <Heading title="فایروال UFW" description="قوانین پنل را بساز، ویرایش کن یا موقتاً غیرفعال کن." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button>{user.role === 'admin' && <Button size="sm" onClick={() => openEditor()}><Plus size={15}/> قانون جدید</Button>}</div>}/>
+    <Heading title="فایروال UFW" description="قوانین پنل را بساز، ویرایش کن یا موقتاً غیرفعال کن." action={<div className="flex flex-wrap gap-2"><RefreshButton onRefresh={refresh}/>{user.role === 'admin' && <Button size="sm" onClick={() => openEditor()}><Plus size={15}/> قانون جدید</Button>}</div>}/>
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">وضعیت UFW</div><div className="mt-3 flex items-center gap-2 text-xl font-bold text-white"><span className={`h-2 w-2 rounded-full ${active ? 'bg-emerald-400' : 'bg-amber-400'}`}/>{loading ? 'در حال بررسی' : data?.available ? active ? 'فعال' : 'غیرفعال' : 'نصب نشده'}</div>{user.role === 'admin' && data?.available && <div className="mt-4 flex items-center gap-2 border-t border-white/10 pt-3 text-xs text-muted-foreground"><Switch checked={!!active} disabled={busy} onCheckedChange={() => void toggleFirewall()} aria-label="تغییر وضعیت UFW"/> تغییر وضعیت کلی UFW</div>}{user.role === 'admin' && !data?.available && <div className="mt-4 border-t border-white/10 pt-3"><Button size="sm" disabled={busy} onClick={() => void installFirewall()}>{busy ? 'در حال نصب…' : 'نصب UFW'}</Button><p className="mt-2 text-[11px] leading-5 text-amber-200/80">{data?.error || 'UFW روی این سرور نصب نشده است.'}</p></div>}</div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین فعال پنل</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => rule.enabled).length)}</div></div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین غیرفعال</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => !rule.enabled).length)}</div></div></div>
     <SectionCard title="قوانین مدیریت‌شده" description="تغییر وضعیت و ویرایش فقط روی قوانین ساخته‌شده توسط پنل اعمال می‌شود" right={<Badge variant="outline">{formatNumber(filtered.length)} قانون</Badge>}>
       <div className="mb-5 flex flex-wrap items-center gap-3"><label className="relative min-w-[180px] flex-1"><span className="sr-only">جست‌وجوی پورت</span><Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"/><Input lang="en" inputMode="numeric" value={query} onChange={(event) => setQuery(event.target.value.replace(/[^0-9]/g, ''))} placeholder="جست‌وجوی شمارهٔ پورت" className="pr-9"/></label><div className="flex gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1">{([['all','همه'], ['enabled','فعال'], ['disabled','غیرفعال']] as const).map(([value, label]) => <button key={value} onClick={() => setStatusFilter(value)} aria-pressed={statusFilter === value} className={`rounded-lg px-3 py-2 text-xs transition ${statusFilter === value ? 'bg-primary/20 text-white' : 'text-muted-foreground hover:text-white'}`}>{label}</button>)}</div></div>
@@ -1182,7 +1195,7 @@ export function AuditPage({ Heading, notify }: Common) {
         title="گزارش عملیات"
         description="ردیابی آخرین تغییرات و ورودهای پنل"
         action={
-          <div className="flex gap-2"><Button variant="outline" size="sm" onClick={refresh}><RefreshCw size={15}/> به‌روزرسانی</Button><Button variant="outline" size="sm" disabled={!events.length} onClick={() => { const rows = [['at','actor','action','detail'], ...events.map((event) => [new Date(event.at * 1000).toISOString(), event.actor, event.action, event.detail])]; downloadText('arg-audit.csv', '\uFEFF' + rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n'), 'text/csv;charset=utf-8') }}><Download size={15}/> دریافت CSV</Button></div>
+          <div className="flex gap-2"><RefreshButton onRefresh={refresh}/><Button variant="outline" size="sm" disabled={!events.length} onClick={() => { const rows = [['at','actor','action','detail'], ...events.map((event) => [new Date(event.at * 1000).toISOString(), event.actor, event.action, event.detail])]; downloadText('arg-audit.csv', '\uFEFF' + rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n'), 'text/csv;charset=utf-8') }}><Download size={15}/> دریافت CSV</Button></div>
         }
       />
       <div className="mb-5"><DistributionBars title="ترکیب عملیات اخیر" description="از میان 100 رویداد آخر ثبت‌شده" items={['login', 'logout', 'account.password', 'user.create', 'user.update'].map((action) => ({ label: action, value: events.filter((event) => event.action === action).length }))} /></div>
@@ -1231,7 +1244,7 @@ export function AuditPage({ Heading, notify }: Common) {
 type MonitoringConfig = { enabled: boolean; interval_seconds: number; retention_days: number; session_hours: number }
 
 type UpdateInfo = { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string }
-export function SettingsPage({ Heading, logout, notify, user, update, openUpdateDialog, updating }: { Heading: Heading; logout: () => void; notify: (message: string) => void; user: User; update: UpdateInfo; openUpdateDialog: () => void; updating: boolean }) {
+export function SettingsPage({ Heading, logout, notify, user, update, openUpdateDialog, updating, checkingUpdate }: { Heading: Heading; logout: () => void; notify: (message: string) => void; user: User; update: UpdateInfo; openUpdateDialog: () => void; updating: boolean; checkingUpdate: boolean }) {
   const [config, setConfig] = useState<MonitoringConfig | null>(null)
   const [port, setPort] = useState(location.port || (location.protocol === 'https:' ? '443' : '80'))
   const [busy, setBusy] = useState(false)
@@ -1280,7 +1293,7 @@ export function SettingsPage({ Heading, logout, notify, user, update, openUpdate
       </SectionCard>
     </div>
     <div className="mt-5"><SectionCard title="درباره و به‌روزرسانی" description="وضعیت نصب‌شده را ببین و از یک پنجره نسخهٔ جدید را بررسی یا نصب کن." right={<Badge variant={updating || update.status === 'available' ? 'warning' : update.status === 'current' ? 'success' : 'outline'}>{updating ? 'در حال نصب' : update.status === 'available' ? 'نسخهٔ جدید' : update.status === 'current' ? 'به‌روز' : 'بررسی نشده'}</Badge>}>
-      <div className="flex flex-wrap items-center justify-between gap-4"><div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-lg font-semibold text-foreground" dir="ltr">{update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخهٔ بررسی‌شده</div><div className="mt-2 truncate font-mono text-lg font-semibold text-foreground" dir="ltr">{update.remote || '—'}</div></div></div><div className="flex gap-2"><Button onClick={openUpdateDialog} disabled={updating}><RefreshCw size={15}/>{update.status === 'available' ? 'نصب نسخهٔ جدید' : 'بررسی و به‌روزرسانی'}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-10 w-10 place-items-center rounded-[10px] border border-border text-muted-foreground hover:bg-accent" aria-label="مخزن ARG در GitHub"><Github size={17}/></a></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-4"><div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-lg font-semibold text-foreground" dir="ltr">{update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخهٔ بررسی‌شده</div><div className="mt-2 truncate font-mono text-lg font-semibold text-foreground" dir="ltr">{update.remote || '—'}</div></div></div><div className="flex gap-2"><Button onClick={openUpdateDialog} disabled={updating || checkingUpdate} aria-busy={checkingUpdate || updating}><RefreshCw size={15} className={checkingUpdate || updating ? 'animate-spin' : ''}/>{checkingUpdate ? 'در حال بررسی…' : updating ? 'در حال نصب…' : update.status === 'available' ? 'نصب نسخهٔ جدید' : 'بررسی و به‌روزرسانی'}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-10 w-10 place-items-center rounded-[10px] border border-border text-muted-foreground hover:bg-accent" aria-label="مخزن ARG در GitHub"><Github size={17}/></a></div></div>
     </SectionCard></div>
     <div className="mt-5"><PasswordCard notify={notify}/></div>
     <Button variant="outline" className="mt-7" onClick={logout}><X size={16}/> خروج از حساب</Button>

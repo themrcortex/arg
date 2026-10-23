@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.4.5 — 2026-10-23
+
+### Changed
+- Added immediate loading feedback to page refresh controls and update actions, including a spinning icon, disabled state, and progress label while requests are running.
+
 ## v0.4.4 — 2026-10-23
 
 ### Changed
