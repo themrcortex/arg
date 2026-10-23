@@ -31,7 +31,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 
-const PRIVILEGED_SOCKET: &str = "/run/donatello-privileged/manager.sock";
+const PRIVILEGED_SOCKET: &str = "/run/arg-privileged/manager.sock";
 const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
 static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
@@ -102,7 +102,7 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
         .split(';')
         .find_map(|part| {
             part.trim()
-                .strip_prefix("donatello_session=")
+                .strip_prefix("arg_session=")
                 .map(str::to_owned)
         })
 }
@@ -163,7 +163,7 @@ async fn setup(
     check_origin(&headers)?;
     let local_setup = remote.ip().is_loopback();
     let db = state.lock().unwrap();
-    let expected_token = env::var("DONATELLO_SETUP_TOKEN").ok().or_else(|| {
+    let expected_token = env::var("ARG_SETUP_TOKEN").ok().or_else(|| {
         db.query_row(
             "SELECT value FROM settings WHERE key='setup_token'",
             [],
@@ -295,7 +295,7 @@ async fn login(
         .and_then(|v| v.to_str().ok())
         == Some("https");
     let cookie = format!(
-        "donatello_session={raw}; HttpOnly; SameSite=Strict; Path=/; Max-Age={session_seconds}{}",
+        "arg_session={raw}; HttpOnly; SameSite=Strict; Path=/; Max-Age={session_seconds}{}",
         if secure { "; Secure" } else { "" }
     );
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response())
@@ -393,7 +393,7 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let db_path = env::var("DONATELLO_DB").unwrap_or_else(|_| "data/donatello.db".into());
+    let db_path = env::var("ARG_DB").unwrap_or_else(|_| "data/arg.db".into());
     let db = Connection::open(db_path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     let user_id = db.query_row(
@@ -447,7 +447,7 @@ async fn logout(
     Ok((
         [(
             header::SET_COOKIE,
-            "donatello_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+            "arg_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
         )],
         Json(json!({"ok": true})),
     )
@@ -715,7 +715,7 @@ struct PanelPortInput {
 async fn get_panel_port(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
-    let port = env::var("DONATELLO_BIND")
+    let port = env::var("ARG_BIND")
         .ok()
         .and_then(|bind| {
             bind.rsplit(':')
@@ -742,14 +742,14 @@ async fn change_panel_port(
     let output = std::process::Command::new("sudo")
         .args([
             "-n",
-            "/usr/local/lib/donatello/port-helper",
+            "/usr/local/lib/arg/port-helper",
             &input.port.to_string(),
         ])
         .output()
         .map_err(|_| {
             error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Panel port helper unavailable; update Donatello",
+                "Panel port helper unavailable; update ARG",
             )
         })?;
     if !output.status.success() {
@@ -968,7 +968,7 @@ fn firewall_rule_validation_error(input: &FirewallRuleInput) -> Option<&'static 
     if input.port == 0 {
         Some("شمارهٔ پورت باید بین 1 تا 65535 باشد.")
     } else if [22, 80, 443, 8282, 8443].contains(&input.port) {
-        Some("این پورت برای دسترسی SSH، وب یا پنل Donatello محافظت شده است.")
+        Some("این پورت برای دسترسی SSH، وب یا پنل ARG محافظت شده است.")
     } else if !["tcp", "udp"].contains(&input.protocol.as_str()) {
         Some("پروتکل TCP یا UDP را انتخاب کن.")
     } else if !["allow", "deny"].contains(&input.policy.as_str()) {
@@ -1000,7 +1000,7 @@ fn privileged_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)
     let mut stream = StdUnixStream::connect(PRIVILEGED_SOCKET).map_err(|_| {
         error(
             StatusCode::SERVICE_UNAVAILABLE,
-            "Privileged manager unavailable; run sudo donatello update",
+            "Privileged manager unavailable; run sudo arg update",
         )
     })?;
     stream
@@ -1058,14 +1058,14 @@ fn run_firewall_helper(
 async fn managed_firewall_rules(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
-    // Import rules created by earlier Donatello releases so they can be edited here.
+    // Import rules created by earlier ARG releases so they can be edited here.
     if let Ok(output) = privileged_request(json!({"action":"status"})) {
         if output["installed"] == true {
             for line in output["status"]
                 .as_str()
                 .unwrap_or_default()
                 .lines()
-                .filter(|line| line.contains("# DONATELLO WEB"))
+                .filter(|line| line.contains("# ARG WEB") || line.contains("# DONATELLO WEB"))
             {
                 let tokens: Vec<_> = line.split_whitespace().collect();
                 let port_protocol = tokens
@@ -1672,10 +1672,10 @@ fn privileged_peer_allowed(stream: &UnixStream) -> bool {
     if result != 0 || length as usize != std::mem::size_of::<libc::ucred>() {
         return false;
     }
-    static DONATELLO_UID: OnceLock<Option<libc::uid_t>> = OnceLock::new();
-    DONATELLO_UID
+    static ARG_UID: OnceLock<Option<libc::uid_t>> = OnceLock::new();
+    ARG_UID
         .get_or_init(|| {
-            let user = std::ffi::CString::new("donatello").unwrap();
+            let user = std::ffi::CString::new("arg").unwrap();
             unsafe {
                 let entry = libc::getpwnam(user.as_ptr());
                 (!entry.is_null()).then(|| (*entry).pw_uid)
@@ -1826,7 +1826,7 @@ fn nginx_atomic_write(path: &std::path::Path, content: &[u8], mode: u32) -> Resu
         .file_name()
         .and_then(|part| part.to_str())
         .ok_or("نام فایل نامعتبر است.")?;
-    let temp = parent.join(format!(".donatello-{file_name}-{}.tmp", std::process::id()));
+    let temp = parent.join(format!(".arg-{file_name}-{}.tmp", std::process::id()));
     let result = (|| {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -1995,12 +1995,12 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     let (helper, helper_args) = if action.starts_with("update-") {
         (
-            "/usr/local/lib/donatello/update-helper",
+            "/usr/local/lib/arg/update-helper",
             vec![action.trim_start_matches("update-")],
         )
     } else {
         (
-            "/usr/local/lib/donatello/ufw-helper",
+            "/usr/local/lib/arg/ufw-helper",
             args.iter().map(String::as_str).collect(),
         )
     };
@@ -2064,7 +2064,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::args().nth(1).as_deref() == Some("change-password") {
         return change_password_cli();
     }
-    let db_path = env::var("DONATELLO_DB").unwrap_or_else(|_| "data/donatello.db".into());
+    let db_path = env::var("ARG_DB").unwrap_or_else(|_| "data/arg.db".into());
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -2078,7 +2078,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol));")?;
     let has_users = initialized(&db);
-    let configured_setup_token = env::var("DONATELLO_SETUP_TOKEN")
+    let configured_setup_token = env::var("ARG_SETUP_TOKEN")
         .ok()
         .filter(|value| !value.is_empty());
     if !has_users && configured_setup_token.is_none() {
@@ -2088,7 +2088,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             [&generated],
         )?;
         if inserted > 0 {
-            println!("DONATELLO_SETUP_CODE={generated}");
+            println!("ARG_SETUP_CODE={generated}");
         }
     }
     db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now()])?;
@@ -2140,22 +2140,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .fallback(get(static_file))
         .with_state(state);
-    let bind = env::var("DONATELLO_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
+    let bind = env::var("ARG_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
     let addr: SocketAddr = bind.parse()?;
-    println!("Donatello listening at http://{addr}");
+    println!("ARG listening at http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let tls_cert = env::var("DONATELLO_TLS_CERT").ok();
-    let tls_key = env::var("DONATELLO_TLS_KEY").ok();
+    let tls_cert = env::var("ARG_TLS_CERT").ok();
+    let tls_key = env::var("ARG_TLS_KEY").ok();
     match (tls_cert, tls_key) {
         (Some(cert), Some(key)) => {
             rustls::crypto::ring::default_provider()
                 .install_default()
                 .map_err(|_| "Failed to configure the TLS crypto provider")?;
-            let tls_bind = env::var("DONATELLO_TLS_BIND")
+            let tls_bind = env::var("ARG_TLS_BIND")
                 .unwrap_or_else(|_| "0.0.0.0:443".into())
                 .parse::<SocketAddr>()?;
             let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
-            println!("Donatello listening at https://{tls_bind}");
+            println!("ARG listening at https://{tls_bind}");
             let https_app = app.clone().layer(axum::middleware::from_fn(
                 |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
                     if !request.headers().contains_key(axum::http::header::HOST) {
@@ -2185,7 +2185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let http_app = app.into_make_service_with_connect_info::<SocketAddr>();
             axum::serve(listener, http_app).await?;
         }
-        _ => return Err("Both DONATELLO_TLS_CERT and DONATELLO_TLS_KEY must be set".into()),
+        _ => return Err("Both ARG_TLS_CERT and ARG_TLS_KEY must be set".into()),
     }
     Ok(())
 }

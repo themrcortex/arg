@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.4.0 — 2026-10-23
+
+### Changed
+- Rebranded the service, CLI, installer, source package, repository, and user-facing documentation as ARG.
+- Replaced the installer and interface accent palette with ARG copper, charcoal, teal, and slate colors.
+- Added a migration path from prior installations that preserves the database, HTTPS files, Nginx site, and managed firewall rules.
+
 ## v0.3.0 — 2026-10-23
 
 ### Added
@@ -12,5 +19,5 @@
 - Reworked the dashboard and navigation with the ARG visual identity.
 - Improved update status and retry controls.
 - Made the shared update dialog available from the top bar and Settings page.
-- Applied the ARG visual identity across the frontend while preserving the Donatello service, CLI, installer, API, and database identifiers.
+- Applied the ARG visual identity across the frontend while preserving the ARG service, CLI, installer, API, and database identifiers.
 - Improved update status, installed version details, and retry controls in Settings.

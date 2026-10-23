@@ -1,39 +1,53 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly APP_NAME="DONATELLO"
-readonly SERVICE_NAME="donatello"
-readonly REPOSITORY="https://github.com/themrcortex/donatello.git"
-readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/themrcortex/donatello/main/install.sh"
+readonly APP_NAME="ARG"
+readonly SERVICE_NAME="arg"
+readonly LEGACY_SERVICE_NAME="donatello"
+readonly REPOSITORY="https://github.com/themrcortex/arg.git"
+readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/themrcortex/arg/main/install.sh"
 readonly BRANCH="main"
-readonly INSTALL_DIR="/opt/donatello"
-readonly SOURCE_DIR="/opt/donatello/source"
-readonly BINARY="/usr/local/lib/donatello/donatello"
-readonly CLI="/usr/local/bin/donatello"
-readonly LEGACY_INSTALLER="/usr/local/sbin/donatello-installer"
-readonly SERVICE_FILE="/etc/systemd/system/donatello.service"
-readonly PRIVILEGED_SERVICE_FILE="/etc/systemd/system/donatello-privileged.service"
-readonly SUDOERS_FILE="/etc/sudoers.d/donatello-ufw-status"
-readonly UFW_HELPER="/usr/local/lib/donatello/ufw-helper"
-readonly PORT_HELPER="/usr/local/lib/donatello/port-helper"
-readonly UPDATE_HELPER="/usr/local/lib/donatello/update-helper"
-readonly ENV_DIR="/etc/donatello"
-readonly ENV_FILE="/etc/donatello/donatello.env"
-readonly DOMAIN_FILE="/etc/donatello/https-domain"
-readonly LEGACY_NGINX_SITE="/etc/nginx/sites-available/donatello"
-readonly LEGACY_NGINX_SITE_LINK="/etc/nginx/sites-enabled/donatello"
-readonly TLS_DIR="/etc/donatello/tls"
+readonly INSTALL_DIR="/opt/arg"
+readonly SOURCE_DIR="/opt/arg/source"
+readonly BINARY="/usr/local/lib/arg/arg"
+readonly CLI="/usr/local/bin/arg"
+readonly LEGACY_INSTALLER="/usr/local/sbin/arg-installer"
+readonly OLD_CLI="/usr/local/bin/donatello"
+readonly OLD_LEGACY_INSTALLER="/usr/local/sbin/donatello-installer"
+readonly SERVICE_FILE="/etc/systemd/system/arg.service"
+readonly PRIVILEGED_SERVICE_FILE="/etc/systemd/system/arg-privileged.service"
+readonly OLD_SERVICE_FILE="/etc/systemd/system/donatello.service"
+readonly OLD_PRIVILEGED_SERVICE_FILE="/etc/systemd/system/donatello-privileged.service"
+readonly SUDOERS_FILE="/etc/sudoers.d/arg-ufw-status"
+readonly UFW_HELPER="/usr/local/lib/arg/ufw-helper"
+readonly PORT_HELPER="/usr/local/lib/arg/port-helper"
+readonly UPDATE_HELPER="/usr/local/lib/arg/update-helper"
+readonly ENV_DIR="/etc/arg"
+readonly ENV_FILE="/etc/arg/arg.env"
+readonly DOMAIN_FILE="/etc/arg/https-domain"
+readonly LEGACY_NGINX_SITE="/etc/nginx/sites-available/arg"
+readonly LEGACY_NGINX_SITE_LINK="/etc/nginx/sites-enabled/arg"
+readonly TLS_DIR="/etc/arg/tls"
 readonly TLS_CERT="$TLS_DIR/fullchain.pem"
 readonly TLS_KEY="$TLS_DIR/privkey.pem"
-readonly CERT_DEPLOY_HOOK="/etc/letsencrypt/renewal-hooks/deploy/donatello"
-readonly CERT_NAME="donatello"
-readonly CERTBOT_TIMER_SERVICE="/etc/systemd/system/donatello-certbot-renew.service"
-readonly CERTBOT_TIMER_UNIT="/etc/systemd/system/donatello-certbot-renew.timer"
-readonly DATA_DIR="/var/lib/donatello"
-readonly SERVICE_USER="donatello"
-readonly SERVICE_GROUP="donatello"
+readonly CERT_DEPLOY_HOOK="/etc/letsencrypt/renewal-hooks/deploy/arg"
+readonly CERT_NAME="arg"
+readonly CERTBOT_TIMER_SERVICE="/etc/systemd/system/arg-certbot-renew.service"
+readonly CERTBOT_TIMER_UNIT="/etc/systemd/system/arg-certbot-renew.timer"
+readonly DATA_DIR="/var/lib/arg"
+readonly OLD_INSTALL_DIR="/opt/donatello"
+readonly OLD_SOURCE_DIR="/opt/donatello/source"
+readonly OLD_ENV_DIR="/etc/donatello"
+readonly OLD_DATA_DIR="/var/lib/donatello"
+readonly OLD_NGINX_SITE="/etc/nginx/sites-available/donatello"
+readonly OLD_NGINX_SITE_LINK="/etc/nginx/sites-enabled/donatello"
+readonly OLD_CERT_DEPLOY_HOOK="/etc/letsencrypt/renewal-hooks/deploy/donatello"
+readonly OLD_CERTBOT_TIMER_SERVICE="/etc/systemd/system/donatello-certbot-renew.service"
+readonly OLD_CERTBOT_TIMER_UNIT="/etc/systemd/system/donatello-certbot-renew.timer"
+readonly SERVICE_USER="arg"
+readonly SERVICE_GROUP="arg"
 readonly DEFAULT_BIND="0.0.0.0:8282"
-readonly DEFAULT_DB="/var/lib/donatello/donatello.db"
+readonly DEFAULT_DB="/var/lib/arg/arg.db"
 SERVER_PUBLIC_IP=""
 PORT80_STOPPED_UNIT=""
 CERTBOT_BIN=""
@@ -51,7 +65,7 @@ export PATH="$CARGO_HOME_DIR/bin:$PATH"
 if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
   readonly C_RESET=$'\033[0m'
   readonly C_BOLD=$'\033[1m'
-  readonly C_PURPLE=$'\033[1;35m'
+  readonly C_COPPER=$'\033[38;5;215m'
   readonly C_CYAN=$'\033[1;36m'
   readonly C_GREEN=$'\033[1;32m'
   readonly C_YELLOW=$'\033[1;33m'
@@ -60,7 +74,7 @@ if [[ -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != "dumb" ]]; then
 else
   readonly C_RESET=''
   readonly C_BOLD=''
-  readonly C_PURPLE=''
+  readonly C_COPPER=''
   readonly C_CYAN=''
   readonly C_GREEN=''
   readonly C_YELLOW=''
@@ -68,21 +82,21 @@ else
   readonly C_DIM=''
 fi
 
-say() { printf '\n%s%s%s\n' "$C_PURPLE" "$*" "$C_RESET"; }
+say() { printf '\n%s%s%s\n' "$C_COPPER" "$*" "$C_RESET"; }
 info() { printf '  %s\n' "$*"; }
 warn() { printf '%s  WARNING: %s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&2; }
 die() { printf '%s  ERROR: %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 has() { command -v "$1" >/dev/null 2>&1; }
 
 show_wordmark() {
-  printf '%s' "$C_PURPLE"
+  printf '%s' "$C_COPPER"
   cat <<'BANNER'
-  ██████╗  ██████╗ ███╗   ██╗ █████╗ ████████╗███████╗██╗     ██╗      ██████╗
-  ██╔══██╗██╔═══██╗████╗  ██║██╔══██╗╚══██╔══╝██╔════╝██║     ██║     ██╔═══██╗
-  ██║  ██║██║   ██║██╔██╗ ██║███████║   ██║   █████╗  ██║     ██║     ██║   ██║
-  ██║  ██║██║   ██║██║╚██╗██║██╔══██║   ██║   ██╔══╝  ██║     ██║     ██║   ██║
-  ██████╔╝╚██████╔╝██║ ╚████║██║  ██║   ██║   ███████╗███████╗███████╗╚██████╔╝
-  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝   ╚═╝   ╚══════╝╚══════╝╚══════╝ ╚═════╝
+   █████╗  ██████╗   ██████╗
+  ██╔══██╗ ██╔══██╗ ██╔════╝
+  ███████║ ██████╔╝ ██║  ███╗
+  ██╔══██║ ██╔══██╗ ██║   ██║
+  ██║  ██║ ██║  ██║ ╚██████╔╝
+  ╚═╝  ╚═╝ ╚═╝  ╚═╝  ╚═════╝
 BANNER
   printf '%s' "$C_RESET"
 }
@@ -136,7 +150,7 @@ require_root() {
   if [[ "$1" == "install" ]]; then
     die "Run the installer as root: sudo bash install.sh install"
   fi
-  die "Run this command as root: sudo donatello $1"
+  die "Run this command as root: sudo arg $1"
 }
 
 require_systemd() {
@@ -174,7 +188,7 @@ ensure_rust() {
   if [[ ! -x "$CARGO_HOME_DIR/bin/rustup" ]]; then
     say "Installing the Rust stable toolchain"
     local installer
-    installer="$(mktemp /tmp/donatello-rustup.XXXXXX)"
+    installer="$(mktemp /tmp/arg-rustup.XXXXXX)"
     curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$installer"
     sh "$installer" -y --profile minimal --default-toolchain stable --no-modify-path
     rm -f "$installer"
@@ -193,7 +207,7 @@ prepare_source() {
   elif [[ -e "$SOURCE_DIR" ]]; then
     die "$SOURCE_DIR exists but is not a Git repository. Please inspect it before continuing."
   else
-    say "Downloading Donatello source from GitHub"
+    say "Downloading ARG source from GitHub"
     git clone --depth 1 --branch "$BRANCH" "$REPOSITORY" "$SOURCE_DIR"
   fi
 }
@@ -201,13 +215,13 @@ prepare_source() {
 build_release() {
   [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the repository and main branch."
   run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"
-  [[ -x "$SOURCE_DIR/target/release/donatello" ]] || die "The Donatello binary was not created."
+  [[ -x "$SOURCE_DIR/target/release/arg" ]] || die "The ARG binary was not created."
 }
 
 run_with_progress() {
   local label="$1" log_file spinner_index=0 started elapsed minutes seconds pid result
   shift
-  log_file="$(mktemp /tmp/donatello-build.XXXXXX)"
+  log_file="$(mktemp /tmp/arg-build.XXXXXX)"
 
   if [[ ! -t 1 || ! -t 2 ]]; then
     say "$label"
@@ -232,7 +246,7 @@ run_with_progress() {
     elapsed=$((SECONDS - started))
     minutes=$((elapsed / 60))
     seconds=$((elapsed % 60))
-    printf '\r  %s%s%s  Building Donatello… %02d:%02d' \
+    printf '\r  %s%s%s  Building ARG… %02d:%02d' \
       "$C_CYAN" "${frames[spinner_index]}" "$C_RESET" "$minutes" "$seconds"
     spinner_index=$(((spinner_index + 1) % ${#frames[@]}))
     sleep 0.12
@@ -265,6 +279,87 @@ ensure_service_account() {
   install -d -o root -g "$SERVICE_GROUP" -m 0750 "$ENV_DIR"
 }
 
+migrate_legacy_install() {
+  local legacy_found=0
+  [[ -e "$OLD_SERVICE_FILE" || -e "$OLD_PRIVILEGED_SERVICE_FILE" || -d "$OLD_ENV_DIR" || -d "$OLD_DATA_DIR" || -d "$OLD_SOURCE_DIR" ]] && legacy_found=1
+  (( legacy_found )) || return 0
+
+  say "Migrating the previous installation to ARG"
+  systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
+  systemctl stop "$LEGACY_SERVICE_NAME" "$LEGACY_SERVICE_NAME-privileged" 2>/dev/null || true
+  systemctl disable "$LEGACY_SERVICE_NAME" "$LEGACY_SERVICE_NAME-privileged" 2>/dev/null || true
+
+  install -d -o root -g root -m 0755 "$INSTALL_DIR"
+  if [[ -d "$OLD_ENV_DIR" && ! -e "$ENV_DIR" ]]; then
+    mv "$OLD_ENV_DIR" "$ENV_DIR"
+  else
+    install -d -o root -g root -m 0755 "$ENV_DIR"
+    [[ ! -d "$OLD_ENV_DIR" ]] || cp -a -n "$OLD_ENV_DIR"/. "$ENV_DIR"/
+  fi
+  if [[ -d "$OLD_DATA_DIR" && ! -e "$DATA_DIR" ]]; then
+    mv "$OLD_DATA_DIR" "$DATA_DIR"
+  else
+    install -d -o root -g root -m 0755 "$DATA_DIR"
+    [[ ! -d "$OLD_DATA_DIR" ]] || cp -a -n "$OLD_DATA_DIR"/. "$DATA_DIR"/
+  fi
+  if [[ -d "$OLD_SOURCE_DIR/.git" && ! -e "$SOURCE_DIR" ]]; then
+    mv "$OLD_SOURCE_DIR" "$SOURCE_DIR"
+  fi
+
+  if [[ -f "$ENV_DIR/donatello.env" && ! -e "$ENV_FILE" ]]; then
+    mv "$ENV_DIR/donatello.env" "$ENV_FILE"
+  fi
+  if [[ -f "$ENV_FILE" ]]; then
+    sed -i \
+      -e 's/^DONATELLO_/ARG_/' \
+      -e 's#/var/lib/donatello#/var/lib/arg#g' \
+      -e 's#/etc/donatello#/etc/arg#g' \
+      -e 's#/usr/local/lib/donatello#/usr/local/lib/arg#g' \
+      -e 's#/donatello\.db#/arg.db#g' "$ENV_FILE"
+  fi
+  for suffix in '' -wal -shm; do
+    if [[ -f "$DATA_DIR/donatello.db$suffix" && ! -e "$DATA_DIR/arg.db$suffix" ]]; then
+      mv "$DATA_DIR/donatello.db$suffix" "$DATA_DIR/arg.db$suffix"
+    fi
+  done
+  if [[ -f "$DATA_DIR/.database-path" ]]; then
+    sed -i -e 's#/var/lib/donatello#/var/lib/arg#g' -e 's#/donatello\.db#/arg.db#g' "$DATA_DIR/.database-path"
+  fi
+
+  if [[ -d "$SOURCE_DIR/.git" ]]; then
+    git -C "$SOURCE_DIR" remote set-url origin "$REPOSITORY" 2>/dev/null || true
+  fi
+  if [[ -f "$OLD_NGINX_SITE" && ! -e "$LEGACY_NGINX_SITE" ]]; then
+    mv "$OLD_NGINX_SITE" "$LEGACY_NGINX_SITE"
+    if [[ -L "$OLD_NGINX_SITE_LINK" || -e "$OLD_NGINX_SITE_LINK" ]]; then
+      rm -f "$OLD_NGINX_SITE_LINK"
+      ln -s "$LEGACY_NGINX_SITE" "$LEGACY_NGINX_SITE_LINK"
+    fi
+  fi
+  if [[ -f "$OLD_CERT_DEPLOY_HOOK" && ! -e "$CERT_DEPLOY_HOOK" ]]; then
+    mv "$OLD_CERT_DEPLOY_HOOK" "$CERT_DEPLOY_HOOK"
+    sed -i \
+      -e 's/DONATELLO/ARG/g' \
+      -e 's#/etc/donatello#/etc/arg#g' \
+      -e 's/donatello\.service/arg.service/g' "$CERT_DEPLOY_HOOK"
+  fi
+  rm -f "$OLD_SERVICE_FILE" "$OLD_PRIVILEGED_SERVICE_FILE" \
+    "$OLD_CERTBOT_TIMER_SERVICE" "$OLD_CERTBOT_TIMER_UNIT" \
+    /etc/sudoers.d/donatello-ufw-status
+  systemctl daemon-reload
+  chmod 0640 "$ENV_FILE" 2>/dev/null || true
+  chmod 0750 "$ENV_DIR" "$DATA_DIR"
+}
+
+cleanup_legacy_identity() {
+  rm -rf /usr/local/lib/donatello
+  rm -f "$OLD_CLI" "$OLD_LEGACY_INSTALLER" /usr/local/sbin/donatello-installer \
+    /etc/sudoers.d/donatello-ufw-status
+  rmdir "$OLD_INSTALL_DIR" 2>/dev/null || true
+  if id donatello >/dev/null 2>&1; then userdel donatello 2>/dev/null || true; fi
+  if getent group donatello >/dev/null; then groupdel donatello 2>/dev/null || true; fi
+}
+
 configure_ufw_status() {
   local ufw sudoers_tmp
   ufw="$(command -v ufw || true)"
@@ -277,7 +372,7 @@ configure_ufw_status() {
     # Keep the helper available so an administrator can install UFW from the web panel.
     install -o root -g root -m 0755 "$SOURCE_DIR/scripts/ufw-helper.sh" "$UFW_HELPER"
   fi
-  sudoers_tmp="$(mktemp /etc/sudoers.d/.donatello-ufw.XXXXXX)"
+  sudoers_tmp="$(mktemp /etc/sudoers.d/.arg-ufw.XXXXXX)"
   printf '%s ALL=(root) NOPASSWD: %s *\n' "$SERVICE_USER" "$PORT_HELPER" > "$sudoers_tmp"
   printf '%s ALL=(root) NOPASSWD: %s check, %s run\n' "$SERVICE_USER" "$UPDATE_HELPER" "$UPDATE_HELPER" >> "$sudoers_tmp"
   chmod 0440 "$sudoers_tmp"
@@ -293,7 +388,7 @@ write_default_config() {
   db_path="$(configured_db_path)"
   if [[ ! -f "$ENV_FILE" ]]; then
     install -o root -g "$SERVICE_GROUP" -m 0640 /dev/null "$ENV_FILE"
-    printf 'DONATELLO_BIND=%s\nDONATELLO_DB=%s\n' "$DEFAULT_BIND" "$db_path" > "$ENV_FILE"
+    printf 'ARG_BIND=%s\nARG_DB=%s\n' "$DEFAULT_BIND" "$db_path" > "$ENV_FILE"
   fi
   chown root:"$SERVICE_GROUP" "$ENV_FILE"
   chmod 0640 "$ENV_FILE"
@@ -302,7 +397,7 @@ write_default_config() {
 configured_db_path() {
   local db_path=""
   if [[ -f "$ENV_FILE" ]]; then
-    db_path="$(awk -F= '$1 == "DONATELLO_DB" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
+    db_path="$(awk -F= '$1 == "ARG_DB" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE")"
   elif [[ -f "$DATA_DIR/.database-path" ]]; then
     db_path="$(<"$DATA_DIR/.database-path")"
   fi
@@ -314,6 +409,10 @@ configured_db_path() {
 take_database_ownership() {
   local db_path file
   db_path="$(configured_db_path)"
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR"
+  chown -R root:"$SERVICE_GROUP" "$ENV_DIR"
+  find "$ENV_DIR" -type d -exec chmod 0750 {} +
+  find "$ENV_DIR" -type f -exec chmod 0640 {} +
   for file in "$db_path" "$db_path-wal" "$db_path-shm"; do
     [[ -f "$file" ]] || continue
     chown "$SERVICE_USER:$SERVICE_GROUP" "$file"
@@ -323,7 +422,7 @@ take_database_ownership() {
 
 panel_port() {
   local bind
-  bind="$(awk -F= '$1 == "DONATELLO_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  bind="$(awk -F= '$1 == "ARG_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
   bind="${bind:-$DEFAULT_BIND}"
   printf '%s\n' "${bind##*:}"
 }
@@ -359,11 +458,11 @@ check_update_status() {
 write_bind_config() {
   local bind="$1" db_path temp
   db_path="$(configured_db_path)"
-  temp="$(mktemp /etc/donatello/.donatello.env.XXXXXX)"
+  temp="$(mktemp /etc/arg/.arg.env.XXXXXX)"
   if [[ -f "$ENV_FILE" ]]; then
-    awk -F= '$1 != "DONATELLO_BIND" && $1 != "DONATELLO_DB" { print }' "$ENV_FILE" > "$temp"
+    awk -F= '$1 != "ARG_BIND" && $1 != "ARG_DB" { print }' "$ENV_FILE" > "$temp"
   fi
-  printf 'DONATELLO_BIND=%s\nDONATELLO_DB=%s\n' "$bind" "$db_path" >> "$temp"
+  printf 'ARG_BIND=%s\nARG_DB=%s\n' "$bind" "$db_path" >> "$temp"
   chown root:"$SERVICE_GROUP" "$temp"
   chmod 0640 "$temp"
   mv -f "$temp" "$ENV_FILE"
@@ -371,7 +470,7 @@ write_bind_config() {
 
 ensure_public_bind() {
   local current port
-  current="$(awk -F= '$1 == "DONATELLO_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  current="$(awk -F= '$1 == "ARG_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
   [[ -n "$current" ]] || current="$DEFAULT_BIND"
   case "$current" in
     127.0.0.1:*|localhost:*)
@@ -414,7 +513,7 @@ ensure_certbot_renewal() {
   systemctl disable --now certbot.timer snap.certbot.renew.timer 2>/dev/null || true
   cat > "$CERTBOT_TIMER_SERVICE" <<UNIT
 [Unit]
-Description=Renew Donatello TLS certificate
+Description=Renew ARG TLS certificate
 
 [Service]
 Type=oneshot
@@ -422,7 +521,7 @@ ExecStart=$CERTBOT_BIN renew --quiet
 UNIT
   cat > "$CERTBOT_TIMER_UNIT" <<'UNIT'
 [Unit]
-Description=Twice-daily renewal check for Donatello certificates
+Description=Twice-daily renewal check for ARG certificates
 
 [Timer]
 OnCalendar=*-*-* 00,12:00:00
@@ -434,7 +533,7 @@ WantedBy=timers.target
 UNIT
   chmod 0644 "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
   systemctl daemon-reload
-  systemctl enable --now donatello-certbot-renew.timer
+  systemctl enable --now arg-certbot-renew.timer
 }
 
 restore_port80_service() {
@@ -484,7 +583,7 @@ available_tls_port() {
 
 set_env_value() {
   local name="$1" value="$2" temp
-  temp="$(mktemp /etc/donatello/.donatello.env.XXXXXX)"
+  temp="$(mktemp /etc/arg/.arg.env.XXXXXX)"
   if [[ -f "$ENV_FILE" ]]; then
     awk -F= -v name="$name" '$1 != name { print }' "$ENV_FILE" > "$temp"
   fi
@@ -496,20 +595,20 @@ set_env_value() {
 
 ensure_setup_token() {
   local current token
-  current="$(awk -F= '$1 == "DONATELLO_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  current="$(awk -F= '$1 == "ARG_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
   [[ -n "$current" ]] && return 0
   token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
   [[ "$token" =~ ^[0-9a-f]{64}$ ]] || die "Could not generate the one-time setup code."
-  set_env_value DONATELLO_SETUP_TOKEN "$token"
+  set_env_value ARG_SETUP_TOKEN "$token"
 }
 
 show_setup_code_if_needed() {
   local state code
   state="$(curl --connect-timeout 1 --max-time 2 -fsS "http://127.0.0.1:$(panel_port)/api/state" 2>/dev/null || true)"
   [[ "$state" == *'"installed":false'* ]] || return 0
-  code="$(awk -F= '$1 == "DONATELLO_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  code="$(awk -F= '$1 == "ARG_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
   if [[ -z "$code" ]] && has journalctl; then
-    code="$(journalctl -u "$SERVICE_NAME" -n 100 --no-pager 2>/dev/null | sed -n 's/.*DONATELLO_SETUP_CODE=//p' | tail -n 1)"
+    code="$(journalctl -u "$SERVICE_NAME" -n 100 --no-pager 2>/dev/null | sed -n 's/.*ARG_SETUP_CODE=//p' | tail -n 1)"
   fi
   [[ -n "$code" ]] || return 0
   say "FIRST ADMINISTRATOR SETUP"
@@ -519,20 +618,20 @@ show_setup_code_if_needed() {
 
 get_setup_code() {
   require_root setup-code
-  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Install it before requesting the setup code."
+  [[ -f "$SERVICE_FILE" ]] || die "ARG is not installed. Install it before requesting the setup code."
   local state code
   state="$(curl --connect-timeout 1 --max-time 2 -fsS "http://127.0.0.1:$(panel_port)/api/state" 2>/dev/null || true)"
-  [[ -n "$state" ]] || die "The panel is not responding. Check the service with 'sudo donatello status'."
+  [[ -n "$state" ]] || die "The panel is not responding. Check the service with 'sudo arg status'."
   if [[ "$state" != *'"installed":false'* ]]; then
     say "ADMINISTRATOR SETUP IS COMPLETE"
     info "A one-time setup code is no longer needed."
     return 0
   fi
-  code="$(awk -F= '$1 == "DONATELLO_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  code="$(awk -F= '$1 == "ARG_SETUP_TOKEN" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
   if [[ -z "$code" ]] && has journalctl; then
-    code="$(journalctl -u "$SERVICE_NAME" -n 100 --no-pager 2>/dev/null | sed -n 's/.*DONATELLO_SETUP_CODE=//p' | tail -n 1)"
+    code="$(journalctl -u "$SERVICE_NAME" -n 100 --no-pager 2>/dev/null | sed -n 's/.*ARG_SETUP_CODE=//p' | tail -n 1)"
   fi
-  [[ -n "$code" ]] || die "The setup code is unavailable. Run 'sudo donatello update' and request it again."
+  [[ -n "$code" ]] || die "The setup code is unavailable. Run 'sudo arg update' and request it again."
   say "FIRST ADMINISTRATOR SETUP"
   info "One-time setup code: $code"
   info "Enter this code on the HTTPS panel setup screen. Keep it private."
@@ -541,14 +640,14 @@ get_setup_code() {
 change_account_password() {
   require_root password
   require_systemd
-  [[ -f "$SERVICE_FILE" && -x "$BINARY" ]] || die "DONATELLO is not installed."
+  [[ -f "$SERVICE_FILE" && -x "$BINARY" ]] || die "ARG is not installed."
   local username new_password db_path
   read -r -p 'Account username: ' username </dev/tty
   [[ -n "$username" ]] || die "Username cannot be empty."
   IFS= read -r -s -p 'New password (at least 12 characters): ' new_password </dev/tty
   printf '\n'
   db_path="$(configured_db_path)"
-  if printf '%s\n' "$username" "$new_password" | DONATELLO_DB="$db_path" "$BINARY" change-password; then
+  if printf '%s\n' "$username" "$new_password" | ARG_DB="$db_path" "$BINARY" change-password; then
     unset new_password
   else
     unset new_password
@@ -564,13 +663,13 @@ sync_ufw_rules() {
   while IFS= read -r rule_id; do
     [[ -n "$rule_id" ]] || continue
     ufw --force delete "$rule_id" >/dev/null 2>&1 || true
-  done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO panel|# DONATELLO HTTPS challenge/ {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
-  ufw allow "$port/tcp" comment 'DONATELLO panel' >/dev/null
+  done < <(ufw status numbered 2>/dev/null | awk '/# ARG panel|# ARG HTTPS challenge|# DONATELLO panel|# DONATELLO HTTPS challenge/ {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
+  ufw allow "$port/tcp" comment 'ARG panel' >/dev/null
   if [[ -s "$DOMAIN_FILE" ]]; then
-    tls_bind="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    tls_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
     tls_port="${tls_bind##*:}"
-    ufw allow 80/tcp comment 'DONATELLO HTTPS challenge' >/dev/null
-    [[ -z "$tls_port" ]] || ufw allow "$tls_port/tcp" comment 'DONATELLO HTTPS panel' >/dev/null
+    ufw allow 80/tcp comment 'ARG HTTPS challenge' >/dev/null
+    [[ -z "$tls_port" ]] || ufw allow "$tls_port/tcp" comment 'ARG HTTPS panel' >/dev/null
   fi
 }
 
@@ -579,16 +678,16 @@ write_cert_deploy_hook() {
   cat > "$CERT_DEPLOY_HOOK" <<'HOOK'
 #!/bin/sh
 set -eu
-domain_file=/etc/donatello/https-domain
+domain_file=/etc/arg/https-domain
 [ -s "$domain_file" ] || exit 0
 domain=$(cat "$domain_file")
 case " ${RENEWED_DOMAINS:-} " in
   *" $domain "*) ;;
   *) exit 0 ;;
 esac
-install -o root -g donatello -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/donatello/tls/fullchain.pem
-install -o root -g donatello -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/donatello/tls/privkey.pem
-systemctl restart donatello.service
+install -o root -g arg -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/arg/tls/fullchain.pem
+install -o root -g arg -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/arg/tls/privkey.pem
+systemctl restart arg.service
 HOOK
   chmod 0755 "$CERT_DEPLOY_HOOK"
   chown root:root "$CERT_DEPLOY_HOOK"
@@ -638,7 +737,7 @@ issue_certificate() {
 configure_https() {
   require_root ssl
   require_systemd
-  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Install it before configuring HTTPS."
+  [[ -f "$SERVICE_FILE" ]] || die "ARG is not installed. Install it before configuring HTTPS."
 
   local address confirmed host email dns_matches port existing_domain port80_unit env_backup is_ip
   address="$(detect_public_ipv4 || true)"
@@ -658,7 +757,7 @@ configure_https() {
   existing_domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   if [[ -n "$existing_domain" ]]; then
     say "HTTPS is already configured for $existing_domain"
-    port="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    port="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
     port="${port##*:}"
     if [[ -n "$port" && "$port" != "443" ]]; then
       info "Panel URL: https://$existing_domain:$port"
@@ -698,7 +797,7 @@ configure_https() {
   [[ "$email" == *@*.* ]] || die "Enter a valid email address for the certificate."
   install_https_dependencies
   [[ "$is_ip" != "y" ]] || ensure_ip_certbot
-  port80_unit="$(port80_systemd_service)" || die "TCP port 80 is occupied by a process that cannot be safely paused as a systemd service. Stop it manually, then run 'sudo donatello ssl' again."
+  port80_unit="$(port80_systemd_service)" || die "TCP port 80 is occupied by a process that cannot be safely paused as a systemd service. Stop it manually, then run 'sudo arg ssl' again."
   if ! issue_certificate "$host" "$email" "$port80_unit" "$is_ip"; then
     rm -f "$CERT_DEPLOY_HOOK"
     warn "Certificate issuance failed. The panel remains available through localhost or an SSH tunnel."
@@ -710,15 +809,15 @@ configure_https() {
     rm -f "$CERT_DEPLOY_HOOK"
     die "No available HTTPS port was found (tried 443, 8443, 9443, and 10443)."
   }
-  env_backup="$(mktemp /etc/donatello/.donatello.env.backup.XXXXXX)"
+  env_backup="$(mktemp /etc/arg/.arg.env.backup.XXXXXX)"
   cp -p "$ENV_FILE" "$env_backup"
   copy_certificate_files "/etc/letsencrypt/live/$CERT_NAME"
   printf '%s\n' "$host" > "$DOMAIN_FILE"
   chown root:"$SERVICE_GROUP" "$DOMAIN_FILE"
   chmod 0640 "$DOMAIN_FILE"
-  set_env_value DONATELLO_TLS_CERT "$TLS_CERT"
-  set_env_value DONATELLO_TLS_KEY "$TLS_KEY"
-  set_env_value DONATELLO_TLS_BIND "0.0.0.0:$port"
+  set_env_value ARG_TLS_CERT "$TLS_CERT"
+  set_env_value ARG_TLS_KEY "$TLS_KEY"
+  set_env_value ARG_TLS_BIND "0.0.0.0:$port"
   sync_ufw_rules
   ensure_certbot_renewal
   if ! systemctl restart "$SERVICE_NAME" || ! wait_until_active || ! wait_for_https "$host" "$port"; then
@@ -761,14 +860,14 @@ show_access_summary() {
   address="${SERVER_PUBLIC_IP:-$(detect_public_ipv4 || true)}"
   domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   port="$(panel_port)"
-  say "DONATELLO IS READY"
+  say "ARG IS READY"
   if [[ -n "$address" ]]; then
     info "Server IP: $address"
   else
     info "Public IP was not confirmed. Use your server IP in the SSH command below."
   fi
   if [[ -n "$domain" ]]; then
-    tls_bind="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    tls_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
     tls_port="${tls_bind##*:}"
     [[ -n "$tls_port" && "$tls_port" != "443" ]] && domain="$domain:$tls_port"
     [[ -n "$tls_port" ]] || domain="$domain:443"
@@ -794,27 +893,27 @@ show_access_summary() {
       printf '  From your computer, run:\n  %sssh -N -L %s:127.0.0.1:%s <SSH_USER>@<SERVER_IP>%s\n' \
         "$C_GREEN" "$port" "$port" "$C_RESET"
     fi
-    info "Replace <SSH_USER> with your server login. For secure public sign-in, enable HTTPS: sudo donatello ssl"
+    info "Replace <SSH_USER> with your server login. For secure public sign-in, enable HTTPS: sudo arg ssl"
   fi
-  printf '\n  %sMANAGEMENT MENU%s\n  Run: %sdonatello%s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET"
-  info "From a non-root account, use: sudo donatello"
+  printf '\n  %sMANAGEMENT MENU%s\n  Run: %sarg%s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$C_RESET"
+  info "From a non-root account, use: sudo arg"
 }
 
 write_service_unit() {
   cat > "$SERVICE_FILE" <<'UNIT'
 [Unit]
-Description=Donatello VPS Management Panel
-Documentation=https://github.com/themrcortex/donatello
+Description=ARG VPS Management Panel
+Documentation=https://github.com/themrcortex/arg
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=donatello
-Group=donatello
-WorkingDirectory=/var/lib/donatello
-EnvironmentFile=/etc/donatello/donatello.env
-ExecStart=/usr/local/lib/donatello/donatello
+User=arg
+Group=arg
+WorkingDirectory=/var/lib/arg
+EnvironmentFile=/etc/arg/arg.env
+ExecStart=/usr/local/lib/arg/arg
 Restart=on-failure
 RestartSec=3
 UMask=0027
@@ -824,7 +923,7 @@ ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-ReadWritePaths=/var/lib/donatello
+ReadWritePaths=/var/lib/arg
 RestrictSUIDSGID=true
 LockPersonality=true
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID
@@ -841,17 +940,17 @@ UNIT
 write_privileged_service_unit() {
   cat > "$PRIVILEGED_SERVICE_FILE" <<'UNIT'
 [Unit]
-Description=Donatello restricted privileged operations
+Description=ARG restricted privileged operations
 After=local-fs.target
 
 [Service]
 Type=simple
 User=root
-Group=donatello
-RuntimeDirectory=donatello-privileged
+Group=arg
+RuntimeDirectory=arg-privileged
 RuntimeDirectoryMode=0770
 UMask=0007
-ExecStart=/usr/local/lib/donatello/donatello privileged-helper
+ExecStart=/usr/local/lib/arg/arg privileged-helper
 Restart=on-failure
 RestartSec=2
 PrivateTmp=true
@@ -868,17 +967,17 @@ UNIT
 }
 
 activate_binary() {
-  local built="$SOURCE_DIR/target/release/donatello"
+  local built="$SOURCE_DIR/target/release/arg"
   local staged
   install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
-  staged="$(mktemp /usr/local/lib/donatello/.donatello.XXXXXX)"
+  staged="$(mktemp /usr/local/lib/arg/.arg.XXXXXX)"
   install -o root -g root -m 0755 "$built" "$staged"
   mv -f "$staged" "$BINARY"
 }
 
 install_cli() {
   local staged
-  staged="$(mktemp /usr/local/bin/.donatello-cli.XXXXXX)"
+  staged="$(mktemp /usr/local/bin/.arg-cli.XXXXXX)"
   curl --proto '=https' --tlsv1.2 -fsSL "$INSTALL_SCRIPT_URL" -o "$staged"
   chmod 0755 "$staged"
   chown root:root "$staged"
@@ -889,6 +988,7 @@ install_cli() {
 install_app() {
   require_root install
   require_systemd
+  migrate_legacy_install
   install_os_dependencies
   ensure_rust
   ensure_firewall_dependency
@@ -903,7 +1003,7 @@ install_app() {
   take_database_ownership
   activate_binary
   write_privileged_service_unit
-  systemctl enable --now donatello-privileged.service
+  systemctl enable --now arg-privileged.service
   write_service_unit
   install_cli
   systemctl enable "$SERVICE_NAME"
@@ -917,8 +1017,9 @@ install_app() {
     journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
     die "The service is running but the web panel did not answer on 127.0.0.1:$(panel_port)."
   fi
-  say "DONATELLO is installed and running"
-  info "Service status: sudo donatello status"
+  cleanup_legacy_identity
+  say "ARG is installed and running"
+  info "Service status: sudo arg status"
   configure_https
   show_access_summary
   show_setup_code_if_needed
@@ -948,33 +1049,39 @@ wait_for_panel() {
 update_app() {
   require_root update
   require_systemd
-  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed. Run 'donatello install' first."
+  local was_installed=0
+  [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
+  (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
+  migrate_legacy_install
   ensure_setup_token
   ensure_public_bind
   ensure_firewall_dependency
   sync_ufw_rules
   prepare_source
   build_release
+  ensure_service_account
   configure_ufw_status
+  take_database_ownership
   local previous staged
-  previous="$(mktemp /var/tmp/donatello.previous.XXXXXX)"
+  previous="$(mktemp /var/tmp/arg.previous.XXXXXX)"
   install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
-  staged="$(mktemp /usr/local/lib/donatello/.donatello.XXXXXX)"
+  staged="$(mktemp /usr/local/lib/arg/.arg.XXXXXX)"
   if [[ -x "$BINARY" ]]; then
     cp -p "$BINARY" "$previous"
   else
     rm -f "$previous"
   fi
-  install -o root -g root -m 0755 "$SOURCE_DIR/target/release/donatello" "$staged"
+  install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$staged"
   mv -f "$staged" "$BINARY"
   write_privileged_service_unit
-  systemctl restart donatello-privileged.service
+  systemctl restart arg-privileged.service
   write_service_unit
   install_cli
   systemctl restart "$SERVICE_NAME"
   if wait_until_active; then
     rm -f "$previous"
-    say "DONATELLO was updated successfully"
+    cleanup_legacy_identity
+    say "ARG was updated successfully"
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
     show_setup_code_if_needed
     if (( MENU_ACTIVE )); then
@@ -997,13 +1104,13 @@ show_status() {
   if [[ -f "$SERVICE_FILE" ]]; then
     systemctl --no-pager --full status "$SERVICE_NAME" || true
   else
-    info "DONATELLO is not installed."
+    info "ARG is not installed."
   fi
 }
 
 change_port() {
   require_root manage
-  [[ -f "$ENV_FILE" ]] || die "Configuration was not found. DONATELLO is not installed."
+  [[ -f "$ENV_FILE" ]] || die "Configuration was not found. ARG is not installed."
   local port
   port="${1:-}"
   if [[ -z "$port" ]]; then read -r -p "New panel port (1024-65535): " port; fi
@@ -1029,7 +1136,7 @@ manage_app() {
     case "$2" in
       status) show_status ;;
       start|stop|restart)
-        [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed."
+        [[ -f "$SERVICE_FILE" ]] || die "ARG is not installed."
         systemctl "$2" "$SERVICE_NAME"
         ;;
       logs) journalctl -u "$SERVICE_NAME" -n "${3:-100}" --no-pager ;;
@@ -1048,7 +1155,7 @@ run_service_action() {
   local action="$1"
   require_root "$action"
   require_systemd
-  [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed."
+  [[ -f "$SERVICE_FILE" ]] || die "ARG is not installed."
   systemctl "$action" "$SERVICE_NAME"
 }
 
@@ -1064,7 +1171,7 @@ draw_menu_item() {
   local selected="$1" number="$2" title="$3" hint="$4"
   if [[ "$selected" == "$number" ]]; then
     printf '  %s❯%s %s%-2s%s  %-30s %s%s%s\n' \
-      "$C_PURPLE" "$C_RESET" "$C_BOLD" "$number" "$C_RESET" "$title" "$C_DIM" "$hint" "$C_RESET"
+      "$C_COPPER" "$C_RESET" "$C_BOLD" "$number" "$C_RESET" "$title" "$C_DIM" "$hint" "$C_RESET"
   else
     printf '    %s%-2s%s  %-30s %s%s%s\n' "$C_DIM" "$number" "$C_RESET" "$title" "$C_DIM" "$hint" "$C_RESET"
   fi
@@ -1083,7 +1190,7 @@ draw_control_center() {
   fi
   if [[ -s "$DOMAIN_FILE" ]]; then
     endpoint="https://$(<"$DOMAIN_FILE")"
-    tls_bind="$(awk -F= '$1 == "DONATELLO_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+    tls_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
     tls_port="${tls_bind##*:}"
     [[ -n "$tls_port" && "$tls_port" != "443" ]] && endpoint="$endpoint:$tls_port"
   elif [[ -f "$ENV_FILE" ]]; then
@@ -1097,7 +1204,7 @@ draw_control_center() {
   printf '\033[2J\033[H'
   show_wordmark
   printf '  %sVPS CONTROL CENTER%s\n' "$C_DIM" "$C_RESET"
-  printf '  %s────────────────────────────────────────────────────────────────────%s\n' "$C_PURPLE" "$C_RESET"
+  printf '  %s────────────────────────────────────────────────────────────────────%s\n' "$C_COPPER" "$C_RESET"
   printf '  Service  %s● %s%s\n' "$state_color" "$state" "$C_RESET"
   printf '  Panel    '
   if [[ "$endpoint" == http* ]]; then
@@ -1111,7 +1218,7 @@ draw_control_center() {
     'NOT INSTALLED') printf '  Update   %s● NOT INSTALLED%s\n' "$C_DIM" "$C_RESET" ;;
     *) printf '  Update   %s● CHECK FAILED%s\n' "$C_YELLOW" "$C_RESET" ;;
   esac
-  printf '  %s────────────────────────────────────────────────────────────────────%s\n\n' "$C_PURPLE" "$C_RESET"
+  printf '  %s────────────────────────────────────────────────────────────────────%s\n\n' "$C_COPPER" "$C_RESET"
 
   printf '  %sSETUP%s\n' "$C_CYAN" "$C_RESET"
   draw_menu_item "$selected" 1 'Install / repair' 'Build and configure the service'
@@ -1120,13 +1227,13 @@ draw_control_center() {
   draw_menu_item "$selected" 3 'Start service' 'Bring the panel online'
   draw_menu_item "$selected" 4 'Stop service' 'Stop the background service'
   draw_menu_item "$selected" 5 'Restart service' 'Restart after configuration changes'
-  draw_menu_item "$selected" 6 'View service logs' 'Inspect recent Donatello logs'
+  draw_menu_item "$selected" 6 'View service logs' 'Inspect recent ARG logs'
   draw_menu_item "$selected" 7 'Change panel port' 'Update the public listening port'
   printf '\n  %sSECURITY & MAINTENANCE%s\n' "$C_CYAN" "$C_RESET"
   draw_menu_item "$selected" 8 'Configure HTTPS / SSL' 'Get a certificate and enable Rust TLS'
-  draw_menu_item "$selected" 9 'Update Donatello' 'Fetch and install the latest version'
-  draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove Donatello and retain its data'
-  draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove Donatello and all its data'
+  draw_menu_item "$selected" 9 'Update ARG' 'Fetch and install the latest version'
+  draw_menu_item "$selected" 10 'Uninstall, keep database' 'Remove ARG and retain its data'
+  draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove ARG and all its data'
   draw_menu_item "$selected" 12 'Get one-time setup code' 'Display the first-admin code'
   draw_menu_item "$selected" 13 'Reset account password' 'Root reset; no old password needed'
   printf '\n  Type option%s%s%s then %sEnter%s   %s↑%s / %s↓%s move   %sq%s quit' \
@@ -1259,18 +1366,18 @@ delete_app() {
   local keep_database="n" db_path entry answer domain
   if [[ "$purge" == "--purge" ]]; then
     warn "This removes the service, installer, source, configuration, and database."
-    read_answer 'Type PURGE DONATELLO to confirm: ' confirmation
-    [[ "$confirmation" == "PURGE DONATELLO" ]] || die "Purge cancelled."
+    read_answer 'Type PURGE ARG to confirm: ' confirmation
+    [[ "$confirmation" == "PURGE ARG" ]] || die "Purge cancelled."
   else
-    warn "DONATELLO services, binaries, source, system account, and configuration will be removed."
+    warn "ARG services, binaries, source, system account, and configuration will be removed."
     read_answer 'Keep the database for the next installation? [Y/n]: ' answer 'y'
     case "${answer,,}" in
       n|no) keep_database="n" ;;
       y|yes) keep_database="y" ;;
       *) die "Choose Y to keep the database or N to remove it." ;;
     esac
-    read_answer 'Type DELETE DONATELLO to confirm: ' confirmation
-    [[ "$confirmation" == "DELETE DONATELLO" ]] || die "Uninstall cancelled."
+    read_answer 'Type DELETE ARG to confirm: ' confirmation
+    [[ "$confirmation" == "DELETE ARG" ]] || die "Uninstall cancelled."
   fi
   db_path="$(configured_db_path)"
   domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
@@ -1280,14 +1387,14 @@ delete_app() {
     chmod 0600 "$DATA_DIR/.database-path"
   fi
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-  systemctl disable --now donatello-privileged.service 2>/dev/null || true
+  systemctl disable --now arg-privileged.service 2>/dev/null || true
   if has ufw && ufw status 2>/dev/null | rg -q '^Status: active'; then
     while IFS= read -r rule_id; do
       [[ -n "$rule_id" ]] || continue
       ufw --force delete "$rule_id" >/dev/null 2>&1 || true
-    done < <(ufw status numbered 2>/dev/null | awk '/# DONATELLO / {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
+    done < <(ufw status numbered 2>/dev/null | awk '/# ARG / || /# DONATELLO / {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
   fi
-  systemctl disable --now donatello-certbot-renew.timer 2>/dev/null || true
+  systemctl disable --now arg-certbot-renew.timer 2>/dev/null || true
   rm -f "$CERTBOT_TIMER_SERVICE" "$CERTBOT_TIMER_UNIT"
   rm -f "$SERVICE_FILE" "$PRIVILEGED_SERVICE_FILE" "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$SUDOERS_FILE" "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER"
   if [[ -n "$domain" ]]; then
@@ -1305,7 +1412,7 @@ delete_app() {
       nginx -t >/dev/null 2>&1 && systemctl reload nginx 2>/dev/null || true
     fi
   fi
-  rmdir /usr/local/lib/donatello 2>/dev/null || true
+  rmdir /usr/local/lib/arg 2>/dev/null || true
   rm -rf "$SOURCE_DIR"
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   rm -rf "$ENV_DIR"
@@ -1316,9 +1423,9 @@ delete_app() {
   if [[ "$purge" == "--purge" || "$keep_database" != "y" ]]; then
     rm -rf "$DATA_DIR"
     if [[ "$purge" == "--purge" ]]; then
-      say "DONATELLO and all application data have been removed."
+      say "ARG and all application data have been removed."
     else
-      say "DONATELLO has been uninstalled and its database was removed."
+      say "ARG has been uninstalled and its database was removed."
     fi
   else
     for entry in "$DATA_DIR"/* "$DATA_DIR"/.[!.]* "$DATA_DIR"/..?*; do
@@ -1334,28 +1441,28 @@ delete_app() {
     done
     chown root:root "$DATA_DIR"
     chmod 0750 "$DATA_DIR"
-    say "DONATELLO has been uninstalled. The database is kept for the next installation."
+    say "ARG has been uninstalled. The database is kept for the next installation."
     info "Retained database: $db_path"
   fi
 }
 
 usage() {
   cat <<'HELP'
-DONATELLO · Installer and System Service Manager
+ARG · Installer and System Service Manager
 
 Usage:
-  sudo donatello                  Open the interactive control center
-  sudo donatello menu             Open the interactive control center
+  sudo arg                  Open the interactive control center
+  sudo arg menu             Open the interactive control center
   sudo bash install.sh             Open the interactive installer menu
-  sudo bash install.sh install     Install DONATELLO
-  sudo donatello manage [status|start|stop|restart|logs|port|ssl|update|delete]
-  sudo donatello ssl
-  sudo donatello update
-  sudo donatello password
-  sudo donatello delete [--purge]
+  sudo bash install.sh install     Install ARG
+  sudo arg manage [status|start|stop|restart|logs|port|ssl|update|delete]
+  sudo arg ssl
+  sudo arg update
+  sudo arg password
+  sudo arg delete [--purge]
 
 Commands:
-  install          Build Donatello and install its systemd service
+  install          Build ARG and install its systemd service
   manage           Open the interactive control center
   status           Show service status
   start|stop       Start or stop the systemd service
@@ -1383,7 +1490,7 @@ case "${1:-menu}" in
   start|stop|restart)
     require_root "$1"
     require_systemd
-    [[ -f "$SERVICE_FILE" ]] || die "DONATELLO is not installed."
+    [[ -f "$SERVICE_FILE" ]] || die "ARG is not installed."
     systemctl "$1" "$SERVICE_NAME"
     ;;
   logs)

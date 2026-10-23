@@ -24,6 +24,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "arg"
+version = "0.4.0"
+dependencies = [
+ "argon2",
+ "axum",
+ "axum-server",
+ "hex",
+ "if-addrs",
+ "libc",
+ "mime_guess",
+ "rand",
+ "rusqlite",
+ "rust-embed",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,27 +266,6 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid",
  "crypto-common 0.2.2",
-]
-
-[[package]]
-name = "donatello"
-version = "0.3.0"
-dependencies = [
- "argon2",
- "axum",
- "axum-server",
- "hex",
- "if-addrs",
- "libc",
- "mime_guess",
- "rand",
- "rusqlite",
- "rust-embed",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tokio",
 ]
 
 [[package]]

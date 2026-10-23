@@ -50,7 +50,7 @@
     --arg-muted: #93a0aa;
     --arg-viz-cpu: #53c992;
     --arg-viz-memory: #dda46f;
-    --arg-viz-disk: #a18acf;
+    --arg-viz-disk: #49b8a8;
     --arg-viz-rx: #69acde;
     --arg-viz-tx: #e3b15d;
     --background: 214 35% 7%;
@@ -204,7 +204,7 @@
 .arg-kpi-track { background: var(--arg-border); }
 .arg-kpi-fill { background: var(--arg-accent); transition: width .2s ease; }
 .arg-kpi[data-tone="green"] .arg-kpi-fill { background: var(--arg-viz-cpu); }
-.arg-kpi[data-tone="purple"] .arg-kpi-fill { background: var(--arg-viz-disk); }
+.arg-kpi[data-tone="teal"] .arg-kpi-fill { background: var(--arg-viz-disk); }
 .arg-kpi[data-tone="blue"] .arg-kpi-fill { background: var(--arg-viz-rx); }
 .arg-range [aria-pressed="true"] { color: var(--arg-accent); background: rgba(221,164,111,.13); }
 .arg-range [aria-pressed="false"] { color: var(--arg-muted); }

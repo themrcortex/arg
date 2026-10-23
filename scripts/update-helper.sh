@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly source_dir="/opt/donatello/source"
-readonly repository="https://github.com/themrcortex/donatello.git"
+readonly source_dir="/opt/arg/source"
+readonly repository="https://github.com/themrcortex/arg.git"
 readonly branch="main"
 
 case "${1:-}" in
@@ -14,7 +14,7 @@ case "${1:-}" in
     printf '%s %s\n' "$local_rev" "$remote_rev"
     ;;
   run)
-    exec systemd-run --quiet --collect --unit="donatello-web-update-$$" --on-active=2s /usr/local/bin/donatello update
+    exec systemd-run --quiet --collect --unit="arg-web-update-$$" --on-active=2s /usr/local/bin/arg update
     ;;
   *) exit 2 ;;
 esac

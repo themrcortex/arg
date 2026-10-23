@@ -16,16 +16,16 @@ if [[ $# -eq 1 ]]; then
       [[ -n "$ssh_ports" ]] || ssh_ports=22
       while IFS= read -r ssh_port; do
         [[ "$ssh_port" =~ ^[0-9]+$ ]] || exit 4
-        "$ufw_bin" allow "$ssh_port/tcp" comment 'DONATELLO SSH access' >/dev/null
+        "$ufw_bin" allow "$ssh_port/tcp" comment 'ARG SSH access' >/dev/null
       done <<< "$ssh_ports"
-      panel_bind="$(sed -n 's/^DONATELLO_BIND=//p' /etc/donatello/donatello.env | tail -1)"
+      panel_bind="$(sed -n 's/^ARG_BIND=//p' /etc/arg/arg.env | tail -1)"
       [[ "${panel_bind##*:}" =~ ^[0-9]+$ ]] || exit 4
-      "$ufw_bin" allow "${panel_bind##*:}/tcp" comment 'DONATELLO panel' >/dev/null
-      tls_bind="$(sed -n 's/^DONATELLO_TLS_BIND=//p' /etc/donatello/donatello.env | tail -1)"
+      "$ufw_bin" allow "${panel_bind##*:}/tcp" comment 'ARG panel' >/dev/null
+      tls_bind="$(sed -n 's/^ARG_TLS_BIND=//p' /etc/arg/arg.env | tail -1)"
       if [[ -n "$tls_bind" ]]; then
         [[ "${tls_bind##*:}" =~ ^[0-9]+$ ]] || exit 4
-        "$ufw_bin" allow "${tls_bind##*:}/tcp" comment 'DONATELLO HTTPS panel' >/dev/null
-        "$ufw_bin" allow 80/tcp comment 'DONATELLO HTTPS challenge' >/dev/null
+        "$ufw_bin" allow "${tls_bind##*:}/tcp" comment 'ARG HTTPS panel' >/dev/null
+        "$ufw_bin" allow 80/tcp comment 'ARG HTTPS challenge' >/dev/null
       fi
       "$ufw_bin" --force enable
       ;;
@@ -45,20 +45,20 @@ policy="$4"
 port="$((10#$port))"
 # Management of access-critical ports stays with the installer and server administrator.
 case "$port" in 22|80|443|8282|8443) exit 4 ;; esac
-if [[ -f /etc/donatello/donatello.env ]]; then
-  bind="$(sed -n 's/^DONATELLO_BIND=//p' /etc/donatello/donatello.env | tail -1)"
+if [[ -f /etc/arg/arg.env ]]; then
+  bind="$(sed -n 's/^ARG_BIND=//p' /etc/arg/arg.env | tail -1)"
   [[ "$port" != "${bind##*:}" ]] || exit 4
-  tls_bind="$(sed -n 's/^DONATELLO_TLS_BIND=//p' /etc/donatello/donatello.env | tail -1)"
+  tls_bind="$(sed -n 's/^ARG_TLS_BIND=//p' /etc/arg/arg.env | tail -1)"
   [[ -z "$tls_bind" || "$port" != "${tls_bind##*:}" ]] || exit 4
 fi
 ufw_bin="$(command -v ufw)"
 [[ -n "$ufw_bin" ]] || exit 3
 if [[ "$action" == add ]]; then
-  "$ufw_bin" "$policy" "$port/$protocol" comment 'DONATELLO WEB'
+  "$ufw_bin" "$policy" "$port/$protocol" comment 'ARG WEB'
 elif [[ "$action" == remove ]]; then
   found=0
   while IFS= read -r line; do
-    if [[ "$line" == *'# DONATELLO WEB'* && "$line" =~ ^[[:space:]]*\[[[:space:]]*([0-9]+)\] ]]; then
+    if [[ "$line" == *'# ARG WEB'* || "$line" == *'# DONATELLO WEB'* ]] && [[ "$line" =~ ^[[:space:]]*\[[[:space:]]*([0-9]+)\] ]]; then
       rule_id="${BASH_REMATCH[1]}"
       if [[ "$line" =~ (^|[[:space:]])${port}/${protocol}([[:space:]]|$) && "$line" == *" ${policy^^} "* ]]; then
         "$ufw_bin" --force delete "$rule_id" >/dev/null

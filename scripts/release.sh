@@ -30,4 +30,4 @@ awk -v heading="## $tag " 'index($0, heading) == 1 { found=1; next } found && /^
   exit 1
 }
 
-gh release create "$tag" --title "Donatello $tag" --notes-file "$notes" --target "$(git rev-parse HEAD)" install.sh --latest
+gh release create "$tag" --title "ARG $tag" --notes-file "$notes" --target "$(git rev-parse HEAD)" install.sh --latest
