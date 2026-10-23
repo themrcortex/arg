@@ -1703,6 +1703,8 @@ async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap
 #[derive(Deserialize)]
 struct NginxSiteContentInput {
     content: String,
+    #[serde(default)]
+    settings: Option<Value>,
 }
 #[derive(Deserialize)]
 struct NginxSiteEnabledInput {
@@ -1716,6 +1718,19 @@ struct NginxActionInput {
 struct NginxCreateSiteInput {
     name: String,
     content: String,
+    #[serde(default)]
+    settings: Option<Value>,
+}
+#[derive(Deserialize)]
+struct NginxSiteSyncInput { source: String }
+
+fn nginx_content_hash(content: &str) -> String {
+    hex::encode(Sha256::digest(content.as_bytes()))
+}
+
+fn store_nginx_snapshot(db: &Connection, name: &str, content: &str, settings: Option<&Value>) -> Result<(), rusqlite::Error> {
+    db.execute("INSERT INTO nginx_site_config_state(name,content,settings_json,content_hash,updated_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(name) DO UPDATE SET content=excluded.content,settings_json=excluded.settings_json,content_hash=excluded.content_hash,updated_at=excluded.updated_at", params![name, content, settings.map(Value::to_string), nginx_content_hash(content), now()])?;
+    Ok(())
 }
 #[derive(Deserialize)]
 struct NginxSiteRenameInput {
@@ -1761,9 +1776,25 @@ async fn nginx_sites(State(state): State<AppState>, headers: HeaderMap) -> ApiRe
     let db = state.lock().unwrap();
     if let Some(sites) = result["sites"].as_array_mut() {
         for site in sites {
-            if let Some(name) = site["name"].as_str() {
-                let description = db.query_row("SELECT description FROM nginx_site_metadata WHERE name=?1", [name], |row| row.get::<_, String>(0)).unwrap_or_default();
+            if let Some(name) = site["name"].as_str().map(str::to_owned) {
+                let description = db.query_row("SELECT description FROM nginx_site_metadata WHERE name=?1", [&name], |row| row.get::<_, String>(0)).unwrap_or_default();
                 site["description"] = json!(description);
+                let file_hash = site["content_hash"].as_str().unwrap_or_default();
+                let snapshot: Option<(String,String)> = db.query_row("SELECT content_hash,content FROM nginx_site_config_state WHERE name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?))).ok();
+                if let Some((hash,db_content)) = snapshot {
+                    let mismatch = hash != file_hash;
+                    site["sync_mismatch"] = json!(mismatch);
+                    if mismatch {
+                        let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+                        site["db_content"] = json!(db_content);
+                        site["content"] = current["content"].clone();
+                    }
+                } else {
+                    let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+                    let content = current["content"].as_str().unwrap_or_default();
+                    store_nginx_snapshot(&db, &name, content, None).map_err(db_error)?;
+                    site["sync_mismatch"] = json!(false);
+                }
             }
         }
     }
@@ -1827,6 +1858,7 @@ async fn create_nginx_site(
     let result = nginx_manager_request(json!({"action":"nginx-create", "name":input.name, "content":input.content}))?;
     let db = state.lock().unwrap();
     db.execute("INSERT OR IGNORE INTO nginx_site_metadata(name,description) VALUES (?1,'')", [&input.name]).map_err(db_error)?;
+    store_nginx_snapshot(&db, &input.name, &input.content, input.settings.as_ref()).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.create", &input.name);
     Ok(Json(result))
 }
@@ -1845,6 +1877,7 @@ async fn delete_nginx_site(
     let result = nginx_manager_request(json!({"action":"nginx-delete", "name":name}))?;
     let db = state.lock().unwrap();
     db.execute("DELETE FROM nginx_site_metadata WHERE name=?1", [&name]).map_err(db_error)?;
+    db.execute("DELETE FROM nginx_site_config_state WHERE name=?1", [&name]).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.delete", &name);
     Ok(Json(result))
 }
@@ -1868,6 +1901,7 @@ async fn rename_nginx_site(
     let old_description = db.query_row("SELECT description FROM nginx_site_metadata WHERE name=?1", [&name], |row| row.get::<_, String>(0)).unwrap_or_default();
     db.execute("DELETE FROM nginx_site_metadata WHERE name=?1", [&name]).map_err(db_error)?;
     db.execute("INSERT OR REPLACE INTO nginx_site_metadata(name,description) VALUES (?1,?2)", params![input.new_name, old_description]).map_err(db_error)?;
+    db.execute("UPDATE nginx_site_config_state SET name=?2 WHERE name=?1", params![name,input.new_name]).map_err(db_error)?;
     result["description"] = json!(old_description);
     audit(&db, &actor, "nginx.site.rename", &format!("{name} -> {}", input.new_name));
     Ok(Json(result))
@@ -1956,7 +1990,21 @@ async fn get_nginx_site(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    let result = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+    let mut result = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+    let db = state.lock().unwrap();
+    let content = result["content"].as_str().unwrap_or_default().to_owned();
+    let snapshot: Option<(String, Option<String>, String)> = db.query_row("SELECT content,settings_json,content_hash FROM nginx_site_config_state WHERE name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).ok();
+    if let Some((db_content, settings, db_hash)) = snapshot {
+        let mismatch = db_hash != nginx_content_hash(&content);
+        result["sync_mismatch"] = json!(mismatch);
+        result["db_content"] = json!(db_content);
+        result["settings"] = settings.and_then(|value| serde_json::from_str::<Value>(&value).ok()).unwrap_or(Value::Null);
+    } else {
+        store_nginx_snapshot(&db, &name, &content, None).map_err(db_error)?;
+        result["sync_mismatch"] = json!(false);
+        result["db_content"] = json!(content);
+        result["settings"] = Value::Null;
+    }
     Ok(Json(result))
 }
 
@@ -1983,8 +2031,34 @@ async fn save_nginx_site(
     let result =
         nginx_manager_request(json!({"action":"nginx-save","name":name,"content":input.content}))?;
     let db = state.lock().unwrap();
+    store_nginx_snapshot(&db, &name, &input.content, input.settings.as_ref()).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.edit", &format!("site={name}"));
     Ok(Json(result))
+}
+
+async fn sync_nginx_site(
+    State(state): State<AppState>, Path(name): Path<String>, headers: HeaderMap,
+    Json(input): Json<NginxSiteSyncInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = { let db=state.lock().unwrap(); require_admin(&db,&headers)?.username };
+    if !valid_nginx_site_name(&name) || !["database","file"].contains(&input.source.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST,"منبع همگام‌سازی معتبر نیست."));
+    }
+    let db = state.lock().unwrap();
+    if input.source == "database" {
+        let (content, settings): (String, Option<String>) = db.query_row("SELECT content,settings_json FROM nginx_site_config_state WHERE name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| error(StatusCode::CONFLICT,"نسخه‌ای در دیتابیس برای این سایت ذخیره نشده است."))?;
+        nginx_manager_request(json!({"action":"nginx-save","name":name,"content":content}))?;
+        let parsed = settings.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        store_nginx_snapshot(&db,&name,&content,parsed.as_ref()).map_err(db_error)?;
+    } else {
+        nginx_manager_request(json!({"action":"nginx-test"}))?;
+        let file = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+        let content=file["content"].as_str().unwrap_or_default();
+        store_nginx_snapshot(&db,&name,content,None).map_err(db_error)?;
+    }
+    audit(&db,&actor,"nginx.site.sync",&format!("site={name} source={}",input.source));
+    Ok(Json(json!({"ok":true,"source":input.source,"message":"همگام‌سازی انجام شد. کانفیگ Nginx نیز اعتبارسنجی شد."})))
 }
 
 async fn toggle_nginx_site(
@@ -2204,7 +2278,9 @@ fn nginx_list_sites() -> Result<Value, String> {
             continue;
         }
         let enabled = nginx_site_enabled(&name)?;
-        sites.push(json!({"name":name,"enabled":enabled,"bytes":metadata.len()}));
+        let content=fs::read_to_string(&entry.path()).map_err(|error| error.to_string())?;
+        let content_hash=hex::encode(Sha256::digest(content.as_bytes()));
+        sites.push(json!({"name":name,"enabled":enabled,"bytes":metadata.len(),"content_hash":content_hash}));
     }
     sites.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
     Ok(json!(sites))
@@ -2728,7 +2804,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT '');")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL);")?;
     let has_users = initialized(&db);
     let configured_setup_token = env::var("ARG_SETUP_TOKEN")
         .ok()
@@ -2779,6 +2855,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/nginx/sites/{name}/rename", post(rename_nginx_site))
         .route("/api/nginx/sites/{name}/metadata", put(update_nginx_site_metadata))
         .route("/api/nginx/sites/{name}/logs", post(api_nginx_site_logs))
+        .route("/api/nginx/sites/{name}/sync", post(sync_nginx_site))
         .route("/api/nginx/domains/check", get(check_nginx_domains))
         .route("/api/nginx/status", get(nginx_status))
         .route("/api/nginx/files", get(api_nginx_browse_files))

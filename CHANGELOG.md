@@ -1,5 +1,13 @@
 # ARG Change Log
 
+## v0.4.9 — 2026-10-23
+
+### Added
+- Added persistent per-site Nginx configuration snapshots and visual builder settings in the database, with SHA-256 drift checks against files on each refresh.
+- Added an explicit reconciliation dialog to apply the database version to the Nginx file or import the current file into the database; Nginx validation runs before database-to-file sync.
+- Expanded visual site creation and editing with request size and timeout controls, dedicated access/error logs, server-token and security-header toggles, and inline help tooltips.
+- Added per-context manual Nginx directives for HTTP, server, default location, and TLS, with saved builder settings restored when reopening managed sites.
+
 ## v0.4.8 — 2026-10-23
 
 ### Changed
