@@ -18,8 +18,11 @@ import {
   Play,
   Square,
   RotateCw,
-  FilePlus,
   Terminal,
+  FolderOpen,
+  ChevronUp,
+  Sparkles,
+  Code2,
   Search,
   Save,
   Trash2,
@@ -564,6 +567,10 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
 
 type NginxSite = { name: string; enabled: boolean; bytes?: number; content?: string; message?: string }
 type NginxStatus = { installed: boolean; active: boolean; enabled: boolean; version: string; config_test: { ok: boolean; output: string } }
+type NginxPreset = 'static' | 'proxy' | 'php' | 'redirect'
+type NginxBuilder = { preset: NginxPreset; domain: string; listen: string; root: string; index: string; proxyPass: string; phpSocket: string; redirectTo: string; ssl: boolean; certificate: string; certificateKey: string; gzip: boolean; maxBody: string }
+type NginxFileEntry = { name: string; path: string; directory: boolean; selectable: boolean }
+type NginxFileListing = { path: string; roots: string[]; entries: NginxFileEntry[] }
 export function NginxPage({ Heading, notify }: Common) {
   const [sites, setSites] = useState<NginxSite[]>([])
   const [status, setStatus] = useState<NginxStatus | null>(null)
@@ -578,6 +585,15 @@ export function NginxPage({ Heading, notify }: Common) {
   const [newContent, setNewContent] = useState('server {\n    listen 80;\n    listen [::]:80;\n    server_name example.com;\n\n    root /var/www/example.com;\n    index index.html;\n\n    location / {\n        try_files $uri $uri/ =404;\n    }\n}\n')
   const [logsOpen, setLogsOpen] = useState(false)
   const [logs, setLogs] = useState('')
+  const [builderOpen, setBuilderOpen] = useState(false)
+  const [builderTarget, setBuilderTarget] = useState<'create' | 'edit'>('create')
+  const [builder, setBuilder] = useState<NginxBuilder>({ preset: 'static', domain: 'example.com', listen: '80', root: '/var/www/example.com', index: 'index.html', proxyPass: 'http://127.0.0.1:3000', phpSocket: 'unix:/run/php/php8.2-fpm.sock', redirectTo: 'https://example.com$request_uri', ssl: false, certificate: '', certificateKey: '', gzip: true, maxBody: '32m' })
+  const [extraDirectives, setExtraDirectives] = useState<Array<{ name: string; value: string }>>([])
+  const [extraLocations, setExtraLocations] = useState<Array<{ path: string; config: string }>>([])
+  const [filePickerOpen, setFilePickerOpen] = useState(false)
+  const [filePickerFor, setFilePickerFor] = useState<'certificate' | 'certificateKey'>('certificate')
+  const [fileListing, setFileListing] = useState<NginxFileListing | null>(null)
+  const [fileLoading, setFileLoading] = useState(false)
 
   const refresh = useCallback(async () => {
     const [serviceResult, sitesResult] = await Promise.allSettled([
@@ -618,6 +634,69 @@ export function NginxPage({ Heading, notify }: Common) {
       setCreateOpen(false); setNewName(''); notify(result.message || 'فایل سایت ساخته شد.'); await refresh()
     } catch (error) { notify(error instanceof Error ? error.message : 'ساخت سایت ناموفق بود.') }
     finally { setBusy(false) }
+  }
+
+  function openBuilder(target: 'create' | 'edit') {
+    setBuilderTarget(target)
+    if (target === 'create') {
+      const initialName = newName.trim() || 'example.com'
+      setBuilder((old) => ({ ...old, domain: initialName, root: `/var/www/${initialName.split(/\s+/)[0]}` }))
+    } else {
+      const directive = (key: string) => content.match(new RegExp(`^\\s*${key}\\s+([^;]+);`, 'm'))?.[1]?.trim()
+      const domain = directive('server_name') || editing || 'example.com'
+      const listens = [...content.matchAll(/^\s*listen\s+([^;]+);/gm)].map((match) => match[1].trim())
+      const proxy = directive('proxy_pass')
+      const php = directive('fastcgi_pass')
+      const redirect = content.match(/^\s*return\s+301\s+([^;]+);/m)?.[1]?.trim()
+      setBuilder((old) => ({ ...old, preset: redirect ? 'redirect' : php ? 'php' : proxy ? 'proxy' : 'static', domain, listen: listens.find((value) => !value.startsWith('443'))?.split(/\s+/)[0] || '80', root: directive('root') || old.root, index: directive('index') || old.index, proxyPass: proxy || old.proxyPass, phpSocket: php || old.phpSocket, redirectTo: redirect || old.redirectTo, ssl: /listen\s+443\s+ssl/.test(content), certificate: directive('ssl_certificate') || '', certificateKey: directive('ssl_certificate_key') || '', gzip: /gzip\s+on\s*;/.test(content), maxBody: directive('client_max_body_size') || '' }))
+    }
+    setExtraDirectives([]); setExtraLocations([])
+    setFilePickerOpen(false)
+    setBuilderOpen(true)
+  }
+
+  function generatedConfig() {
+    const serverName = builder.domain.trim() || '_'
+    const custom = extraDirectives.filter((item) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(item.name.trim()) && item.value.trim() && !/[;{}\r\n]/.test(item.value)).map((item) => `    ${item.name.trim()} ${item.value.trim()};`).join('\n')
+    const locations = extraLocations.filter((item) => item.path.trim() && item.config.trim()).map((item) => `    location ${item.path.trim()} {\n${item.config.split('\n').map((line) => `        ${line}`).join('\n')}\n    }`).join('\n\n')
+    const common = [builder.gzip ? '    gzip on;' : '', builder.maxBody.trim() ? `    client_max_body_size ${builder.maxBody.trim()};` : '', custom].filter(Boolean).join('\n')
+    if (builder.preset === 'redirect') {
+      const destination = builder.redirectTo.trim() || 'https://$host$request_uri'
+      if (builder.ssl) return `server {\n    listen ${builder.listen.trim() || '80'};\n    server_name ${serverName};\n    return 301 https://$host$request_uri;\n}\n\nserver {\n    listen 443 ssl;\n    server_name ${serverName};\n    ssl_certificate ${builder.certificate.trim()};\n    ssl_certificate_key ${builder.certificateKey.trim()};\n    ssl_protocols TLSv1.2 TLSv1.3;\n    return 301 ${destination};\n}\n`
+      return `server {\n    listen ${builder.listen.trim() || '80'};\n    server_name ${serverName};\n    return 301 ${destination};\n}\n`
+    }
+    let handler = ''
+    if (builder.preset === 'proxy') handler = `    location / {\n        proxy_pass ${builder.proxyPass.trim()};\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n    }`
+    else if (builder.preset === 'php') handler = `    location / {\n        try_files $uri $uri/ /index.php?$query_string;\n    }\n\n    location ~ \\.php$ {\n        include snippets/fastcgi-php.conf;\n        fastcgi_pass ${builder.phpSocket.trim()};\n    }\n\n    location ~ /\\.ht {\n        deny all;\n    }`
+    else handler = `    location / {\n        try_files $uri $uri/ =404;\n    }`
+    const tls = builder.ssl ? `    listen 443 ssl;\n    ssl_certificate ${builder.certificate.trim()};\n    ssl_certificate_key ${builder.certificateKey.trim()};\n    ssl_protocols TLSv1.2 TLSv1.3;\n` : ''
+    const root = builder.preset === 'proxy' ? '' : `    root ${builder.root.trim()};\n    index ${builder.index.trim() || 'index.html'};\n`
+    return `server {\n    listen ${builder.listen.trim() || '80'};\n${tls}    server_name ${serverName};\n${root}${common ? `${common}\n` : ''}\n${handler}${locations ? `\n\n${locations}` : ''}\n}\n`
+  }
+
+  async function browseFiles(path?: string) {
+    setFileLoading(true)
+    try {
+      const query = path ? `?path=${encodeURIComponent(path)}` : ''
+      setFileListing(await api<NginxFileListing>(`nginx/files${query}`))
+    } catch (error) { notify(error instanceof Error ? error.message : 'خواندن فایل‌ها ناموفق بود.') }
+    finally { setFileLoading(false) }
+  }
+
+  function openFilePicker(target: 'certificate' | 'certificateKey') {
+    setFilePickerFor(target); setFileListing(null); setFilePickerOpen(true); void browseFiles()
+  }
+
+  function applyBuilder() {
+    const config = generatedConfig()
+    if (builderTarget === 'edit') setContent(config)
+    else {
+      setNewContent(config)
+      setNewName((builder.domain.trim().split(/\s+/)[0] || 'site').replace(/[^a-zA-Z0-9._-]/g, ''))
+    }
+    setBuilderOpen(false); setFilePickerOpen(false)
+    if (builderTarget === 'edit') setEditorOpen(true)
+    else setCreateOpen(true)
   }
 
   async function deleteSite(site: NginxSite) {
@@ -664,7 +743,7 @@ export function NginxPage({ Heading, notify }: Common) {
 
   const enabledCount = sites.filter((site) => site.enabled).length
   return <>
-    <Heading title="مدیریت کامل Nginx" description="نصب و کنترل سرویس، اعتبارسنجی پیکربندی، لاگ‌ها و مدیریت سایت‌ها را از همین صفحه انجام بده." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy || loading} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/> تازه‌سازی</Button>{status?.installed && <Button size="sm" disabled={busy} onClick={() => setCreateOpen(true)}><FilePlus size={15}/> سایت جدید</Button>}</div>}/>
+    <Heading title="مدیریت کامل Nginx" description="نصب و کنترل سرویس، اعتبارسنجی پیکربندی، لاگ‌ها و مدیریت سایت‌ها را از همین صفحه انجام بده." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy || loading} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/> تازه‌سازی</Button>{status?.installed && <Button size="sm" disabled={busy} onClick={() => openBuilder('create')}><Sparkles size={15}/> سایت جدید</Button>}</div>}/>
     <SectionCard title="سرویس Nginx" description="وضعیت سرویس، اجرای دستورهای مدیریتی و اعتبارسنجی پیکربندی" right={status?.installed ? <Badge variant={status.active ? 'success' : 'warning'}>{status.active ? 'فعال' : 'متوقف'}</Badge> : <Badge variant="outline">نصب نشده</Badge>}>
       {status?.installed ? <>
         <div className="grid gap-3 sm:grid-cols-3"><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">وضعیت اجرا</p><p className="mt-2 font-semibold text-white">{status.active ? 'در حال اجرا' : 'متوقف'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">اجرا هنگام بوت</p><p className="mt-2 font-semibold text-white">{status.enabled ? 'فعال' : 'غیرفعال'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">نسخه</p><p dir="ltr" className="mt-2 truncate text-left font-mono text-xs text-white">{status.version || 'نامشخص'}</p></div></div>
@@ -685,9 +764,29 @@ export function NginxPage({ Heading, notify }: Common) {
       </article>)}</div> : !loadError ? <div className="rounded-xl border border-dashed border-white/10 py-14 text-center"><Globe size={22} className="mx-auto text-muted-foreground"/><p className="mt-3 text-sm font-medium text-white">سایتی پیدا نشد</p><p className="mt-1 text-xs text-muted-foreground">فایل‌های پیکربندی Nginx در مسیر sites-available نمایش داده می‌شوند.</p></div> : null}
     </SectionCard>
     <Alert className="mt-5"><ShieldCheck size={16} className="mb-2 text-primary"/><AlertTitle>اعمال ایمن تنظیمات</AlertTitle><AlertDescription>قبل از ذخیره یا تغییر symlink، دستور <code dir="ltr">nginx -t</code> اجرا می‌شود. اگر تنظیمات معتبر نباشند، تغییر برگردانده می‌شود؛ در صورت روشن‌بودن سرویس، پس از اعتبارسنجی Nginx reload خواهد شد.</AlertDescription></Alert>
-    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="max-h-[92vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>ساخت سایت Nginx</DialogTitle><DialogDescription>فایل در sites-available ساخته و با nginx -t بررسی می‌شود. سایت در شروع غیرفعال می‌ماند.</DialogDescription></DialogHeader><form onSubmit={createSite} className="space-y-4"><div className="space-y-2"><Label htmlFor="nginx-site-name">نام فایل</Label><Input id="nginx-site-name" dir="ltr" value={newName} onChange={(event) => setNewName(event.target.value.replace(/[^a-zA-Z0-9._-]/g, ''))} placeholder="example.com" required maxLength={128}/></div><div className="space-y-2"><Label htmlFor="nginx-site-content">پیکربندی Nginx</Label><textarea id="nginx-site-content" spellCheck={false} dir="ltr" value={newContent} onChange={(event) => setNewContent(event.target.value)} className="min-h-[45vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none focus:border-primary/50"/></div><Button type="submit" disabled={busy || !newName.trim() || !newContent.trim()} className="w-full">{busy ? 'در حال بررسی و ساخت…' : 'اعتبارسنجی و ساخت سایت'}</Button></form></DialogContent></Dialog>
+    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="max-h-[92vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>ساخت سایت Nginx</DialogTitle><DialogDescription>فایل در sites-available ساخته و با nginx -t بررسی می‌شود. سایت در شروع غیرفعال می‌ماند.</DialogDescription></DialogHeader><form onSubmit={createSite} className="space-y-4"><div className="space-y-2"><Label htmlFor="nginx-site-name">نام فایل</Label><Input id="nginx-site-name" dir="ltr" value={newName} onChange={(event) => setNewName(event.target.value.replace(/[^a-zA-Z0-9._-]/g, ''))} placeholder="example.com" required maxLength={128}/></div><div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={() => { setCreateOpen(false); openBuilder('create') }}><Sparkles size={14}/>ویرایش با سازندهٔ بصری</Button></div><div className="space-y-2"><Label htmlFor="nginx-site-content">پیکربندی Nginx</Label><textarea id="nginx-site-content" spellCheck={false} dir="ltr" value={newContent} onChange={(event) => setNewContent(event.target.value)} className="min-h-[45vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none focus:border-primary/50"/></div><Button type="submit" disabled={busy || !newName.trim() || !newContent.trim()} className="w-full">{busy ? 'در حال بررسی و ساخت…' : 'اعتبارسنجی و ساخت سایت'}</Button></form></DialogContent></Dialog>
     <Dialog open={logsOpen} onOpenChange={setLogsOpen}><DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>لاگ سرویس Nginx</DialogTitle><DialogDescription>۱۰۰ رویداد آخر ثبت‌شده در systemd journal</DialogDescription></DialogHeader><pre dir="ltr" className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-xl bg-background p-4 text-left font-mono text-[11px] leading-5 text-muted-foreground">{logs || 'لاگی موجود نیست.'}</pre></DialogContent></Dialog>
-    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>ویرایش سایت <span className="font-mono text-primary" dir="ltr">{editing}</span></DialogTitle><DialogDescription>مسیر فایل: <code dir="ltr">/etc/nginx/sites-available/{editing}</code>. ذخیره فقط پس از موفقیت <code dir="ltr">nginx -t</code> اعمال می‌شود.</DialogDescription></DialogHeader><form onSubmit={saveSite} className="space-y-4"><textarea aria-label="تنظیمات Nginx" spellCheck={false} dir="ltr" value={content} onChange={(event) => setContent(event.target.value)} className="min-h-[55vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"/><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">سقف اندازهٔ فایل 512 KB است؛ در صورت خطا نسخهٔ قبلی حفظ می‌شود.</p><Button type="submit" disabled={busy}><Save size={15}/>{busy ? 'در حال اعتبارسنجی…' : 'اعتبارسنجی و ذخیره'}</Button></div></form></DialogContent></Dialog>
+    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>ویرایش سایت <span className="font-mono text-primary" dir="ltr">{editing}</span></DialogTitle><DialogDescription>مسیر فایل: <code dir="ltr">/etc/nginx/sites-available/{editing}</code>. ذخیره فقط پس از موفقیت <code dir="ltr">nginx -t</code> اعمال می‌شود.</DialogDescription></DialogHeader><div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={() => { setEditorOpen(false); openBuilder('edit') }}><Sparkles size={14}/>ساخت با فرم بصری</Button></div><form onSubmit={saveSite} className="space-y-4"><textarea aria-label="تنظیمات Nginx" spellCheck={false} dir="ltr" value={content} onChange={(event) => setContent(event.target.value)} className="min-h-[55vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"/><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">سقف اندازهٔ فایل 512 KB است؛ در صورت خطا نسخهٔ قبلی حفظ می‌شود.</p><Button type="submit" disabled={busy}><Save size={15}/>{busy ? 'در حال اعتبارسنجی…' : 'اعتبارسنجی و ذخیره'}</Button></div></form></DialogContent></Dialog>
+    <Dialog open={builderOpen} onOpenChange={(open) => { setBuilderOpen(open); if (!open) setFilePickerOpen(false) }}><DialogContent className="max-h-[94vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>{filePickerOpen ? 'انتخاب فایل SSL' : 'سازندهٔ بصری کانفیگ'}</DialogTitle><DialogDescription>{filePickerOpen ? 'فقط مسیر و نام فایل نمایش داده می‌شود؛ محتوای گواهی و کلید خصوصی خوانده نمی‌شود.' : 'قالب مناسب را انتخاب کن، فیلدها را پر کن و پیش‌نمایش کانفیگ را وارد ویرایشگر کن.'}</DialogDescription></DialogHeader>
+      {filePickerOpen ? <div className="space-y-4"><div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="outline" onClick={() => { setFileListing(null); void browseFiles() }}>پوشه‌های مجاز</Button>{fileListing?.path && fileListing.roots.some((root) => fileListing.path !== root) && <Button type="button" size="sm" variant="outline" onClick={() => { const current = fileListing.path; const parent = current.slice(0, current.lastIndexOf('/')) || '/'; void browseFiles(parent) }}><ChevronUp size={14}/>پوشهٔ بالاتر</Button>}<span dir="ltr" className="min-w-0 flex-1 truncate text-left font-mono text-[11px] text-muted-foreground">{fileListing?.path || 'انتخاب پوشه'}</span><Button type="button" size="sm" variant="ghost" onClick={() => setFilePickerOpen(false)}>بازگشت</Button></div>
+        {!fileListing || !fileListing.path ? <div className="grid gap-2 sm:grid-cols-2">{fileListing?.roots.map((root) => <button key={root} type="button" dir="ltr" onClick={() => void browseFiles(root)} className="flex items-center gap-3 rounded-xl border border-white/10 bg-background/50 p-3 text-left font-mono text-xs text-white hover:border-primary/40"><FolderOpen size={16} className="shrink-0 text-primary"/>{root}</button>)}</div> : fileLoading ? <Skeleton className="h-40"/> : <div className="max-h-[45vh] space-y-1 overflow-auto rounded-xl border border-white/10 p-2">{fileListing.entries.map((entry) => <button key={entry.path} type="button" disabled={!entry.directory && (!entry.selectable || (filePickerFor === 'certificateKey' ? !/\.(key|pem)$/i.test(entry.name) : /\.key$/i.test(entry.name)))} onClick={() => entry.directory ? void browseFiles(entry.path) : (setBuilder((old) => ({ ...old, [filePickerFor]: entry.path })), setFilePickerOpen(false))} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-xs text-muted-foreground hover:bg-white/[.04] disabled:cursor-not-allowed disabled:opacity-35"><FolderOpen size={15} className={entry.directory ? 'text-primary' : 'text-muted-foreground'}/><span dir="ltr" className="min-w-0 flex-1 truncate font-mono">{entry.name}</span>{entry.directory ? <span>پوشه</span> : entry.selectable ? <span>انتخاب</span> : null}</button>)}{!fileListing.entries.length && <p className="p-6 text-center text-xs text-muted-foreground">فایل SSL در این پوشه پیدا نشد.</p>}</div>}
+      </div> : <div className="space-y-5">
+        <div className="grid gap-2 sm:grid-cols-4">{([['static','سایت استاتیک','فایل‌های HTML/CSS'],['proxy','Reverse proxy','اتصال به برنامهٔ محلی'],['php','PHP / FastCGI','اجرای اسکریپت‌های PHP'],['redirect','تغییر مسیر','Redirect با کد 301']] as const).map(([value,title,detail]) => <button key={value} type="button" onClick={() => setBuilder((old) => ({ ...old, preset: value }))} className={`rounded-xl border p-3 text-right transition ${builder.preset === value ? 'border-primary/50 bg-primary/10' : 'border-white/10 bg-background/40 hover:border-white/20'}`}><span className="block text-sm font-semibold text-white">{title}</span><span className="mt-1 block text-[11px] text-muted-foreground">{detail}</span></button>)}</div>
+        <div className="grid gap-4 md:grid-cols-2"><div className="space-y-2"><Label htmlFor="nginx-builder-domain">دامنه‌ها</Label><Input id="nginx-builder-domain" dir="ltr" value={builder.domain} onChange={(event) => setBuilder((old) => ({ ...old, domain: event.target.value }))} placeholder="example.com www.example.com"/></div><div className="space-y-2"><Label htmlFor="nginx-builder-listen">پورت HTTP</Label><Input id="nginx-builder-listen" dir="ltr" inputMode="numeric" value={builder.listen} onChange={(event) => setBuilder((old) => ({ ...old, listen: event.target.value.replace(/[^0-9]/g, '') }))}/></div>
+          {builder.preset === 'static' || builder.preset === 'php' ? <><div className="space-y-2"><Label htmlFor="nginx-builder-root">مسیر ریشهٔ سایت</Label><Input id="nginx-builder-root" dir="ltr" value={builder.root} onChange={(event) => setBuilder((old) => ({ ...old, root: event.target.value }))} placeholder="/var/www/example.com"/></div><div className="space-y-2"><Label htmlFor="nginx-builder-index">فایل‌های پیش‌فرض</Label><Input id="nginx-builder-index" dir="ltr" value={builder.index} onChange={(event) => setBuilder((old) => ({ ...old, index: event.target.value }))}/></div></> : null}
+          {builder.preset === 'proxy' && <div className="space-y-2 md:col-span-2"><Label htmlFor="nginx-builder-proxy">آدرس برنامهٔ مقصد</Label><Input id="nginx-builder-proxy" dir="ltr" value={builder.proxyPass} onChange={(event) => setBuilder((old) => ({ ...old, proxyPass: event.target.value }))} placeholder="http://127.0.0.1:3000"/></div>}
+          {builder.preset === 'php' && <div className="space-y-2 md:col-span-2"><Label htmlFor="nginx-builder-php">Socket یا آدرس PHP-FPM</Label><Input id="nginx-builder-php" dir="ltr" value={builder.phpSocket} onChange={(event) => setBuilder((old) => ({ ...old, phpSocket: event.target.value }))}/><p className="text-[11px] text-muted-foreground">اسکریپت‌های PHP با FastCGI به این سرویس ارسال می‌شوند.</p></div>}
+          {builder.preset === 'redirect' && <div className="space-y-2 md:col-span-2"><Label htmlFor="nginx-builder-redirect">نشانی مقصد</Label><Input id="nginx-builder-redirect" dir="ltr" value={builder.redirectTo} onChange={(event) => setBuilder((old) => ({ ...old, redirectTo: event.target.value }))}/></div>}
+        </div>
+        <div className="rounded-xl border border-white/10 p-4"><label className="flex items-center justify-between gap-3"><span><span className="block text-sm font-medium text-white">فعال‌سازی HTTPS</span><span className="mt-1 block text-xs text-muted-foreground">مسیر certificate و private key را از فایل‌منیجر انتخاب کن.</span></span><Switch checked={builder.ssl} onCheckedChange={(ssl) => setBuilder((old) => ({ ...old, ssl }))}/></label>{builder.ssl && <div className="mt-4 grid gap-3 md:grid-cols-2"><div className="space-y-2"><Label>گواهی SSL</Label><div className="flex gap-2"><Input dir="ltr" value={builder.certificate} onChange={(event) => setBuilder((old) => ({ ...old, certificate: event.target.value }))} placeholder="/etc/letsencrypt/live/.../fullchain.pem"/><Button type="button" variant="outline" size="icon" aria-label="انتخاب گواهی" onClick={() => openFilePicker('certificate')}><FolderOpen size={15}/></Button></div></div><div className="space-y-2"><Label>کلید خصوصی SSL</Label><div className="flex gap-2"><Input dir="ltr" value={builder.certificateKey} onChange={(event) => setBuilder((old) => ({ ...old, certificateKey: event.target.value }))} placeholder="/etc/letsencrypt/live/.../privkey.pem"/><Button type="button" variant="outline" size="icon" aria-label="انتخاب کلید خصوصی" onClick={() => openFilePicker('certificateKey')}><FolderOpen size={15}/></Button></div></div></div>}</div>
+        <div className="grid gap-3 sm:grid-cols-2"><label className="flex items-center justify-between rounded-xl border border-white/10 p-3 text-sm"><span>فعال‌سازی Gzip</span><Switch checked={builder.gzip} onCheckedChange={(gzip) => setBuilder((old) => ({ ...old, gzip }))}/></label><div className="space-y-2"><Label htmlFor="nginx-builder-body">حداکثر اندازهٔ درخواست</Label><Input id="nginx-builder-body" dir="ltr" value={builder.maxBody} onChange={(event) => setBuilder((old) => ({ ...old, maxBody: event.target.value.replace(/[^0-9kKmMgG]/g, '') }))} placeholder="32m"/></div></div>
+        <section className="space-y-3 rounded-xl border border-white/10 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold text-white">Directiveهای اضافه</h3><p className="mt-1 text-xs text-muted-foreground">برای افزودن تنظیم‌هایی مثل timeout یا header.</p></div><Button type="button" variant="outline" size="sm" onClick={() => setExtraDirectives((old) => [...old, { name: '', value: '' }])}><Plus size={14}/>افزودن ورودی</Button></div>{extraDirectives.map((item,index) => <div key={index} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto]"><Input dir="ltr" placeholder="proxy_read_timeout" value={item.name} onChange={(event) => setExtraDirectives((old) => old.map((row,i) => i === index ? { ...row, name: event.target.value } : row))}/><Input dir="ltr" placeholder="60s" value={item.value} onChange={(event) => setExtraDirectives((old) => old.map((row,i) => i === index ? { ...row, value: event.target.value } : row))}/><Button type="button" variant="ghost" size="icon" aria-label="حذف ورودی" onClick={() => setExtraDirectives((old) => old.filter((_,i) => i !== index))}><X size={15}/></Button></div>)}</section>
+        <section className="space-y-3 rounded-xl border border-white/10 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold text-white">Location و تنظیمات سفارشی</h3><p className="mt-1 text-xs text-muted-foreground">برای مسیرهای خاص یا اتصال اسکریپت؛ PHP-FPM هم در قالب PHP آماده است.</p></div><Button type="button" variant="outline" size="sm" onClick={() => setExtraLocations((old) => [...old, { path: '/api/', config: 'proxy_pass http://127.0.0.1:3000;' }])}><Code2 size={14}/>افزودن location</Button></div>{extraLocations.map((item,index) => <div key={index} className="space-y-2 rounded-lg border border-white/[.07] p-3"><div className="flex gap-2"><Input dir="ltr" placeholder="/api/" value={item.path} onChange={(event) => setExtraLocations((old) => old.map((row,i) => i === index ? { ...row, path: event.target.value } : row))}/><Button type="button" variant="ghost" size="icon" aria-label="حذف location" onClick={() => setExtraLocations((old) => old.filter((_,i) => i !== index))}><X size={15}/></Button></div><textarea dir="ltr" spellCheck={false} value={item.config} onChange={(event) => setExtraLocations((old) => old.map((row,i) => i === index ? { ...row, config: event.target.value } : row))} placeholder="proxy_pass http://127.0.0.1:3000;" className="min-h-20 w-full rounded-lg border border-white/10 bg-background p-3 font-mono text-xs leading-5 text-white"/></div>)}</section>
+        {builderTarget === 'edit' && <Alert><AlertTitle>پیش‌نویس جایگزین</AlertTitle><AlertDescription>فیلدهای قابل‌تشخیص از کانفیگ فعلی پر شده‌اند. ساخت پیش‌نویس، متن ویرایشگر را با خروجی فرم جایگزین می‌کند؛ قبل از ذخیره آن را بررسی کن.</AlertDescription></Alert>}
+        <details className="rounded-xl border border-white/10 p-4"><summary className="cursor-pointer text-sm font-medium text-white">پیش‌نمایش کانفیگ تولیدشده</summary><pre dir="ltr" className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg bg-background p-3 text-left font-mono text-[11px] leading-5 text-muted-foreground">{generatedConfig()}</pre></details>
+        <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" onClick={() => setBuilderOpen(false)}>انصراف</Button><Button type="button" onClick={applyBuilder} disabled={builder.ssl && (!builder.certificate.trim() || !builder.certificateKey.trim())}><Sparkles size={15}/>{builderTarget === 'edit' ? 'انتقال به ویرایشگر' : 'ساخت پیش‌نویس'}</Button></div>
+      </div>}
+    </DialogContent></Dialog>
   </>
 }
 

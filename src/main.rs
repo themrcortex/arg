@@ -1544,6 +1544,10 @@ struct NginxCreateSiteInput {
     name: String,
     content: String,
 }
+#[derive(Deserialize)]
+struct NginxBrowseQuery {
+    path: Option<String>,
+}
 
 fn nginx_manager_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
     let response = privileged_request(request)?;
@@ -1574,6 +1578,19 @@ async fn nginx_status(State(state): State<AppState>, headers: HeaderMap) -> ApiR
         require_admin(&db, &headers)?;
     }
     nginx_manager_request(json!({"action":"nginx-status"})).map(Json)
+}
+
+async fn api_nginx_browse_files(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<NginxBrowseQuery>,
+) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    let result = nginx_manager_request(json!({"action":"nginx-browse", "path":query.path}))?;
+    Ok(Json(result))
 }
 
 async fn nginx_action(
@@ -2092,11 +2109,42 @@ fn nginx_delete_site(name: &str) -> Result<Value, String> {
     Ok(json!({"message":"فایل سایت حذف شد."}))
 }
 
+fn nginx_browse_files(path: Option<&str>) -> Result<Value, String> {
+    const ROOTS: &[&str] = &["/etc/letsencrypt", "/etc/ssl", "/etc/nginx", "/var/www"];
+    let roots: Vec<String> = ROOTS.iter().filter(|root| std::path::Path::new(root).is_dir()).map(|root| (*root).to_owned()).collect();
+    let Some(path) = path else {
+        return Ok(json!({"path":"", "roots":roots, "entries":[]}));
+    };
+    if path.len() > 1024 { return Err("مسیر بیش از حد طولانی است.".into()); }
+    let requested = std::path::PathBuf::from(path);
+    let directory = fs::canonicalize(&requested).map_err(|_| "مسیر پیدا نشد یا قابل دسترسی نیست.")?;
+    let allowed = roots.iter().filter_map(|root| fs::canonicalize(root).ok()).any(|root| directory.starts_with(root));
+    if !allowed || !directory.is_dir() { return Err("دسترسی فقط به پوشه‌های مجاز SSL، Nginx و وب محدود است.".into()); }
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(|error| error.to_string())?.take(500) {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.len() > 255 { continue; }
+        let displayed = requested.join(&name);
+        let Ok(target) = fs::canonicalize(entry.path()) else { continue; };
+        if !roots.iter().filter_map(|root| fs::canonicalize(root).ok()).any(|root| target.starts_with(root)) { continue; }
+        let is_dir = target.is_dir();
+        let ext = entry.path().extension().and_then(|part| part.to_str()).unwrap_or("").to_ascii_lowercase();
+        let selectable = !is_dir && matches!(ext.as_str(), "pem" | "crt" | "cer" | "key" | "p12" | "pfx");
+        if is_dir || selectable {
+            entries.push(json!({"name":name,"path":displayed.to_string_lossy(),"directory":is_dir,"selectable":selectable}));
+        }
+    }
+    entries.sort_by(|a,b| b["directory"].as_bool().cmp(&a["directory"].as_bool()).then_with(|| a["name"].as_str().cmp(&b["name"].as_str())));
+    Ok(json!({"path":requested.to_string_lossy(),"roots":roots,"entries":entries}))
+}
+
 fn execute_nginx_request(action: &str, request: &Value) -> Value {
     let result = match action {
         "nginx-status" | "nginx-install" | "nginx-start" | "nginx-stop" | "nginx-restart" | "nginx-reload" | "nginx-enable" | "nginx-disable" | "nginx-test" | "nginx-logs" => nginx_manage(action),
         "nginx-create" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(|name| request["content"].as_str().ok_or_else(|| "محتوای سایت ارسال نشده است.".to_owned()).and_then(|content| nginx_create_site(name, content))),
         "nginx-delete" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(nginx_delete_site).map(|_| json!({"message":"فایل سایت حذف شد."})),
+        "nginx-browse" => nginx_browse_files(request["path"].as_str()),
         "nginx-list" => nginx_list_sites().map(|sites| json!({"sites":sites})),
         "nginx-get" => request["name"]
             .as_str()
@@ -2157,6 +2205,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-logs") => "nginx-logs",
         Some("nginx-create") => "nginx-create",
         Some("nginx-delete") => "nginx-delete",
+        Some("nginx-browse") => "nginx-browse",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
     if action.starts_with("nginx-") {
@@ -2318,6 +2367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/audit", get(audit_log))
         .route("/api/nginx/sites", get(nginx_sites).post(create_nginx_site))
         .route("/api/nginx/status", get(nginx_status))
+        .route("/api/nginx/files", get(api_nginx_browse_files))
         .route("/api/nginx/action", post(nginx_action))
         .route(
             "/api/nginx/sites/{name}",

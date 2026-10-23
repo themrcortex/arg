@@ -1,5 +1,16 @@
 # ARG Change Log
 
+## v0.5.0 — 2026-10-23
+
+### Added
+- Added a visual Nginx site builder with static, reverse proxy, PHP-FPM, and redirect presets.
+- Added configurable TLS certificate and private key paths with a restricted SSL file browser.
+- Added repeatable custom directives and location blocks, plus generated configuration preview.
+- Added common server inputs for document root, proxy target, PHP-FPM socket, Gzip, and request size.
+
+### Changed
+- The visual builder can prefill common fields from an existing site and transfers generated output to the validated editor before saving.
+
 ## v0.4.0 — 2026-10-23
 
 ### Changed
