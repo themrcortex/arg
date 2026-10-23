@@ -206,6 +206,58 @@
 /* ARG overview and chart surfaces */
 .arg-dashboard-hero { border-color: hsl(var(--border)); background: linear-gradient(110deg, #19232b, #141d26); }
 .arg-kpi, .arg-dashboard-panel { border-color: hsl(var(--border)); background: hsl(var(--card)); }
+.arg-dashboard-hero { isolation: isolate; }
+.arg-dashboard-hero::before,
+.arg-dashboard-hero::after {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  content: '';
+}
+.arg-dashboard-hero::before {
+  inset: auto 0 0;
+  height: 22px;
+  background: url('/arg/patterns/arg-bottom-trim.svg') center bottom / 360px 80px repeat-x;
+  opacity: .2;
+}
+.arg-dashboard-hero::after {
+  inset: 0 0 auto auto;
+  width: 176px;
+  height: 100%;
+  background: url('/arg/patterns/arg-girih-tile.svg') right center / 80px 80px repeat;
+  opacity: .12;
+}
+.arg-kpi {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+.arg-kpi::after {
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 auto auto;
+  width: 92px;
+  height: 58px;
+  background: url('/arg/patterns/arg-card-corner.svg') right top / contain no-repeat;
+  opacity: .11;
+  pointer-events: none;
+  content: '';
+}
+.arg-kpi > * { position: relative; z-index: 1; }
+.arg-kpi:hover { border-color: color-mix(in srgb, var(--arg-accent) 32%, var(--arg-border)); }
+.arg-chart-surface { position: relative; isolation: isolate; }
+.arg-chart-surface::before {
+  position: absolute;
+  z-index: 0;
+  inset: 1px;
+  border-radius: inherit;
+  background: url('/arg/patterns/arg-chart-grid.svg') right 12px bottom 12px / min(240px, 70%) auto no-repeat;
+  opacity: .22;
+  pointer-events: none;
+  content: '';
+}
+.arg-chart-surface > * { position: relative; z-index: 1; }
 .arg-kpi-track { background: var(--arg-border); }
 .arg-kpi-fill { background: var(--arg-accent); transition: width .2s ease; }
 .arg-kpi[data-tone="green"] .arg-kpi-fill { background: var(--arg-viz-cpu); }

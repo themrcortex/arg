@@ -270,7 +270,7 @@ function ArgKpi({ icon, label, value, detail, progress, tone = 'copper', ltr = t
 }
 
 function ArgChartPanel({ title, icon, children, description }: { title: string; icon: string; children: ReactNode; description: string }) {
-  return <section className="arg-dashboard-panel min-w-0 rounded-[14px] border p-4" aria-label={title}>
+  return <section className="arg-dashboard-panel arg-chart-surface min-w-0 rounded-[14px] border p-4" aria-label={title}>
     <div className="mb-4 flex items-center gap-2"><img src={`/arg/icons/${icon}.svg`} alt="" aria-hidden="true" className="h-5 w-5"/><h2 className="text-sm font-bold text-foreground">{title}</h2></div>
     {children}
     <p className="mt-3 text-xs text-muted-foreground">{description}</p>

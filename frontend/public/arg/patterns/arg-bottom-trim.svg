@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="80" viewBox="0 0 360 80" fill="none" aria-hidden="true">
+ <path d="M0 78H360" stroke="#C88F5A" stroke-opacity=".24"/>
+ <g stroke="#B47B4C" stroke-width=".9" opacity=".2">
+  <path d="M0 72L40 32L80 72L120 32L160 72L200 32L240 72L280 32L320 72L360 32"/>
+  <path d="M0 32L40 72L80 32L120 72L160 32L200 72L240 32L280 72L320 32L360 72"/>
+  <path d="M0 52H360"/>
+ </g>
+</svg>

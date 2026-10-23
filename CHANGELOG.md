@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.4.12 — 2026-10-23
+
+### Changed
+- Added subtle ARG girih, chart-grid, card-corner, and bottom-trim patterns from the supplied design packs to the dashboard surfaces without changing layout breakpoints or component dimensions.
+
 ## v0.4.11 — 2026-10-23
 
 ### Added
