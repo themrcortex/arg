@@ -308,13 +308,45 @@ function ChangelogView({ content }: { content: string }) {
   })}</div>
 }
 
-function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, canInstall, changelog, onCheck, onInstall, onForceRefresh }: {
+function UpdateLogDetails({ active = false }: { active?: boolean }) {
+  const [open, setOpen] = useState(false)
+  const [logs, setLogs] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    let timer = 0
+    const read = async () => {
+      setLoading(true)
+      try {
+        const result = await api<{ logs: string }>('update/logs')
+        if (!cancelled) { setLogs(result.logs); setError('') }
+      } catch (cause) {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : 'دریافت گزارش به‌روزرسانی ناموفق بود.')
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+      if (active && !cancelled) timer = window.setTimeout(() => void read(), 3000)
+    }
+    void read()
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [open, active])
+  return <div className="rounded-xl border border-border/80 bg-background/55 p-3">
+    <Button type="button" variant="outline" size="sm" className="w-full justify-between" aria-expanded={open} onClick={() => setOpen((value) => !value)}>{open ? 'بستن جزئیات فرایند' : 'نمایش جزئیات فرایند'}<ChevronDown size={15} className={open ? 'rotate-180 transition-transform' : 'transition-transform'}/></Button>
+    {open && <div className="mt-3"><div className="mb-2 flex items-center justify-between text-xs text-muted-foreground"><span>{active ? 'گزارش زندهٔ به‌روزرسانی' : 'گزارش آخرین به‌روزرسانی'}</span>{loading && <RefreshCw size={13} className="animate-spin"/>}</div>{error ? <p className="rounded-lg border border-rose-400/20 bg-rose-400/[.06] p-3 text-xs text-rose-200">{error}</p> : <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-[#090e13] p-3 text-left font-mono text-[11px] leading-5 text-muted-foreground" dir="ltr">{logs || (loading ? 'در حال دریافت گزارش…' : 'هنوز گزارشی ثبت نشده است.')}</pre>}</div>}
+  </div>
+}
+
+function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, refreshing, failure, canInstall, changelog, onCheck, onInstall, onForceRefresh }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   update: { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }
   checking: boolean
   updating: boolean
   finished: boolean
+  refreshing: boolean
+  failure: string | null
   canInstall: boolean
   changelog: string
   onCheck: () => void
@@ -327,11 +359,11 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
     onForceRefresh()
     window.setTimeout(() => setRefreshingPanel(false), 1800)
   }
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{finished ? 'به‌روزرسانی کامل شد' : 'به‌روزرسانی ARG'}</DialogTitle><DialogDescription>{finished ? 'نسخهٔ جدید نصب و سرویس دوباره راه‌اندازی شد. تغییرات این نسخه:' : 'نسخهٔ نصب‌شده را با آخرین نسخهٔ GitHub بررسی کن.'}</DialogDescription></DialogHeader>
-    {finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>به‌روزرسانی با موفقیت انجام شد.</div><p className="text-xs leading-6 text-muted-foreground">رفرش خودکار انجام می‌شود. اگر پنل تازه نشد یا بخشی درست بارگذاری نشد، دکمهٔ زیر کش را پاک می‌کند و رفرش کامل انجام می‌دهد.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><div className="grid gap-2 sm:grid-cols-2"><Button onClick={refreshPanelManually} aria-busy={refreshingPanel}><RefreshCw size={15} className={refreshingPanel ? 'animate-spin' : ''}/>{refreshingPanel ? 'در حال پاک‌سازی و رفرش…' : 'رفرش کامل صفحه'}</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{failure ? 'به‌روزرسانی ناموفق بود' : finished ? 'به‌روزرسانی کامل شد' : 'به‌روزرسانی ARG'}</DialogTitle><DialogDescription>{failure ? 'نصب نسخه کامل نشد. گزارش زنده یا آخرین گزارش را برای جزئیات باز کن.' : finished ? refreshing ? 'نصب تمام شد؛ در حال آماده‌سازی صفحهٔ جدید هستیم.' : 'نسخهٔ جدید نصب و سرویس دوباره راه‌اندازی شد. تغییرات این نسخه:' : 'نسخهٔ نصب‌شده را با آخرین نسخهٔ GitHub بررسی کن.'}</DialogDescription></DialogHeader>
+    {failure ? <div className="space-y-4"><div role="alert" className="rounded-xl border border-rose-400/25 bg-rose-400/[.07] p-4 text-sm text-rose-100"><div className="mb-1 flex items-center gap-2 font-semibold"><X size={17}/>به‌روزرسانی انجام نشد</div><p className="leading-6">{failure}</p></div><UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>تلاش دوباره برای نصب</Button>}<Button variant="ghost" onClick={() => onOpenChange(false)}>بستن</Button></div></div> : finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>{refreshing ? 'به‌روزرسانی با موفقیت انجام شد؛ در حال ساختن و بارگذاری صفحهٔ جدید…' : 'به‌روزرسانی با موفقیت انجام شد.'}</div><p className="text-xs leading-6 text-muted-foreground">رفرش خودکار انجام می‌شود. اگر پنل تازه نشد یا بخشی درست بارگذاری نشد، دکمهٔ زیر کش را پاک می‌کند و رفرش کامل انجام می‌دهد.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><UpdateLogDetails/><div className="grid gap-2 sm:grid-cols-2"><Button onClick={refreshPanelManually} aria-busy={refreshingPanel}><RefreshCw size={15} className={refreshingPanel ? 'animate-spin' : ''}/>{refreshingPanel ? 'در حال پاک‌سازی و رفرش…' : 'رفرش کامل صفحه'}</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">آخرین نسخه</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.remote || '—'}</div></div></div>
       {checking ? <div role="status" className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground"><RefreshCw size={16} className="animate-spin text-primary"/>در حال بررسی نسخهٔ GitHub…</div> : update.status === 'available' ? <div className="rounded-xl border border-amber-400/25 bg-amber-400/[.06] p-4 text-sm text-amber-100">نسخهٔ جدید {update.remote} آمادهٔ نصب است.</div> : update.status === 'current' ? <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[.06] p-4 text-sm text-emerald-200">پنل به‌روز است.</div> : <div className="rounded-xl border border-rose-400/20 bg-rose-400/[.06] p-4 text-sm text-rose-200">{update.error || 'بررسی نسخه انجام نشد. اتصال سرور و دسترسی helper را بررسی کن.'}</div>}
-      <div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>نصب نسخهٔ جدید</Button>}</div>
+      <UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>نصب نسخهٔ جدید</Button>}</div>
     </div>}
   </DialogContent></Dialog>
 }
@@ -350,7 +382,7 @@ function UpdateOverlay({ active, stage, startedAt, shared }: { active: boolean; 
   const elapsedLabel = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`
   if (!active) return null
   return <div ref={overlayRef} tabIndex={-1} className="fixed inset-0 z-[100] grid place-items-center bg-[#080d12]/95 p-5 backdrop-blur-sm outline-none" role="alertdialog" aria-modal="true" aria-labelledby="update-overlay-title" aria-describedby="update-overlay-description">
-    <div className="w-full max-w-md rounded-2xl border border-border bg-card p-7 text-center shadow-2xl"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary"><RefreshCw size={25} className="animate-spin"/></div><h2 id="update-overlay-title" className="mt-5 text-xl font-bold text-foreground">در حال به‌روزرسانی ARG</h2><p id="update-overlay-description" className="mt-2 text-sm leading-7 text-muted-foreground">{shared ? 'یک نشست دیگر این سرور را به‌روزرسانی می‌کند. برای جلوگیری از تداخل، پنل تا پایان عملیات موقتاً قفل شده است.' : stage === 1 ? 'در حال ثبت درخواست به‌روزرسانی…' : stage === 3 ? 'نسخهٔ جدید نصب شد؛ سرویس در حال راه‌اندازی و بررسی نهایی است.' : 'دریافت و ساخت نسخهٔ جدید در حال انجام است. این مرحله ممکن است چند دقیقه طول بکشد.'}</p><div className="mt-6 h-2 overflow-hidden rounded-full bg-secondary" role="progressbar" aria-label="پیشرفت به‌روزرسانی" aria-valuetext={stage === 1 ? 'ثبت درخواست' : stage === 3 ? 'راه‌اندازی مجدد سرویس' : 'دریافت و ساخت نسخه'}><div className="arg-update-progress h-full rounded-full"/></div><div className="mt-4 grid grid-cols-3 gap-2 text-[10px]"><span className={stage >= 1 ? 'text-primary' : 'text-muted-foreground'}>ثبت درخواست</span><span className={stage >= 2 ? 'text-primary' : 'text-muted-foreground'}>دریافت و ساخت</span><span className={stage >= 3 ? 'text-primary' : 'text-muted-foreground'}>راه‌اندازی</span></div><div className="mt-2 flex justify-end text-[11px] text-muted-foreground"><span>زمان سپری‌شده</span><span dir="ltr" className="mr-2 font-mono tabular-nums">{elapsedLabel}</span></div><p className="mt-3 text-xs text-muted-foreground" role="status" aria-live="polite">لطفاً تا پایان فرایند این صفحه را نبند.</p></div>
+    <div className="max-h-[calc(100dvh-2.5rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-border bg-card p-7 text-center shadow-2xl"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary"><RefreshCw size={25} className="animate-spin"/></div><h2 id="update-overlay-title" className="mt-5 text-xl font-bold text-foreground">در حال به‌روزرسانی ARG</h2><p id="update-overlay-description" className="mt-2 text-sm leading-7 text-muted-foreground">{shared ? 'یک نشست دیگر این سرور را به‌روزرسانی می‌کند. برای جلوگیری از تداخل، پنل تا پایان عملیات موقتاً قفل شده است.' : stage === 1 ? 'در حال ثبت درخواست به‌روزرسانی…' : stage === 3 ? 'نسخهٔ جدید نصب شد؛ سرویس در حال راه‌اندازی و بررسی نهایی است.' : 'دریافت و ساخت نسخهٔ جدید در حال انجام است. این مرحله ممکن است چند دقیقه طول بکشد.'}</p><div className="mt-6 h-2 overflow-hidden rounded-full bg-secondary" role="progressbar" aria-label="پیشرفت به‌روزرسانی" aria-valuetext={stage === 1 ? 'ثبت درخواست' : stage === 3 ? 'راه‌اندازی مجدد سرویس' : 'دریافت و ساخت نسخه'}><div className="arg-update-progress h-full rounded-full"/></div><div className="mt-4 grid grid-cols-3 gap-2 text-[10px]"><span className={stage >= 1 ? 'text-primary' : 'text-muted-foreground'}>ثبت درخواست</span><span className={stage >= 2 ? 'text-primary' : 'text-muted-foreground'}>دریافت و ساخت</span><span className={stage >= 3 ? 'text-primary' : 'text-muted-foreground'}>راه‌اندازی</span></div><div className="mt-2 flex justify-end text-[11px] text-muted-foreground"><span>زمان سپری‌شده</span><span dir="ltr" className="mr-2 font-mono tabular-nums">{elapsedLabel}</span></div><div className="mt-4 text-right"><UpdateLogDetails active/></div><p className="mt-3 text-xs text-muted-foreground" role="status" aria-live="polite">لطفاً تا پایان فرایند این صفحه را نبند.</p></div>
   </div>
 }
 
@@ -391,6 +423,7 @@ export default function App() {
   const [loadError, setLoadError] = useState('')
   const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string; instance?: string }>({ status: 'unavailable' })
   const [updating, setUpdating] = useState(false)
+  const [updateFailure, setUpdateFailure] = useState<string | null>(null)
   const [updateStage, setUpdateStage] = useState<1 | 2 | 3>(1)
   const [updateStartedAt, setUpdateStartedAt] = useState<number | null>(null)
   const [sharedUpdate, setSharedUpdate] = useState<{ updating: boolean; started_at: number | null; instance: string }>({ updating: false, started_at: null, instance: '' })
@@ -402,6 +435,7 @@ export default function App() {
   const updateStartInstance = useRef<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
+  const [reloadQueued, setReloadQueued] = useState(false)
   const [updateFinished, setUpdateFinished] = useState(() => {
     try { const done = window.sessionStorage.getItem('arg-update-finished') === 'true'; window.sessionStorage.removeItem('arg-update-finished'); return done } catch { return false }
   })
@@ -468,7 +502,7 @@ export default function App() {
       setUpdate(result)
       if (announce) notifyUser(result.status === 'available' ? `نسخهٔ جدید پنل ARG (${result.remote}) آماده است.` : result.status === 'current' ? 'پنل ARG به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
     } catch (error) {
-      setUpdate({ status: 'unavailable' })
+      setUpdate({ status: 'unavailable', error: error instanceof Error ? error.message : 'بررسی نسخه انجام نشد.' })
       if (announce) notifyUser(error instanceof Error ? error.message : 'بررسی آپدیت ناموفق بود')
     }
   }, [installed, user])
@@ -510,15 +544,22 @@ export default function App() {
               const restarted = progress.instance !== previousInstance
               const versionChanged = Boolean(previousVersion && latest.local && latest.local !== previousVersion)
               if (latest.status === 'current' && (restarted || versionChanged || !previousVersion)) {
+                setUpdateFailure(null)
                 setUpdateFinished(true)
+                setReloadQueued(true)
                 setUpdateDialogOpen(true)
                 window.setTimeout(() => void forceFreshPanelReload(), 2200)
               } else if (restarted) {
-                if (latest.status === 'available') notifyUser('به‌روزرسانی کامل نشد؛ پنل برای بارگذاری دوباره تازه‌سازی می‌شود.')
-                void forceFreshPanelReload(false)
+                setUpdateFinished(false)
+                setUpdateFailure(latest.status === 'available' ? 'نسخهٔ جدید نصب یا فعال نشد. گزارش فرایند را برای جزئیات بررسی کن.' : latest.error || 'سرویس دوباره راه‌اندازی شد اما نسخهٔ جدید تأیید نشد.')
+                setUpdateDialogOpen(true)
               }
             } catch {
-              if (progress.instance !== previousInstance) void forceFreshPanelReload(false)
+              if (progress.instance !== previousInstance) {
+                setUpdateFinished(false)
+                setUpdateFailure('سرویس پس از به‌روزرسانی دوباره راه‌اندازی شد، اما وضعیت نسخه قابل بررسی نیست. گزارش فرایند را باز کن.')
+                setUpdateDialogOpen(true)
+              }
             }
           }
         }
@@ -533,6 +574,7 @@ export default function App() {
   }, [update.status, update.remote, updating, sharedUpdate.updating])
   useEffect(() => { if (updateFinished) { setUpdateDialogOpen(true); notifyUser('به‌روزرسانی کامل شد.') } }, [updateFinished])
   async function openUpdateDialog() {
+    setUpdateFailure(null)
     setUpdateDialogOpen(true)
     setCheckingUpdate(true)
     await checkUpdate()
@@ -540,6 +582,7 @@ export default function App() {
   }
   async function runUpdate() {
     if (user?.role !== 'admin' || updating) return
+    setUpdateFailure(null)
     let baselineInstance = update.instance || null
     try {
       const fresh = await api<typeof update>('update')
@@ -559,7 +602,10 @@ export default function App() {
       setUpdating(false)
       setUpdateStartedAt(null)
       localUpdateStarted.current = false
-      notifyUser(e instanceof Error ? e.message : 'شروع آپدیت ناموفق بود')
+      const message = e instanceof Error ? e.message : 'شروع به‌روزرسانی ناموفق بود.'
+      setUpdateFailure(message)
+      setUpdateDialogOpen(true)
+      notifyUser(message)
     }
   }
   useEffect(() => {
@@ -567,37 +613,54 @@ export default function App() {
     let cancelled = false
     let attempts = 0
     let timer = 0
-    let serviceRestartSeen = false
     let currentSince: number | null = null
     const poll = async () => {
       if (cancelled) return
       attempts += 1
       try {
-        const result = await api<typeof update>('update')
+        const [result, progress] = await Promise.all([
+          api<typeof update>('update'),
+          api<{ updating: boolean; started_at: number | null; instance: string }>('update/progress'),
+        ])
         if (cancelled) return
         setUpdate(result)
-        if (updateStartInstance.current && result.instance && result.instance !== updateStartInstance.current) {
-          serviceRestartSeen = true
+        if (updateStartInstance.current && progress.instance && progress.instance !== updateStartInstance.current) {
           setUpdateStage(3)
         }
-        if (result.status === 'current' && serviceRestartSeen) {
+        if (!progress.updating && result.status === 'current') {
+          setUpdateStage(3)
           currentSince ??= Date.now()
           if (Date.now() - currentSince >= 5000) {
             try { window.sessionStorage.setItem('arg-update-finished', 'true') } catch { /* Session storage may be disabled. */ }
             setUpdating(false)
             setUpdateStartedAt(null)
             setUpdateFinished(true)
+            setReloadQueued(true)
             setUpdateDialogOpen(true)
             window.setTimeout(() => void forceFreshPanelReload(), 2200)
             return
           }
         } else currentSince = null
+        if (!progress.updating && result.status !== 'current') {
+          const message = result.error && result.error !== 'ARG_UPDATE_IN_PROGRESS'
+            ? result.error
+            : 'فرایند پایان یافت اما نسخهٔ جدید به‌درستی فعال نشد.'
+          setUpdating(false)
+          setUpdateStartedAt(null)
+          localUpdateStarted.current = false
+          setUpdateFailure(message)
+          setUpdateDialogOpen(true)
+          return
+        }
       } catch { /* Wait for the restarted panel API; an unavailable status is not proof the update completed. */ }
       if (attempts >= 400) {
         setUpdating(false)
         setUpdateStartedAt(null)
         localUpdateStarted.current = false
-        notifyUser('وضعیت آپدیت پس از 10 دقیقه مشخص نشد. صفحه را تازه کن و گزارش سرویس را بررسی کن.')
+        const message = 'وضعیت به‌روزرسانی پس از 10 دقیقه مشخص نشد. گزارش فرایند را بررسی کن و در صورت نیاز رفرش کامل انجام بده.'
+        setUpdateFailure(message)
+        setUpdateDialogOpen(true)
+        notifyUser(message)
         return
       }
       timer = window.setTimeout(() => void poll(), 1500)
@@ -713,7 +776,7 @@ export default function App() {
         </div>
         <Toaster />
         <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating}/>
-        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) setUpdateFinished(false) }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()} onForceRefresh={() => void forceFreshPanelReload()}/>
+        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()} onForceRefresh={() => void forceFreshPanelReload()}/>
       </div>
   )
 }

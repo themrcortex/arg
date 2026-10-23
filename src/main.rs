@@ -1720,6 +1720,20 @@ async fn panel_update_progress(State(state): State<AppState>, headers: HeaderMap
     let started_at = update_started_at();
     Ok(Json(json!({"updating":started_at.is_some(),"started_at":started_at,"instance":process_instance_id()})))
 }
+async fn panel_update_logs(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_user(&db, &headers)?;
+    }
+    let output = privileged_request(json!({"action":"update-logs"}))?;
+    if output["ok"] != true {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            output["error"].as_str().unwrap_or("Update details are temporarily unavailable"),
+        ));
+    }
+    Ok(Json(json!({"logs":output["stdout"].as_str().unwrap_or("")})))
+}
 async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     check_origin(&headers)?;
     let _exclusive = UPDATE_OPERATION_GATE.write().await;
@@ -2687,6 +2701,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("remove") => "remove",
         Some("update-check") => "update-check",
         Some("update-run") => "update-run",
+        Some("update-logs") => "update-logs",
         Some("nginx-list") => "nginx-list",
         Some("nginx-get") => "nginx-get",
         Some("nginx-save") => "nginx-save",
@@ -2890,6 +2905,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(panel_update_status).post(schedule_panel_update),
         )
         .route("/api/update/progress", get(panel_update_progress))
+        .route("/api/update/logs", get(panel_update_logs))
         .route("/api/network/probe", post(port_probe))
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))

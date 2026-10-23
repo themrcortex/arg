@@ -377,7 +377,7 @@ configure_ufw_status() {
   fi
   sudoers_tmp="$(mktemp /etc/sudoers.d/.arg-ufw.XXXXXX)"
   printf '%s ALL=(root) NOPASSWD: %s *\n' "$SERVICE_USER" "$PORT_HELPER" > "$sudoers_tmp"
-  printf '%s ALL=(root) NOPASSWD: %s check, %s run\n' "$SERVICE_USER" "$UPDATE_HELPER" "$UPDATE_HELPER" >> "$sudoers_tmp"
+  printf '%s ALL=(root) NOPASSWD: %s check, %s run, %s logs\n' "$SERVICE_USER" "$UPDATE_HELPER" "$UPDATE_HELPER" "$UPDATE_HELPER" >> "$sudoers_tmp"
   chmod 0440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then
     rm -f "$sudoers_tmp"

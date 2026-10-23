@@ -6,6 +6,7 @@ readonly repository="${ARG_REPOSITORY:-https://github.com/themrcortex/arg.git}"
 readonly branch="${ARG_BRANCH:-main}"
 readonly update_lock_dir="/run/arg-update.lock"
 readonly update_status_file="/run/arg-update-in-progress"
+readonly update_last_unit_file="/run/arg-update-last-unit"
 
 clear_stale_update_lock() {
   [[ -d "$update_lock_dir" ]] || return 0
@@ -25,6 +26,11 @@ clear_stale_update_lock() {
 }
 
 case "${1:-}" in
+  logs)
+    unit="$(cat "$update_last_unit_file" 2>/dev/null || true)"
+    [[ "$unit" =~ ^arg-web-update-[0-9]+$ ]] || exit 0
+    journalctl --no-pager --output=short-iso --lines=100 --unit="$unit.service" 2>&1 || true
+    ;;
   check)
     [[ -d "$source_dir/.git" ]] || { echo "ARG source checkout is missing at $source_dir; run 'sudo arg update' to repair it." >&2; exit 3; }
     local_rev="$(git -C "$source_dir" rev-parse --verify HEAD 2>/dev/null || true)"
@@ -43,11 +49,14 @@ case "${1:-}" in
     fi
     printf '%s %s\n' "$(date +%s)" "$$" > "$update_status_file"
     chmod 0644 "$update_status_file"
-    if ! systemd-run --quiet --collect --unit="arg-web-update-$$" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 /usr/local/bin/arg update; then
+    unit="arg-web-update-$$"
+    if ! systemd-run --quiet --collect --unit="$unit" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 /usr/local/bin/arg update; then
       rm -f "$update_status_file"
       rmdir "$update_lock_dir" 2>/dev/null || true
       exit 1
     fi
+    printf '%s\n' "$unit" > "$update_last_unit_file"
+    chmod 0644 "$update_last_unit_file"
     ;;
   *) exit 2 ;;
 esac

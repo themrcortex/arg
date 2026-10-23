@@ -1,5 +1,16 @@
 # ARG Change Log
 
+## v0.4.15 — 2026-10-23
+
+### Added
+- Added independent terminal tabs with per-session PTY connections, editable names, close controls, and a polished tab bar.
+- Added per-tab terminal copy, cut-selection, paste, clear, and reconnect actions with keyboard guidance for Ctrl+Shift+C and Ctrl+Shift+V.
+
+### Fixed
+- Kept terminal connection attempts in a calm connecting state and delayed failure messaging until the WebSocket actually closes.
+- Prevented a closing old terminal socket from overriding the connection state of a newly reopened session.
+- Added live updater logs, an explicit failure state, and a completion refresh flow with a manual full-refresh fallback.
+
 ## v0.4.14 — 2026-10-23
 
 ### Fixed
