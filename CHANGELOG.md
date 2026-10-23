@@ -1,3 +1,11 @@
+## v0.10.0 — 2026-10-23
+
+### Changed
+- Moved network traffic monitoring above the interface cards and compacted the card layout.
+
+### Added
+- Added an active-interface filter and expandable per-interface details for addresses, MTU, link speed, packet counts, errors, drops, and carrier state.
+
 ## v0.9.0 — 2026-10-23
 
 ### Added

@@ -23,6 +23,7 @@ import {
   ChevronUp,
   Sparkles,
   Code2,
+  ChevronDown,
   Search,
   Save,
   Trash2,
@@ -439,6 +440,10 @@ function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
 
 export function NetworkPage({ Heading, notify }: Common) {
   const { data, history, loading, refresh, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, historyEnabled } = useDashboard(notify)
+  const [showInactiveInterfaces, setShowInactiveInterfaces] = useState(false)
+  const interfaces = data?.interfaces || []
+  const activeInterfaces = interfaces.filter((item) => item.state.toLowerCase() === 'up' && item.carrier !== false)
+  const visibleInterfaces = showInactiveInterfaces ? interfaces : activeInterfaces
   return (
     <>
       <Heading
@@ -454,46 +459,41 @@ export function NetworkPage({ Heading, notify }: Common) {
         <LoadingCards />
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {data?.interfaces.map((item) => (
-              <Card key={item.name} className="metric-card">
-                <CardHeader className="flex-row items-start justify-between space-y-0">
-                  <div>
-                    <CardTitle dir="ltr" className="text-lg">
-                      {item.name}
-                    </CardTitle>
-                    <CardDescription className="mt-1 mono text-xs">{item.mac}</CardDescription>
-                  </div>
-                  <Badge variant={item.state === 'up' ? 'success' : 'outline'}>
-                    {item.state === 'up' ? 'فعال' : item.state || 'نامشخص'}
-                  </Badge>
+          <div className="mb-5">
+            <SectionCard title="نرخ ترافیک شبکه" description="نمونه‌های ذخیره‌شده توسط سرویس" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<TrafficChart history={history}/></SectionCard>
+          </div>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/70 px-4 py-3">
+            <div><h2 className="text-sm font-semibold text-foreground">کارت‌های شبکه</h2><p className="mt-1 text-xs text-muted-foreground">{formatNumber(activeInterfaces.length)} فعال از {formatNumber(interfaces.length)} رابط</p></div>
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"><Switch checked={!showInactiveInterfaces} onCheckedChange={(checked) => setShowInactiveInterfaces(!checked)} aria-label="فقط نمایش کارت‌های فعال"/><span>فقط کارت‌های فعال</span></label>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            {visibleInterfaces.map((item) => {
+              const active = item.state.toLowerCase() === 'up' && item.carrier !== false
+              const errors = (item.rx_errors || 0) + (item.tx_errors || 0)
+              const dropped = (item.rx_dropped || 0) + (item.tx_dropped || 0)
+              return <Card key={item.name} className="metric-card overflow-hidden">
+                <CardHeader className="flex-row items-center justify-between gap-2 space-y-0 p-4 pb-2">
+                  <div className="min-w-0"><CardTitle dir="ltr" className="truncate text-base">{item.name}</CardTitle><CardDescription dir="ltr" className="mt-1 truncate font-mono text-[10px]">{item.mac || 'MAC نامشخص'}</CardDescription></div>
+                  <Badge variant={active ? 'success' : 'outline'}>{active ? 'فعال' : item.state || 'نامشخص'}</Badge>
                 </CardHeader>
-                <CardContent>
-                  <div className="space-y-3 text-sm">
-                    <div className="flex items-center justify-between text-muted-foreground">
-                      <span className="flex items-center gap-2">
-                        <ArrowDownLeft size={16} className="text-primary" /> دریافت کل
-                      </span>
-                      <strong className="text-foreground">{formatBytes(item.rx_bytes)}</strong>
+                <CardContent className="space-y-2 p-4 pt-2 text-xs">
+                  <div className="flex items-center justify-between gap-2 text-muted-foreground"><span className="flex items-center gap-1.5"><ArrowDownLeft size={14} className="text-primary"/>دریافت کل</span><strong dir="ltr" className="font-mono text-foreground">{formatBytes(item.rx_bytes)}</strong></div>
+                  <div className="flex items-center justify-between gap-2 text-muted-foreground"><span className="flex items-center gap-1.5"><ArrowUpRight size={14} className="text-emerald-300"/>ارسال کل</span><strong dir="ltr" className="font-mono text-foreground">{formatBytes(item.tx_bytes)}</strong></div>
+                  <details className="group border-t border-border pt-2">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-md py-1 text-primary outline-none focus-visible:ring-2 focus-visible:ring-ring"><span>جزئیات بیشتر</span><ChevronDown size={14} className="transition group-open:rotate-180"/></summary>
+                    <div className="mt-2 space-y-2 rounded-lg bg-background/65 p-3">
+                      <div><span className="text-muted-foreground">آدرس‌های IP</span><p dir="ltr" className="mt-1 break-all text-left font-mono text-[10px] text-foreground">{item.addresses?.join(' · ') || 'ندارد'}</p></div>
+                      <div className="grid grid-cols-2 gap-2"><span className="text-muted-foreground">MTU <b dir="ltr" className="mr-1 font-mono text-foreground">{item.mtu ?? '—'}</b></span><span className="text-muted-foreground">سرعت <b dir="ltr" className="mr-1 font-mono text-foreground">{item.speed_mbps ? `${formatNumber(item.speed_mbps)} Mbps` : '—'}</b></span><span className="text-muted-foreground">RX packets <b dir="ltr" className="mr-1 font-mono text-foreground">{formatNumber(item.rx_packets || 0)}</b></span><span className="text-muted-foreground">TX packets <b dir="ltr" className="mr-1 font-mono text-foreground">{formatNumber(item.tx_packets || 0)}</b></span><span className="text-muted-foreground">خطا <b dir="ltr" className="mr-1 font-mono text-foreground">{formatNumber(errors)}</b></span><span className="text-muted-foreground">حذف‌شده <b dir="ltr" className="mr-1 font-mono text-foreground">{formatNumber(dropped)}</b></span></div>
+                      <div className="text-muted-foreground">Carrier: <span dir="ltr" className="font-mono text-foreground">{item.carrier === undefined ? '—' : item.carrier ? 'connected' : 'disconnected'}</span></div>
                     </div>
-                    <div className="flex items-center justify-between text-muted-foreground">
-                      <span className="flex items-center gap-2">
-                        <ArrowUpRight size={16} className="text-emerald-300" /> ارسال کل
-                      </span>
-                      <strong className="text-foreground">{formatBytes(item.tx_bytes)}</strong>
-                    </div>
-                    <div className="border-t border-border pt-3 text-xs text-muted-foreground">
-                      آدرس‌ها:{' '}
-                      <span className="mono text-foreground">{item.addresses?.join(', ') || 'نامشخص'}</span>
-                    </div>
-                  </div>
+                  </details>
                 </CardContent>
               </Card>
-            ))}
-            {!data?.interfaces.length && (
+            })}
+            {!visibleInterfaces.length && (
               <Card>
-                <CardContent className="p-8 text-center text-muted-foreground">
-                  کارت شبکه‌ای یافت نشد.
+                <CardContent className="p-8 text-center text-sm text-muted-foreground">
+                  {interfaces.length ? 'کارت فعالی پیدا نشد؛ فیلتر کارت‌های فعال را خاموش کن تا همهٔ رابط‌ها را ببینی.' : 'کارت شبکه‌ای یافت نشد.'}
                 </CardContent>
               </Card>
             )}
@@ -501,7 +501,6 @@ export function NetworkPage({ Heading, notify }: Common) {
           <div className="mt-5">
             <DistributionBars title="توزیع ترافیک کارت‌ها" description="جمع بایت‌های دریافت و ارسال هر رابط از زمان شروع آن" items={(data?.interfaces || []).map((item) => ({ label: item.name, value: item.rx_bytes + item.tx_bytes, display: formatBytes(item.rx_bytes + item.tx_bytes) }))} />
           </div>
-          <div className="mt-5"><SectionCard title="نرخ ترافیک شبکه" description="نمونه‌های ذخیره‌شده توسط سرویس" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<TrafficChart history={history}/></SectionCard></div>
           <div className="mt-5"><SectionCard title="جزئیات رابط‌ها" description="شمارنده‌های فعلی هر کارت از کرنل خوانده می‌شوند"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>رابط</TableHead><TableHead>وضعیت</TableHead><TableHead>MTU</TableHead><TableHead>سرعت لینک</TableHead><TableHead>بستهٔ دریافتی</TableHead><TableHead>بستهٔ ارسالی</TableHead><TableHead>خطا / حذف</TableHead></TableRow></TableHeader><TableBody>{(data?.interfaces || []).map((item) => <TableRow key={item.name}><TableCell className="font-mono text-white" dir="ltr">{item.name}</TableCell><TableCell>{item.state || '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.mtu ?? '—'}</TableCell><TableCell className="font-mono" dir="ltr">{item.speed_mbps ? `${formatNumber(item.speed_mbps)} Mbps` : '—'}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.rx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber(item.tx_packets || 0)}</TableCell><TableCell className="font-mono" dir="ltr">{formatNumber((item.rx_errors || 0) + (item.tx_errors || 0) + (item.rx_dropped || 0) + (item.tx_dropped || 0))}</TableCell></TableRow>)}</TableBody></Table></div></SectionCard></div>
         </>
       )}
