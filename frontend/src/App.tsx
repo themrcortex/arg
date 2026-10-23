@@ -34,8 +34,14 @@ import {
 } from './components/ui/dropdown-menu'
 import { AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { navigation, pageFromHash, type PageId } from './navigation'
+import { toast } from 'sonner'
+import { Toaster } from './components/ui/sonner'
 import changelog from '../../CHANGELOG.md?raw'
 const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
+const notifyUser = (message: string) => {
+  if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد/.test(message)) toast.error(message)
+  else toast.success(message)
+}
 const developer = (
   <a
     className="font-semibold text-primary transition hover:text-white hover:underline"
@@ -280,7 +286,6 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return window.localStorage.getItem('arg.arg-sidebar-collapsed') === 'true' } catch { return false }
   })
-  const [notice, setNotice] = useState('')
   const [loadError, setLoadError] = useState('')
   const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }>({ status: 'unavailable' })
   const [updating, setUpdating] = useState(false)
@@ -345,21 +350,15 @@ export default function App() {
       mobileMenuButton.current?.focus()
     }
   }, [mobileOpen])
-  useEffect(() => {
-    if (notice) {
-      const timer = window.setTimeout(() => setNotice(''), 4000)
-      return () => window.clearTimeout(timer)
-    }
-  }, [notice])
   const checkUpdate = useCallback(async (announce = false) => {
     if (!installed || !user) return
     try {
       const result = await api<typeof update>('update')
       setUpdate(result)
-      if (announce) setNotice(result.status === 'available' ? `نسخهٔ جدید پنل ARG (${result.remote}) آماده است.` : result.status === 'current' ? 'پنل ARG به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
+      if (announce) notifyUser(result.status === 'available' ? `نسخهٔ جدید پنل ARG (${result.remote}) آماده است.` : result.status === 'current' ? 'پنل ARG به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
     } catch (error) {
       setUpdate({ status: 'unavailable' })
-      if (announce) setNotice(error instanceof Error ? error.message : 'بررسی آپدیت ناموفق بود')
+      if (announce) notifyUser(error instanceof Error ? error.message : 'بررسی آپدیت ناموفق بود')
     }
   }, [installed, user])
   useEffect(() => {
@@ -368,9 +367,9 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [checkUpdate])
   useEffect(() => {
-    if (update.status === 'available' && !updating) setNotice(`نسخهٔ جدید پنل ARG (${update.remote}) آماده است.`)
+    if (update.status === 'available' && !updating) notifyUser(`نسخهٔ جدید پنل ARG (${update.remote}) آماده است.`)
   }, [update.status, update.remote, updating])
-  useEffect(() => { if (updateFinished) { setUpdateDialogOpen(true); setNotice('به‌روزرسانی کامل شد.') } }, [updateFinished])
+  useEffect(() => { if (updateFinished) { setUpdateDialogOpen(true); notifyUser('به‌روزرسانی کامل شد.') } }, [updateFinished])
   async function openUpdateDialog() {
     setUpdateDialogOpen(true)
     setCheckingUpdate(true)
@@ -385,7 +384,7 @@ export default function App() {
       setUpdateDialogOpen(false)
     } catch (e) {
       setUpdating(false)
-      setNotice(e instanceof Error ? e.message : 'شروع آپدیت ناموفق بود')
+      notifyUser(e instanceof Error ? e.message : 'شروع آپدیت ناموفق بود')
     }
   }
   useEffect(() => {
@@ -414,7 +413,7 @@ export default function App() {
       } catch { serviceRestartSeen = true /* The service may briefly restart while the update is installed. */ }
       if (attempts >= 200) {
         setUpdating(false)
-        setNotice('وضعیت آپدیت پس از 10 دقیقه مشخص نشد. صفحه را تازه کن و گزارش سرویس را بررسی کن.')
+        notifyUser('وضعیت آپدیت پس از 10 دقیقه مشخص نشد. صفحه را تازه کن و گزارش سرویس را بررسی کن.')
         return
       }
       timer = window.setTimeout(() => void poll(), 1500)
@@ -429,7 +428,7 @@ export default function App() {
       setPage('dashboard')
       window.location.hash = '/dashboard'
     } catch (e) {
-      setNotice(e instanceof Error ? e.message : 'خروج ناموفق بود')
+      notifyUser(e instanceof Error ? e.message : 'خروج ناموفق بود')
     }
   }
   if (boot)
@@ -503,20 +502,20 @@ export default function App() {
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             <div key={currentPage} className="arg-page-enter">
-            {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={setNotice} />}
-            {currentPage === 'system' && <SystemPage user={user} Heading={PageHeading} notify={setNotice} />}
-            {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={setNotice} />}
-            {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={setNotice} />}
-            {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={setNotice} user={user} />}
-            {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={setNotice} />}
+            {currentPage === 'dashboard' && <DashboardPage user={user} Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'system' && <SystemPage user={user} Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
+            {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'terminal' && user.role === 'admin' && <Suspense fallback={<div className="py-20 text-center text-sm text-muted-foreground">در حال آماده‌سازی ترمینال…</div>}><TerminalPage Heading={PageHeading} /></Suspense>}
             {currentPage === 'users' && user.role === 'admin' && (
-              <UsersPage current={user} Heading={PageHeading} notify={setNotice} />
+              <UsersPage current={user} Heading={PageHeading} notify={notifyUser} />
             )}
             {currentPage === 'audit' && user.role === 'admin' && (
-              <AuditPage Heading={PageHeading} notify={setNotice} />
+              <AuditPage Heading={PageHeading} notify={notifyUser} />
             )}
-            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updating} />}
+            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updating} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
@@ -524,14 +523,7 @@ export default function App() {
             </div>
           </main>
         </div>
-        {notice && (
-          <div
-            role="status"
-            className="fixed bottom-5 left-5 z-50 max-w-sm rounded-xl border border-primary/40 bg-popover px-5 py-3 text-sm text-white shadow-2xl"
-          >
-            {notice}
-          </div>
-        )}
+        <Toaster />
         <UpdateOverlay active={updating}/>
         <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updating) setUpdateDialogOpen(open); if (!open) setUpdateFinished(false) }} update={update} checking={checkingUpdate} updating={updating} finished={updateFinished} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()}/>
       </div>

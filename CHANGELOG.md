@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.2 — 2026-10-23
+
+### Changed
+- Replaced the temporary notice banner with a consistent RTL toast system based on shadcn Sonner.
+- Styled toast messages for the ARG theme and distinguish successful actions from errors.
+
 ## v0.4.1 — 2026-10-23
 
 ### Added
