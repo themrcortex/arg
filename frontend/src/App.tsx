@@ -33,7 +33,7 @@ import { AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPa
 import { navigation, pageFromHash, type PageId } from './navigation'
 const developer = (
   <a
-    className="font-semibold text-[#c4a1ff] transition hover:text-white hover:underline"
+    className="font-semibold text-primary transition hover:text-white hover:underline"
     href="https://t.me/mrc0rtex"
     target="_blank"
     rel="noopener noreferrer"
@@ -46,29 +46,11 @@ const developer = (
 function Brand({ large = false }: { large?: boolean }) {
   return (
     <div className="flex items-center gap-3">
-      <span
-        role="img"
-        aria-label="لوگوی دوناتلو"
-        className={cn(
-          'grid shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-[#cb9fff] via-[#9c6df0] to-[#633cc0] text-white shadow-glow',
-          large ? 'h-14 w-14 text-3xl' : 'h-11 w-11 text-2xl',
-        )}
-      >
-        <svg viewBox="0 0 64 64" className={large ? 'h-11 w-11' : 'h-9 w-9'} fill="none" aria-hidden="true">
-          <path
-            d="M9 23 3 17l3 13-3 10 8-4 5-5-5-7 6-3 9 2 6 4 6-4 9-2 6 3-5 7 5 5 8 4-3-10 3-13-6 6-8-4-10 1-5 4-5-4-10-1-8 4Z"
-            fill="#54258C"
-          />
-          <path d="M12 25c5-4 11-5 17-2l2 4-3 5c-6 2-11 1-15-2l-1-5Zm40 0c-5-4-11-5-17-2l-2 4 3 5c6 2 11 1 15-2l1-5Z" fill="#F4EAFE" />
-          <path d="M22 25.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Zm20 0a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z" fill="#32104F" />
-          <path d="m31 29 1-2 1 2-1 2-1-2Z" fill="#CB9FFF" />
-        </svg>
-      </span>
+      <img src="/arg/brand/arg-symbol.svg" alt="" aria-hidden="true" className={large ? 'h-14 w-14' : 'h-11 w-11'} />
       <div>
-        <div className={cn('brand-text font-black leading-none text-white', large ? 'text-[31px]' : 'text-[21px]')} dir="ltr">
-          DONATELLO
-        </div>
-        <div className="mt-1 text-[9px] font-semibold uppercase tracking-[.25em] text-[#a6eddf]" dir="ltr">
+        <div className={cn('brand-text font-black leading-none text-primary', large ? 'text-[31px]' : 'text-[21px]')} dir="ltr">ARG</div>
+        <div className="mt-1 text-sm font-bold text-foreground">ارگ</div>
+        <div className="mt-1 text-[10px] font-semibold uppercase tracking-[.2em] text-muted-foreground" dir="ltr">
           VPS CONTROL CENTER
         </div>
       </div>
@@ -123,15 +105,15 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
     )
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden p-5">
-      <div className="pointer-events-none absolute -top-32 right-[18%] h-[520px] w-[520px] rounded-full bg-primary/10 blur-[100px]" />
+      <div className="pointer-events-none absolute inset-0 bg-[url('/arg/patterns/arg-card-corner.svg')] bg-[length:260px] bg-no-repeat opacity-[.08]" />
       <div className="relative w-full max-w-[440px]">
         <div className="mb-8 flex justify-center">
           <Brand large />
         </div>
-        <Card className="soft-panel border-[#55416e] shadow-[0_30px_90px_-32px_#000]">
+        <Card className="soft-panel">
           <CardHeader className="pb-6">
             <Badge className="mb-4 w-fit">{installer ? 'راه‌اندازی اولیه' : 'ورود امن'}</Badge>
-            <CardTitle className="text-2xl">{installer ? 'به دوناتلو خوش آمدید' : 'خوش آمدید'}</CardTitle>
+            <CardTitle className="text-2xl">{installer ? 'به ارگ خوش آمدید' : 'خوش آمدید'}</CardTitle>
             <CardDescription className="leading-7">
               {installer
                 ? 'حساب مدیر را بسازید تا مدیریت سرور را آغاز کنید.'
@@ -232,7 +214,7 @@ function PageHeading({
   return (
     <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
       <div>
-        <div className="mb-3 flex items-center gap-2 text-[10px] font-bold tracking-[.17em] text-[#a6eddf]" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-[#71e4cf]"/> LIVE SERVER DATA</div>
+        <div className="mb-3 flex items-center gap-2 text-xs font-bold tracking-[.12em] text-primary" dir="ltr"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/> SERVER CONTROL</div>
         <h1 className="text-3xl font-extrabold tracking-tight text-white md:text-[34px]">{title}</h1>
         <p className="mt-2 text-sm text-muted-foreground">{description}</p>
       </div>
@@ -286,11 +268,24 @@ export default function App() {
   }, [sidebarCollapsed])
   useEffect(() => {
     if (!mobileOpen) return
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setMobileOpen(false) }
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setMobileOpen(false); return }
+      if (event.key !== 'Tab') return
+      const drawer = document.getElementById('arg-sidebar')
+      const controls = Array.from(drawer?.querySelectorAll<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])') || []).filter((element) => element.getClientRects().length > 0)
+      if (!controls.length) return
+      const first = controls[0]
+      const last = controls[controls.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
     window.addEventListener('keydown', onKeyDown)
     mobileCloseButton.current?.focus()
     return () => {
       window.removeEventListener('keydown', onKeyDown)
+      document.body.style.overflow = previousOverflow
       mobileMenuButton.current?.focus()
     }
   }, [mobileOpen])
@@ -305,7 +300,7 @@ export default function App() {
     try {
       const result = await api<typeof update>('update')
       setUpdate(result)
-      if (announce) setNotice(result.status === 'available' ? `نسخهٔ جدید Donatello (${result.remote}) آماده است.` : result.status === 'current' ? 'Donatello به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
+      if (announce) setNotice(result.status === 'available' ? `نسخهٔ جدید پنل ARG (${result.remote}) آماده است.` : result.status === 'current' ? 'پنل ARG به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
     } catch (error) {
       setUpdate({ status: 'unavailable' })
       if (announce) setNotice(error instanceof Error ? error.message : 'بررسی آپدیت ناموفق بود')
@@ -317,7 +312,7 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [checkUpdate])
   useEffect(() => {
-    if (update.status === 'available' && !updating) setNotice(`نسخهٔ جدید Donatello (${update.remote}) آماده است.`)
+    if (update.status === 'available' && !updating) setNotice(`نسخهٔ جدید پنل ARG (${update.remote}) آماده است.`)
   }, [update.status, update.remote, updating])
   async function runUpdate() {
     if (user?.role !== 'admin' || updating) return
@@ -377,7 +372,7 @@ export default function App() {
   if (boot)
     return (
       <div className="flex min-h-screen items-center justify-center gap-3 text-muted-foreground">
-        <Activity className="animate-pulse text-primary" /> در حال بارگذاری دوناتلو…
+        <Activity className="animate-pulse text-primary" /> در حال بارگذاری ارگ…
       </div>
     )
   if (loadError)
@@ -441,7 +436,7 @@ export default function App() {
         )}
         <div className="min-w-0">
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
-            <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-[10px] font-bold tracking-[.16em] text-[#c0a2f7] sm:inline" dir="ltr">DONATELLO <span className="text-[#7f768f]">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
+            <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-xs font-bold text-primary sm:inline" dir="ltr">ARG <span className="text-muted-foreground">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
             <div className="flex items-center gap-1.5"><a href="https://github.com/themrcortex/donatello" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
@@ -459,7 +454,7 @@ export default function App() {
             )}
             {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={setNotice} user={user} update={update} checkUpdate={checkUpdate} runUpdate={runUpdate} updating={updating} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
-              <span>© {new Date().getFullYear()} Donatello · Rust + React</span>
+              <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
             </footer>
           </main>

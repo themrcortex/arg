@@ -24,8 +24,7 @@ export default {
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))'
       },
-      borderRadius: { lg: 'var(--radius)', md: 'calc(var(--radius) - 4px)', sm: 'calc(var(--radius) - 8px)' },
-      boxShadow: { glow: '0 12px 38px -18px hsl(267 100% 68% / .7)' }
+      borderRadius: { lg: 'var(--radius)', md: 'calc(var(--radius) - 4px)', sm: 'calc(var(--radius) - 8px)' }
     }
   },
   plugins: []

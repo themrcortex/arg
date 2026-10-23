@@ -64,7 +64,7 @@ export function formatNumber(n: number) {
 }
 export function formatBytes(n: number) {
   let value = Number(n) || 0
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
   let index = 0
   while (value >= 1024 && index < units.length - 1) {
     value /= 1024
@@ -75,5 +75,8 @@ export function formatBytes(n: number) {
 export function formatUptime(seconds: number) {
   const days = Math.floor(seconds / 86400)
   const hours = Math.floor((seconds % 86400) / 3600)
-  return `${formatNumber(days)} روز و ${formatNumber(hours)} ساعت`
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (days) return `${formatNumber(days)} روز و ${formatNumber(hours)} ساعت`
+  if (hours) return `${formatNumber(hours)} ساعت و ${formatNumber(minutes)} دقیقه`
+  return `${formatNumber(minutes)} دقیقه`
 }
