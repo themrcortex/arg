@@ -1051,7 +1051,9 @@ fn run_firewall_helper(
     } else {
         Err(error(
             StatusCode::BAD_REQUEST,
-            "UFW change failed; check active rules and protected ports",
+            response["error"]
+                .as_str()
+                .unwrap_or("UFW change failed; check the UFW service and active rules"),
         ))
     }
 }
@@ -1492,12 +1494,12 @@ fn update_status() -> Value {
     };
     let revisions: Vec<_> = output.split_whitespace().collect();
     if revisions.len() != 2 {
-        return json!({"status":"unavailable"});
+        return json!({"status":"unavailable", "error":"The update helper returned an invalid revision response. Run 'sudo arg update' to repair the updater."});
     }
     let local = revisions[0];
     let remote = revisions[1];
     if local.len() != 40 || remote.len() != 40 {
-        return json!({"status":"unavailable"});
+        return json!({"status":"unavailable", "error":"Could not read the installed or remote ARG revision. Check the server's GitHub connection."});
     }
     json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7]})
 }
@@ -2017,7 +2019,7 @@ fn execute_privileged_request(request: &Value) -> Value {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if action == "status" {
         let installed = output.status.success();
-        return json!({"ok":true,"available":installed,"installed":installed,"status":stdout,"error":if installed { "" } else { "UFW is not installed" }});
+        return json!({"ok":true,"available":installed,"installed":installed,"status":stdout,"error":if installed { "" } else if stderr.is_empty() { "UFW is not installed" } else { &stderr }});
     }
     if output.status.success() {
         json!({"ok":true,"stdout":stdout})
