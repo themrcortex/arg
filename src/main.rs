@@ -1535,6 +1535,15 @@ struct NginxSiteContentInput {
 struct NginxSiteEnabledInput {
     enabled: bool,
 }
+#[derive(Deserialize)]
+struct NginxActionInput {
+    action: String,
+}
+#[derive(Deserialize)]
+struct NginxCreateSiteInput {
+    name: String,
+    content: String,
+}
 
 fn nginx_manager_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
     let response = privileged_request(request)?;
@@ -1556,6 +1565,70 @@ async fn nginx_sites(State(state): State<AppState>, headers: HeaderMap) -> ApiRe
         require_admin(&db, &headers)?;
     }
     let result = nginx_manager_request(json!({"action":"nginx-list"}))?;
+    Ok(Json(result))
+}
+
+async fn nginx_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    nginx_manager_request(json!({"action":"nginx-status"})).map(Json)
+}
+
+async fn nginx_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<NginxActionInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let allowed = ["install", "start", "stop", "restart", "reload", "enable", "disable", "test", "logs"];
+    if !allowed.contains(&input.action.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "عملیات Nginx معتبر نیست."));
+    }
+    let result = nginx_manager_request(json!({"action":format!("nginx-{}", input.action)}))?;
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "nginx.service.action", &input.action);
+    Ok(Json(result))
+}
+
+async fn create_nginx_site(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<NginxCreateSiteInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&input.name) || input.content.len() > 512 * 1024 {
+        return Err(error(StatusCode::BAD_REQUEST, "نام یا اندازهٔ فایل سایت معتبر نیست."));
+    }
+    let result = nginx_manager_request(json!({"action":"nginx-create", "name":input.name, "content":input.content}))?;
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "nginx.site.create", &input.name);
+    Ok(Json(result))
+}
+
+async fn delete_nginx_site(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) { return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست.")); }
+    let result = nginx_manager_request(json!({"action":"nginx-delete", "name":name}))?;
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "nginx.site.delete", &name);
     Ok(Json(result))
 }
 
@@ -1915,8 +1988,115 @@ fn nginx_set_site_enabled(name: &str, enabled: bool) -> Result<Value, String> {
     )
 }
 
+fn nginx_command(program: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    std::process::Command::new(program).args(args).output()
+        .map_err(|error| format!("اجرای {program} ناموفق بود: {error}"))
+}
+
+fn nginx_service_status() -> Value {
+    let installed = std::path::Path::new("/usr/sbin/nginx").exists()
+        || std::path::Path::new("/usr/bin/nginx").exists();
+    let active = nginx_command("systemctl", &["is-active", "nginx"]).ok()
+        .is_some_and(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "active");
+    let enabled = nginx_command("systemctl", &["is-enabled", "nginx"]).ok()
+        .is_some_and(|out| out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "enabled");
+    let version = if installed { nginx_command("nginx", &["-v"]).ok().map(|out| {
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        text.trim().to_owned()
+    }).unwrap_or_default() } else { String::new() };
+    let config_test = if installed { nginx_command("nginx", &["-t"]).ok().map(|out| {
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        json!({"ok":out.status.success(),"output":text.trim()})
+    }).unwrap_or_else(|| json!({"ok":false,"output":"اجرای nginx -t ناموفق بود."})) } else { json!({"ok":false,"output":"Nginx نصب نیست."}) };
+    json!({"installed":installed,"active":active,"enabled":enabled,"version":version,"config_test":config_test})
+}
+
+fn nginx_manage(action: &str) -> Result<Value, String> {
+    match action {
+        "nginx-status" => Ok(nginx_service_status()),
+        "nginx-install" => {
+            if std::path::Path::new("/usr/sbin/nginx").exists() { return Ok(json!({"message":"Nginx از قبل نصب است."})); }
+            let (program, args): (&str, &[&str]) = if std::path::Path::new("/usr/bin/apt-get").exists() {
+                ("apt-get", &["install", "-y", "nginx"])
+            } else if std::path::Path::new("/usr/bin/dnf").exists() {
+                ("dnf", &["install", "-y", "nginx"])
+            } else if std::path::Path::new("/usr/bin/yum").exists() {
+                ("yum", &["install", "-y", "nginx"])
+            } else { return Err("مدیر بستهٔ پشتیبانی‌شده پیدا نشد (apt، dnf یا yum).".into()); };
+            let output = nginx_command(program, args)?;
+            if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()); }
+            let enable = nginx_command("systemctl", &["enable", "--now", "nginx"])?;
+            if !enable.status.success() { return Err(format!("نصب انجام شد، اما راه‌اندازی سرویس ناموفق بود: {}", String::from_utf8_lossy(&enable.stderr).trim())); }
+            Ok(json!({"message":"Nginx نصب و سرویس آن راه‌اندازی شد."}))
+        }
+        "nginx-start" | "nginx-stop" | "nginx-restart" | "nginx-reload" | "nginx-enable" | "nginx-disable" => {
+            let verb = action.trim_start_matches("nginx-");
+            if !nginx_service_status()["installed"].as_bool().unwrap_or(false) { return Err("Nginx نصب نیست.".into()); }
+            if matches!(verb, "reload" | "start" | "restart") { nginx_config_test()?; }
+            let args: &[&str] = match verb {
+                "enable" => &["enable", "nginx"], "disable" => &["disable", "nginx"],
+                _ => &[verb, "nginx"],
+            };
+            let output = nginx_command("systemctl", args)?;
+            if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()); }
+            Ok(json!({"message":format!("دستور {verb} برای Nginx با موفقیت اجرا شد.")}))
+        }
+        "nginx-test" => {
+            let output = nginx_command("nginx", &["-t"])?;
+            let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            if output.status.success() { Ok(json!({"ok":true,"output":text.trim(),"message":"تنظیمات Nginx معتبر است."})) }
+            else { Err(text.trim().to_owned()) }
+        }
+        "nginx-logs" => {
+            let output = nginx_command("journalctl", &["-u", "nginx", "-n", "100", "--no-pager", "-o", "short-iso"])?;
+            if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()); }
+            Ok(json!({"logs":String::from_utf8_lossy(&output.stdout)}))
+        }
+        _ => Err("عملیات سرویس Nginx معتبر نیست.".into()),
+    }
+}
+
+fn nginx_create_site(name: &str, content: &str) -> Result<Value, String> {
+    if !valid_nginx_site_name(name) || content.is_empty() || content.len() > 512 * 1024 || content.contains('\0') {
+        return Err("نام یا محتوای فایل سایت معتبر نیست.".into());
+    }
+    let (available, _) = nginx_site_paths(name)?;
+    if available.exists() { return Err("فایلی با این نام از قبل وجود دارد.".into()); }
+    nginx_atomic_write(&available, content.as_bytes(), 0o644)?;
+    if let Err(error) = nginx_config_test() {
+        let _ = fs::remove_file(&available);
+        return Err(format!("پیکربندی معتبر نیست؛ فایل ساخته نشد: {error}"));
+    }
+    Ok(json!({"site":{"name":name,"enabled":false,"bytes":content.len()},"message":"فایل سایت ساخته و اعتبارسنجی شد؛ برای اعمال، آن را فعال کن."}))
+}
+
+fn nginx_delete_site(name: &str) -> Result<Value, String> {
+    if name == "default" { return Err("حذف سایت پیش‌فرض سیستم از پنل مجاز نیست.".into()); }
+    let (available, enabled) = nginx_site_paths(name)?;
+    let metadata = fs::symlink_metadata(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    if !metadata.file_type().is_file() { return Err("فقط فایل معمولی قابل حذف است.".into()); }
+    let content = fs::read(&available).map_err(|error| error.to_string())?;
+    let mode = metadata.permissions().mode();
+    let was_enabled = nginx_site_enabled(name)?;
+    if was_enabled { fs::remove_file(&enabled).map_err(|error| error.to_string())?; }
+    if let Err(error) = fs::remove_file(&available) {
+        if was_enabled { let _ = std::os::unix::fs::symlink(format!("../sites-available/{name}"), &enabled); }
+        return Err(error.to_string());
+    }
+    if let Err(error) = nginx_config_test().and_then(|_| nginx_reload_if_active()) {
+        let _ = nginx_atomic_write(&available, &content, mode);
+        if was_enabled { let _ = std::os::unix::fs::symlink(format!("../sites-available/{name}"), &enabled); }
+        let _ = nginx_reload_if_active();
+        return Err(format!("حذف اعمال نشد و سایت بازگردانده شد: {error}"));
+    }
+    Ok(json!({"message":"فایل سایت حذف شد."}))
+}
+
 fn execute_nginx_request(action: &str, request: &Value) -> Value {
     let result = match action {
+        "nginx-status" | "nginx-install" | "nginx-start" | "nginx-stop" | "nginx-restart" | "nginx-reload" | "nginx-enable" | "nginx-disable" | "nginx-test" | "nginx-logs" => nginx_manage(action),
+        "nginx-create" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(|name| request["content"].as_str().ok_or_else(|| "محتوای سایت ارسال نشده است.".to_owned()).and_then(|content| nginx_create_site(name, content))),
+        "nginx-delete" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(nginx_delete_site).map(|_| json!({"message":"فایل سایت حذف شد."})),
         "nginx-list" => nginx_list_sites().map(|sites| json!({"sites":sites})),
         "nginx-get" => request["name"]
             .as_str()
@@ -1965,6 +2145,18 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-get") => "nginx-get",
         Some("nginx-save") => "nginx-save",
         Some("nginx-toggle") => "nginx-toggle",
+        Some("nginx-status") => "nginx-status",
+        Some("nginx-install") => "nginx-install",
+        Some("nginx-start") => "nginx-start",
+        Some("nginx-stop") => "nginx-stop",
+        Some("nginx-restart") => "nginx-restart",
+        Some("nginx-reload") => "nginx-reload",
+        Some("nginx-enable") => "nginx-enable",
+        Some("nginx-disable") => "nginx-disable",
+        Some("nginx-test") => "nginx-test",
+        Some("nginx-logs") => "nginx-logs",
+        Some("nginx-create") => "nginx-create",
+        Some("nginx-delete") => "nginx-delete",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
     if action.starts_with("nginx-") {
@@ -2124,10 +2316,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))
         .route("/api/audit", get(audit_log))
-        .route("/api/nginx/sites", get(nginx_sites))
+        .route("/api/nginx/sites", get(nginx_sites).post(create_nginx_site))
+        .route("/api/nginx/status", get(nginx_status))
+        .route("/api/nginx/action", post(nginx_action))
         .route(
             "/api/nginx/sites/{name}",
-            get(get_nginx_site).put(save_nginx_site),
+            get(get_nginx_site).put(save_nginx_site).delete(delete_nginx_site),
         )
         .route("/api/nginx/sites/{name}/enabled", put(toggle_nginx_site))
         .route("/api/firewall", get(firewall).put(update_firewall_state))

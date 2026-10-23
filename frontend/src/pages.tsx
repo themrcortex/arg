@@ -15,6 +15,11 @@ import {
   Plus,
   Pencil,
   Power,
+  Play,
+  Square,
+  RotateCw,
+  FilePlus,
+  Terminal,
   Search,
   Save,
   Trash2,
@@ -558,26 +563,70 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
 }
 
 type NginxSite = { name: string; enabled: boolean; bytes?: number; content?: string; message?: string }
+type NginxStatus = { installed: boolean; active: boolean; enabled: boolean; version: string; config_test: { ok: boolean; output: string } }
 export function NginxPage({ Heading, notify }: Common) {
   const [sites, setSites] = useState<NginxSite[]>([])
+  const [status, setStatus] = useState<NginxStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [editing, setEditing] = useState<string | null>(null)
   const [content, setContent] = useState('')
   const [editorOpen, setEditorOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newContent, setNewContent] = useState('server {\n    listen 80;\n    listen [::]:80;\n    server_name example.com;\n\n    root /var/www/example.com;\n    index index.html;\n\n    location / {\n        try_files $uri $uri/ =404;\n    }\n}\n')
+  const [logsOpen, setLogsOpen] = useState(false)
+  const [logs, setLogs] = useState('')
 
   const refresh = useCallback(async () => {
-    try {
-      const result = await api<{ sites: NginxSite[] }>('nginx/sites')
-      setSites(result.sites)
+    const [serviceResult, sitesResult] = await Promise.allSettled([
+      api<NginxStatus>('nginx/status'),
+      api<{ sites: NginxSite[] }>('nginx/sites'),
+    ])
+    if (serviceResult.status === 'fulfilled') setStatus(serviceResult.value)
+    if (sitesResult.status === 'fulfilled') {
+      setSites(sitesResult.value.sites)
       setLoadError('')
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'خواندن سایت‌های Nginx ناموفق بود.'
-      setLoadError(message)
-    } finally { setLoading(false) }
+    } else {
+      setSites([])
+      setLoadError(sitesResult.reason instanceof Error ? sitesResult.reason.message : 'خواندن سایت‌های Nginx ناموفق بود.')
+    }
+    if (serviceResult.status === 'rejected' && sitesResult.status === 'rejected') {
+      setLoadError(serviceResult.reason instanceof Error ? serviceResult.reason.message : 'وضعیت Nginx در دسترس نیست.')
+    }
+    setLoading(false)
   }, [])
   useEffect(() => { void refresh() }, [refresh])
+
+  async function runAction(action: string) {
+    setBusy(true)
+    try {
+      const result = await api<{ message?: string; logs?: string; output?: string }>('nginx/action', { method: 'POST', body: JSON.stringify({ action }) })
+      if (action === 'logs') { setLogs(result.logs || ''); setLogsOpen(true) }
+      else notify(result.message || 'عملیات Nginx انجام شد.')
+      await refresh()
+    } catch (error) { notify(error instanceof Error ? error.message : 'عملیات Nginx ناموفق بود.') }
+    finally { setBusy(false) }
+  }
+
+  async function createSite(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    try {
+      const result = await api<{ message?: string }>('nginx/sites', { method: 'POST', body: JSON.stringify({ name: newName.trim(), content: newContent }) })
+      setCreateOpen(false); setNewName(''); notify(result.message || 'فایل سایت ساخته شد.'); await refresh()
+    } catch (error) { notify(error instanceof Error ? error.message : 'ساخت سایت ناموفق بود.') }
+    finally { setBusy(false) }
+  }
+
+  async function deleteSite(site: NginxSite) {
+    if (!window.confirm(`فایل تنظیمات ${site.name} و symlink آن حذف شود؟`)) return
+    setBusy(true)
+    try { const result = await api<{ message?: string }>(`nginx/sites/${encodeURIComponent(site.name)}`, { method: 'DELETE' }); notify(result.message || 'سایت حذف شد.'); await refresh() }
+    catch (error) { notify(error instanceof Error ? error.message : 'حذف سایت ناموفق بود.') }
+    finally { setBusy(false) }
+  }
 
   async function editSite(site: NginxSite) {
     setBusy(true)
@@ -615,7 +664,14 @@ export function NginxPage({ Heading, notify }: Common) {
 
   const enabledCount = sites.filter((site) => site.enabled).length
   return <>
-    <Heading title="مدیریت سایت‌های Nginx" description="سایت‌ها را فعال یا غیرفعال کن، symlink را خودکار بساز و تنظیمات را با اعتبارسنجی ویرایش کن." action={<Button variant="outline" size="sm" disabled={loading} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/> تازه‌سازی</Button>}/>
+    <Heading title="مدیریت کامل Nginx" description="نصب و کنترل سرویس، اعتبارسنجی پیکربندی، لاگ‌ها و مدیریت سایت‌ها را از همین صفحه انجام بده." action={<div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy || loading} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/> تازه‌سازی</Button>{status?.installed && <Button size="sm" disabled={busy} onClick={() => setCreateOpen(true)}><FilePlus size={15}/> سایت جدید</Button>}</div>}/>
+    <SectionCard title="سرویس Nginx" description="وضعیت سرویس، اجرای دستورهای مدیریتی و اعتبارسنجی پیکربندی" right={status?.installed ? <Badge variant={status.active ? 'success' : 'warning'}>{status.active ? 'فعال' : 'متوقف'}</Badge> : <Badge variant="outline">نصب نشده</Badge>}>
+      {status?.installed ? <>
+        <div className="grid gap-3 sm:grid-cols-3"><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">وضعیت اجرا</p><p className="mt-2 font-semibold text-white">{status.active ? 'در حال اجرا' : 'متوقف'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">اجرا هنگام بوت</p><p className="mt-2 font-semibold text-white">{status.enabled ? 'فعال' : 'غیرفعال'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">نسخه</p><p dir="ltr" className="mt-2 truncate text-left font-mono text-xs text-white">{status.version || 'نامشخص'}</p></div></div>
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[.07] pt-4"><Button size="sm" disabled={busy || status.active} onClick={() => void runAction('start')}><Play size={14}/>شروع</Button><Button size="sm" variant="outline" disabled={busy || !status.active} onClick={() => void runAction('stop')}><Square size={14}/>توقف</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction('restart')}><RotateCw size={14}/>راه‌اندازی مجدد</Button><Button size="sm" variant="outline" disabled={busy || !status.active} onClick={() => void runAction('reload')}><RefreshCw size={14}/>Reload</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction('test')}><ShieldCheck size={14}/>بررسی تنظیمات</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void runAction(status.enabled ? 'disable' : 'enable')}>{status.enabled ? 'غیرفعال‌کردن اجرا هنگام بوت' : 'فعال‌کردن اجرا هنگام بوت'}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void runAction('logs')}><Terminal size={14}/>لاگ سرویس</Button></div>
+        <div className={`mt-4 rounded-xl border p-3 text-xs ${status.config_test.ok ? 'border-emerald-400/20 bg-emerald-400/[.04] text-emerald-200' : 'border-amber-400/20 bg-amber-400/[.04] text-amber-100'}`}><div className="font-semibold">{status.config_test.ok ? 'پیکربندی معتبر است' : 'پیکربندی نیاز به بررسی دارد'}</div><pre dir="ltr" className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap text-left font-mono text-[11px] opacity-80">{status.config_test.output}</pre></div>
+      </> : <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-dashed border-white/10 p-4"><div><p className="font-medium text-white">Nginx نصب نشده است</p><p className="mt-1 text-xs text-muted-foreground">نصب از مخزن سیستم‌عامل با apt، dnf یا yum انجام می‌شود.</p></div><Button disabled={busy} onClick={() => void runAction('install')}><Download size={15}/>{busy ? 'در حال نصب…' : 'نصب Nginx'}</Button></div>}
+    </SectionCard>
     <div className="mb-5 grid gap-3 sm:grid-cols-3">
       <Metric icon={Globe} label="همهٔ سایت‌ها" value={formatNumber(sites.length)} detail="فایل‌های معتبر sites-available"/>
       <Metric icon={Power} label="فعال" value={formatNumber(enabledCount)} detail="symlink فعال در sites-enabled"/>
@@ -625,10 +681,12 @@ export function NginxPage({ Heading, notify }: Common) {
     <SectionCard title="سایت‌های موجود" description="فعال‌سازی، symlink استاندارد را می‌سازد؛ خاموش‌کردن فقط symlink همان سایت را حذف می‌کند." right={<Badge variant="outline">{formatNumber(sites.length)} سایت</Badge>}>
       {loading ? <Skeleton className="h-48"/> : sites.length ? <div className="grid gap-3 xl:grid-cols-2">{sites.map((site) => <article key={site.name} className="rounded-[14px] border border-white/10 bg-white/[.025] p-4 transition hover:border-primary/25 hover:bg-white/[.04]">
         <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><div className="flex items-center gap-2"><Globe size={16} className="shrink-0 text-primary"/><h2 className="truncate font-mono text-sm font-semibold text-white" dir="ltr">{site.name}</h2></div><p className="mt-2 font-mono text-[11px] text-muted-foreground" dir="ltr">/etc/nginx/sites-available/{site.name}</p><p className="mt-1 text-[11px] text-muted-foreground" dir="ltr">{site.enabled ? `symlink → ../sites-available/${site.name}` : 'بدون symlink فعال'}</p></div><Badge variant={site.enabled ? 'success' : 'outline'}>{site.enabled ? 'روشن' : 'خاموش'}</Badge></div>
-        <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[.07] pt-3"><Button size="sm" variant={site.enabled ? 'outline' : 'default'} disabled={busy} onClick={() => void toggleSite(site)}><Power size={14}/>{site.enabled ? 'خاموش‌کردن سایت' : 'روشن‌کردن و ساخت symlink'}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void editSite(site)}><Pencil size={14}/>ویرایش تنظیمات</Button>{typeof site.bytes === 'number' && <span className="mr-auto self-center font-mono text-[10px] text-muted-foreground" dir="ltr">{formatNumber(site.bytes)} B</span>}</div>
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[.07] pt-3"><Button size="sm" variant={site.enabled ? 'outline' : 'default'} disabled={busy} onClick={() => void toggleSite(site)}><Power size={14}/>{site.enabled ? 'خاموش‌کردن سایت' : 'روشن‌کردن و ساخت symlink'}</Button><Button size="sm" variant="ghost" disabled={busy} onClick={() => void editSite(site)}><Pencil size={14}/>ویرایش تنظیمات</Button>{site.name !== 'default' && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void deleteSite(site)}><Trash2 size={14}/>حذف</Button>}{typeof site.bytes === 'number' && <span className="mr-auto self-center font-mono text-[10px] text-muted-foreground" dir="ltr">{formatNumber(site.bytes)} B</span>}</div>
       </article>)}</div> : !loadError ? <div className="rounded-xl border border-dashed border-white/10 py-14 text-center"><Globe size={22} className="mx-auto text-muted-foreground"/><p className="mt-3 text-sm font-medium text-white">سایتی پیدا نشد</p><p className="mt-1 text-xs text-muted-foreground">فایل‌های پیکربندی Nginx در مسیر sites-available نمایش داده می‌شوند.</p></div> : null}
     </SectionCard>
     <Alert className="mt-5"><ShieldCheck size={16} className="mb-2 text-primary"/><AlertTitle>اعمال ایمن تنظیمات</AlertTitle><AlertDescription>قبل از ذخیره یا تغییر symlink، دستور <code dir="ltr">nginx -t</code> اجرا می‌شود. اگر تنظیمات معتبر نباشند، تغییر برگردانده می‌شود؛ در صورت روشن‌بودن سرویس، پس از اعتبارسنجی Nginx reload خواهد شد.</AlertDescription></Alert>
+    <Dialog open={createOpen} onOpenChange={setCreateOpen}><DialogContent className="max-h-[92vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>ساخت سایت Nginx</DialogTitle><DialogDescription>فایل در sites-available ساخته و با nginx -t بررسی می‌شود. سایت در شروع غیرفعال می‌ماند.</DialogDescription></DialogHeader><form onSubmit={createSite} className="space-y-4"><div className="space-y-2"><Label htmlFor="nginx-site-name">نام فایل</Label><Input id="nginx-site-name" dir="ltr" value={newName} onChange={(event) => setNewName(event.target.value.replace(/[^a-zA-Z0-9._-]/g, ''))} placeholder="example.com" required maxLength={128}/></div><div className="space-y-2"><Label htmlFor="nginx-site-content">پیکربندی Nginx</Label><textarea id="nginx-site-content" spellCheck={false} dir="ltr" value={newContent} onChange={(event) => setNewContent(event.target.value)} className="min-h-[45vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none focus:border-primary/50"/></div><Button type="submit" disabled={busy || !newName.trim() || !newContent.trim()} className="w-full">{busy ? 'در حال بررسی و ساخت…' : 'اعتبارسنجی و ساخت سایت'}</Button></form></DialogContent></Dialog>
+    <Dialog open={logsOpen} onOpenChange={setLogsOpen}><DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>لاگ سرویس Nginx</DialogTitle><DialogDescription>۱۰۰ رویداد آخر ثبت‌شده در systemd journal</DialogDescription></DialogHeader><pre dir="ltr" className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-xl bg-background p-4 text-left font-mono text-[11px] leading-5 text-muted-foreground">{logs || 'لاگی موجود نیست.'}</pre></DialogContent></Dialog>
     <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>ویرایش سایت <span className="font-mono text-primary" dir="ltr">{editing}</span></DialogTitle><DialogDescription>مسیر فایل: <code dir="ltr">/etc/nginx/sites-available/{editing}</code>. ذخیره فقط پس از موفقیت <code dir="ltr">nginx -t</code> اعمال می‌شود.</DialogDescription></DialogHeader><form onSubmit={saveSite} className="space-y-4"><textarea aria-label="تنظیمات Nginx" spellCheck={false} dir="ltr" value={content} onChange={(event) => setContent(event.target.value)} className="min-h-[55vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"/><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">سقف اندازهٔ فایل 512 KB است؛ در صورت خطا نسخهٔ قبلی حفظ می‌شود.</p><Button type="submit" disabled={busy}><Save size={15}/>{busy ? 'در حال اعتبارسنجی…' : 'اعتبارسنجی و ذخیره'}</Button></div></form></DialogContent></Dialog>
   </>
 }
