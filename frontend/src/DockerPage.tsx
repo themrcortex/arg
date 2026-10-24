@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Activity, Box, Check, CircleAlert, Database, Download, FileCode2, HardDrive, LoaderCircle, Network, Pause, Play, Plus, Power, RefreshCw, RotateCw, Search, Square, TerminalSquare, Trash2 } from 'lucide-react'
 import { api } from './lib/api'
+import { cachedRequest, cachedSnapshot, invalidateCached } from './lib/heavy-cache'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Badge } from './components/ui/badge'
@@ -24,9 +25,9 @@ const tabs = [
 ] as const
 
 export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (message: string) => void }) {
-  const [data, setData] = useState<DockerData | null>(null)
+  const [data, setData] = useState<DockerData | null>(() => cachedSnapshot('docker'))
   const [tab, setTab] = useState<(typeof tabs)[number]['id']>('containers')
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(() => !cachedSnapshot('docker'))
   const [refreshing, setRefreshing] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -47,9 +48,9 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
   const [resourceName, setResourceName] = useState('')
   const [composeFile, setComposeFile] = useState('/opt/arg/compose/docker-compose.yml')
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (force = false) => {
     setError('')
-    try { setData(await api<DockerData>('docker')) }
+    try { setData(await cachedRequest('docker', () => api<DockerData>('docker'), 30000, force)) }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'وضعیت Docker دریافت نشد.') }
     finally { setLoading(false); setRefreshing(false) }
   }, [])
@@ -61,15 +62,16 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
     setBusy(action); setError(''); setOutput('')
     try {
       const result = await api<{ output: string }>('docker/action', { method: 'POST', body: JSON.stringify({ action, ...payload, confirmed: !!confirmation }) })
+      invalidateCached('docker')
       setOutput(result.output || 'Operation completed successfully.')
       notify(`عملیات Docker (${action}) انجام شد.`)
-      await load()
+      await load(true)
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'عملیات Docker ناموفق بود.'
       setError(message); notify(message)
     } finally { setBusy('') }
   }
-  const refresh = () => { setRefreshing(true); void load() }
+  const refresh = () => { setRefreshing(true); void load(true) }
   const ready = !!data?.installed && !!data.active
   const count = (value: number) => value.toLocaleString('en-US')
   const disabled = !!busy || !ready

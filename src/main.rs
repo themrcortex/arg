@@ -2087,6 +2087,8 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-delete") => "nginx-delete",
         Some("nginx-rename") => "nginx-rename",
         Some("nginx-site-logs") => "nginx-site-logs",
+        Some("nginx-site-traffic") => "nginx-site-traffic",
+        Some("nginx-site-repository") => "nginx-site-repository",
         Some("nginx-browse") => "nginx-browse",
         Some("apt-list") => "apt-list",
         Some("apt-run") => "apt-run",

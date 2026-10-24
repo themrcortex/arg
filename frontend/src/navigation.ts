@@ -22,7 +22,7 @@ export const navigation: NavigationItem[] = [
 ]
 
 export function pageFromHash(hash: string): PageId {
-  const id = hash.replace(/^#\/?/, '')
+  const id = hash.replace(/^#\/?/, '').split('?')[0]
   const direct = navigation.find((item) => item.id === id)
   if (direct) return direct.id
   const legacy = navigation.find((item) => id.startsWith(`${item.id}-`))

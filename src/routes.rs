@@ -76,6 +76,14 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/nginx/sites/{name}/logs",
             post(nginx::api_nginx_site_logs),
         )
+        .route(
+            "/api/nginx/sites/{name}/traffic",
+            get(nginx::api_nginx_site_traffic),
+        )
+        .route(
+            "/api/nginx/sites/{name}/repository",
+            get(nginx::api_nginx_site_repository),
+        )
         .route("/api/nginx/sites/{name}/sync", post(nginx::sync_nginx_site))
         .route(
             "/api/nginx/sites/{name}/ssl",

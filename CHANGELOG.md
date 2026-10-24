@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.4.30 — 2026-10-24
+
+### Changed
+- Give each Nginx site a dedicated Certbot certificate lineage, avoiding interactive expansion of unrelated certificates during noninteractive SSL issuance.
+- Add a secure Laravel/PHP-FPM visual preset with an index.php-only handler, protected files, IPv4/IPv6 HTTPS listeners, and HTTP redirect.
+- Add per-site access-log traffic samples with hourly response-volume charts, read-only GitHub repository checks, and direct access to each site's document root in the file manager.
+- Add per-connection Nginx response rate controls and dedicated access/error log defaults to the visual editor.
+- Cache Docker, APT, and systemd listing requests briefly to reduce repeated work when switching pages; invalidate after management actions.
+
 ## v0.4.29 — 2026-10-24
 
 ### Added

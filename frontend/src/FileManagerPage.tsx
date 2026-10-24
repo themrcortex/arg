@@ -56,7 +56,10 @@ export function FileManagerPage({ Heading, notify }: { Heading: Heading; notify:
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'فهرست فایل‌ها دریافت نشد.') }
     finally { setLoading(false) }
   }, [path])
-  useEffect(() => { void load('/') }, [])
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.hash.split('?')[1] || '').get('path') || '/'
+    void load(requested.startsWith('/') ? requested : '/')
+  }, [])
 
   const entries = useMemo(() => (listing?.entries || []).filter((entry) => entry.name.toLowerCase().includes(query.trim().toLowerCase())), [listing, query])
   const perform = async (action: string, payload: Record<string, unknown> = {}, success = 'عملیات فایل انجام شد.') => {

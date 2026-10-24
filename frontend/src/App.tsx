@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, type Dashboard, type User } from './lib/api'
+import { clearHeavyCache } from './lib/heavy-cache'
 import { PanelTimeZoneContext } from './lib/timezone'
 import { cn } from './lib/utils'
 import { Button } from './components/ui/button'
@@ -786,6 +787,7 @@ export default function App() {
   async function logout() {
     try {
       await api('logout', { method: 'POST' })
+      clearHeavyCache()
       setUser(null)
       setPage('dashboard')
       window.location.hash = '/dashboard'
