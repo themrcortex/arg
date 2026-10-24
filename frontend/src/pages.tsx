@@ -153,7 +153,7 @@ function SectionCard({
   className?: string
 }) {
   return (
-    <Card className={className}>
+    <Card className={`arg-section-card ${className}`}>
       <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
         <div>
           <CardTitle>{title}</CardTitle>
@@ -769,7 +769,7 @@ export function NginxPage({ Heading, notify }: Common) {
   const [confirmDatabaseRestore, setConfirmDatabaseRestore] = useState(false)
   const [sectionCode, setSectionCode] = useState({ http: '', server: '', location: '', tls: '' })
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (syncedSiteName?: string) => {
     const [serviceResult, sitesResult] = await Promise.allSettled([
       api<NginxStatus>('nginx/status'),
       api<{ sites: NginxSite[] }>('nginx/sites'),
@@ -778,7 +778,7 @@ export function NginxPage({ Heading, notify }: Common) {
     else setStatusError(serviceResult.reason instanceof Error ? serviceResult.reason.message : 'وضعیت سرویس Nginx دریافت نشد.')
     if (sitesResult.status === 'fulfilled') {
       setSites(sitesResult.value.sites)
-      const drift = sitesResult.value.sites.find((site) => site.sync_mismatch)
+      const drift = sitesResult.value.sites.find((site) => site.sync_mismatch && site.name !== syncedSiteName)
       if (drift) setReconcileSite({ name: drift.name, dbContent: drift.db_content || '', fileContent: drift.content || '' })
       setLoadError('')
     } else {
@@ -1051,8 +1051,10 @@ export function NginxPage({ Heading, notify }: Common) {
       setDatabaseRestorePending(false)
       setConfirmDatabaseRestore(false)
       notify(result.message)
-      await refresh()
-      if (source === 'file') await editSite({ name, enabled: true })
+      // A just-reconciled site's listing can briefly be served by the old
+      // privileged helper during an update/restart. Do not reopen the same
+      // confirmation dialog while the successful sync settles.
+      await refresh(name)
     } catch (error) { notify(error instanceof Error ? error.message : 'همگام‌سازی انجام نشد.') }
     finally { setBusy(false) }
   }
@@ -1438,7 +1440,7 @@ export function AuditPage({ Heading, notify }: Common) {
 
 type MonitoringConfig = { enabled: boolean; interval_seconds: number; retention_days: number; session_hours: number }
 
-type UpdateInfo = { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string }
+type UpdateInfo = { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string }
 export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, updating, checkingUpdate }: { Heading: Heading; notify: (message: string) => void; user: User; update: UpdateInfo; openUpdateDialog: () => void; updating: boolean; checkingUpdate: boolean }) {
   const [config, setConfig] = useState<MonitoringConfig | null>(null)
   const [port, setPort] = useState(location.port || (location.protocol === 'https:' ? '443' : '80'))
@@ -1489,7 +1491,7 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
       </SectionCard>
     </div>
     <div className="mt-5"><SectionCard title="درباره و به‌روزرسانی" description="وضعیت نصب‌شده را ببین و از یک پنجره نسخهٔ جدید را بررسی یا نصب کن." right={<Badge variant={updating || update.status === 'available' ? 'warning' : update.status === 'current' ? 'success' : 'outline'}>{updating ? 'در حال نصب' : update.status === 'available' ? 'نسخهٔ جدید' : update.status === 'current' ? 'به‌روز' : 'بررسی نشده'}</Badge>}>
-      <div className="flex flex-wrap items-center justify-between gap-4"><div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-lg font-semibold text-foreground" dir="ltr">{update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخهٔ بررسی‌شده</div><div className="mt-2 truncate font-mono text-lg font-semibold text-foreground" dir="ltr">{update.remote || '—'}</div></div></div><div className="flex gap-2"><Button onClick={openUpdateDialog} disabled={updating || checkingUpdate} aria-busy={checkingUpdate || updating}><RefreshCw size={15} className={checkingUpdate || updating ? 'animate-spin' : ''}/>{checkingUpdate ? 'در حال بررسی…' : updating ? 'در حال نصب…' : update.status === 'available' ? 'نصب نسخهٔ جدید' : 'بررسی و به‌روزرسانی'}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-10 w-10 place-items-center rounded-[10px] border border-border text-muted-foreground hover:bg-accent" aria-label="مخزن ARG در GitHub"><Github size={17}/></a></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-4"><div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.local_version ? `v${update.local_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخهٔ بررسی‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.remote_version ? `v${update.remote_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.remote || '—'}</div></div></div><div className="flex gap-2"><Button onClick={openUpdateDialog} disabled={updating || checkingUpdate} aria-busy={checkingUpdate || updating}><RefreshCw size={15} className={checkingUpdate || updating ? 'animate-spin' : ''}/>{checkingUpdate ? 'در حال بررسی…' : updating ? 'در حال نصب…' : update.status === 'available' ? 'نصب نسخهٔ جدید' : 'بررسی و به‌روزرسانی'}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-10 w-10 place-items-center rounded-[10px] border border-border text-muted-foreground hover:bg-accent" aria-label="مخزن ARG در GitHub"><Github size={17}/></a></div></div>
     </SectionCard></div>
   </>
 }

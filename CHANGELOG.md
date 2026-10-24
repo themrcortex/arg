@@ -1,5 +1,26 @@
 # ARG Change Log
 
+## v0.4.24 — 2026-10-24
+
+### Added
+- Add Docker Engine and Compose management for containers, images, networks, and persistent volumes.
+- Add container creation, lifecycle controls, logs, inspect, command execution, port and environment configuration.
+- Add image pull, build, tag, push, removal, and unused image cleanup.
+- Add Docker service installation, lifecycle controls, Compose project actions, and confirmation-gated destructive cleanup.
+
+## v0.4.23 — 2026-10-24
+
+### Changed
+- Add admin-only `Terminal Root` sessions with an explicit danger confirmation, separate PTYs, and cleanup when a tab disconnects.
+- Remove the terminal tab cap and record root terminal openings in the audit log.
+- Show full semantic versions prominently in the update page and dialog, with short commit IDs as supporting details.
+
+### Fixed
+- Read Nginx site contents from both current and legacy privileged-helper response formats, so reconciliation previews show the actual on-disk configuration.
+- Compare the database snapshot against the file contents themselves and keep Nginx visual settings when syncing the file into ARG.
+- Close a successful reconciliation without reopening the same confirmation modal during the follow-up refresh.
+- Include the remote Cargo package version in update-check responses while retaining commit-based update detection.
+
 ## v0.4.22 — 2026-10-24
 
 ### Improved

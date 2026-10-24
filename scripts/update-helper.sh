@@ -85,7 +85,9 @@ case "${1:-}" in
     fi
     [[ "$local_rev" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not read the installed ARG revision from $source_dir; run 'sudo arg update' to repair it." >&2; exit 4; }
     [[ "$remote_rev" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not reach GitHub to check ARG updates. Check DNS, HTTPS access, and the server clock, then retry." >&2; exit 4; }
-    printf '%s %s\n' "$local_rev" "$remote_rev"
+    remote_version="$(curl --connect-timeout 4 --max-time 8 -fsSL "https://raw.githubusercontent.com/themrcortex/arg/$branch/Cargo.toml" 2>/dev/null | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 || true)"
+    [[ "$remote_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.-]+)?$ ]] || remote_version="unknown"
+    printf '%s %s %s\n' "$local_rev" "$remote_rev" "$remote_version"
     ;;
   run)
     clear_stale_update_lock

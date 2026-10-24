@@ -20,9 +20,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::os::unix::{fs::PermissionsExt, io::AsRawFd};
+use std::os::unix::{fs::{FileTypeExt, MetadataExt, PermissionsExt}, io::AsRawFd, process::CommandExt};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     io::{self, BufRead, BufReader},
     net::SocketAddr,
@@ -41,8 +41,8 @@ const UPDATE_STATUS_FILE: &str = "/run/arg-update-in-progress";
 static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 static UPDATE_OPERATION_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 static APT_OPERATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static TERMINAL_SESSION_LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 static PROCESS_INSTANCE_ID: OnceLock<String> = OnceLock::new();
+static ROOT_TERMINAL_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 
 type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
@@ -1171,9 +1171,15 @@ async fn network_traffic_volume(State(state): State<AppState>, headers: HeaderMa
     let fresh_at = buckets.last().and_then(|bucket| bucket["at"].as_i64());
     Ok(Json(json!({"from":from,"to":to,"granularity":granularity,"interface":selected_interface,"interfaces":interface_query,"buckets":buckets,"fresh_at":fresh_at,"enabled":setting_u64(&db,"history_enabled",1)==1,"timezone":"UTC"})))
 }
+#[derive(Deserialize, Default)]
+struct TerminalQuery {
+    mode: Option<String>,
+}
+
 async fn terminal_socket(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
     let host = headers
@@ -1198,35 +1204,33 @@ async fn terminal_socket(
     if !origin_matches {
         return (StatusCode::FORBIDDEN, "Invalid WebSocket origin").into_response();
     }
+    let root_mode = match query.mode.as_deref().unwrap_or("user") {
+        "user" => false,
+        "root" => true,
+        _ => return (StatusCode::BAD_REQUEST, "Invalid terminal mode").into_response(),
+    };
     {
         let db = state.lock().unwrap();
-        if require_admin(&db, &headers).is_err() {
-            return (StatusCode::FORBIDDEN, "Administrator access required").into_response();
+        let actor = match require_admin(&db, &headers) {
+            Ok(actor) => actor,
+            Err(_) => return (StatusCode::FORBIDDEN, "Administrator access required").into_response(),
+        };
+        if root_mode {
+            audit(&db, &actor.username, "terminal.root.open", "web root terminal opened");
         }
     }
     let Some(raw_token) = cookie_token(&headers) else {
         return (StatusCode::FORBIDDEN, "Login required").into_response();
     };
     let terminal_session_hash = session_hash(&raw_token);
-    let permit = match TERMINAL_SESSION_LIMIT.try_acquire() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Terminal session limit reached",
-            )
-                .into_response()
-        }
-    };
     ws.max_message_size(16 * 1024)
         .max_frame_size(16 * 1024)
         .on_upgrade(move |socket| async move {
-            let _permit = permit;
-            run_terminal(socket, state, terminal_session_hash).await;
+            run_terminal(socket, state, terminal_session_hash, root_mode).await;
         })
 }
 
-async fn run_terminal(socket: WebSocket, state: AppState, terminal_session_hash: String) {
+async fn run_terminal(mut socket: WebSocket, state: AppState, terminal_session_hash: String, root_mode: bool) {
     let pty = native_pty_system();
     let pair = match pty.openpty(PtySize {
         rows: 28,
@@ -1238,31 +1242,46 @@ async fn run_terminal(socket: WebSocket, state: AppState, terminal_session_hash:
         Err(_) => return,
     };
     let master = Arc::new(Mutex::new(pair.master));
-    let executable = match env::current_exe() {
-        Ok(path) => path,
-        Err(_) => return,
-    };
-    let mut command = CommandBuilder::new(executable);
-    command.arg("terminal-shell");
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    command.cwd(env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/arg")));
-    let mut child = match pair.slave.spawn_command(command) {
-        Ok(child) => child,
-        Err(_) => return,
-    };
+    let mut child = None;
+    let mut root_pid = None;
+    if root_mode {
+        let Some(tty) = master.lock().unwrap().tty_name().map(|path| path.to_string_lossy().into_owned()) else { return; };
+        let response = tokio::task::spawn_blocking(move || privileged_request(json!({"action":"terminal-root-start","tty":tty}))).await;
+        let failure = match response {
+            Ok(Ok(value)) if value["ok"] == true => { root_pid = value["pid"].as_u64().map(|pid| pid as u32); None },
+            Ok(Ok(value)) => Some(value["error"].as_str().unwrap_or("Privileged manager rejected the root terminal").to_owned()),
+            Ok(Err((_, body))) => Some(body.0["error"].as_str().unwrap_or("Privileged manager is unavailable").to_owned()),
+            Err(_) => Some("Could not start the root terminal helper".to_owned()),
+        };
+        if let Some(message) = failure {
+            let _ = socket.send(Message::Text(format!("\r\n\x1b[31mRoot terminal failed: {message}\x1b[0m\r\n").into())).await;
+            return;
+        }
+    } else {
+        let executable = match env::current_exe() { Ok(path) => path, Err(_) => return };
+        let mut command = CommandBuilder::new(executable);
+        command.arg("terminal-shell");
+        command.env("TERM", "xterm-256color");
+        command.env("COLORTERM", "truecolor");
+        command.cwd(env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/arg")));
+        match pair.slave.spawn_command(command) { Ok(process) => child = Some(process), Err(_) => return }
+    }
     drop(pair.slave);
-    let writer = match master.lock().unwrap().take_writer() {
+    let writer_result = { master.lock().unwrap().take_writer() };
+    let writer = match writer_result {
         Ok(writer) => Arc::new(Mutex::new(writer)),
         Err(_) => {
-            let _ = child.kill();
+            if let Some(child) = child.as_mut() { let _ = child.kill(); }
+            if let Some(pid) = root_pid { let _ = privileged_request_async(json!({"action":"terminal-root-stop","pid":pid})).await; }
             return;
         }
     };
-    let reader = match master.lock().unwrap().try_clone_reader() {
+    let reader_result = { master.lock().unwrap().try_clone_reader() };
+    let reader = match reader_result {
         Ok(reader) => reader,
         Err(_) => {
-            let _ = child.kill();
+            if let Some(child) = child.as_mut() { let _ = child.kill(); }
+            if let Some(pid) = root_pid { let _ = privileged_request_async(json!({"action":"terminal-root-stop","pid":pid})).await; }
             return;
         }
     };
@@ -1316,14 +1335,16 @@ async fn run_terminal(socket: WebSocket, state: AppState, terminal_session_hash:
             }
         }
     }
-    if let Some(pid) = child.process_id().filter(|pid| *pid > 1) {
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+    if let Some(mut child) = child {
+        if let Some(pid) = child.process_id().filter(|pid| *pid > 1) {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
         }
-    } else {
         let _ = child.kill();
+        let _ = child.wait();
     }
-    let _ = child.wait();
+    if let Some(pid) = root_pid {
+        let _ = privileged_request_async(json!({"action":"terminal-root-stop","pid":pid})).await;
+    }
 }
 #[derive(Deserialize)]
 struct AlertSettings {
@@ -1965,7 +1986,7 @@ fn update_status() -> Value {
         }
     };
     let revisions: Vec<_> = output.split_whitespace().collect();
-    if revisions.len() != 2 {
+    if revisions.len() < 2 {
         return json!({"status":"unavailable", "error":"The update helper returned an invalid revision response. Run 'sudo arg update' to repair the updater."});
     }
     let local = revisions[0];
@@ -1973,7 +1994,8 @@ fn update_status() -> Value {
     if local.len() != 40 || remote.len() != 40 {
         return json!({"status":"unavailable", "error":"Could not read the installed or remote ARG revision. Check the server's GitHub connection."});
     }
-    json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7]})
+    let remote_version = revisions.get(2).copied().filter(|value| *value != "unknown");
+    json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7], "local_version": env!("CARGO_PKG_VERSION"), "remote_version": remote_version})
 }
 async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
@@ -2016,6 +2038,21 @@ async fn panel_update_logs(State(state): State<AppState>, headers: HeaderMap) ->
 struct AptOperation { action: String, #[serde(default)] packages: Vec<String> }
 #[derive(Deserialize)]
 struct ServiceOperation { action: String, unit: String }
+#[derive(Deserialize, Default)]
+struct DockerOperation {
+    action: String,
+    #[serde(default)] target: String,
+    #[serde(default)] name: String,
+    #[serde(default)] image: String,
+    #[serde(default)] ports: Vec<String>,
+    #[serde(default)] env: Vec<String>,
+    #[serde(default)] network: String,
+    #[serde(default)] restart: String,
+    #[serde(default)] compose_file: String,
+    #[serde(default)] context_path: String,
+    #[serde(default)] command: Vec<String>,
+    #[serde(default)] confirmed: bool,
+}
 
 async fn list_packages(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     { let db = state.lock().unwrap(); require_admin(&db, &headers)?; }
@@ -2054,6 +2091,26 @@ async fn run_service_operation(State(state): State<AppState>, headers: HeaderMap
     if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("Service operation failed"))); }
     { let db = state.lock().unwrap(); audit(&db, &actor.username, "systemd.service.action", &format!("{} {}", input.action, input.unit)); }
     Ok(Json(json!({"output":result["stdout"].as_str().unwrap_or("")})))
+}
+async fn docker_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    { let db = state.lock().unwrap(); require_admin(&db, &headers)?; }
+    let result = privileged_request_async(json!({"action":"docker-status"})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::SERVICE_UNAVAILABLE, result["error"].as_str().unwrap_or("Docker status is unavailable"))); }
+    Ok(Json(result["data"].clone()))
+}
+async fn docker_operation(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<DockerOperation>) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = { let db = state.lock().unwrap(); require_admin(&db, &headers)?.username };
+    let allowed = ["install", "uninstall", "start", "stop", "restart", "enable", "disable", "container-run", "container-start", "container-stop", "container-restart", "container-pause", "container-unpause", "container-remove", "container-logs", "container-inspect", "container-exec", "image-pull", "image-push", "image-build", "image-tag", "image-remove", "image-prune", "network-create", "network-remove", "volume-create", "volume-remove", "volume-prune", "system-prune", "compose-up", "compose-down", "compose-pull"];
+    if !allowed.contains(&input.action.as_str()) { return Err(error(StatusCode::BAD_REQUEST, "Docker operation is invalid")); }
+    if ["uninstall", "container-remove", "image-remove", "image-push", "network-remove", "volume-remove", "image-prune", "volume-prune", "system-prune", "stop", "restart", "disable", "compose-down"].contains(&input.action.as_str()) && !input.confirmed {
+        return Err(error(StatusCode::BAD_REQUEST, "Confirm this Docker operation before continuing"));
+    }
+    let _update_guard = UPDATE_OPERATION_GATE.read().await;
+    let result = privileged_request_async(json!({"action":"docker-operation","operation":input.action,"target":input.target,"name":input.name,"image":input.image,"ports":input.ports,"env":input.env,"network":input.network,"restart":input.restart,"compose_file":input.compose_file,"context_path":input.context_path,"command":input.command,"confirmed":input.confirmed})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("Docker operation failed"))); }
+    { let db = state.lock().unwrap(); audit(&db, &actor, "docker.operation", &input.action); }
+    Ok(Json(json!({"output":result["stdout"].as_str().unwrap_or("Docker operation completed.")})))
 }
 fn valid_package_name(name: &str) -> bool {
     let (base, arch) = name.split_once(':').unwrap_or((name, ""));
@@ -2161,6 +2218,21 @@ fn nginx_manager_request(request: Value) -> Result<Value, (StatusCode, Json<Valu
     }
 }
 
+fn nginx_site_content(value: &Value) -> Result<&str, (StatusCode, Json<Value>)> {
+    // Current privileged-manager responses wrap a site in `site`; older installed
+    // helpers returned the site object directly. Accept both wire formats so an
+    // upgrade cannot turn a readable config into an empty reconciliation preview.
+    value["site"]["content"]
+        .as_str()
+        .or_else(|| value["content"].as_str())
+        .ok_or_else(|| {
+        error(
+            StatusCode::BAD_GATEWAY,
+            "مدیر Nginx محتوای فایل سایت را در قالب قابل‌خواندن برنگرداند.",
+        )
+    })
+}
+
 async fn nginx_sites(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
         let db = state.lock().unwrap();
@@ -2173,19 +2245,20 @@ async fn nginx_sites(State(state): State<AppState>, headers: HeaderMap) -> ApiRe
             if let Some(name) = site["name"].as_str().map(str::to_owned) {
                 let description = db.query_row("SELECT description FROM nginx_site_metadata WHERE name=?1", [&name], |row| row.get::<_, String>(0)).unwrap_or_default();
                 site["description"] = json!(description);
-                let file_hash = site["content_hash"].as_str().unwrap_or_default();
+                // Read the actual file before comparing hashes. The list payload
+                // is metadata-only and may come from a helper with a stale schema.
+                let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+                let content = nginx_site_content(&current)?;
+                let file_hash = nginx_content_hash(content);
                 let snapshot: Option<(String,String)> = db.query_row("SELECT content_hash,content FROM nginx_site_config_state WHERE name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?))).ok();
                 if let Some((hash,db_content)) = snapshot {
                     let mismatch = hash != file_hash;
                     site["sync_mismatch"] = json!(mismatch);
                     if mismatch {
-                        let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
                         site["db_content"] = json!(db_content);
-                        site["content"] = current["content"].clone();
+                        site["content"] = json!(content);
                     }
                 } else {
-                    let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
-                    let content = current["content"].as_str().unwrap_or_default();
                     store_nginx_snapshot(&db, &name, content, None).map_err(db_error)?;
                     site["sync_mismatch"] = json!(false);
                 }
@@ -2386,18 +2459,18 @@ async fn get_nginx_site(
     }
     let mut result = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
     let db = state.lock().unwrap();
-    let content = result["content"].as_str().unwrap_or_default().to_owned();
+    let content = nginx_site_content(&result)?.to_owned();
     let snapshot: Option<(String, Option<String>, String)> = db.query_row("SELECT content,settings_json,content_hash FROM nginx_site_config_state WHERE name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).ok();
     if let Some((db_content, settings, db_hash)) = snapshot {
         let mismatch = db_hash != nginx_content_hash(&content);
-        result["sync_mismatch"] = json!(mismatch);
-        result["db_content"] = json!(db_content);
-        result["settings"] = settings.and_then(|value| serde_json::from_str::<Value>(&value).ok()).unwrap_or(Value::Null);
+        result["site"]["sync_mismatch"] = json!(mismatch);
+        result["site"]["db_content"] = json!(db_content);
+        result["site"]["settings"] = settings.and_then(|value| serde_json::from_str::<Value>(&value).ok()).unwrap_or(Value::Null);
     } else {
         store_nginx_snapshot(&db, &name, &content, None).map_err(db_error)?;
-        result["sync_mismatch"] = json!(false);
-        result["db_content"] = json!(content);
-        result["settings"] = Value::Null;
+        result["site"]["sync_mismatch"] = json!(false);
+        result["site"]["db_content"] = json!(content);
+        result["site"]["settings"] = Value::Null;
     }
     Ok(Json(result))
 }
@@ -2448,8 +2521,11 @@ async fn sync_nginx_site(
     } else {
         nginx_manager_request(json!({"action":"nginx-test"}))?;
         let file = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
-        let content=file["content"].as_str().unwrap_or_default();
-        store_nginx_snapshot(&db,&name,content,None).map_err(db_error)?;
+        let content=nginx_site_content(&file)?;
+        // Keep the visual editor's DB metadata while accepting the on-disk file.
+        let settings: Option<Option<String>> = db.query_row("SELECT settings_json FROM nginx_site_config_state WHERE name=?1", [&name], |row| row.get(0)).optional().map_err(db_error)?;
+        let parsed = settings.flatten().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        store_nginx_snapshot(&db,&name,content,parsed.as_ref()).map_err(db_error)?;
     }
     audit(&db,&actor,"nginx.site.sync",&format!("site={name} source={}",input.source));
     Ok(Json(json!({"ok":true,"source":input.source,"message":"همگام‌سازی انجام شد. کانفیگ Nginx نیز اعتبارسنجی شد."})))
@@ -2480,7 +2556,7 @@ async fn issue_nginx_site_ssl(
     }
     let data = result.get("data").cloned().unwrap_or(result);
     let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
-    let content = current["content"].as_str().unwrap_or_default();
+    let content = nginx_site_content(&current)?;
     let db = state.lock().unwrap();
     let settings: Option<Option<String>> = db.query_row("SELECT settings_json FROM nginx_site_config_state WHERE name=?1", [&name], |row| row.get(0)).optional().map_err(db_error)?;
     let parsed = settings.flatten().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
@@ -3135,6 +3211,82 @@ fn execute_nginx_request(action: &str, request: &Value) -> Value {
     }
 }
 
+fn valid_terminal_pty_path(path: &str) -> bool {
+    path.strip_prefix("/dev/pts/")
+        .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn start_root_terminal(request: &Value) -> Result<u32, String> {
+    let tty_path = request["tty"].as_str().ok_or("Terminal device was not provided")?;
+    if !valid_terminal_pty_path(tty_path) {
+        return Err("Invalid terminal device".into());
+    }
+    let metadata = fs::metadata(tty_path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_char_device() {
+        return Err("Terminal device is not a character device".into());
+    }
+    let arg_name = std::ffi::CString::new("arg").unwrap();
+    let arg_uid = unsafe {
+        let entry = libc::getpwnam(arg_name.as_ptr());
+        if entry.is_null() { return Err("ARG service account was not found".into()); }
+        (*entry).pw_uid
+    };
+    if metadata.uid() != arg_uid {
+        return Err("Terminal device is not owned by the ARG service account".into());
+    }
+
+    let tty = fs::OpenOptions::new().read(true).write(true).open(tty_path).map_err(|error| error.to_string())?;
+    let stdin = tty.try_clone().map_err(|error| error.to_string())?;
+    let stdout = tty.try_clone().map_err(|error| error.to_string())?;
+    let mut command = std::process::Command::new("/bin/bash");
+    command
+        .args(["--login", "-i"])
+        .env("TERM", "xterm-256color")
+        .env("COLORTERM", "truecolor")
+        .env("HOME", "/root")
+        .env("USER", "root")
+        .env("LOGNAME", "root")
+        .env("SHELL", "/bin/bash")
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .current_dir("/")
+        .stdin(std::process::Stdio::from(tty))
+        .stdout(std::process::Stdio::from(stdin))
+        .stderr(std::process::Stdio::from(stdout));
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 { return Err(io::Error::last_os_error()); }
+            if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|error| format!("Could not start root shell: {error}"))?;
+    let pid = child.id();
+    let pids = ROOT_TERMINAL_PIDS.get_or_init(|| Mutex::new(HashSet::new()));
+    pids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(pid);
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        if let Some(pids) = ROOT_TERMINAL_PIDS.get() {
+            pids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&pid);
+        }
+    });
+    Ok(pid)
+}
+
+fn stop_root_terminal(request: &Value) -> Result<(), String> {
+    let pid = request["pid"].as_u64().filter(|pid| *pid > 1 && *pid <= i32::MAX as u64).ok_or("Invalid root terminal process id")? as u32;
+    let pids = ROOT_TERMINAL_PIDS.get_or_init(|| Mutex::new(HashSet::new()));
+    let removed = pids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&pid);
+    if !removed { return Ok(()); }
+    let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) { return Err(error.to_string()); }
+    }
+    Ok(())
+}
+
 fn execute_privileged_request(request: &Value) -> Value {
     let action = match request["action"].as_str() {
         Some("status") => "status",
@@ -3171,8 +3323,26 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("apt-run") => "apt-run",
         Some("service-list") => "service-list",
         Some("service-action") => "service-action",
+        Some("docker-status") => "docker-status",
+        Some("docker-operation") => "docker-operation",
+        Some("terminal-root-start") => "terminal-root-start",
+        Some("terminal-root-stop") => "terminal-root-stop",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
+    if action == "terminal-root-start" {
+        return match start_root_terminal(request) {
+            Ok(pid) => json!({"ok":true,"pid":pid}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
+    }
+    if action == "terminal-root-stop" {
+        return match stop_root_terminal(request) {
+            Ok(()) => json!({"ok":true}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
+    }
+    if action == "docker-status" { return execute_docker_status(); }
+    if action == "docker-operation" { return execute_docker_operation(request); }
     if action.starts_with("apt-") { return execute_apt_request(action, request); }
     if action.starts_with("service-") { return execute_service_request(action, request); }
     if action.starts_with("nginx-") {
@@ -3308,6 +3478,184 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
     match command_result(&mut command) { Ok((true,output))=>json!({"ok":true,"stdout":output}),Ok((false,output))=>json!({"ok":false,"error":output}),Err(error)=>json!({"ok":false,"error":error}) }
 }
 
+fn docker_table(args: &[&str], fields: &[&str]) -> Result<Vec<Value>, String> {
+    let mut command = std::process::Command::new("docker");
+    command.args(args);
+    let (success, output) = command_result(&mut command)?;
+    if !success { return Err(output); }
+    Ok(output.lines().filter_map(|line| {
+        let values: Vec<_> = line.split('\t').collect();
+        if values.len() != fields.len() { return None; }
+        Some(Value::Object(fields.iter().zip(values).map(|(key, value)| ((*key).to_owned(), json!(value))).collect()))
+    }).collect())
+}
+
+fn execute_docker_status() -> Value {
+    let mut client = std::process::Command::new("docker");
+    client.arg("--version");
+    let client_result = command_result(&mut client);
+    let Ok((true, client_version)) = client_result else {
+        return json!({"ok":true,"data":{"installed":false,"active":false,"version":"","containers":[],"images":[],"networks":[],"volumes":[],"error":"Docker is not installed."}});
+    };
+    let mut server = std::process::Command::new("docker");
+    server.args(["version", "--format", "{{.Server.Version}}"]);
+    let server_result = command_result(&mut server);
+    let active = matches!(&server_result, Ok((true, _)));
+    if !active {
+        let detail = server_result.map(|(_, output)| output).unwrap_or_else(|error| error);
+        return json!({"ok":true,"data":{"installed":true,"active":false,"version":client_version,"server_version":"","containers":[],"images":[],"networks":[],"volumes":[],"error":detail}});
+    }
+    let server_version = server_result.unwrap().1;
+    let mut containers = docker_table(&["ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.State}}"], &["id", "names", "image", "status", "ports", "state"]);
+    if let Ok(stats) = docker_table(&["stats", "--no-stream", "--format", "{{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}"], &["container", "cpu", "memory", "memory_percent", "network_io", "block_io"]) {
+        if let Some(rows) = containers.as_mut().ok() {
+            for container in rows {
+                if let Some(id) = container["id"].as_str() {
+                    if let Some(stat) = stats.iter().find(|stat| stat["container"].as_str().is_some_and(|key| id.starts_with(key))) {
+                        container["stats"] = stat.clone();
+                    }
+                }
+            }
+        }
+    }
+    let images = docker_table(&["image", "ls", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}"], &["id", "repository", "tag", "size", "created"]);
+    let networks = docker_table(&["network", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.Scope}}"], &["id", "name", "driver", "scope"]);
+    let volumes = docker_table(&["volume", "ls", "--format", "{{.Name}}\t{{.Driver}}\t{{.Mountpoint}}"], &["name", "driver", "mountpoint"]);
+    let mut compose_version_command = std::process::Command::new("docker"); compose_version_command.args(["compose", "version", "--short"]);
+    let compose_version = command_result(&mut compose_version_command).ok().filter(|(success, _)| *success).map(|(_, output)| output).unwrap_or_default();
+    let mut compose_list_command = std::process::Command::new("docker"); compose_list_command.args(["compose", "ls", "--all", "--format", "json"]);
+    let compose_projects: Vec<Value> = command_result(&mut compose_list_command).ok().and_then(|(success, output)| if success { serde_json::from_str(&output).ok() } else { None }).unwrap_or_default();
+    let failed = [&containers, &images, &networks, &volumes].iter().find_map(|result| result.as_ref().err().cloned());
+    json!({"ok":true,"data":{"installed":true,"active":true,"version":client_version,"server_version":server_version,"compose_version":compose_version,"compose_projects":compose_projects,"containers":containers.unwrap_or_default(),"images":images.unwrap_or_default(),"networks":networks.unwrap_or_default(),"volumes":volumes.unwrap_or_default(),"error":failed.unwrap_or_default()}})
+}
+
+fn valid_docker_object(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        && !value.contains("..")
+}
+
+fn valid_docker_image(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 255 && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/:@-".contains(&byte))
+}
+
+fn valid_docker_port(value: &str) -> bool {
+    let (mapping, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
+    if !["tcp", "udp"].contains(&protocol) { return false; }
+    let Some((host, container)) = mapping.split_once(':') else { return false; };
+    host.parse::<u16>().is_ok_and(|port| port > 0) && container.parse::<u16>().is_ok_and(|port| port > 0)
+}
+
+fn execute_docker_operation(request: &Value) -> Value {
+    let Some(operation) = request["operation"].as_str() else { return json!({"ok":false,"error":"Missing Docker operation"}); };
+    let confirmed = request["confirmed"].as_bool().unwrap_or(false);
+    let target = request["target"].as_str().unwrap_or_default();
+    let name = request["name"].as_str().unwrap_or_default();
+    let image = request["image"].as_str().unwrap_or_default();
+    let mut args: Vec<String> = Vec::new();
+    match operation {
+        "install" => {
+            let mut update = std::process::Command::new("apt-get"); update.args(["update"]);
+            if let Err(error) = command_result(&mut update).and_then(|(ok, output)| if ok { Ok((ok, output)) } else { Err(output) }) { return json!({"ok":false,"error":error}); }
+            let mut install = std::process::Command::new("apt-get"); install.args(["install", "-y", "docker.io"]);
+            return match command_result(&mut install) { Ok((true, output)) => { let mut enable = std::process::Command::new("systemctl"); enable.args(["enable", "--now", "docker"]); match command_result(&mut enable) { Ok((true, service)) => json!({"ok":true,"stdout":format!("{output}\n{service}")}), Ok((false, service)) => json!({"ok":false,"error":service}), Err(error) => json!({"ok":false,"error":error}) } }, Ok((false, output)) => json!({"ok":false,"error":output}), Err(error) => json!({"ok":false,"error":error}) };
+        }
+        "uninstall" => {
+            if !confirmed { return json!({"ok":false,"error":"Confirmation required"}); }
+            let mut stop = std::process::Command::new("systemctl"); stop.args(["disable", "--now", "docker"]);
+            let stop_result = command_result(&mut stop).map(|(_, output)| output).unwrap_or_default();
+            let mut purge = std::process::Command::new("apt-get"); purge.args(["purge", "-y", "docker.io"]);
+            return match command_result(&mut purge) { Ok((true, output)) => json!({"ok":true,"stdout":format!("{stop_result}\n{output}\nDocker data directory was not explicitly removed.")}), Ok((false, output)) => json!({"ok":false,"error":output}), Err(error) => json!({"ok":false,"error":error}) };
+        }
+        "start" | "stop" | "restart" | "enable" | "disable" => {
+            if ["stop", "restart", "disable"].contains(&operation) && !confirmed { return json!({"ok":false,"error":"Confirmation required"}); }
+            if operation == "enable" || operation == "disable" { args.extend(["systemctl".to_owned(), operation.to_owned(), "docker".to_owned()]); }
+            else { args.extend(["systemctl".to_owned(), operation.to_owned(), "docker".to_owned()]); }
+            let mut command = std::process::Command::new(&args[0]); command.args(&args[1..]);
+            return match command_result(&mut command) { Ok((true, output)) => json!({"ok":true,"stdout":output}), Ok((false, output)) => json!({"ok":false,"error":output}), Err(error) => json!({"ok":false,"error":error}) };
+        }
+        "container-run" => {
+            if !valid_docker_object(name) || !valid_docker_image(image) { return json!({"ok":false,"error":"Invalid container name or image"}); }
+            let ports: Vec<&str> = request["ports"].as_array().map(|items| items.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            let envs: Vec<&str> = request["env"].as_array().map(|items| items.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            if ports.len() > 32 || ports.iter().any(|port| !valid_docker_port(port)) || envs.len() > 64 || envs.iter().any(|value| value.len() > 4096 || value.bytes().any(|byte| matches!(byte, b'\n' | b'\r')) || !value.split_once('=').is_some_and(|(key, _)| !key.is_empty() && key.bytes().enumerate().all(|(i, byte)| if i == 0 { byte.is_ascii_alphabetic() || byte == b'_' } else { byte.is_ascii_alphanumeric() || byte == b'_' }))) { return json!({"ok":false,"error":"Invalid port or environment settings"}); }
+            let restart = request["restart"].as_str().unwrap_or("unless-stopped");
+            if !["no", "always", "unless-stopped", "on-failure"].contains(&restart) { return json!({"ok":false,"error":"Invalid restart policy"}); }
+            args.extend(["run".into(), "-d".into(), "--name".into(), name.into(), "--restart".into(), restart.into()]);
+            for port in ports { args.extend(["-p".into(), port.into()]); }
+            for value in envs { args.extend(["--env".into(), value.into()]); }
+            let network = request["network"].as_str().unwrap_or_default();
+            if !network.is_empty() { if !valid_docker_object(network) { return json!({"ok":false,"error":"Invalid Docker network"}); } args.extend(["--network".into(), network.into()]); }
+            args.push(image.into());
+        }
+        "container-start" | "container-stop" | "container-restart" | "container-pause" | "container-unpause" | "container-remove" | "container-logs" | "container-inspect" => {
+            if !valid_docker_object(target) { return json!({"ok":false,"error":"Invalid container identifier"}); }
+            if operation == "container-remove" && !confirmed { return json!({"ok":false,"error":"Confirmation required"}); }
+            let action = match operation { "container-start" => "start", "container-stop" => "stop", "container-restart" => "restart", "container-pause" => "pause", "container-unpause" => "unpause", "container-remove" => "rm", "container-logs" => "logs", "container-inspect" => "inspect", _ => unreachable!() };
+            args.push(action.into());
+            if operation == "container-remove" { args.push("-f".into()); }
+            if operation == "container-logs" { args.extend(["--tail".into(), "200".into(), "--timestamps".into()]); }
+            if operation == "container-inspect" { args.extend(["--type".into(), "container".into()]); }
+            args.push(target.into());
+        }
+        "container-exec" => {
+            if !valid_docker_object(target) { return json!({"ok":false,"error":"Invalid container identifier"}); }
+            let command: Vec<&str> = request["command"].as_array().map(|items| items.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            if command.is_empty() || command.len() > 32 || command.iter().any(|part| part.is_empty() || part.len() > 1024 || part.bytes().any(|byte| matches!(byte, b'\n' | b'\r'))) { return json!({"ok":false,"error":"Enter a valid command and arguments"}); }
+            args.extend(["exec".into(), "-i".into(), target.into()]);
+            args.extend(command.iter().map(|part| (*part).to_owned()));
+        }
+        "image-pull" | "image-push" | "image-remove" => {
+            let reference = if target.is_empty() { image } else { target };
+            if !valid_docker_image(reference) || ["image-remove", "image-push"].contains(&operation) && !confirmed { return json!({"ok":false,"error":"Invalid image reference or missing confirmation"}); }
+            args.extend(["image".into(), match operation { "image-pull" => "pull", "image-push" => "push", _ => "rm" }.into()]);
+            if operation == "image-remove" { args.push("--".into()); }
+            args.push(reference.into());
+        }
+        "image-build" => {
+            let Some(context) = request["context_path"].as_str().filter(|context| {
+                let path = std::path::Path::new(context);
+                path.is_absolute() && !path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                    && path.is_dir() && path.join("Dockerfile").is_file()
+            }) else { return json!({"ok":false,"error":"Build context must be an absolute directory containing Dockerfile"}); };
+            if !valid_docker_image(image) { return json!({"ok":false,"error":"Invalid image tag"}); }
+            args.extend(["build".into(), "--tag".into(), image.into(), context.into()]);
+        }
+        "image-tag" => {
+            if !valid_docker_image(target) || !valid_docker_image(image) { return json!({"ok":false,"error":"Invalid source or target image reference"}); }
+            args.extend(["image".into(), "tag".into(), target.into(), image.into()]);
+        }
+        "image-prune" => { if !confirmed { return json!({"ok":false,"error":"Confirmation required"}); } args.extend(["image".into(), "prune".into(), "-af".into()]); }
+        "network-create" | "network-remove" => {
+            let value = if operation == "network-create" { name } else { target };
+            if !valid_docker_object(value) || operation == "network-remove" && !confirmed { return json!({"ok":false,"error":"Invalid network name or missing confirmation"}); }
+            args.extend(["network".into(), if operation == "network-create" { "create" } else { "rm" }.into(), value.into()]);
+        }
+        "volume-create" | "volume-remove" => {
+            let value = if operation == "volume-create" { name } else { target };
+            if !valid_docker_object(value) || operation == "volume-remove" && !confirmed { return json!({"ok":false,"error":"Invalid volume name or missing confirmation"}); }
+            args.extend(["volume".into(), if operation == "volume-create" { "create" } else { "rm" }.into(), value.into()]);
+        }
+        "volume-prune" => { if !confirmed { return json!({"ok":false,"error":"Confirmation required"}); } args.extend(["volume".into(), "prune".into(), "-f".into()]); }
+        "system-prune" => { if !confirmed { return json!({"ok":false,"error":"Confirmation required"}); } args.extend(["system".into(), "prune".into(), "-af".into()]); }
+        "compose-up" | "compose-down" | "compose-pull" => {
+            if operation == "compose-down" && !confirmed { return json!({"ok":false,"error":"Confirmation required"}); }
+            let Some(file) = request["compose_file"].as_str().filter(|file| {
+                let path = std::path::Path::new(file);
+                path.is_absolute() && !path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                    && path.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|extension| ["yml", "yaml"].contains(&extension))
+                    && path.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 1024 * 1024)
+            }) else { return json!({"ok":false,"error":"Choose an existing absolute Compose YAML file (maximum 1 MB)"}); };
+            args.extend(["compose".into(), "-f".into(), file.into(), match operation { "compose-up" => "up", "compose-down" => "down", _ => "pull" }.into()]);
+            if operation == "compose-up" { args.push("-d".into()); }
+        }
+        _ => return json!({"ok":false,"error":"Unsupported Docker operation"}),
+    }
+    let mut command = std::process::Command::new("docker"); command.args(&args);
+    match command_result(&mut command) { Ok((true, output)) => json!({"ok":true,"stdout":output}), Ok((false, output)) => json!({"ok":false,"error":output}), Err(error) => json!({"ok":false,"error":error}) }
+}
+
 async fn serve_privileged_connection(mut stream: UnixStream) {
     if !privileged_peer_allowed(&stream) {
         return;
@@ -3441,6 +3789,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/packages/action", post(run_apt_operation))
         .route("/api/services", get(list_system_services))
         .route("/api/services/action", post(run_service_operation))
+        .route("/api/docker", get(docker_status))
+        .route("/api/docker/action", post(docker_operation))
         .route("/api/network/probe", post(port_probe))
         .route("/api/users", get(users).post(add_user))
         .route("/api/users/{id}", put(update_user))
@@ -3528,7 +3878,37 @@ async fn state_handler(state: State<AppState>, headers: HeaderMap) -> ApiResult 
 
 #[cfg(test)]
 mod update_progress_tests {
-    use super::{firewall_rule_validation_error, update_progress_payload, FirewallRuleInput};
+    use super::{firewall_rule_validation_error, update_progress_payload, valid_docker_image, valid_docker_object, valid_docker_port, FirewallRuleInput};
+
+    #[test]
+    fn docker_inputs_reject_shell_metacharacters_and_invalid_ports() {
+        assert!(valid_docker_object("web_app-1"));
+        assert!(!valid_docker_object("../etc"));
+        assert!(!valid_docker_object("web;id"));
+        assert!(valid_docker_image("registry.example/app:v1.2"));
+        assert!(!valid_docker_image("app; touch /tmp/pwned"));
+        assert!(valid_docker_port("8080:80/tcp"));
+        assert!(valid_docker_port("5353:53/udp"));
+        assert!(!valid_docker_port("65536:80/tcp"));
+        assert!(!valid_docker_port("80:80/icmp"));
+    }
+
+    #[test]
+    fn nginx_file_content_supports_current_and_legacy_manager_payloads() {
+        let response = serde_json::json!({"site":{"name":"example.conf","content":"server { listen 80; }"}});
+        assert_eq!(super::nginx_site_content(&response).unwrap(), "server { listen 80; }");
+        let legacy = serde_json::json!({"name":"example.conf","content":"legacy config"});
+        assert_eq!(super::nginx_site_content(&legacy).unwrap(), "legacy config");
+        let malformed = serde_json::json!({"site":{"name":"example.conf"}});
+        assert!(super::nginx_site_content(&malformed).is_err());
+    }
+
+    #[test]
+    fn root_terminal_accepts_only_numeric_pty_device_paths() {
+        assert!(super::valid_terminal_pty_path("/dev/pts/17"));
+        assert!(!super::valid_terminal_pty_path("/dev/pts/../../etc/passwd"));
+        assert!(!super::valid_terminal_pty_path("/dev/tty0"));
+    }
 
     #[test]
     fn active_job_locks_only_while_authoritative_state_is_running() {

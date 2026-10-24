@@ -958,8 +958,6 @@ ExecStart=/usr/local/lib/arg/arg privileged-helper
 Restart=on-failure
 RestartSec=2
 PrivateTmp=true
-ProtectHome=true
-ProtectControlGroups=true
 LockPersonality=true
 LimitNOFILE=1024
 

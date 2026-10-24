@@ -37,6 +37,7 @@ import {
 } from './components/ui/dropdown-menu'
 import { AccountPage, AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { AptPage, ServicesPage } from './AdminOpsPage'
+import { DockerPage } from './DockerPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
@@ -368,7 +369,7 @@ function UpdateLogDetails({ active = false }: { active?: boolean }) {
 function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, refreshing, failure, canInstall, changelog, onCheck, onInstall, onForceRefresh }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  update: { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string }
+  update: { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string; error?: string }
   checking: boolean
   updating: boolean
   finished: boolean
@@ -388,8 +389,8 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
   }
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{failure ? 'به‌روزرسانی ناموفق بود' : finished ? 'به‌روزرسانی کامل شد' : 'به‌روزرسانی ARG'}</DialogTitle><DialogDescription>{failure ? 'نصب نسخه کامل نشد. گزارش زنده یا آخرین گزارش را برای جزئیات باز کن.' : finished ? refreshing ? 'نصب تمام شد؛ در حال آماده‌سازی صفحهٔ جدید هستیم.' : 'نسخهٔ جدید نصب و سرویس دوباره راه‌اندازی شد. تغییرات این نسخه:' : 'نسخهٔ نصب‌شده را با آخرین نسخهٔ GitHub بررسی کن.'}</DialogDescription></DialogHeader>
     {failure ? <div className="space-y-4"><div role="alert" className="rounded-xl border border-rose-400/25 bg-rose-400/[.07] p-4 text-sm text-rose-100"><div className="mb-1 flex items-center gap-2 font-semibold"><X size={17}/>به‌روزرسانی انجام نشد</div><p className="leading-6">{failure}</p></div><UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>تلاش دوباره برای نصب</Button>}<Button variant="ghost" onClick={() => onOpenChange(false)}>بستن</Button></div></div> : finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>{refreshing ? 'به‌روزرسانی با موفقیت انجام شد؛ در حال ساختن و بارگذاری صفحهٔ جدید…' : 'به‌روزرسانی با موفقیت انجام شد.'}</div><p className="text-xs leading-6 text-muted-foreground">رفرش خودکار انجام می‌شود. اگر پنل تازه نشد یا بخشی درست بارگذاری نشد، دکمهٔ زیر کش را پاک می‌کند و رفرش کامل انجام می‌دهد.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><UpdateLogDetails/><div className="grid gap-2 sm:grid-cols-2"><Button onClick={refreshPanelManually} aria-busy={refreshingPanel}><RefreshCw size={15} className={refreshingPanel ? 'animate-spin' : ''}/>{refreshingPanel ? 'در حال پاک‌سازی و رفرش…' : 'رفرش کامل صفحه'}</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-3"><div className="text-xs text-muted-foreground">آخرین نسخه</div><div className="mt-2 truncate font-mono text-sm text-foreground" dir="ltr">{update.remote || '—'}</div></div></div>
-      {checking ? <div role="status" className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground"><RefreshCw size={16} className="animate-spin text-primary"/>در حال بررسی نسخهٔ GitHub…</div> : update.status === 'available' ? <div className="rounded-xl border border-amber-400/25 bg-amber-400/[.06] p-4 text-sm text-amber-100">نسخهٔ جدید {update.remote} آمادهٔ نصب است.</div> : update.status === 'current' ? <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[.06] p-4 text-sm text-emerald-200">پنل به‌روز است.</div> : <div className="rounded-xl border border-rose-400/20 bg-rose-400/[.06] p-4 text-sm text-rose-200">{update.error || 'بررسی نسخه انجام نشد. اتصال سرور و دسترسی helper را بررسی کن.'}</div>}
+      <div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.local_version ? `v${update.local_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخه</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.remote_version ? `v${update.remote_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.remote || '—'}</div></div></div>
+      {checking ? <div role="status" className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground"><RefreshCw size={16} className="animate-spin text-primary"/>در حال بررسی نسخهٔ GitHub…</div> : update.status === 'available' ? <div className="rounded-xl border border-amber-400/25 bg-amber-400/[.06] p-4 text-sm text-amber-100">نسخهٔ جدید {update.remote_version ? `v${update.remote_version}` : update.remote} آمادهٔ نصب است.</div> : update.status === 'current' ? <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[.06] p-4 text-sm text-emerald-200">پنل به‌روز است.</div> : <div className="rounded-xl border border-rose-400/20 bg-rose-400/[.06] p-4 text-sm text-rose-200">{update.error || 'بررسی نسخه انجام نشد. اتصال سرور و دسترسی helper را بررسی کن.'}</div>}
       <UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>نصب نسخهٔ جدید</Button>}</div>
     </div>}
   </DialogContent></Dialog>
@@ -462,7 +463,7 @@ export default function App() {
     try { return window.localStorage.getItem('arg.arg-sidebar-collapsed') === 'true' } catch { return false }
   })
   const [loadError, setLoadError] = useState('')
-  const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; error?: string; instance?: string }>({ status: 'unavailable' })
+  const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string; error?: string; instance?: string }>({ status: 'unavailable' })
   const [updating, setUpdating] = useState(false)
   const [updateFailure, setUpdateFailure] = useState<string | null>(null)
   const [updateStage, setUpdateStage] = useState<1 | 2 | 3>(1)
@@ -552,7 +553,7 @@ export default function App() {
     try {
       const result = await api<typeof update>('update')
       setUpdate(result)
-      if (announce) notifyUser(result.status === 'available' ? `نسخهٔ جدید پنل ARG (${result.remote}) آماده است.` : result.status === 'current' ? 'پنل ARG به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
+      if (announce) notifyUser(result.status === 'available' ? `نسخهٔ جدید پنل ARG (${result.remote_version ? `v${result.remote_version}` : result.remote}) آماده است.` : result.status === 'current' ? 'پنل ARG به‌روز است.' : result.error || 'بررسی نسخه انجام نشد.')
     } catch (error) {
       setUpdate({ status: 'unavailable', error: error instanceof Error ? error.message : 'بررسی نسخه انجام نشد.' })
       if (announce) notifyUser(error instanceof Error ? error.message : 'بررسی آپدیت ناموفق بود')
@@ -648,8 +649,8 @@ export default function App() {
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [installed, user, update.local])
   useEffect(() => {
-    if (update.status === 'available' && !updating && !sharedUpdate.updating) notifyUser(`نسخهٔ جدید پنل ARG (${update.remote}) آماده است.`)
-  }, [update.status, update.remote, updating, sharedUpdate.updating])
+    if (update.status === 'available' && !updating && !sharedUpdate.updating) notifyUser(`نسخهٔ جدید پنل ARG (${update.remote_version ? `v${update.remote_version}` : update.remote}) آماده است.`)
+  }, [update.status, update.remote, update.remote_version, updating, sharedUpdate.updating])
   useEffect(() => { if (updateFinished) notifyUser('به‌روزرسانی کامل شد؛ صفحه تا چند لحظهٔ دیگر تازه می‌شود.') }, [updateFinished])
   async function openUpdateDialog() {
     setUpdateFailure(null)
@@ -818,19 +819,19 @@ export default function App() {
         <aside id="arg-sidebar" inert={updateLocked} aria-hidden={updateLocked} role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(80vw,260px)] max-w-[100vw] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0', sidebarCollapsed ? 'arg-sidebar-collapsed lg:w-[56px]' : 'lg:w-[224px]', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
           <div className="arg-sidebar-pattern" aria-hidden="true" />
           <div className="arg-sidebar-corner" aria-hidden="true" />
-          <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-2 px-2">
-            <div className="arg-brand-lockup flex min-w-0 items-center gap-2" aria-label="ARG VPS Control Center">
-              <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-10 w-10 shrink-0" />
-              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-product-label" dir="ltr">VPS CONTROL CENTER</div></div>
+          <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-1">
+            <div className="arg-brand-lockup flex min-w-0 flex-1 items-center gap-1.5" aria-label="ARG VPS Control Manager">
+              <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-9 w-9 shrink-0" />
+              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-product-label" dir="ltr"><span>VPS CONTROL</span><span>MANAGER</span></div></div>
             </div>
-            <Button variant="ghost" size="icon" className="arg-collapse hidden shrink-0 lg:inline-flex" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{sidebarCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
-            <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button>
+            <Button variant="ghost" size="icon" className="arg-collapse hidden h-8 w-8 shrink-0 lg:inline-flex" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{sidebarCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
+            <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close h-8 w-8 shrink-0 lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button>
           </div>
           <div className="arg-divider relative z-10 mx-2 my-3" aria-hidden="true" />
           <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'terminal'].includes(item.id)) },
+              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'docker', 'terminal'].includes(item.id)) },
               { title: 'عملیات سیستم', pages: allowedPages.filter((item) => ['packages', 'services'].includes(item.id)) },
               { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} title={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>)}</div></nav>)}
@@ -864,6 +865,7 @@ export default function App() {
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
             {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'docker' && user.role === 'admin' && <DockerPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'terminal' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="ترمینال"/>}><TerminalPage Heading={PageHeading} /></Suspense>}
             {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}
