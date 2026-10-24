@@ -24,6 +24,7 @@ readonly PORT_HELPER="/usr/local/lib/arg/port-helper"
 readonly UPDATE_HELPER="/usr/local/lib/arg/update-helper"
 readonly UPDATE_LOCK_DIR="/run/arg-update.lock"
 readonly UPDATE_STATUS_FILE="/run/arg-update-in-progress"
+readonly UPDATE_STATE_FILE="/run/arg-update-state.json"
 readonly ENV_DIR="/etc/arg"
 readonly ENV_FILE="/etc/arg/arg.env"
 readonly DOMAIN_FILE="/etc/arg/https-domain"
@@ -1075,17 +1076,33 @@ update_app() {
     fi
     mkdir "$UPDATE_LOCK_DIR" 2>/dev/null || die "Another ARG update is already running. Please wait for it to finish."
     printf '%s %s\n' "$(date +%s)" "$$" > "$UPDATE_STATUS_FILE"
+    export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
   fi
   chmod 0644 "$UPDATE_STATUS_FILE"
-  cleanup_update_reservation() { rm -f "$UPDATE_STATUS_FILE"; rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true; }
+  [[ -n "${ARG_UPDATE_JOB_ID:-}" ]] || export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
+  update_phase() { "$UPDATE_HELPER" state running "$1" "${2:-}" >/dev/null 2>&1 || true; }
+  cleanup_update_reservation() {
+    local exit_code=$?
+    if (( exit_code != 0 )); then
+      "$UPDATE_HELPER" state failed failed "The update stopped before successful verification. Review the update log and retry." >/dev/null 2>&1 || true
+    fi
+    rm -f "$UPDATE_STATUS_FILE"
+    rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
+    return "$exit_code"
+  }
   trap cleanup_update_reservation EXIT
+  update_phase preparing "Preparing the ARG update."
   migrate_legacy_install
   ensure_setup_token
   ensure_public_bind
   ensure_firewall_dependency
   sync_ufw_rules
   prepare_source
+  # Keep the privileged updater helper in sync before the replacement service starts polling it.
+  configure_ufw_status
+  update_phase building "Building the new ARG release."
   build_release
+  update_phase installing "Installing the verified build."
   ensure_service_account
   configure_ufw_status
   take_database_ownership
@@ -1104,12 +1121,15 @@ update_app() {
   systemctl restart arg-privileged.service
   write_service_unit
   install_cli
+  update_phase restarting "Restarting the ARG service."
   systemctl restart "$SERVICE_NAME"
+  update_phase verifying "Checking that the updated service is active."
   if wait_until_active; then
     rm -f "$previous"
     cleanup_legacy_identity
     say "ARG was updated successfully"
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
+    "$UPDATE_HELPER" state succeeded complete "ARG is updated and the service is active." >/dev/null 2>&1 || true
     show_setup_code_if_needed
     if (( MENU_ACTIVE )); then
       cleanup_update_reservation

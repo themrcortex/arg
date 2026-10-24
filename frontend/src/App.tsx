@@ -1,7 +1,8 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
   AlertTriangle,
+  ArrowDownToLine,
   ArrowLeft,
   CheckCircle2,
   ChevronDown,
@@ -11,10 +12,10 @@ import {
   EyeOff,
   Github,
   LifeBuoy,
-  LogOut,
   Menu,
   RefreshCw,
   Settings,
+  UserRound,
   X,
 } from 'lucide-react'
 import { api, type Dashboard, type User } from './lib/api'
@@ -33,7 +34,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
-import { AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
+import { AccountPage, AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { AptPage, ServicesPage } from './AdminOpsPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
@@ -47,6 +48,12 @@ const notifyUser = (message: string) => {
 
 type AlertThresholds = { cpu: number; memory: number; disk: number }
 type ResourceAlert = { key: string; label: string; value: number; threshold: number; critical: boolean }
+type UpdateProgress = { updating: boolean; started_at: number | null; instance: string; job_id?: string | null; state?: 'idle' | 'running' | 'succeeded' | 'failed'; phase?: string; message?: string }
+const updateStageFor = (phase?: string): 1 | 2 | 3 => {
+  if (['building', 'installing'].includes(phase || '')) return 2
+  if (['restarting', 'verifying', 'complete'].includes(phase || '')) return 3
+  return 1
+}
 
 function ResourceAlertNotice() {
   const [alerts, setAlerts] = useState<ResourceAlert[]>([])
@@ -314,6 +321,9 @@ function UpdateLogDetails({ active = false }: { active?: boolean }) {
   const [logs, setLogs] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [following, setFollowing] = useState(true)
+  const logViewport = useRef<HTMLPreElement>(null)
+  const followTail = useRef(true)
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -333,9 +343,24 @@ function UpdateLogDetails({ active = false }: { active?: boolean }) {
     void read()
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [open, active])
-  return <div className="rounded-xl border border-border/80 bg-background/55 p-3">
-    <Button type="button" variant="outline" size="sm" className="w-full justify-between" aria-expanded={open} onClick={() => setOpen((value) => !value)}>{open ? 'بستن جزئیات فرایند' : 'نمایش جزئیات فرایند'}<ChevronDown size={15} className={open ? 'rotate-180 transition-transform' : 'transition-transform'}/></Button>
-    {open && <div className="mt-3"><div className="mb-2 flex items-center justify-between text-xs text-muted-foreground"><span>{active ? 'گزارش زندهٔ به‌روزرسانی' : 'گزارش آخرین به‌روزرسانی'}</span>{loading && <RefreshCw size={13} className="animate-spin"/>}</div>{error ? <p className="rounded-lg border border-rose-400/20 bg-rose-400/[.06] p-3 text-xs text-rose-200">{error}</p> : <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-[#090e13] p-3 text-left font-mono text-[11px] leading-5 text-muted-foreground" dir="ltr">{logs || (loading ? 'در حال دریافت گزارش…' : 'هنوز گزارشی ثبت نشده است.')}</pre>}</div>}
+  useLayoutEffect(() => {
+    const viewport = logViewport.current
+    if (!viewport || !followTail.current) return
+    const frame = window.requestAnimationFrame(() => {
+      const current = logViewport.current
+      if (current && followTail.current) current.scrollTo({ top: current.scrollHeight, behavior: 'auto' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [logs, open])
+  function jumpToLatest() {
+    followTail.current = true
+    setFollowing(true)
+    const viewport = logViewport.current
+    if (viewport) viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
+  }
+  return <div className="rounded-xl border border-border bg-card/70 p-3 shadow-sm">
+    <Button type="button" variant="outline" size="sm" className="w-full justify-between rounded-lg border-border bg-background/70 text-foreground transition-colors hover:border-primary/40 hover:bg-secondary/70" aria-expanded={open} onClick={() => { if (!open) { followTail.current = true; setFollowing(true) }; setOpen((value) => !value) }}><span className="flex items-center gap-2"><span className="grid h-6 w-6 place-items-center rounded-md border border-primary/15 bg-primary/10 text-primary"><Activity size={13}/></span>{open ? 'بستن جزئیات فرایند' : 'مشاهدهٔ جزئیات فرایند'}</span><span className="flex items-center gap-2 text-muted-foreground">{active && <i className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"/>}{loading && <RefreshCw size={13} className="animate-spin"/>}<ChevronDown size={15} className={cn('transition-transform duration-300', open && 'rotate-180')}/></span></Button>
+    {open && <div className="mt-3 rounded-lg border border-border/80 bg-background/55 p-2.5"><div className="mb-2 flex min-h-7 items-center justify-between gap-3 px-1 text-xs text-muted-foreground"><span>{active ? 'گزارش زندهٔ به‌روزرسانی' : 'گزارش آخرین به‌روزرسانی'}</span>{!following ? <Button type="button" variant="ghost" size="sm" onClick={jumpToLatest} className="h-7 gap-1.5 rounded-md px-2 text-[11px] text-primary hover:bg-primary/10 hover:text-primary"><ArrowDownToLine size={13}/>رفتن به آخرین گزارش</Button> : <span className="flex items-center gap-1.5 font-mono text-[10px] text-primary/80" dir="ltr">{active && <i className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary"/>}FOLLOWING</span>}</div>{error ? <p className="rounded-lg border border-rose-400/20 bg-rose-400/[.06] p-3 text-xs text-rose-200">{error}</p> : <pre ref={logViewport} onScroll={(event) => { const node = event.currentTarget; const atTail = node.scrollHeight - node.scrollTop - node.clientHeight < 28; followTail.current = atTail; setFollowing(atTail) }} className="max-h-[min(42vh,360px)] min-h-24 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-[#111820] p-3 text-left font-mono text-[11px] leading-5 text-foreground/80 shadow-inner" dir="ltr">{logs || (loading ? 'در حال دریافت گزارش…' : 'هنوز گزارشی ثبت نشده است.')}</pre>}</div>}
   </div>
 }
 
@@ -382,8 +407,11 @@ function UpdateOverlay({ active, stage, startedAt, shared }: { active: boolean; 
   useEffect(() => { if (active) overlayRef.current?.focus() }, [active])
   const elapsedLabel = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`
   if (!active) return null
+  const phaseLabels = ['آماده‌سازی و دریافت', 'ساخت و نصب', 'راه‌اندازی و بررسی']
   return <div ref={overlayRef} tabIndex={-1} className="fixed inset-0 z-[100] grid place-items-center bg-[#080d12]/95 p-5 backdrop-blur-sm outline-none" role="alertdialog" aria-modal="true" aria-labelledby="update-overlay-title" aria-describedby="update-overlay-description">
-    <div className="max-h-[calc(100dvh-2.5rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-border bg-card p-7 text-center shadow-2xl"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary"><RefreshCw size={25} className="animate-spin"/></div><h2 id="update-overlay-title" className="mt-5 text-xl font-bold text-foreground">در حال به‌روزرسانی ARG</h2><p id="update-overlay-description" className="mt-2 text-sm leading-7 text-muted-foreground">{shared ? 'یک نشست دیگر این سرور را به‌روزرسانی می‌کند. برای جلوگیری از تداخل، پنل تا پایان عملیات موقتاً قفل شده است.' : stage === 1 ? 'در حال ثبت درخواست به‌روزرسانی…' : stage === 3 ? 'نسخهٔ جدید نصب شد؛ سرویس در حال راه‌اندازی و بررسی نهایی است.' : 'دریافت و ساخت نسخهٔ جدید در حال انجام است. این مرحله ممکن است چند دقیقه طول بکشد.'}</p><div className="mt-6 h-2 overflow-hidden rounded-full bg-secondary" role="progressbar" aria-label="پیشرفت به‌روزرسانی" aria-valuetext={stage === 1 ? 'ثبت درخواست' : stage === 3 ? 'راه‌اندازی مجدد سرویس' : 'دریافت و ساخت نسخه'}><div className="arg-update-progress h-full rounded-full"/></div><div className="mt-4 grid grid-cols-3 gap-2 text-[10px]"><span className={stage >= 1 ? 'text-primary' : 'text-muted-foreground'}>ثبت درخواست</span><span className={stage >= 2 ? 'text-primary' : 'text-muted-foreground'}>دریافت و ساخت</span><span className={stage >= 3 ? 'text-primary' : 'text-muted-foreground'}>راه‌اندازی</span></div><div className="mt-2 flex justify-end text-[11px] text-muted-foreground"><span>زمان سپری‌شده</span><span dir="ltr" className="mr-2 font-mono tabular-nums">{elapsedLabel}</span></div><div className="mt-4 text-right"><UpdateLogDetails active/></div><p className="mt-3 text-xs text-muted-foreground" role="status" aria-live="polite">لطفاً تا پایان فرایند این صفحه را نبند.</p></div>
+    <div className="max-h-[calc(100dvh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-2xl border border-border bg-card p-5 text-center shadow-2xl sm:p-7"><div className="mx-auto grid h-12 w-12 place-items-center rounded-xl border border-primary/20 bg-primary/[.08] text-primary"><RefreshCw size={21} className="animate-spin"/></div><h2 id="update-overlay-title" className="mt-4 text-xl font-bold text-foreground">در حال به‌روزرسانی ARG</h2><p id="update-overlay-description" className="mt-2 text-sm leading-7 text-muted-foreground">{shared ? 'یک نشست دیگر این سرور را به‌روزرسانی می‌کند. پنل موقتاً برای جلوگیری از تداخل قفل شده است.' : stage === 1 ? 'در حال آماده‌سازی و دریافت نسخهٔ تازه…' : stage === 3 ? 'سرویس در حال راه‌اندازی و بررسی نسخهٔ نصب‌شده است…' : 'نسخهٔ تازه در حال ساخت و نصب است؛ این مرحله ممکن است چند دقیقه طول بکشد.'}</p>
+      <div className="mt-6 rounded-xl border border-border bg-background/55 p-4 text-right shadow-inner"><div className="mb-4 flex items-center justify-between gap-4"><div><p className="text-[11px] text-muted-foreground">مرحلهٔ جاری</p><p className="mt-1 font-semibold text-foreground">{phaseLabels[stage - 1]}</p></div><span className="rounded-md border border-border bg-card px-2.5 py-1 font-mono text-xs tabular-nums text-muted-foreground" dir="ltr">{elapsedLabel}</span></div><div className="flex gap-2" role="progressbar" aria-label="مراحل به‌روزرسانی" aria-valuemin={0} aria-valuemax={3} aria-valuenow={stage - 1} aria-valuetext={`${phaseLabels[stage - 1]}؛ مرحلهٔ ${stage} از 3`}>{phaseLabels.map((label, index) => <span key={label} className="relative h-2 flex-1 overflow-hidden rounded-full bg-secondary"><span className={cn('absolute inset-0 rounded-full transition-colors duration-500', index < stage - 1 ? 'bg-primary' : index === stage - 1 ? 'arg-update-active-segment' : 'bg-transparent')}/></span>)}</div><div className="mt-3 grid grid-cols-3 gap-2 text-[10px]"><span className={stage >= 1 ? 'font-medium text-primary' : 'text-muted-foreground'}>آماده‌سازی</span><span className={stage >= 2 ? 'font-medium text-primary' : 'text-muted-foreground'}>ساخت و نصب</span><span className={stage >= 3 ? 'font-medium text-primary' : 'text-muted-foreground'}>بررسی نهایی</span></div></div>
+      <div className="mt-4 text-right"><UpdateLogDetails active/></div><p className="mt-3 text-xs text-muted-foreground" role="status" aria-live="polite">لطفاً تا پایان فرایند این صفحه را نبند.</p></div>
   </div>
 }
 
@@ -427,15 +455,16 @@ export default function App() {
   const [updateFailure, setUpdateFailure] = useState<string | null>(null)
   const [updateStage, setUpdateStage] = useState<1 | 2 | 3>(1)
   const [updateStartedAt, setUpdateStartedAt] = useState<number | null>(null)
-  const [sharedUpdate, setSharedUpdate] = useState<{ updating: boolean; started_at: number | null; instance: string }>({ updating: false, started_at: null, instance: '' })
+  const [sharedUpdate, setSharedUpdate] = useState<UpdateProgress>({ updating: false, started_at: null, instance: '' })
   const [sharedUpdateStage, setSharedUpdateStage] = useState<1 | 2 | 3>(1)
   const sharedUpdateWasActive = useRef(false)
   const sharedUpdateStartInstance = useRef<string | null>(null)
   const sharedUpdateStartVersion = useRef<string | null>(null)
   const localUpdateStarted = useRef(false)
   const updateStartInstance = useRef<string | null>(null)
-  const updateStartVersion = useRef<string | null>(null)
+  const currentUpdateJobId = useRef<string | null>(null)
   const reloadScheduled = useRef(false)
+  const stalledJobId = useRef<string | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
   const [reloadQueued, setReloadQueued] = useState(false)
@@ -522,10 +551,24 @@ export default function App() {
     let timer = 0
     const poll = async () => {
       try {
-        const progress = await api<{ updating: boolean; started_at: number | null; instance: string }>('update/progress')
+        const progress = await api<UpdateProgress>('update/progress')
         if (cancelled) return
-        setSharedUpdate((current) => current.updating === progress.updating && current.started_at === progress.started_at && current.instance === progress.instance ? current : progress)
-        if (progress.updating) {
+        const staleForRecovery = Boolean(progress.updating && progress.started_at && Date.now() - progress.started_at * 1000 >= 10 * 60 * 1000)
+        if (progress.job_id && progress.job_id === stalledJobId.current && progress.updating) {
+          setSharedUpdate((current) => ({ ...current, ...progress, updating: false }))
+          setUpdateFailure('فرایند به‌روزرسانی بیش از 10 دقیقه بدون نتیجه مانده است. پنل از حالت قفل خارج شد؛ گزارش را بررسی و وضعیت را دوباره بررسی کن.')
+          setUpdateDialogOpen(true)
+        } else {
+          setSharedUpdate((current) => current.updating === progress.updating && current.started_at === progress.started_at && current.instance === progress.instance && current.state === progress.state ? current : progress)
+        }
+        if (staleForRecovery && progress.job_id && stalledJobId.current !== progress.job_id) {
+          stalledJobId.current = progress.job_id
+          setSharedUpdate((current) => ({ ...current, ...progress, updating: false }))
+          setUpdateFailure('فرایند به‌روزرسانی بیش از 10 دقیقه بدون نتیجه مانده است. پنل از حالت قفل خارج شد؛ گزارش را بررسی و وضعیت را دوباره بررسی کن.')
+          setUpdateDialogOpen(true)
+        }
+        if (progress.updating && !(progress.job_id && progress.job_id === stalledJobId.current)) {
+          setSharedUpdateStage(updateStageFor(progress.phase))
           if (!sharedUpdateWasActive.current) {
             sharedUpdateWasActive.current = true
             sharedUpdateStartInstance.current = progress.instance
@@ -534,7 +577,7 @@ export default function App() {
           } else if (sharedUpdateStartInstance.current && progress.instance !== sharedUpdateStartInstance.current) {
             setSharedUpdateStage(3)
           }
-        } else if (sharedUpdateWasActive.current) {
+        } else if (!progress.updating && sharedUpdateWasActive.current) {
           sharedUpdateWasActive.current = false
           const previousInstance = sharedUpdateStartInstance.current
           const previousVersion = sharedUpdateStartVersion.current
@@ -548,15 +591,31 @@ export default function App() {
               setUpdate(latest)
               const restarted = progress.instance !== previousInstance
               const versionChanged = Boolean(previousVersion && latest.local && latest.local !== previousVersion)
-              if (latest.status === 'current' && (restarted || versionChanged || !previousVersion)) {
+              if (progress.state === 'failed') {
+                setUpdateFinished(false)
+                setUpdateFailure(progress.message || 'فرایند به‌روزرسانی شکست خورد. گزارش را برای جزئیات بررسی کن.')
+                setUpdateDialogOpen(true)
+              } else if (latest.status === 'current' && (progress.state === 'succeeded' || restarted || versionChanged || !previousVersion)) {
+                sharedUpdateWasActive.current = false
+                sharedUpdateStartInstance.current = null
+                sharedUpdateStartVersion.current = null
                 finishUpdateAndRefresh()
+              } else if (progress.state === 'succeeded' && latest.status === 'unavailable') {
+                // The script records success just before removing its lock marker; verify again after cleanup.
+                sharedUpdateWasActive.current = true
+                sharedUpdateStartInstance.current = previousInstance
+                sharedUpdateStartVersion.current = previousVersion
               } else if (restarted) {
                 setUpdateFinished(false)
                 setUpdateFailure(latest.status === 'available' ? 'نسخهٔ جدید نصب یا فعال نشد. گزارش فرایند را برای جزئیات بررسی کن.' : latest.error || 'سرویس دوباره راه‌اندازی شد اما نسخهٔ جدید تأیید نشد.')
                 setUpdateDialogOpen(true)
               }
             } catch {
-              if (progress.instance !== previousInstance) {
+              if (progress.state === 'succeeded') {
+                sharedUpdateWasActive.current = true
+                sharedUpdateStartInstance.current = previousInstance
+                sharedUpdateStartVersion.current = previousVersion
+              } else if (progress.instance !== previousInstance) {
                 setUpdateFinished(false)
                 setUpdateFailure('سرویس پس از به‌روزرسانی دوباره راه‌اندازی شد، اما وضعیت نسخه قابل بررسی نیست. گزارش فرایند را باز کن.')
                 setUpdateDialogOpen(true)
@@ -598,16 +657,14 @@ export default function App() {
     setUpdateFinished(false)
     setReloadQueued(false)
     reloadScheduled.current = false
+    stalledJobId.current = null
     let baselineInstance = update.instance || null
-    let baselineVersion = update.local || null
     try {
       const fresh = await api<typeof update>('update')
       setUpdate(fresh)
       baselineInstance = fresh.instance || baselineInstance
-      baselineVersion = fresh.local || baselineVersion
     } catch { /* The update endpoint may still schedule the helper if status checking is temporarily unavailable. */ }
     updateStartInstance.current = baselineInstance
-    updateStartVersion.current = baselineVersion
     localUpdateStarted.current = true
     setUpdateStage(1)
     setUpdateStartedAt(Date.now())
@@ -638,16 +695,26 @@ export default function App() {
       try {
         const [result, progress] = await Promise.all([
           api<typeof update>('update'),
-          api<{ updating: boolean; started_at: number | null; instance: string }>('update/progress'),
+          api<UpdateProgress>('update/progress'),
         ])
         if (cancelled) return
         setUpdate(result)
+        setUpdateStage(updateStageFor(progress.phase))
+        if (progress.job_id) currentUpdateJobId.current = progress.job_id
+        if (progress.state === 'failed') {
+          const message = progress.message || 'به‌روزرسانی ناموفق بود. گزارش فرایند را بررسی کن و سپس دوباره تلاش کن.'
+          setUpdating(false)
+          setUpdateStartedAt(null)
+          localUpdateStarted.current = false
+          setUpdateFailure(message)
+          setUpdateDialogOpen(true)
+          return
+        }
         if (updateStartInstance.current && progress.instance && progress.instance !== updateStartInstance.current) {
           setUpdateStage(3)
         }
         const processRestarted = Boolean(updateStartInstance.current && progress.instance && progress.instance !== updateStartInstance.current)
-        const versionChanged = Boolean(updateStartVersion.current && result.local && result.local !== updateStartVersion.current)
-        const updateConfirmed = !progress.updating || (processRestarted && versionChanged)
+        const updateConfirmed = progress.state === 'succeeded' && (!progress.updating || processRestarted || !updateStartInstance.current)
         if (result.status === 'current' && updateConfirmed) {
           setUpdateStage(3)
           currentSince ??= Date.now()
@@ -657,7 +724,7 @@ export default function App() {
             return
           }
         } else currentSince = null
-        if (!progress.updating && result.status !== 'current') {
+        if (!progress.updating && progress.state !== 'succeeded' && result.status !== 'current') {
           const message = result.error && result.error !== 'ARG_UPDATE_IN_PROGRESS'
             ? result.error
             : 'فرایند پایان یافت اما نسخهٔ جدید به‌درستی فعال نشد.'
@@ -670,6 +737,8 @@ export default function App() {
         }
       } catch { /* Wait for the restarted panel API; an unavailable status is not proof the update completed. */ }
       if (attempts >= 400) {
+        const stalledId = currentUpdateJobId.current || sharedUpdate.job_id
+        if (stalledId) stalledJobId.current = stalledId
         setUpdating(false)
         setUpdateStartedAt(null)
         localUpdateStarted.current = false
@@ -717,7 +786,7 @@ export default function App() {
   if (!installed || !user) return <Auth installer={!installed} onSuccess={refresh} />
   const allowedPages = navigation.filter((item) => !item.admin || user.role === 'admin')
   const currentPage = allowedPages.some((item) => item.id === page) ? page : 'dashboard'
-  const updateLocked = updating || (!reloadScheduled.current && sharedUpdate.updating)
+  const updateLocked = updating || (!reloadScheduled.current && sharedUpdate.updating && !(sharedUpdate.job_id && sharedUpdate.job_id === stalledJobId.current))
   const activeUpdateStage = updating ? updateStage : sharedUpdateStage
   const activeUpdateStartedAt = updating ? updateStartedAt : sharedUpdate.started_at ? sharedUpdate.started_at * 1000 : null
   function selectPage(next: PageId) {
@@ -732,9 +801,9 @@ export default function App() {
           <div className="arg-sidebar-pattern" aria-hidden="true" />
           <div className="arg-sidebar-corner" aria-hidden="true" />
           <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-2 px-2">
-            <div className="arg-brand-lockup flex min-w-0 items-center gap-2" aria-label="ARG ارگ VPS Control Center">
+            <div className="arg-brand-lockup flex min-w-0 items-center gap-2" aria-label="ARG VPS Control Center">
               <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-10 w-10 shrink-0" />
-              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-persian-name">ارگ</div><div className="arg-product-label" dir="ltr">VPS CONTROL CENTER</div></div>
+              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-product-label" dir="ltr">VPS CONTROL CENTER</div></div>
             </div>
             <Button variant="ghost" size="icon" className="arg-collapse hidden shrink-0 lg:inline-flex" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{sidebarCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
             <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button>
@@ -745,13 +814,13 @@ export default function App() {
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
               { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'terminal'].includes(item.id)) },
               { title: 'عملیات سیستم', pages: allowedPages.filter((item) => ['packages', 'services'].includes(item.id)) },
-              { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings'].includes(item.id)) },
+              { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} title={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>)}</div></nav>)}
           </div>
           <div className="arg-sidebar-footer relative z-10 mt-auto pt-2">
             <div className="arg-divider mx-2 mb-3" aria-hidden="true" />
             <div className={cn('arg-service-status mb-2 flex min-h-8 items-center gap-2 px-3 text-[11px]', sidebarCollapsed && 'justify-center px-0')} title={sidebarCollapsed ? 'سرویس متصل' : undefined}><span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400"/><span className="arg-nav-label">سرویس متصل</span></div>
-            <DropdownMenu><DropdownMenuTrigger asChild><button className="arg-account flex min-h-[54px] w-full items-center gap-2.5 rounded-[11px] border px-2.5 text-right transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]" title={sidebarCollapsed ? user.username : undefined}><Avatar className="h-9 w-9 shrink-0"><AvatarFallback className="arg-avatar-fallback">{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="arg-account-copy min-w-0 flex-1"><span className="block truncate text-xs font-semibold">{user.username}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{user.role === 'admin' ? 'مدیر سیستم' : user.role === 'operator' ? 'اپراتور' : 'ناظر'}</span></span><ChevronDown className="arg-account-chevron" size={15}/></button></DropdownMenuTrigger><DropdownMenuContent align="end" side="top" className="w-52"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات حساب</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج از حساب</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+            <DropdownMenu><DropdownMenuTrigger asChild><button className="arg-account flex min-h-[54px] w-full items-center gap-2.5 rounded-[11px] border px-2.5 text-right transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]" title={sidebarCollapsed ? user.username : undefined}><Avatar className="h-9 w-9 shrink-0"><AvatarFallback className="arg-avatar-fallback">{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="arg-account-copy min-w-0 flex-1"><span className="block truncate text-xs font-semibold">{user.username}</span><span className="mt-0.5 block text-[10px] text-muted-foreground">{user.role === 'admin' ? 'مدیر سیستم' : user.role === 'operator' ? 'اپراتور' : 'ناظر'}</span></span><ChevronDown className="arg-account-chevron" size={15}/></button></DropdownMenuTrigger><DropdownMenuContent align="end" side="top" collisionPadding={16} className="w-52"><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
           </div>
           <img className="arg-fortress" src="/arg/illustrations/arg-fortress-minimal.svg" alt="" aria-hidden="true" />
         </aside>
@@ -764,8 +833,8 @@ export default function App() {
         )}
         <div className="min-w-0" inert={updateLocked} aria-hidden={updateLocked}>
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
-            <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-xs font-bold text-primary sm:inline" dir="ltr">ARG <span className="text-muted-foreground">/</span> {navigation.find((item) => item.id === currentPage)?.label}</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
-            <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات</DropdownMenuItem><DropdownMenuItem onSelect={logout} className="text-rose-300"><LogOut size={15}/>خروج</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+            <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-[10px] font-semibold tracking-[.18em] text-primary sm:inline" dir="ltr">VPS CONTROL CENTER</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
+            <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end" sideOffset={8} collisionPadding={16}><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             <ResourceAlertNotice />
@@ -785,7 +854,8 @@ export default function App() {
             {currentPage === 'audit' && user.role === 'admin' && (
               <AuditPage Heading={PageHeading} notify={notifyUser} />
             )}
-            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} logout={logout} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} />}
+            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} />}
+            {currentPage === 'account' && <AccountPage Heading={PageHeading} user={user} setUser={(next) => setUser(next)} logout={logout} notify={notifyUser} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>

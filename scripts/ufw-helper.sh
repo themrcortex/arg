@@ -1,6 +1,42 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 fail() { printf 'UFW: %s\n' "$1" >&2; exit "${2:-1}"; }
+ensure_allow_first() {
+  local port="$1" protocol="$2" label="$3" status line rule_id i
+  local -a rule_ids=()
+  status="$("$ufw_bin" status numbered)" || fail "could not inspect existing UFW rules before opening $port/$protocol" 4
+  while IFS= read -r line; do
+    if [[ "$line" == *"# $label"* && "$line" == *"ALLOW IN"* && "$line" =~ ^[[:space:]]*\[[[:space:]]*([0-9]+)\] ]]; then
+      rule_id="${BASH_REMATCH[1]}"
+      if [[ " $line " =~ [[:space:]]${port}/${protocol}[[:space:]] ]]; then
+        rule_ids+=("$rule_id")
+      fi
+    fi
+  done <<< "$status"
+  # Delete matching ARG rules from bottom to top so numbered IDs remain valid.
+  for ((i=${#rule_ids[@]}-1; i>=0; i--)); do
+    "$ufw_bin" --force delete "${rule_ids[i]}" >/dev/null || fail "could not refresh the $label firewall rule" 4
+  done
+  # Put essential access rules ahead of any pre-existing deny rules.
+  "$ufw_bin" insert 1 allow "$port/$protocol" comment "$label" >/dev/null || fail "could not allow $port/$protocol before enabling UFW" 4
+}
+ensure_web_allow_unless_denied() {
+  local port="$1" status line rule_id first_id=999999 first_action="" label
+  if [[ "$port" == 80 ]]; then label='ARG HTTP websites'; else label='ARG HTTPS websites'; fi
+  status="$("$ufw_bin" status numbered)" || fail "could not inspect existing rules for web port $port" 4
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*\[[[:space:]]*([0-9]+)\] ]] || continue
+    rule_id="${BASH_REMATCH[1]}"
+    [[ " $line " =~ [[:space:]]${port}/tcp[[:space:]] ]] || continue
+    if [[ "$line" == *"DENY IN"* || "$line" == *"ALLOW IN"* ]] && (( 10#$rule_id < first_id )); then
+      first_id=$((10#$rule_id))
+      if [[ "$line" == *"DENY IN"* ]]; then first_action=deny; else first_action=allow; fi
+    fi
+  done <<< "$status"
+  # Respect an explicit inbound deny; the panel can change it to allow as a managed rule.
+  [[ "$first_action" == deny ]] && return 0
+  ensure_allow_first "$port" tcp "$label"
+}
 if [[ $# -eq 1 ]]; then
   if [[ "$1" == install ]]; then
     [[ -r /etc/os-release ]] || fail "cannot identify this Linux distribution" 3
@@ -20,17 +56,19 @@ if [[ $# -eq 1 ]]; then
       [[ -n "$ssh_ports" ]] || ssh_ports=22
       while IFS= read -r ssh_port; do
         [[ "$ssh_port" =~ ^[0-9]+$ ]] || fail "could not determine the SSH port safely; UFW was not enabled" 4
-        "$ufw_bin" allow "$ssh_port/tcp" comment 'ARG SSH access' >/dev/null
+        ensure_allow_first "$ssh_port" tcp 'ARG SSH access'
       done <<< "$ssh_ports"
       panel_bind="$(sed -n 's/^ARG_BIND=//p' /etc/arg/arg.env | tail -1)"
       [[ "${panel_bind##*:}" =~ ^[0-9]+$ ]] || fail "could not read ARG_BIND from /etc/arg/arg.env; UFW was not enabled" 4
-      "$ufw_bin" allow "${panel_bind##*:}/tcp" comment 'ARG panel' >/dev/null
+      ensure_allow_first "${panel_bind##*:}" tcp 'ARG panel'
       tls_bind="$(sed -n 's/^ARG_TLS_BIND=//p' /etc/arg/arg.env | tail -1)"
       if [[ -n "$tls_bind" ]]; then
         [[ "${tls_bind##*:}" =~ ^[0-9]+$ ]] || fail "could not read ARG_TLS_BIND from /etc/arg/arg.env; UFW was not enabled" 4
-        "$ufw_bin" allow "${tls_bind##*:}/tcp" comment 'ARG HTTPS panel' >/dev/null
-        "$ufw_bin" allow 80/tcp comment 'ARG HTTPS challenge' >/dev/null
+        ensure_allow_first "${tls_bind##*:}" tcp 'ARG HTTPS panel'
       fi
+      # Keep hosted websites reachable regardless of whether panel TLS is configured.
+      ensure_web_allow_unless_denied 80
+      ensure_web_allow_unless_denied 443
       "$ufw_bin" --force enable
       ;;
     disable) "$ufw_bin" --force disable ;;
@@ -47,8 +85,8 @@ policy="$4"
 [[ "$protocol" == tcp || "$protocol" == udp ]] || fail "protocol must be tcp or udp" 2
 [[ "$policy" == allow || "$policy" == deny ]] || fail "policy must be allow or deny" 2
 port="$((10#$port))"
-# Management of access-critical ports stays with the installer and server administrator.
-case "$port" in 22|80|443|8282|8443) fail "port $port is reserved for SSH, HTTP, HTTPS, or the ARG panel" 4 ;; esac
+# SSH and the ARG panel stay protected. HTTP/HTTPS are intentionally editable in the panel.
+case "$port" in 22|8282|8443) fail "port $port is reserved for SSH or the ARG panel" 4 ;; esac
 if [[ -f /etc/arg/arg.env ]]; then
   bind="$(sed -n 's/^ARG_BIND=//p' /etc/arg/arg.env | tail -1)"
   [[ "$port" != "${bind##*:}" ]] || fail "port $port is the configured ARG panel port" 4
@@ -58,7 +96,7 @@ fi
 ufw_bin="$(command -v ufw || true)"
 [[ -n "$ufw_bin" ]] || fail "UFW is not installed; use the Install UFW action first" 3
 if [[ "$action" == add ]]; then
-  "$ufw_bin" "$policy" "$port/$protocol" comment 'ARG WEB'
+  "$ufw_bin" insert 1 "$policy" "$port/$protocol" comment 'ARG WEB'
 elif [[ "$action" == remove ]]; then
   found=0
   while IFS= read -r line; do

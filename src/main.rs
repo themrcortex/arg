@@ -13,7 +13,7 @@ use axum::{
 use rand::RngCore;
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -74,6 +74,11 @@ struct PasswordChange {
     current_password: String,
     new_password: String,
 }
+#[derive(Deserialize)]
+struct UsernameChange {
+    username: String,
+    current_password: String,
+}
 #[derive(Serialize)]
 struct User {
     id: i64,
@@ -99,6 +104,41 @@ fn update_started_at() -> Option<i64> {
     let value = fs::read_to_string(UPDATE_STATUS_FILE).ok()?;
     let started = value.split_whitespace().next()?.parse::<i64>().ok()?;
     (now().saturating_sub(started) <= 21600).then_some(started)
+}
+
+fn update_progress_payload(raw: Option<&str>, marker_started: Option<i64>, instance: &str) -> Value {
+    let mut job = raw.and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .unwrap_or_else(|| json!({"state":if marker_started.is_some() {"running"} else {"idle"},"phase":"unknown","started_at":marker_started,"job_id":null,"message":""}));
+    let state_running = job["state"].as_str() == Some("running");
+    if state_running && marker_started.is_none() {
+        job["state"] = json!("failed");
+        job["phase"] = json!("failed");
+        job["message"] = json!("The update process ended without recording a final result. Review its logs before retrying.");
+    }
+    job["updating"] = json!(marker_started.is_some() && state_running);
+    job["instance"] = json!(instance);
+    if job["started_at"].is_null() {
+        if let Some(started) = marker_started { job["started_at"] = json!(started); }
+    }
+    job
+}
+
+fn ensure_sessions_metadata(db: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = db.prepare("PRAGMA table_info(sessions)")?;
+    let existing: Vec<String> = statement.query_map([], |row| row.get(1))?
+        .filter_map(Result::ok).collect();
+    drop(statement);
+    for (name, definition) in [
+        ("created_at", "INTEGER"),
+        ("last_seen", "INTEGER"),
+        ("remote_ip", "TEXT"),
+        ("user_agent", "TEXT"),
+    ] {
+        if !existing.iter().any(|column| column == name) {
+            db.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {name} {definition}"))?;
+        }
+    }
+    Ok(())
 }
 
 async fn update_guard(request: Request, next: Next) -> Response {
@@ -139,7 +179,11 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 fn require_user(db: &Connection, headers: &HeaderMap) -> Result<User, (StatusCode, Json<Value>)> {
     let raw =
         cookie_token(headers).ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Login required"))?;
-    db.query_row("SELECT u.id,u.username,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?1 AND s.expires_at>?2 AND u.enabled=1", params![session_hash(&raw), now()], |row| Ok(User { id: row.get(0)?, username: row.get(1)?, role: row.get(2)?, enabled: row.get(3)? })).map_err(|_| error(StatusCode::UNAUTHORIZED, "Session expired"))
+    let hash = session_hash(&raw);
+    let user = db.query_row("SELECT u.id,u.username,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?1 AND s.expires_at>?2 AND u.enabled=1", params![hash, now()], |row| Ok(User { id: row.get(0)?, username: row.get(1)?, role: row.get(2)?, enabled: row.get(3)? })).map_err(|_| error(StatusCode::UNAUTHORIZED, "Session expired"))?;
+    let current = now();
+    let _ = db.execute("UPDATE sessions SET last_seen=?1 WHERE token_hash=?2 AND (last_seen IS NULL OR last_seen<?3)", params![current, hash, current - 60]);
+    Ok(user)
 }
 fn require_admin(db: &Connection, headers: &HeaderMap) -> Result<User, (StatusCode, Json<Value>)> {
     let user = require_user(db, headers)?;
@@ -257,6 +301,7 @@ async fn setup(
     Ok(Json(json!({"ok": true})))
 }
 async fn login(
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<Credentials>,
@@ -314,9 +359,12 @@ async fn login(
     );
     let raw = token();
     let session_seconds = setting_u64(&db, "session_hours", 24).clamp(1, 72) as i64 * 3600;
+    let created_at = now();
+    let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().filter(|ch| !ch.is_control()).take(256).collect::<String>());
     db.execute(
-        "INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?1,?2,?3)",
-        params![session_hash(&raw), id, now() + session_seconds],
+        "INSERT INTO sessions (token_hash,user_id,expires_at,created_at,last_seen,remote_ip,user_agent) VALUES (?1,?2,?3,?4,?4,?5,?6)",
+        params![session_hash(&raw), id, created_at + session_seconds, created_at, remote.ip().to_string(), user_agent],
     )
     .map_err(db_error)?;
     audit(&db, &input.username, "login", "Successful login");
@@ -398,6 +446,71 @@ async fn change_password(
         "Password changed; other sessions revoked",
     );
     Ok(Json(json!({"ok":true})))
+}
+
+async fn change_username(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UsernameChange>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if input.username.len() < 3 || input.username.len() > 32
+        || !input.username.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+        return Err(error(StatusCode::BAD_REQUEST, "Username must be 3-32 ASCII letters, digits, '_' or '-'"));
+    }
+    let db = state.lock().unwrap();
+    let user = require_user(&db, &headers)?;
+    let hash: String = db.query_row("SELECT password_hash FROM users WHERE id=?1", [user.id], |row| row.get(0)).map_err(db_error)?;
+    let parsed = PasswordHash::new(&hash).map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Invalid stored password hash"))?;
+    if Argon2::default().verify_password(input.current_password.as_bytes(), &parsed).is_err() {
+        return Err(error(StatusCode::UNAUTHORIZED, "Current password is incorrect"));
+    }
+    match db.execute("UPDATE users SET username=?1 WHERE id=?2", params![input.username, user.id]) {
+        Ok(_) => {},
+        Err(rusqlite::Error::SqliteFailure(ref code, _)) if code.code == rusqlite::ErrorCode::ConstraintViolation => {
+            return Err(error(StatusCode::CONFLICT, "That username is already in use"));
+        }
+        Err(_) => return Err(db_error(rusqlite::Error::InvalidQuery)),
+    }
+    audit(&db, &input.username, "account.username", "Username changed");
+    Ok(Json(json!({"ok":true,"username":input.username})))
+}
+
+async fn list_account_sessions(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    let user = require_user(&db, &headers)?;
+    let current_hash = cookie_token(&headers).map(|raw| session_hash(&raw)).unwrap_or_default();
+    let mut statement = db.prepare("SELECT rowid,created_at,last_seen,expires_at,remote_ip,user_agent,token_hash FROM sessions WHERE user_id=?1 AND expires_at>?2 ORDER BY (token_hash=?3) DESC, COALESCE(last_seen,created_at,0) DESC").map_err(db_error)?;
+    let rows = statement.query_map(params![user.id, now(), current_hash], |row| Ok(json!({
+        "id":row.get::<_,i64>(0)?,"created_at":row.get::<_,Option<i64>>(1)?,"last_seen":row.get::<_,Option<i64>>(2)?,
+        "expires_at":row.get::<_,i64>(3)?,"remote_ip":row.get::<_,Option<String>>(4)?,"user_agent":row.get::<_,Option<String>>(5)?,
+        "current":row.get::<_,String>(6)? == current_hash
+    }))).map_err(db_error)?;
+    let sessions: Vec<Value> = rows.filter_map(Result::ok).collect();
+    Ok(Json(json!({"sessions":sessions})))
+}
+
+async fn revoke_account_session(State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let user = require_user(&db, &headers)?;
+    let current_hash = cookie_token(&headers).map(|raw| session_hash(&raw)).unwrap_or_default();
+    let target_hash: Option<String> = db.query_row("SELECT token_hash FROM sessions WHERE rowid=?1 AND user_id=?2", params![id, user.id], |row| row.get(0)).optional().map_err(db_error)?;
+    let Some(target_hash) = target_hash else { return Err(error(StatusCode::NOT_FOUND, "Session not found")); };
+    if target_hash == current_hash { return Err(error(StatusCode::BAD_REQUEST, "Use sign out to close the current session")); }
+    db.execute("DELETE FROM sessions WHERE rowid=?1 AND user_id=?2", params![id, user.id]).map_err(db_error)?;
+    audit(&db, &user.username, "account.session.revoke", "Another account session was revoked");
+    Ok(Json(json!({"ok":true})))
+}
+
+async fn revoke_other_account_sessions(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let user = require_user(&db, &headers)?;
+    let current_hash = cookie_token(&headers).map(|raw| session_hash(&raw)).unwrap_or_default();
+    let removed = db.execute("DELETE FROM sessions WHERE user_id=?1 AND token_hash<>?2", params![user.id, current_hash]).map_err(db_error)?;
+    audit(&db, &user.username, "account.sessions.revoke_others", "Other account sessions were revoked");
+    Ok(Json(json!({"ok":true,"revoked":removed})))
 }
 
 fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
@@ -495,6 +608,38 @@ fn meminfo() -> HashMap<String, u64> {
             ))
         })
         .collect()
+}
+fn os_pretty_name() -> String {
+    fs::read_to_string("/etc/os-release").unwrap_or_default().lines()
+        .find_map(|line| line.strip_prefix("PRETTY_NAME=").map(|value| value.trim_matches('"').to_owned()))
+        .unwrap_or_else(|| "Unknown Linux distribution".into())
+}
+fn cpu_model_name() -> Option<String> {
+    fs::read_to_string("/proc/cpuinfo").ok()?.lines().find_map(|line| {
+        line.split_once(':').filter(|(key, _)| matches!(key.trim(), "model name" | "Hardware" | "Processor"))
+            .map(|(_, value)| value.trim().to_owned())
+    }).filter(|value| !value.is_empty())
+}
+fn is_public_ip(value: &str) -> bool {
+    let Ok(ip) = value.parse::<std::net::IpAddr>() else { return false; };
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let [a,b,c,_] = ip.octets();
+            !ip.is_private() && !ip.is_loopback() && !ip.is_link_local() && !ip.is_broadcast()
+                && !ip.is_unspecified() && !ip.is_multicast()
+                && !(a == 100 && (64..=127).contains(&b))
+                && !(a == 192 && b == 0 && c == 2)
+                && !(a == 198 && (b == 18 || b == 19))
+                && !(a == 198 && b == 51 && c == 100)
+                && !(a == 203 && b == 0 && c == 113)
+        }
+        std::net::IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_unicast_link_local()
+                && (segments[0] & 0xfe00) != 0xfc00
+                && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
 }
 fn network() -> Vec<Value> {
     let mut result = Vec::new();
@@ -679,6 +824,47 @@ fn network_totals() -> (u64, u64) {
     }
     (rx, tx)
 }
+
+fn network_interface_counters() -> HashMap<String, (u64, u64, bool)> {
+    let mut totals = HashMap::new();
+    if let Ok(entries) = fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "lo" { continue; }
+            let path = entry.path();
+            let read_counter = |key: &str| fs::read_to_string(path.join("statistics").join(key)).ok().and_then(|value| value.trim().parse::<u64>().ok()).unwrap_or(0);
+            let rx = read_counter("rx_bytes");
+            let tx = read_counter("tx_bytes");
+            let virtual_name = ["veth", "docker", "br-", "virbr", "cni", "flannel", "podman", "lxc", "zt"].iter().any(|prefix| name.starts_with(prefix));
+            let hardware_like = ["eth", "en", "eno", "ens", "enp", "wlan", "bond"].iter().any(|prefix| name.starts_with(prefix));
+            let eligible = !path.join("master").exists() && !virtual_name && (path.join("device").exists() || hardware_like);
+            totals.insert(name, (rx, tx, eligible));
+        }
+    }
+    totals
+}
+
+fn split_traffic_delta(from: i64, to: i64, rx: u64, tx: u64) -> Vec<(i64, u64, u64)> {
+    if from < 0 || to <= from { return Vec::new(); }
+    let duration = (to - from) as u64;
+    let mut cursor = from;
+    let mut rx_used = 0u64;
+    let mut tx_used = 0u64;
+    let mut result = Vec::new();
+    while cursor < to {
+        let bucket = cursor.div_euclid(3600) * 3600;
+        let end = to.min(bucket + 3600);
+        let span = (end - cursor) as u64;
+        let is_last = end == to;
+        let rx_part = if is_last { rx.saturating_sub(rx_used) } else { ((rx as u128 * span as u128) / duration as u128) as u64 };
+        let tx_part = if is_last { tx.saturating_sub(tx_used) } else { ((tx as u128 * span as u128) / duration as u128) as u64 };
+        result.push((bucket, rx_part, tx_part));
+        rx_used = rx_used.saturating_add(rx_part);
+        tx_used = tx_used.saturating_add(tx_part);
+        cursor = end;
+    }
+    result
+}
 fn setting_u64(db: &Connection, key: &str, default: u64) -> u64 {
     db.query_row("SELECT value FROM settings WHERE key=?1", [key], |row| {
         row.get::<_, String>(0)
@@ -737,6 +923,7 @@ async fn put_monitoring_config(
         [now() - (input.retention_days * 86400) as i64],
     )
     .map_err(db_error)?;
+    db.execute("DELETE FROM network_traffic_hourly WHERE hour_start<?1", [now() - (input.retention_days * 86400) as i64]).map_err(db_error)?;
     audit(
         &db,
         &actor.username,
@@ -809,6 +996,8 @@ async fn change_panel_port(
 async fn collect_metrics(state: AppState) {
     let mut previous_cpu = cpu_ticks();
     let mut previous_network = network_totals();
+    let mut previous_traffic = network_interface_counters();
+    let mut previous_traffic_at = now();
     let mut previous_at = Instant::now();
     let mut sample_count = 0u64;
     loop {
@@ -824,6 +1013,23 @@ async fn collect_metrics(state: AppState) {
         let at = now();
         let current_cpu = cpu_ticks();
         let current_network = network_totals();
+        let current_traffic = network_interface_counters();
+        let traffic_from = previous_traffic_at;
+        let traffic_gap_is_reliable = at > traffic_from && at - traffic_from <= (interval_seconds as i64 * 2 + 2);
+        let mut traffic_rows = Vec::new();
+        if traffic_gap_is_reliable {
+            for (name, (rx, tx, eligible)) in &current_traffic {
+                if let Some((previous_rx, previous_tx, _)) = previous_traffic.get(name) {
+                    let rx_delta = if rx >= previous_rx { rx - previous_rx } else { 0 };
+                    let tx_delta = if tx >= previous_tx { tx - previous_tx } else { 0 };
+                    for (hour, rx_bytes, tx_bytes) in split_traffic_delta(traffic_from, at, rx_delta, tx_delta) {
+                        traffic_rows.push((hour, name.clone(), rx_bytes, tx_bytes, *eligible));
+                    }
+                }
+            }
+        }
+        previous_traffic = current_traffic;
+        previous_traffic_at = at;
         let elapsed = previous_at.elapsed().as_secs_f64().max(0.1);
         previous_at = Instant::now();
         let total = current_cpu.0.saturating_sub(previous_cpu.0);
@@ -858,11 +1064,15 @@ async fn collect_metrics(state: AppState) {
                     continue;
                 }
                 let _ = db.execute("INSERT OR REPLACE INTO metric_samples(at,cpu,memory,disk,rx_rate,tx_rate) VALUES (?1,?2,?3,?4,?5,?6)", params![at,cpu,memory,disk,rx_rate,tx_rate]);
+                for (hour, interface, rx_bytes, tx_bytes, eligible) in traffic_rows {
+                    let _ = db.execute("INSERT INTO network_traffic_hourly(hour_start,interface,rx_bytes,tx_bytes,eligible_for_total) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(hour_start,interface) DO UPDATE SET rx_bytes=network_traffic_hourly.rx_bytes+excluded.rx_bytes,tx_bytes=network_traffic_hourly.tx_bytes+excluded.tx_bytes,eligible_for_total=MAX(network_traffic_hourly.eligible_for_total,excluded.eligible_for_total)", params![hour,interface,rx_bytes.min(i64::MAX as u64) as i64,tx_bytes.min(i64::MAX as u64) as i64,if eligible {1} else {0}]);
+                }
                 if sample_count % 60 == 0 {
                     let _ = db.execute(
                         "DELETE FROM metric_samples WHERE at<?1",
                         [at - (retention_days * 86400) as i64],
                     );
+                    let _ = db.execute("DELETE FROM network_traffic_hourly WHERE hour_start<?1", [at - (retention_days * 86400) as i64]);
                 }
             }
         }
@@ -914,6 +1124,53 @@ async fn history(
         json!({"samples": samples, "config": monitoring_config(&db)}),
     ))
 }
+
+#[derive(Deserialize)]
+struct TrafficVolumeQuery {
+    #[serde(default)] range: Option<String>,
+    #[serde(default)] granularity: Option<String>,
+    #[serde(default)] from: Option<i64>,
+    #[serde(default)] to: Option<i64>,
+    #[serde(default)] interface: Option<String>,
+}
+
+async fn network_traffic_volume(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<TrafficVolumeQuery>) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    let current = now();
+    let range = query.range.as_deref().unwrap_or("24h");
+    let (from, to) = if range == "custom" {
+        match (query.from, query.to) {
+            (Some(from), Some(to)) if from >= 0 && from < to && to <= current && to - from <= 366 * 86400 => (from, to),
+            _ => return Err(error(StatusCode::BAD_REQUEST, "بازهٔ دلخواه ترافیک معتبر نیست یا از 366 روز بیشتر است.")),
+        }
+    } else {
+        let seconds = match range { "24h" => 86400, "7d" => 7 * 86400, "30d" => 30 * 86400, _ => return Err(error(StatusCode::BAD_REQUEST, "بازهٔ زمانی پشتیبانی نمی‌شود.")) };
+        (current - seconds, current)
+    };
+    let granularity = query.granularity.as_deref().unwrap_or(if to - from <= 2 * 86400 { "hour" } else { "day" });
+    if !["hour", "day"].contains(&granularity) || (granularity == "hour" && to - from > 90 * 86400) {
+        return Err(error(StatusCode::BAD_REQUEST, "برای بازه‌های بیش از 90 روز از گروه‌بندی روزانه استفاده کن."));
+    }
+    let selected_interface = query.interface.clone().unwrap_or_else(|| "all".into());
+    let interface = if selected_interface == "all" { None } else { Some(selected_interface.clone()) };
+    if interface.as_ref().is_some_and(|name| name.len() > 32 || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام کارت شبکه معتبر نیست."));
+    }
+    let bucket_expr = if granularity == "hour" { "hour_start" } else { "(hour_start / 86400) * 86400" };
+    let sql = format!("SELECT {bucket_expr},SUM(rx_bytes),SUM(tx_bytes),COUNT(DISTINCT interface) FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND (?3 IS NULL OR interface=?3) AND (?4=0 OR eligible_for_total=1) GROUP BY 1 ORDER BY 1");
+    let mut statement = db.prepare(&sql).map_err(db_error)?;
+    let rows = statement.query_map(params![from, to, interface, if selected_interface == "all" {1} else {0}], |row| Ok(json!({"at":row.get::<_,i64>(0)?,"rx_bytes":row.get::<_,i64>(1)?.max(0),"tx_bytes":row.get::<_,i64>(2)?.max(0),"interfaces":row.get::<_,i64>(3)?}))).map_err(db_error)?;
+    let buckets: Vec<Value> = rows.filter_map(Result::ok).collect();
+    let interface_query = if selected_interface != "all" {
+        let name = selected_interface.clone();
+        db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND interface=?3 ORDER BY interface").and_then(|mut statement| statement.query_map(params![from,to,name], |row| row.get::<_,String>(0)).map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())).unwrap_or_default()
+    } else {
+        db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND eligible_for_total=1 ORDER BY interface").and_then(|mut statement| statement.query_map(params![from,to], |row| row.get::<_,String>(0)).map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())).unwrap_or_default()
+    };
+    let fresh_at = buckets.last().and_then(|bucket| bucket["at"].as_i64());
+    Ok(Json(json!({"from":from,"to":to,"granularity":granularity,"interface":selected_interface,"interfaces":interface_query,"buckets":buckets,"fresh_at":fresh_at,"enabled":setting_u64(&db,"history_enabled",1)==1,"timezone":"UTC"})))
+}
 async fn terminal_socket(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -947,6 +1204,10 @@ async fn terminal_socket(
             return (StatusCode::FORBIDDEN, "Administrator access required").into_response();
         }
     }
+    let Some(raw_token) = cookie_token(&headers) else {
+        return (StatusCode::FORBIDDEN, "Login required").into_response();
+    };
+    let terminal_session_hash = session_hash(&raw_token);
     let permit = match TERMINAL_SESSION_LIMIT.try_acquire() {
         Ok(permit) => permit,
         Err(_) => {
@@ -961,11 +1222,11 @@ async fn terminal_socket(
         .max_frame_size(16 * 1024)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            run_terminal(socket).await;
+            run_terminal(socket, state, terminal_session_hash).await;
         })
 }
 
-async fn run_terminal(socket: WebSocket) {
+async fn run_terminal(socket: WebSocket, state: AppState, terminal_session_hash: String) {
     let pty = native_pty_system();
     let pair = match pty.openpty(PtySize {
         rows: 28,
@@ -1021,10 +1282,17 @@ async fn run_terminal(socket: WebSocket) {
         }
     });
     let (mut sender, mut receiver) = socket.split();
-    let mut update_check = tokio::time::interval(std::time::Duration::from_secs(1));
+    let mut update_check = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         tokio::select! {
-            _ = update_check.tick() => if update_started_at().is_some() { break; },
+            _ = update_check.tick() => {
+                if update_started_at().is_some() { break; }
+                let valid = {
+                    let db = state.lock().unwrap();
+                    db.query_row("SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?1 AND s.expires_at>?2 AND u.enabled=1 AND u.role='admin')", params![terminal_session_hash, now()], |row| row.get::<_, bool>(0)).unwrap_or(false)
+                };
+                if !valid { break; }
+            },
             output = output_rx.recv() => match output {
                 Some(bytes) => if sender.send(Message::Binary(bytes.into())).await.is_err() { break; },
                 None => break,
@@ -1159,15 +1427,15 @@ struct FirewallRuleInput {
 }
 fn valid_firewall_rule(input: &FirewallRuleInput) -> bool {
     input.port > 0
-        && ![22, 80, 8282, 8443].contains(&input.port)
+        && ![22, 8282, 8443].contains(&input.port)
         && ["tcp", "udp"].contains(&input.protocol.as_str())
         && ["allow", "deny"].contains(&input.policy.as_str())
 }
 fn firewall_rule_validation_error(input: &FirewallRuleInput) -> Option<&'static str> {
     if input.port == 0 {
         Some("شمارهٔ پورت باید بین 1 تا 65535 باشد.")
-    } else if [22, 80, 8282, 8443].contains(&input.port) {
-        Some("این پورت برای دسترسی SSH، وب یا پنل ARG محافظت شده است.")
+    } else if [22, 8282, 8443].contains(&input.port) {
+        Some("این پورت برای دسترسی SSH یا پنل ARG محافظت شده است. پورت‌های HTTP و HTTPS قابل مدیریت هستند.")
     } else if !["tcp", "udp"].contains(&input.protocol.as_str()) {
         Some("پروتکل TCP یا UDP را انتخاب کن.")
     } else if !["allow", "deny"].contains(&input.policy.as_str()) {
@@ -1723,8 +1991,11 @@ async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) 
 async fn panel_update_progress(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
-    let started_at = update_started_at();
-    Ok(Json(json!({"updating":started_at.is_some(),"started_at":started_at,"instance":process_instance_id()})))
+    drop(db);
+    let fallback_started = update_started_at();
+    let output = privileged_request(json!({"action":"update-progress"}));
+    let raw = output.ok().and_then(|value| value["stdout"].as_str().map(str::to_owned));
+    Ok(Json(update_progress_payload(raw.as_deref(), fallback_started, process_instance_id())))
 }
 async fn panel_update_logs(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
@@ -1839,6 +2110,13 @@ struct NginxCreateSiteInput {
 }
 #[derive(Deserialize)]
 struct NginxSiteSyncInput { source: String }
+#[derive(Deserialize)]
+struct NginxSslIssueInput {
+    email: String,
+    domains: Vec<String>,
+    #[serde(default)]
+    redirect: bool,
+}
 
 fn nginx_content_hash(content: &str) -> String {
     hex::encode(Sha256::digest(content.as_bytes()))
@@ -2177,6 +2455,40 @@ async fn sync_nginx_site(
     Ok(Json(json!({"ok":true,"source":input.source,"message":"همگام‌سازی انجام شد. کانفیگ Nginx نیز اعتبارسنجی شد."})))
 }
 
+async fn issue_nginx_site_ssl(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxSslIssueInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = { let db = state.lock().unwrap(); require_admin(&db, &headers)?.username };
+    if !valid_nginx_site_name(&name) || input.domains.is_empty() || input.domains.len() > 20
+        || input.domains.iter().any(|domain| !valid_domain_name(domain) || domain.starts_with("*."))
+        || input.email.len() > 254 || !input.email.split_once('@').is_some_and(|(local, domain)| !local.is_empty() && valid_domain_name(domain)) {
+        return Err(error(StatusCode::BAD_REQUEST, "دامنه یا ایمیل معتبر نیست؛ wildcard با HTTP-01 پشتیبانی نمی‌شود."));
+    }
+    let mut domains = input.domains.clone();
+    domains.sort();
+    domains.dedup();
+    if domains.len() != input.domains.len() {
+        return Err(error(StatusCode::BAD_REQUEST, "دامنه تکراری در فهرست وجود دارد."));
+    }
+    let result = nginx_manager_request(json!({"action":"nginx-ssl-issue","name":name,"email":input.email,"domains":domains,"redirect":input.redirect}))?;
+    if result["ok"] == false {
+        return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("گرفتن گواهی SSL ناموفق بود.")));
+    }
+    let data = result.get("data").cloned().unwrap_or(result);
+    let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+    let content = current["content"].as_str().unwrap_or_default();
+    let db = state.lock().unwrap();
+    let settings: Option<Option<String>> = db.query_row("SELECT settings_json FROM nginx_site_config_state WHERE name=?1", [&name], |row| row.get(0)).optional().map_err(db_error)?;
+    let parsed = settings.flatten().and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    store_nginx_snapshot(&db, &name, content, parsed.as_ref()).map_err(db_error)?;
+    audit(&db, &actor, "nginx.site.ssl", &format!("site={name} domains={}", domains.join(",")));
+    Ok(Json(data))
+}
+
 async fn toggle_nginx_site(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -2440,6 +2752,73 @@ fn nginx_atomic_write(path: &std::path::Path, content: &[u8], mode: u32) -> Resu
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+fn nginx_issue_ssl(name: &str, email: &str, domains: &[String], redirect: bool) -> Result<Value, String> {
+    if !valid_nginx_site_name(name) || domains.is_empty() || domains.len() > 20
+        || domains.iter().any(|domain| !valid_domain_name(domain) || domain.starts_with("*.")) {
+        return Err("دامنه معتبر نیست؛ HTTP-01 برای wildcard مناسب نیست.".into());
+    }
+    let (site_path, _) = nginx_site_paths(name)?;
+    if !nginx_site_enabled(name)? { return Err("ابتدا سایت را روشن کن؛ صدور گواهی برای سایت غیرفعال انجام نمی‌شود.".into()); }
+    if !nginx_service_status()["active"].as_bool().unwrap_or(false) { return Err("سرویس Nginx باید روشن باشد تا Certbot بتواند challenge را پاسخ دهد.".into()); }
+    let original_metadata = fs::metadata(&site_path).map_err(|error| error.to_string())?;
+    let original_content = fs::read(&site_path).map_err(|error| error.to_string())?;
+    let text = String::from_utf8_lossy(&original_content);
+    if name == "arg" { return Err("این سایت برای پنل ARG رزرو است؛ ابزار SSL سایت‌ها نباید گواهی پنل را تغییر دهد.".into()); }
+    let mut configured_domains = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("server_name ") {
+            if let Some(value) = trimmed.strip_prefix("server_name ").and_then(|value| value.split(';').next()) {
+                configured_domains.extend(value.split_whitespace().map(|value| value.to_ascii_lowercase()));
+            }
+        }
+    }
+    for domain in domains {
+        if !configured_domains.iter().any(|configured| configured == &domain.to_ascii_lowercase()) {
+            return Err(format!("دامنهٔ {domain} در server_name همین سایت نیست. ابتدا دامنه‌های سایت را ذخیره و دوباره بررسی کن."));
+        }
+    }
+    let panel_domain = fs::read_to_string("/etc/arg/https-domain").unwrap_or_default().trim().to_ascii_lowercase();
+    if !panel_domain.is_empty() && domains.iter().any(|domain| domain.eq_ignore_ascii_case(&panel_domain)) {
+        return Err("دامنهٔ پنل ARG را با ابزار SSL سایت‌ها مدیریت نکن؛ گواهی پنل بخش جداگانه‌ای دارد.".into());
+    }
+    let version = std::process::Command::new("certbot").arg("--version").output()
+        .map_err(|_| "Certbot نصب نیست. ابتدا بستهٔ python3-certbot-nginx را نصب کن.".to_owned())?;
+    if !version.status.success() { return Err("Certbot نصب نیست یا اجرا نمی‌شود. بستهٔ python3-certbot-nginx را نصب کن.".into()); }
+    let backup_dir = std::path::Path::new("/var/backups/arg/nginx-ssl");
+    fs::create_dir_all(backup_dir).map_err(|error| format!("ساخت پوشهٔ پشتیبان ناموفق بود: {error}"))?;
+    fs::set_permissions(backup_dir, fs::Permissions::from_mode(0o700)).map_err(|error| error.to_string())?;
+    let backup = backup_dir.join(format!("{name}-{}.conf", now()));
+    fs::write(&backup, &original_content).map_err(|error| format!("تهیهٔ پشتیبان ناموفق بود: {error}"))?;
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).map_err(|error| error.to_string())?;
+
+    let mut command = std::process::Command::new("timeout");
+    command.args(["600s", "certbot", "--nginx", "--non-interactive", "--agree-tos", "--email", email]);
+    for domain in domains { command.arg("-d").arg(domain); }
+    command.arg(if redirect { "--redirect" } else { "--no-redirect" });
+    let output = command.output().map_err(|error| format!("اجرای Certbot ناموفق بود: {error}"))?;
+    let mut detail = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        let _ = nginx_atomic_write(&site_path, &original_content, original_metadata.permissions().mode());
+        let _ = nginx_reload_if_active();
+        detail.truncate(6000);
+        return Err(format!("صدور یا نصب گواهی کامل نشد؛ فایل سایت از پشتیبان بازگردانده شد. پورت 80، DNS و دسترسی Certbot را بررسی کن.\n{detail}"));
+    }
+    if let Err(error) = nginx_config_test() {
+        let _ = nginx_atomic_write(&site_path, &original_content, original_metadata.permissions().mode());
+        let _ = nginx_reload_if_active();
+        return Err(format!("پس از Certbot آزمون nginx -t شکست خورد؛ کانفیگ سایت بازگردانده شد: {error}"));
+    }
+    if let Err(error) = nginx_reload_if_active() {
+        let _ = nginx_atomic_write(&site_path, &original_content, original_metadata.permissions().mode());
+        let _ = nginx_reload_if_active();
+        return Err(format!("راه‌اندازی مجدد Nginx ناموفق شد؛ کانفیگ سایت بازگردانده شد: {error}"));
+    }
+    let certificate = format!("/etc/letsencrypt/live/{}/fullchain.pem", domains[0]);
+    detail.truncate(3000);
+    Ok(json!({"message":"گواهی صادر و در تنظیمات سایت فعال شد. Certbot تمدید خودکار را مدیریت می‌کند.","domains":domains,"certificate":certificate,"backup":backup,"output":detail.trim()}))
 }
 
 fn nginx_save_site(name: &str, content: &str) -> Result<Value, String> {
@@ -2712,6 +3091,11 @@ fn nginx_browse_files(path: Option<&str>) -> Result<Value, String> {
 fn execute_nginx_request(action: &str, request: &Value) -> Value {
     let result = match action {
         "nginx-status" | "nginx-install" | "nginx-start" | "nginx-stop" | "nginx-restart" | "nginx-reload" | "nginx-enable" | "nginx-disable" | "nginx-test" | "nginx-logs" => nginx_manage(action),
+        "nginx-ssl-issue" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(|name| {
+            let email = request["email"].as_str().ok_or_else(|| "ایمیل ارسال نشده است.".to_owned())?;
+            let domains = request["domains"].as_array().ok_or_else(|| "فهرست دامنه‌ها ارسال نشده است.".to_owned())?.iter().map(|value| value.as_str().map(str::to_owned).ok_or_else(|| "دامنه نامعتبر است.".to_owned())).collect::<Result<Vec<_>,_>>()?;
+            nginx_issue_ssl(name, email, &domains, request["redirect"].as_bool().unwrap_or(false))
+        }),
         "nginx-create" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(|name| request["content"].as_str().ok_or_else(|| "محتوای سایت ارسال نشده است.".to_owned()).and_then(|content| nginx_create_site(name, content))),
         "nginx-delete" => request["name"].as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned()).and_then(nginx_delete_site).map(|_| json!({"message":"فایل سایت حذف شد."})),
         "nginx-rename" => request["name"].as_str().ok_or_else(|| "نام فعلی ارسال نشده است.".to_owned()).and_then(|name| request["new_name"].as_str().ok_or_else(|| "نام جدید ارسال نشده است.".to_owned()).and_then(|new_name| nginx_rename_site(name, new_name))),
@@ -2762,6 +3146,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("update-check") => "update-check",
         Some("update-run") => "update-run",
         Some("update-logs") => "update-logs",
+        Some("update-progress") => "update-progress",
         Some("nginx-list") => "nginx-list",
         Some("nginx-get") => "nginx-get",
         Some("nginx-save") => "nginx-save",
@@ -2776,6 +3161,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-disable") => "nginx-disable",
         Some("nginx-test") => "nginx-test",
         Some("nginx-logs") => "nginx-logs",
+        Some("nginx-ssl-issue") => "nginx-ssl-issue",
         Some("nginx-create") => "nginx-create",
         Some("nginx-delete") => "nginx-delete",
         Some("nginx-rename") => "nginx-rename",
@@ -3000,7 +3386,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL);")?;
+    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL);")?;
+    ensure_sessions_metadata(&db)?;
     let has_users = initialized(&db);
     let configured_setup_token = env::var("ARG_SETUP_TOKEN")
         .ok()
@@ -3024,9 +3411,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/account/password", post(change_password))
+        .route("/api/account/username", post(change_username))
+        .route("/api/account/sessions", get(list_account_sessions))
+        .route("/api/account/sessions/{id}", axum::routing::delete(revoke_account_session))
+        .route("/api/account/sessions/revoke-others", post(revoke_other_account_sessions))
         .route("/api/terminal", get(terminal_socket))
         .route("/api/dashboard", get(dashboard))
         .route("/api/history", get(history))
+        .route("/api/network/traffic", get(network_traffic_volume))
         .route(
             "/api/monitoring/alerts",
             get(alert_settings).put(update_alert_settings),
@@ -3058,6 +3450,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/nginx/sites/{name}/metadata", put(update_nginx_site_metadata))
         .route("/api/nginx/sites/{name}/logs", post(api_nginx_site_logs))
         .route("/api/nginx/sites/{name}/sync", post(sync_nginx_site))
+        .route("/api/nginx/sites/{name}/ssl", post(issue_nginx_site_ssl))
         .route("/api/nginx/domains/check", get(check_nginx_domains))
         .route("/api/nginx/status", get(nginx_status))
         .route("/api/nginx/files", get(api_nginx_browse_files))
@@ -3131,4 +3524,90 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 async fn state_handler(state: State<AppState>, headers: HeaderMap) -> ApiResult {
     self::state(state, headers).await
+}
+
+#[cfg(test)]
+mod update_progress_tests {
+    use super::{firewall_rule_validation_error, update_progress_payload, FirewallRuleInput};
+
+    #[test]
+    fn active_job_locks_only_while_authoritative_state_is_running() {
+        let running = update_progress_payload(Some(r#"{"job_id":"job-1","state":"running","phase":"building","started_at":100,"message":""}"#), Some(100), "instance-a");
+        assert_eq!(running["updating"], true);
+        assert_eq!(running["phase"], "building");
+
+        let succeeded = update_progress_payload(Some(r#"{"job_id":"job-1","state":"succeeded","phase":"complete","started_at":100,"message":"done"}"#), Some(100), "instance-b");
+        assert_eq!(succeeded["updating"], false);
+        assert_eq!(succeeded["state"], "succeeded");
+    }
+
+    #[test]
+    fn failed_and_orphaned_jobs_are_recoverable_not_locked() {
+        let failed = update_progress_payload(Some(r#"{"job_id":"job-2","state":"failed","phase":"failed","started_at":100,"message":"build failed"}"#), None, "instance-a");
+        assert_eq!(failed["updating"], false);
+        assert_eq!(failed["state"], "failed");
+
+        let orphaned = update_progress_payload(Some(r#"{"job_id":"job-3","state":"running","phase":"building","started_at":100,"message":""}"#), None, "instance-a");
+        assert_eq!(orphaned["updating"], false);
+        assert_eq!(orphaned["state"], "failed");
+        assert!(orphaned["message"].as_str().unwrap().contains("final result"));
+    }
+
+    #[test]
+    fn malformed_state_falls_back_to_the_update_marker() {
+        let fallback = update_progress_payload(Some("not json"), Some(123), "instance-a");
+        assert_eq!(fallback["updating"], true);
+        assert_eq!(fallback["started_at"], 123);
+    }
+
+    #[test]
+    fn sessions_metadata_migration_is_idempotent_and_preserves_existing_rows() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,expires_at INTEGER NOT NULL); INSERT INTO sessions VALUES ('hash',7,9999999999);").unwrap();
+        super::ensure_sessions_metadata(&db).unwrap();
+        super::ensure_sessions_metadata(&db).unwrap();
+        let row: (String, i64, Option<i64>) = db.query_row("SELECT token_hash,expires_at,created_at FROM sessions", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert_eq!(row, ("hash".to_owned(), 9999999999, None));
+    }
+
+    #[test]
+    fn network_deltas_split_at_utc_hour_boundaries_without_losing_bytes() {
+        let buckets = super::split_traffic_delta(3598, 3602, 101, 57);
+        assert_eq!(buckets, vec![(0, 50, 28), (3600, 51, 29)]);
+        assert_eq!(buckets.iter().map(|bucket| bucket.1).sum::<u64>(), 101);
+        assert_eq!(buckets.iter().map(|bucket| bucket.2).sum::<u64>(), 57);
+        assert!(super::split_traffic_delta(10, 10, 500, 200).is_empty());
+    }
+
+    #[test]
+    fn daily_traffic_buckets_keep_known_rx_and_tx_totals() {
+        let rx = 1536u64 * 1024 * 1024;
+        let tx = 512u64 * 1024 * 1024;
+        let buckets = super::split_traffic_delta(0, 24 * 3600, rx, tx);
+        assert_eq!(buckets.len(), 24);
+        assert_eq!(buckets.iter().map(|bucket| bucket.1).sum::<u64>(), rx);
+        assert_eq!(buckets.iter().map(|bucket| bucket.2).sum::<u64>(), tx);
+    }
+
+    #[test]
+    fn website_ports_are_configurable_but_ssh_and_panel_ports_stay_protected() {
+        for port in [80, 443] {
+            let rule = FirewallRuleInput {
+                port,
+                protocol: "tcp".into(),
+                policy: "allow".into(),
+                enabled: true,
+            };
+            assert_eq!(firewall_rule_validation_error(&rule), None);
+        }
+        for port in [22, 8282, 8443] {
+            let rule = FirewallRuleInput {
+                port,
+                protocol: "tcp".into(),
+                policy: "allow".into(),
+                enabled: true,
+            };
+            assert!(firewall_rule_validation_error(&rule).is_some());
+        }
+    }
 }

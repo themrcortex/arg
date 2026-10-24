@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { Check, Circle, Clipboard, ClipboardPaste, Copy, LoaderCircle, Pencil, Plus, RotateCw, Scissors, TerminalSquare, Trash2, X } from 'lucide-react'
+import { Check, Circle, Clipboard, ClipboardPaste, Copy, LoaderCircle, Maximize2, Minimize2, Pencil, Plus, RotateCw, Scissors, TerminalSquare, Trash2, X } from 'lucide-react'
 import { Alert, AlertDescription } from './components/ui/alert'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
@@ -11,7 +11,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './comp
 type Connection = 'connecting' | 'connected' | 'disconnected' | 'error'
 type TerminalTab = { id: string; name: string }
 
-const MAX_TABS = 8
+const MAX_TABS = 4
 
 export function TerminalPage({ Heading }: { Heading: (props: { title: string; description: string }) => React.ReactNode }) {
   const [tabs, setTabs] = useState<TerminalTab[]>([{ id: crypto.randomUUID(), name: 'Terminal 1' }])
@@ -26,10 +26,9 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
     setActiveId(next.id)
   }
   const closeTab = (id: string) => {
-    if (tabs.length === 1) return
     const remaining = tabs.filter((tab) => tab.id !== id)
     setTabs(remaining)
-    if (activeId === id) setActiveId(remaining[Math.max(0, tabs.findIndex((tab) => tab.id === id) - 1)].id)
+    if (activeId === id) setActiveId(remaining.length ? remaining[Math.max(0, tabs.findIndex((tab) => tab.id === id) - 1)].id : '')
     if (renameId === id) setRenameId(null)
   }
   const renameTab = (id: string, name: string) => {
@@ -52,9 +51,9 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
             </div>)}
             <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label="تب جدید" disabled={tabs.length >= MAX_TABS} onClick={addTab} className="h-8 w-8 shrink-0"><Plus size={15}/></Button></TooltipTrigger><TooltipContent>{tabs.length >= MAX_TABS ? `حداکثر ${MAX_TABS} تب` : 'باز کردن نشست ترمینال جدید'}</TooltipContent></Tooltip>
           </div>
-          <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-400/15 px-2.5 py-1 text-[11px] text-muted-foreground"><i className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>PTY زنده</span>
+          <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-400/15 px-2.5 py-1 text-[11px] text-muted-foreground"><i className={`h-1.5 w-1.5 rounded-full ${tabs.length ? 'bg-emerald-400' : 'bg-slate-500'}`}/>{tabs.length ? `${tabs.length} نشست` : 'بدون نشست'}</span>
         </div>
-        {tabs.map((tab) => <SessionTerminal key={tab.id} tab={tab} active={activeId === tab.id} clipboardNote={activeId === tab.id ? clipboardNote : ''} setClipboardNote={setClipboardNote} />)}
+        {tabs.length ? tabs.map((tab) => <SessionTerminal key={tab.id} tab={tab} active={activeId === tab.id} onClose={() => closeTab(tab.id)} clipboardNote={activeId === tab.id ? clipboardNote : ''} setClipboardNote={setClipboardNote} />) : <div className="grid min-h-64 place-items-center p-8 text-center"><div><div className="mx-auto grid h-12 w-12 place-items-center rounded-xl border border-[#dda46f]/20 bg-[#dda46f]/[.06] text-[#dda46f]"><TerminalSquare size={22}/></div><h3 className="mt-4 font-semibold text-foreground">همهٔ نشست‌ها بسته شده‌اند</h3><p className="mt-1 text-sm text-muted-foreground">برای شروع، یک نشست ترمینال تازه باز کن.</p><Button className="mt-4" onClick={addTab}><Plus size={15}/>ترمینال جدید</Button></div></div>}
       </section>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-2"><Check size={13} className="text-emerald-300"/>نشست‌ها از اتصال پنل و نشست ورود مدیر محافظت می‌شوند.</span>
@@ -64,7 +63,7 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
   </>
 }
 
-function SessionTerminal({ tab, active, clipboardNote, setClipboardNote }: { tab: TerminalTab; active: boolean; clipboardNote: string; setClipboardNote: (message: string) => void }) {
+function SessionTerminal({ tab, active, onClose, clipboardNote, setClipboardNote }: { tab: TerminalTab; active: boolean; onClose: () => void; clipboardNote: string; setClipboardNote: (message: string) => void }) {
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -74,6 +73,8 @@ function SessionTerminal({ tab, active, clipboardNote, setClipboardNote }: { tab
   const [connection, setConnection] = useState<Connection>('connecting')
   const [session, setSession] = useState(0)
   const [error, setError] = useState('')
+  const [minimized, setMinimized] = useState(false)
+  const [maximized, setMaximized] = useState(false)
 
   const copySelection = useCallback(async (cut = false) => {
     const terminal = terminalRef.current
@@ -186,12 +187,40 @@ function SessionTerminal({ tab, active, clipboardNote, setClipboardNote }: { tab
     })
   }, [active])
 
+  useEffect(() => {
+    if (!active) { setMaximized(false); return }
+    if (!maximized) return
+    const oldOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setMaximized(false) }
+    window.addEventListener('keydown', onKey)
+    return () => { document.body.style.overflow = oldOverflow; window.removeEventListener('keydown', onKey) }
+  }, [active, maximized])
+
+  useEffect(() => {
+    if (!active || minimized) return
+    requestAnimationFrame(() => {
+      try {
+        const terminal = terminalRef.current; const fit = fitRef.current; const socket = socketRef.current
+        if (terminal && fit && hostRef.current?.getClientRects().length) {
+          fit.fit()
+          if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }))
+        }
+      } catch { /* Wait for the terminal host to finish resizing. */ }
+    })
+  }, [active, minimized, maximized])
+
   const stateLabel = connection === 'connected' ? 'متصل' : connection === 'connecting' ? 'در حال اتصال' : connection === 'error' ? 'نیاز به اتصال مجدد' : 'قطع‌شده'
   const action = (label: string, shortcut: string, icon: React.ReactNode, onClick: () => void, disabled = false) => <Tooltip key={label}><TooltipTrigger asChild><Button size="sm" variant="ghost" disabled={disabled} aria-label={label} onClick={onClick} className="h-8 gap-1.5 px-2 text-xs">{icon}<span className="hidden md:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label} <span dir="ltr" className="mr-1 font-mono opacity-70">{shortcut}</span></TooltipContent></Tooltip>
 
   return <div className={active ? 'block' : 'hidden'} role="tabpanel" aria-label={tab.name}>
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-[#111820]/60 px-3 py-2">
-      <div className="flex min-w-0 items-center gap-2"><span className="flex gap-1.5" aria-hidden="true"><i className="h-2 w-2 rounded-full bg-rose-400"/><i className="h-2 w-2 rounded-full bg-amber-300"/><i className="h-2 w-2 rounded-full bg-emerald-400"/></span><span className="mr-1 max-w-32 truncate font-mono text-xs text-muted-foreground" dir="ltr">{tab.name} — arg@server</span><Badge variant={connection === 'connected' ? 'success' : connection === 'error' ? 'warning' : 'outline'}><Circle size={8} className={connection === 'connected' ? 'fill-current' : ''}/>{stateLabel}</Badge>{connection === 'connecting' && <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><LoaderCircle size={12} className="animate-spin"/>اتصال امن در حال آماده‌سازی است</span>}</div>
+    <div className={`overflow-hidden border-border bg-[#090d12] ${maximized ? 'fixed inset-2 z-[80] flex flex-col rounded-2xl border shadow-2xl sm:inset-4' : ''}`}>
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 bg-[#111820]/90 px-3 py-2">
+      <div className="flex min-w-0 items-center gap-2"><div className="flex items-center gap-1.5" aria-label="کنترل‌های پنجرهٔ ترمینال">
+        <Tooltip><TooltipTrigger asChild><button type="button" aria-label="بستن تب ترمینال" onClick={onClose} className="grid h-3 w-3 place-items-center rounded-full bg-rose-400 transition-[filter,transform] hover:scale-110 hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-300"><X size={8} className="opacity-0 hover:opacity-100"/></button></TooltipTrigger><TooltipContent>بستن تب و پایان نشست</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><button type="button" aria-label={minimized ? 'بازگردانی ترمینال' : 'کوچک‌کردن ترمینال'} onClick={() => setMinimized((value) => !value)} className="grid h-3 w-3 place-items-center rounded-full bg-amber-300 transition-[filter,transform] hover:scale-110 hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-200"><Minimize2 size={8} className="opacity-0 hover:opacity-100"/></button></TooltipTrigger><TooltipContent>{minimized ? 'بازگرداندن پنجره' : 'کوچک‌کردن پنجره؛ نشست باز می‌ماند'}</TooltipContent></Tooltip>
+        <Tooltip><TooltipTrigger asChild><button type="button" aria-label={maximized ? 'بازگردانی اندازهٔ ترمینال' : 'بزرگ‌کردن ترمینال'} onClick={() => { setMinimized(false); setMaximized((value) => !value) }} className="grid h-3 w-3 place-items-center rounded-full bg-emerald-400 transition-[filter,transform] hover:scale-110 hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300">{maximized && <Minimize2 size={8} className="opacity-0 hover:opacity-100"/>}</button></TooltipTrigger><TooltipContent>{maximized ? 'بازگردانی اندازه · Esc' : 'بزرگ‌کردن به اندازهٔ صفحه'}</TooltipContent></Tooltip>
+      </div><span className="mr-1 max-w-32 truncate font-mono text-xs text-muted-foreground" dir="ltr">{tab.name} — arg@server</span><Badge variant={connection === 'connected' ? 'success' : connection === 'error' ? 'warning' : 'outline'}><Circle size={8} className={connection === 'connected' ? 'fill-current' : ''}/>{stateLabel}</Badge>{connection === 'connecting' && <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><LoaderCircle size={12} className="animate-spin"/>اتصال امن در حال آماده‌سازی است</span>}</div>
       <div className="flex flex-wrap items-center gap-0.5">
         {action('کپی', 'Ctrl ⇧ C', <Copy size={14}/>, () => void copySelection())}
         {action('برش', 'انتخاب و کپی', <Scissors size={14}/>, () => void copySelection(true))}
@@ -200,9 +229,10 @@ function SessionTerminal({ tab, active, clipboardNote, setClipboardNote }: { tab
         {action('اتصال دوباره', 'Reopen PTY', <RotateCw size={14}/>, () => { setError(''); setConnection('connecting'); setSession((value) => value + 1) })}
       </div>
     </div>
-    {connection === 'error' && <div className="mx-3 mt-3 rounded-xl border border-rose-400/20 bg-rose-400/[.06] px-3 py-2 text-xs text-rose-100" role="status">{error} <button className="mr-2 underline underline-offset-2" onClick={() => { setError(''); setConnection('connecting'); setSession((value) => value + 1) }}>تلاش دوباره</button></div>}
-    {clipboardNote && active && <div className="mx-3 mt-2 flex items-center gap-2 text-[11px] text-[#dda46f]" role="status"><Clipboard size={12}/>{clipboardNote}</div>}
-    <div ref={hostRef} className="h-[min(66vh,720px)] min-h-[380px] w-full p-3 sm:p-4" dir="ltr" aria-label={`ترمینال تعاملی ${tab.name}`} />
-    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/5 px-4 py-2 text-[10px] text-muted-foreground"><span>انتخاب متن با ماوس · اسکرول برای تاریخچه · Ctrl+C برای ارسال وقفه به شل</span><span dir="ltr" className="font-mono">Ctrl + Shift + C copy · Ctrl + Shift + V paste</span></div>
+    {!minimized && connection === 'error' && <div className="mx-3 mt-3 rounded-xl border border-rose-400/20 bg-rose-400/[.06] px-3 py-2 text-xs text-rose-100" role="status">{error} <button className="mr-2 underline underline-offset-2" onClick={() => { setError(''); setConnection('connecting'); setSession((value) => value + 1) }}>تلاش دوباره</button></div>}
+    {!minimized && clipboardNote && active && <div className="mx-3 mt-2 flex items-center gap-2 text-[11px] text-[#dda46f]" role="status"><Clipboard size={12}/>{clipboardNote}</div>}
+    <div ref={hostRef} className={`w-full p-3 sm:p-4 ${minimized ? 'hidden' : maximized ? 'min-h-0 flex-1' : 'h-[min(66vh,720px)] min-h-[380px]'}`} dir="ltr" aria-label={`ترمینال تعاملی ${tab.name}`} />
+    {!minimized ? <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/5 px-4 py-2 text-[10px] text-muted-foreground"><span>انتخاب متن با ماوس · اسکرول برای تاریخچه · Ctrl+C برای ارسال وقفه به شل</span><span dir="ltr" className="font-mono">Ctrl + Shift + C copy · Ctrl + Shift + V paste</span></div> : <div className="flex items-center justify-between px-4 py-2 text-xs text-muted-foreground"><span>ترمینال کوچک شده است؛ نشست سرور همچنان فعال است.</span><Button size="sm" variant="ghost" onClick={() => setMinimized(false)}><Maximize2 size={14}/>بازگردانی</Button></div>}
+    </div>
   </div>
 }

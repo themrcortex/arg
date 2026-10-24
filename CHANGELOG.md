@@ -1,5 +1,20 @@
 # ARG Change Log
 
+## v0.4.19 — 2026-10-24
+
+### Fixed
+- Keep SSH and panel access rules ahead of UFW rules before enabling the firewall, and allow website ports 80 and 443 by default unless an explicit inbound deny rule exists.
+- Make TCP ports 80 and 443 configurable from the firewall page, with one-click HTTP and HTTPS allow rules.
+
+## v0.4.18 — 2026-10-24
+
+### Fixed
+- Persist authoritative updater job phases and final success/failure state so polling can distinguish a completed build, a failed build, and an orphaned update marker.
+- Release the blocking update overlay into a recovery state after a stalled job, while preserving the manual full-refresh and retry controls.
+- Restyle update progress as clear build stages, unify the log-details control with the ARG theme, and auto-follow fresh log output until the reader scrolls away.
+- Turn terminal titlebar controls into close, minimize, and maximize actions; minimizing keeps the PTY alive, and maximizing can be exited with Escape.
+- Smooth page and sidebar transitions and remove the Persian product label from the sidebar/header brand lockup.
+
 ## v0.4.17 — 2026-10-23
 
 ### Fixed
