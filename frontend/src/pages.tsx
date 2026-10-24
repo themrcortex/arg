@@ -69,6 +69,7 @@ import { Skeleton } from './components/ui/skeleton'
 import { Switch } from './components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
+import { formatPanelDate, usePanelTimeZone } from './lib/timezone'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
@@ -89,6 +90,7 @@ function TimeRangeFilter({ range, setRange, from, setFrom, to, setTo, applyCusto
 }
 
 function useDashboard(notify: (message: string) => void) {
+  const timeZone = usePanelTimeZone()
   const [data, setData] = useState<Dashboard | null>(null)
   const [samples, setSamples] = useState<StoredSample[]>([])
   const [historyEnabled, setHistoryEnabled] = useState(true)
@@ -124,7 +126,7 @@ function useDashboard(notify: (message: string) => void) {
     const timer = window.setInterval(refresh, 15000)
     return () => window.clearInterval(timer)
   }, [refresh])
-  const history = samples.map((sample) => ({ at: sample.at, time: new Date(sample.at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }), rx: sample.rx, tx: sample.tx }))
+  const history = samples.map((sample) => ({ at: sample.at, time: new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', minute: '2-digit' }).format(sample.at * 1000), rx: sample.rx, tx: sample.tx }))
   const resourceHistory = samples.map(({ at, cpu, memory, disk }) => ({ at, cpu, memory, disk }))
   function applyCustomRange() {
     const from = new Date(customFrom).getTime()
@@ -399,6 +401,7 @@ function ResourceChart({ samples }: { samples: ResourceSample[] }) {
 
 type ChartSeries = { key: string; label: string; color: string }
 function TimeSeriesChart({ samples, series, max, unit }: { samples: (ResourceSample | Sample)[]; series: ChartSeries[]; max: number; unit: string }) {
+  const timeZone = usePanelTimeZone()
   const [hover, setHover] = useState<number | null>(null)
   const chartHost = useRef<HTMLDivElement>(null)
   const [chartSize, setChartSize] = useState({ width: 760, height: 222 })
@@ -424,7 +427,7 @@ function TimeSeriesChart({ samples, series, max, unit }: { samples: (ResourceSam
   const current = samples[selected]
   const read = (sample: ResourceSample | Sample, key: string) => Number((sample as unknown as Record<string, number>)[key]) || 0
   const display = (value: number) => unit === '%' ? `${formatNumber(Math.round(value * 10) / 10)}%` : `${formatBytes(value)}/s`
-  const stamp = (at: number) => new Date(at * 1000).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+  const stamp = (at: number) => new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', minute: '2-digit', hour12: false }).format(at * 1000)
   return <div className="overflow-hidden rounded-xl border border-border bg-background">
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">{series.map((item) => <div key={item.key} className="flex items-center gap-2 rounded-lg bg-secondary/40 px-2 py-1 text-xs"><span className="h-1.5 w-1.5 rounded-full" style={{ background: item.color }}/><span className="text-muted-foreground">{item.label}</span><b className="font-mono font-semibold text-foreground tabular-nums" dir="ltr">{display(read(current, item.key))}</b></div>)}<span className="mr-auto font-mono text-xs text-muted-foreground" dir="ltr">{stamp(current.at)}</span></div>
     <div ref={chartHost} className="h-[230px] px-2 pt-2 md:px-3" dir="ltr"><svg viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" onMouseLeave={() => setHover(null)} onMouseMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setHover(Math.round(((event.clientX - rect.left) / rect.width * width - left) / (width - left - right) * (samples.length - 1))) }} role="img" aria-label={`تاریخچهٔ ${series.map((item) => item.label).join('، ')}`}>
@@ -494,9 +497,10 @@ function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
 }
 
 type TrafficBucket = { at: number; rx_bytes: number; tx_bytes: number; interfaces: number }
-type TrafficVolumeResponse = { from: number; to: number; granularity: 'hour' | 'day'; interface: string; interfaces: string[]; buckets: TrafficBucket[]; fresh_at: number | null; enabled: boolean; timezone: 'UTC' }
+type TrafficVolumeResponse = { from: number; to: number; granularity: 'hour' | 'day'; interface: string; interfaces: string[]; buckets: TrafficBucket[]; fresh_at: number | null; enabled: boolean; timezone: string }
 
 function NetworkTrafficVolume({ availableInterfaces }: { availableInterfaces: string[] }) {
+  const timeZone = usePanelTimeZone()
   const [range, setRange] = useState<'24h' | '7d' | '30d' | 'custom'>('24h')
   const [granularity, setGranularity] = useState<'hour' | 'day'>('hour')
   const [interfaceName, setInterfaceName] = useState('all')
@@ -524,7 +528,7 @@ function NetworkTrafficVolume({ availableInterfaces }: { availableInterfaces: st
   const totalRx = buckets.reduce((sum, item) => sum + item.rx_bytes, 0)
   const totalTx = buckets.reduce((sum, item) => sum + item.tx_bytes, 0)
   const maxVolume = Math.max(1, ...buckets.map((item) => Math.max(item.rx_bytes, item.tx_bytes)))
-  const labelTime = (seconds: number) => new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', ...(granularity === 'hour' ? { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' } : { day: '2-digit', month: 'short' }) }).format(new Date(seconds * 1000))
+  const labelTime = (seconds: number) => new Intl.DateTimeFormat('en-GB', { timeZone, ...(granularity === 'hour' ? { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' } : { day: '2-digit', month: 'short' }) }).format(new Date(seconds * 1000))
   return <SectionCard title="حجم ترافیک منتقل‌شده" description="مجموع بایت‌های ثبت‌شده از اختلاف شمارنده‌های کرنل؛ نمودار سرعت جداگانه پایین صفحه است." right={<Button size="icon" variant="ghost" aria-label="تازه‌سازی حجم ترافیک" onClick={() => setRefreshKey((value) => value + 1)}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/></Button>}>
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="arg-range flex flex-wrap gap-1 rounded-lg border border-border bg-background/45 p-1">{(['24h','7d','30d','custom'] as const).map((item) => <button key={item} type="button" aria-pressed={range === item} onClick={() => { setRange(item); if (item === '24h') setGranularity('hour'); else if (item !== 'custom') setGranularity('day') }} className="rounded-md px-2.5 py-1.5 text-xs transition-colors">{{'24h':'24 ساعت','7d':'7 روز','30d':'30 روز','custom':'دلخواه'}[item]}</button>)}</div>
@@ -532,8 +536,8 @@ function NetworkTrafficVolume({ availableInterfaces }: { availableInterfaces: st
     </div>
     {range === 'custom' && <div className="mt-3 flex flex-wrap items-end gap-3 rounded-xl border border-border/70 bg-background/30 p-3"><label className="space-y-1 text-xs text-muted-foreground">از (زمان محلی مرورگر)<Input type="datetime-local" value={fromInput} onChange={(event) => setFromInput(event.target.value)} className="h-9 min-w-48"/></label><label className="space-y-1 text-xs text-muted-foreground">تا<Input type="datetime-local" value={toInput} onChange={(event) => setToInput(event.target.value)} className="h-9 min-w-48"/></label><Button size="sm" disabled={!fromEpoch || !toEpoch || fromEpoch >= toEpoch} onClick={() => setRefreshKey((value) => value + 1)}>اعمال بازه</Button><span className="text-[10px] text-muted-foreground">گروه‌بندی ساعتی حداکثر تا 90 روز پشتیبانی می‌شود.</span></div>}
     <div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-xl border border-border bg-background/40 p-3"><span className="text-xs text-muted-foreground">دریافت</span><strong dir="ltr" className="mt-2 block font-mono text-lg text-foreground">{formatBytes(totalRx)}</strong></div><div className="rounded-xl border border-border bg-background/40 p-3"><span className="text-xs text-muted-foreground">ارسال</span><strong dir="ltr" className="mt-2 block font-mono text-lg text-foreground">{formatBytes(totalTx)}</strong></div><div className="rounded-xl border border-border bg-background/40 p-3"><span className="text-xs text-muted-foreground">مجموع این بازه</span><strong dir="ltr" className="mt-2 block font-mono text-lg text-primary">{formatBytes(totalRx + totalTx)}</strong></div></div>
-    <div className="mt-4 flex flex-wrap items-center gap-4 text-[11px] text-muted-foreground"><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-sm bg-primary"/>دریافت RX</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-sm bg-emerald-300"/>ارسال TX</span><span className="mr-auto" dir="ltr">UTC · {data?.fresh_at ? `آخرین نمونه ${labelTime(data.fresh_at)}` : 'بدون نمونه'}</span></div>
-    {error ? <Alert className="mt-3 border-rose-400/20 bg-rose-400/[.05]"><AlertDescription>{error}</AlertDescription></Alert> : loading && !data ? <Skeleton className="mt-4 h-56"/> : !data?.enabled ? <div className="mt-4 rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">ثبت تاریخچه در تنظیمات خاموش است؛ برای جمع‌آوری حجم ترافیک، ثبت تاریخچه را روشن کن.</div> : !buckets.length ? <div className="mt-4 rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">برای این بازه داده‌ای ثبت نشده است. حجم از زمان شروع مشاهدهٔ شمارنده‌ها جمع می‌شود و تاریخچهٔ قدیمی ساخته نمی‌شود.</div> : <div className="mt-4 overflow-x-auto rounded-xl border border-border/70 bg-background/25 p-4"><div className="flex h-52 min-w-[640px] items-end gap-2 border-b border-border/80 pb-2">{buckets.map((item) => <div key={item.at} title={`${labelTime(item.at)} UTC\nRX ${formatBytes(item.rx_bytes)} · TX ${formatBytes(item.tx_bytes)}`} className="group flex h-full min-w-5 flex-1 flex-col justify-end"><div className="flex h-[calc(100%-24px)] items-end justify-center gap-1"><div className="w-[42%] rounded-t-sm bg-primary/90 transition-[height] duration-500 ease-out" style={{ height: `${Math.max(item.rx_bytes ? 3 : 0, item.rx_bytes / maxVolume * 100)}%` }}/><div className="w-[42%] rounded-t-sm bg-emerald-300/85 transition-[height] duration-500 ease-out" style={{ height: `${Math.max(item.tx_bytes ? 3 : 0, item.tx_bytes / maxVolume * 100)}%` }}/></div><span className="mt-2 truncate text-center font-mono text-[9px] text-muted-foreground" dir="ltr">{labelTime(item.at)}</span></div>)}</div><div className="mt-3 flex items-center justify-between text-[10px] text-muted-foreground"><span>هر ستون حجم ثبت‌شده در بازه است، نه سرعت لحظه‌ای.</span><span dir="ltr">{formatNumber(buckets.length)} buckets</span></div></div>}
+    <div className="mt-4 flex flex-wrap items-center gap-4 text-[11px] text-muted-foreground"><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-sm bg-primary"/>دریافت RX</span><span className="flex items-center gap-2"><i className="h-2 w-2 rounded-sm bg-emerald-300"/>ارسال TX</span><span className="mr-auto" dir="ltr">{timeZone} · {data?.fresh_at ? `آخرین نمونه ${labelTime(data.fresh_at)}` : 'بدون نمونه'}</span></div>
+    {error ? <Alert className="mt-3 border-rose-400/20 bg-rose-400/[.05]"><AlertDescription>{error}</AlertDescription></Alert> : loading && !data ? <Skeleton className="mt-4 h-56"/> : !data?.enabled ? <div className="mt-4 rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">ثبت تاریخچه در تنظیمات خاموش است؛ برای جمع‌آوری حجم ترافیک، ثبت تاریخچه را روشن کن.</div> : !buckets.length ? <div className="mt-4 rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">برای این بازه داده‌ای ثبت نشده است. حجم از زمان شروع مشاهدهٔ شمارنده‌ها جمع می‌شود و تاریخچهٔ قدیمی ساخته نمی‌شود.</div> : <div className="mt-4 overflow-x-auto rounded-xl border border-border/70 bg-background/25 p-4"><div className="flex h-52 min-w-[640px] items-end gap-2 border-b border-border/80 pb-2">{buckets.map((item) => <div key={item.at} title={`${labelTime(item.at)} ${timeZone}\nRX ${formatBytes(item.rx_bytes)} · TX ${formatBytes(item.tx_bytes)}`} className="group flex h-full min-w-5 flex-1 flex-col justify-end"><div className="flex h-[calc(100%-24px)] items-end justify-center gap-1"><div className="w-[42%] rounded-t-sm bg-primary/90 transition-[height] duration-500 ease-out" style={{ height: `${Math.max(item.rx_bytes ? 3 : 0, item.rx_bytes / maxVolume * 100)}%` }}/><div className="w-[42%] rounded-t-sm bg-emerald-300/85 transition-[height] duration-500 ease-out" style={{ height: `${Math.max(item.tx_bytes ? 3 : 0, item.tx_bytes / maxVolume * 100)}%` }}/></div><span className="mt-2 truncate text-center font-mono text-[9px] text-muted-foreground" dir="ltr">{labelTime(item.at)}</span></div>)}</div><div className="mt-3 flex items-center justify-between text-[10px] text-muted-foreground"><span>هر ستون حجم ثبت‌شده در بازه است، نه سرعت لحظه‌ای.</span><span dir="ltr">{formatNumber(buckets.length)} buckets</span></div></div>}
     <p className="mt-3 text-[10px] leading-5 text-muted-foreground">محاسبه از اختلاف شمارندهٔ رابط فیزیکی و فقط برای نمونه‌های پیوسته انجام می‌شود؛ پس از راه‌اندازی مجدد یا وقفهٔ طولانی، شکاف داده به‌عنوان مصرف تخمینی پر نمی‌شود. این عدد با صورتحساب حجمی ارائه‌دهندهٔ VPS لزوماً برابر نیست.</p>
   </SectionCard>
 }
@@ -1372,6 +1376,7 @@ function downloadText(filename: string, content: string, type = 'text/plain') {
 }
 
 export function AuditPage({ Heading, notify }: Common) {
+  const timeZone = usePanelTimeZone()
   const [events, setEvents] = useState<AuditEvent[]>([])
   const [loading, setLoading] = useState(true)
   const refresh = useCallback(async () => {
@@ -1417,7 +1422,7 @@ export function AuditPage({ Heading, notify }: Common) {
               {events.map((e, i) => (
                 <TableRow key={`${e.at}-${i}`}>
                   <TableCell className="whitespace-nowrap text-muted-foreground">
-                    {new Date(e.at * 1000).toLocaleString('en-US')}
+                    {formatPanelDate(e.at, timeZone, { dateStyle: 'medium', timeStyle: 'medium' })}
                   </TableCell>
                   <TableCell className="font-semibold">{e.actor}</TableCell>
                   <TableCell>
@@ -1441,14 +1446,17 @@ export function AuditPage({ Heading, notify }: Common) {
 type MonitoringConfig = { enabled: boolean; interval_seconds: number; retention_days: number; session_hours: number }
 
 type UpdateInfo = { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string }
-export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, updating, checkingUpdate }: { Heading: Heading; notify: (message: string) => void; user: User; update: UpdateInfo; openUpdateDialog: () => void; updating: boolean; checkingUpdate: boolean }) {
+export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, updating, checkingUpdate, panelTimeZone, onTimeZoneChange }: { Heading: Heading; notify: (message: string) => void; user: User; update: UpdateInfo; openUpdateDialog: () => void; updating: boolean; checkingUpdate: boolean; panelTimeZone: string; onTimeZoneChange: (timezone: string) => void }) {
   const [config, setConfig] = useState<MonitoringConfig | null>(null)
   const [port, setPort] = useState(location.port || (location.protocol === 'https:' ? '443' : '80'))
   const [busy, setBusy] = useState(false)
   const [scheduledPort, setScheduledPort] = useState<number | null>(null)
+  const [timezoneDraft, setTimezoneDraft] = useState(panelTimeZone)
+  const [timezoneBusy, setTimezoneBusy] = useState(false)
   const isAdmin = user.role === 'admin'
   useEffect(() => { void api<MonitoringConfig>('monitoring/config').then(setConfig).catch((error) => notify(error instanceof Error ? error.message : 'دریافت تنظیمات ناموفق بود')) }, [notify])
   useEffect(() => { void api<{port: number}>('settings/port').then((result) => setPort(String(result.port))).catch(() => undefined) }, [])
+  useEffect(() => { setTimezoneDraft(panelTimeZone) }, [panelTimeZone])
   async function saveConfig(event: FormEvent) {
     event.preventDefault()
     if (!config) return
@@ -1468,9 +1476,24 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
     } catch (error) { notify(error instanceof Error ? error.message : 'تغییر پورت ناموفق بود') }
     finally { setBusy(false) }
   }
+  async function saveTimezone(event: FormEvent) {
+    event.preventDefault()
+    setTimezoneBusy(true)
+    try {
+      const result = await api<{ timezone: string }>('settings/timezone', { method: 'PUT', body: JSON.stringify({ timezone: timezoneDraft.trim() }) })
+      setTimezoneDraft(result.timezone)
+      onTimeZoneChange(result.timezone)
+      notify(`منطقهٔ زمانی پنل روی ${result.timezone} تنظیم شد.`)
+    } catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ منطقهٔ زمانی ناموفق بود.') }
+    finally { setTimezoneBusy(false) }
+  }
   function selector(label: string, key: 'interval_seconds' | 'retention_days' | 'session_hours', values: number[], unit: string) {
     return <label className="space-y-2 text-sm"><span className="block font-medium text-white">{label}</span><Select disabled={!isAdmin} value={String(config?.[key] ?? values[0])} onValueChange={(value) => setConfig((old) => old && { ...old, [key]: Number(value) })}><SelectTrigger dir="ltr"><SelectValue/></SelectTrigger><SelectContent>{values.map((value) => <SelectItem key={value} value={String(value)}>{value} {unit}</SelectItem>)}</SelectContent></Select></label>
   }
+  const timezonePreview = (() => {
+    try { return new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'short', timeZone: timezoneDraft || 'UTC' }).format(new Date()) }
+    catch { return 'نام منطقهٔ زمانی را بررسی کن.' }
+  })()
   return <>
     <Heading title="تنظیمات" description="زمان نمونه‌برداری، نگه‌داری تاریخچه، امنیت نشست و پورت دسترسی" />
     <div className="mb-5"><AlertControls user={user} notify={notify}/></div>
@@ -1490,6 +1513,12 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
         {scheduledPort && <Alert className="mt-4"><AlertDescription>نشانی HTTP جدید: <a className="font-mono text-primary underline" dir="ltr" href={`http://${location.hostname}:${scheduledPort}`}>http://{location.hostname}:{scheduledPort}</a></AlertDescription></Alert>}
       </SectionCard>
     </div>
+    <div className="mt-5"><SectionCard title="منطقهٔ زمانی پنل" description="زمان تاریخچه، گزارش‌ها، نشست‌ها و تغییر فایل‌ها بر اساس این منطقه نمایش داده می‌شود.">
+      <form onSubmit={saveTimezone} className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+        <label className="min-w-0 space-y-2 text-sm"><span className="block font-medium text-white">شناسهٔ منطقهٔ زمانی (IANA)</span><Input list="arg-timezone-presets" dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={timezoneDraft} onChange={(event) => setTimezoneDraft(event.target.value)} placeholder="Asia/Tehran" disabled={!isAdmin || timezoneBusy}/><datalist id="arg-timezone-presets">{['UTC','Asia/Tehran','Asia/Dubai','Europe/London','Europe/Berlin','America/New_York','America/Los_Angeles','Asia/Tokyo','Australia/Sydney'].map((zone) => <option key={zone} value={zone}/>)}</datalist><span className="block text-xs text-muted-foreground">مثال: <code dir="ltr">Asia/Tehran</code> یا <code dir="ltr">UTC</code>. ساعت تابستانی به‌صورت خودکار اعمال می‌شود.</span><span className="block text-xs text-primary">نمونهٔ زمان اکنون: <b dir="ltr" className="font-mono">{timezonePreview}</b></span></label>
+        {isAdmin && <Button type="submit" disabled={timezoneBusy || !timezoneDraft.trim() || timezoneDraft.trim() === panelTimeZone}>{timezoneBusy ? 'در حال ذخیره…' : 'ذخیرهٔ منطقهٔ زمانی'}</Button>}
+      </form>
+    </SectionCard></div>
     <div className="mt-5"><SectionCard title="درباره و به‌روزرسانی" description="وضعیت نصب‌شده را ببین و از یک پنجره نسخهٔ جدید را بررسی یا نصب کن." right={<Badge variant={updating || update.status === 'available' ? 'warning' : update.status === 'current' ? 'success' : 'outline'}>{updating ? 'در حال نصب' : update.status === 'available' ? 'نسخهٔ جدید' : update.status === 'current' ? 'به‌روز' : 'بررسی نشده'}</Badge>}>
       <div className="flex flex-wrap items-center justify-between gap-4"><div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.local_version ? `v${update.local_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخهٔ بررسی‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.remote_version ? `v${update.remote_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.remote || '—'}</div></div></div><div className="flex gap-2"><Button onClick={openUpdateDialog} disabled={updating || checkingUpdate} aria-busy={checkingUpdate || updating}><RefreshCw size={15} className={checkingUpdate || updating ? 'animate-spin' : ''}/>{checkingUpdate ? 'در حال بررسی…' : updating ? 'در حال نصب…' : update.status === 'available' ? 'نصب نسخهٔ جدید' : 'بررسی و به‌روزرسانی'}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-10 w-10 place-items-center rounded-[10px] border border-border text-muted-foreground hover:bg-accent" aria-label="مخزن ARG در GitHub"><Github size={17}/></a></div></div>
     </SectionCard></div>
@@ -1497,9 +1526,8 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
 }
 
 type AccountSession = { id: number; created_at: number | null; last_seen: number | null; expires_at: number; remote_ip: string | null; user_agent: string | null; current: boolean }
-const formatSessionTime = (seconds: number | null) => seconds ? new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(seconds * 1000)) : 'نامشخص'
-
 export function AccountPage({ Heading, user, setUser, logout, notify }: { Heading: Heading; user: User; setUser: (next: User) => void; logout: () => void; notify: (message: string) => void }) {
+  const timeZone = usePanelTimeZone()
   const [sessions, setSessions] = useState<AccountSession[]>([])
   const [loading, setLoading] = useState(true)
   const [sessionError, setSessionError] = useState('')
@@ -1543,7 +1571,7 @@ export function AccountPage({ Heading, user, setUser, logout, notify }: { Headin
       <div className="space-y-5"><PasswordCard notify={notify}/><SectionCard title="پایان نشست" description="از حساب کاربری در این مرورگر خارج شو." right={<LogOut size={18} className="text-muted-foreground" />}><Button variant="outline" onClick={logout}><LogOut size={15}/>خروج از حساب</Button></SectionCard></div>
     </div>
     <div className="mt-5"><SectionCard title="نشست‌های فعال" description="نشست‌ها فقط برای همین حساب نمایش داده می‌شوند؛ بستن نشست روی درخواست بعدی آن اعمال می‌شود." right={<div className="flex gap-2"><Button variant="ghost" size="icon" onClick={() => void loadSessions()} aria-label="بارگذاری دوبارهٔ نشست‌ها"><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/></Button><Button variant="outline" size="sm" disabled={loading || sessions.filter((session) => !session.current).length === 0} onClick={() => void revokeOthers()}>بستن همهٔ نشست‌های دیگر</Button></div>}>
-      {sessionError ? <Alert className="border-rose-400/20 bg-rose-400/[.06] text-rose-100"><AlertDescription>{sessionError}</AlertDescription></Alert> : loading ? <Skeleton className="h-28"/> : !sessions.length ? <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">نشست فعالی پیدا نشد.</div> : <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-right text-sm"><thead className="text-xs text-muted-foreground"><tr><th className="px-3 py-3 font-medium">دستگاه و نشانی</th><th className="px-3 py-3 font-medium">ایجاد</th><th className="px-3 py-3 font-medium">آخرین فعالیت</th><th className="px-3 py-3 font-medium">انقضا</th><th className="px-3 py-3"/></tr></thead><tbody>{sessions.map((session) => <tr key={session.id} className="border-t border-border/70"><td className="max-w-[360px] px-3 py-3"><div className="flex flex-wrap items-center gap-2"><span className="font-medium text-foreground">{session.user_agent || 'دستگاه نامشخص'}</span>{session.current && <Badge variant="success">نشست فعلی</Badge>}</div><div className="mt-1 font-mono text-xs text-muted-foreground" dir="ltr">{session.remote_ip || 'IP نامشخص'}</div></td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{formatSessionTime(session.created_at)}</td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{formatSessionTime(session.last_seen)}</td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{formatSessionTime(session.expires_at)}</td><td className="px-3 py-3 text-left">{!session.current && <Button size="sm" variant="ghost" className="text-rose-200 hover:bg-rose-400/10" onClick={() => void revoke(session.id)}><X size={14}/>بستن</Button>}</td></tr>)}</tbody></table></div>}
+      {sessionError ? <Alert className="border-rose-400/20 bg-rose-400/[.06] text-rose-100"><AlertDescription>{sessionError}</AlertDescription></Alert> : loading ? <Skeleton className="h-28"/> : !sessions.length ? <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">نشست فعالی پیدا نشد.</div> : <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-right text-sm"><thead className="text-xs text-muted-foreground"><tr><th className="px-3 py-3 font-medium">دستگاه و نشانی</th><th className="px-3 py-3 font-medium">ایجاد</th><th className="px-3 py-3 font-medium">آخرین فعالیت</th><th className="px-3 py-3 font-medium">انقضا</th><th className="px-3 py-3"/></tr></thead><tbody>{sessions.map((session) => <tr key={session.id} className="border-t border-border/70"><td className="max-w-[360px] px-3 py-3"><div className="flex flex-wrap items-center gap-2"><span className="font-medium text-foreground">{session.user_agent || 'دستگاه نامشخص'}</span>{session.current && <Badge variant="success">نشست فعلی</Badge>}</div><div className="mt-1 font-mono text-xs text-muted-foreground" dir="ltr">{session.remote_ip || 'IP نامشخص'}</div></td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{session.created_at ? formatPanelDate(session.created_at, timeZone) : 'نامشخص'}</td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{session.last_seen ? formatPanelDate(session.last_seen, timeZone) : 'نامشخص'}</td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{formatPanelDate(session.expires_at, timeZone)}</td><td className="px-3 py-3 text-left">{!session.current && <Button size="sm" variant="ghost" className="text-rose-200 hover:bg-rose-400/10" onClick={() => void revoke(session.id)}><X size={14}/>بستن</Button>}</td></tr>)}</tbody></table></div>}
     </SectionCard></div>
   </>
 }

@@ -34,6 +34,10 @@ pub(super) fn router(state: AppState) -> Router {
             get(get_panel_port).put(change_panel_port),
         )
         .route(
+            "/api/settings/timezone",
+            get(get_panel_timezone).put(change_panel_timezone),
+        )
+        .route(
             "/api/update",
             get(panel_update_status).post(schedule_panel_update),
         )

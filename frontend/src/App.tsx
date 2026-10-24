@@ -19,6 +19,7 @@ import {
   X,
 } from 'lucide-react'
 import { api, type Dashboard, type User } from './lib/api'
+import { PanelTimeZoneContext } from './lib/timezone'
 import { cn } from './lib/utils'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
@@ -455,6 +456,7 @@ export default function App() {
   const [boot, setBoot] = useState(true)
   const [installed, setInstalled] = useState(false)
   const [user, setUser] = useState<User | null>(null)
+  const [panelTimeZone, setPanelTimeZone] = useState('UTC')
   const [page, setPage] = useState<PageId>(() => pageFromHash(window.location.hash))
   const [pageReady, setPageReady] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
@@ -503,6 +505,14 @@ export default function App() {
   useEffect(() => {
     void refresh()
   }, [refresh])
+  useEffect(() => {
+    if (!user) return
+    let active = true
+    void api<{ timezone: string }>('settings/timezone').then((result) => {
+      if (active) setPanelTimeZone(result.timezone)
+    }).catch(() => undefined)
+    return () => { active = false }
+  }, [user?.username])
   useEffect(() => { if (updateReloadNotice) notifyUser('به‌روزرسانی کامل شد و صفحه با نسخهٔ تازه بارگذاری شد.') }, [updateReloadNotice])
   useEffect(() => {
     const onHash = () => {
@@ -816,6 +826,7 @@ export default function App() {
     setMobileOpen(false)
   }
   return (
+    <PanelTimeZoneContext.Provider value={panelTimeZone}>
       <div className="app-shell min-h-screen lg:grid" style={{ gridTemplateColumns: `${sidebarCollapsed ? 56 : 224}px minmax(0, 1fr)` }}>
         <aside id="arg-sidebar" inert={updateLocked} aria-hidden={updateLocked} role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(80vw,260px)] max-w-[100vw] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0', sidebarCollapsed ? 'arg-sidebar-collapsed lg:w-[56px]' : 'lg:w-[224px]', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
           <div className="arg-sidebar-pattern" aria-hidden="true" />
@@ -877,7 +888,7 @@ export default function App() {
             {currentPage === 'audit' && user.role === 'admin' && (
               <AuditPage Heading={PageHeading} notify={notifyUser} />
             )}
-            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} />}
+            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} panelTimeZone={panelTimeZone} onTimeZoneChange={setPanelTimeZone} />}
             {currentPage === 'account' && <AccountPage Heading={PageHeading} user={user} setUser={(next) => setUser(next)} logout={logout} notify={notifyUser} />}
             <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
@@ -891,6 +902,7 @@ export default function App() {
         <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating}/>
         <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={changelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()} onForceRefresh={() => void forceFreshPanelReload()}/>
       </div>
+    </PanelTimeZoneContext.Provider>
   )
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "arg-frontend",
   "private": true,
-  "version": "0.4.27",
+  "version": "0.4.29",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",

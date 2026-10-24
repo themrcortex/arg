@@ -726,6 +726,71 @@ async fn change_panel_port(
     );
     Ok(Json(json!({"scheduled": true, "port": input.port})))
 }
+#[derive(Deserialize)]
+struct PanelTimezoneInput {
+    timezone: String,
+}
+fn valid_panel_timezone(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 64
+        || value.starts_with('/')
+        || value.split('/').any(|part| {
+            part.is_empty()
+                || part == "."
+                || part == ".."
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'+'))
+        })
+    {
+        return false;
+    }
+    let Ok(root) = fs::canonicalize("/usr/share/zoneinfo") else {
+        return false;
+    };
+    fs::canonicalize(root.join(value))
+        .is_ok_and(|resolved| resolved.starts_with(&root) && resolved.is_file())
+}
+fn panel_timezone(db: &Connection) -> String {
+    db.query_row(
+        "SELECT value FROM settings WHERE key='panel_timezone'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .filter(|value| valid_panel_timezone(value))
+    .unwrap_or_else(|| "UTC".to_owned())
+}
+async fn get_panel_timezone(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    Ok(Json(json!({"timezone": panel_timezone(&db)})))
+}
+async fn change_panel_timezone(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PanelTimezoneInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let timezone = input.timezone.trim();
+    if !valid_panel_timezone(timezone) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Invalid IANA time zone. Choose a zone such as Asia/Tehran.",
+        ));
+    }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    db.execute(
+        "INSERT INTO settings(key,value) VALUES ('panel_timezone',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [timezone],
+    )
+    .map_err(db_error)?;
+    audit(&db, &actor.username, "panel.timezone", timezone);
+    Ok(Json(json!({"timezone": timezone})))
+}
 async fn collect_metrics(state: AppState) {
     let mut previous_cpu = metrics::cpu_ticks();
     let mut previous_network = metrics::network_totals();
@@ -902,7 +967,7 @@ async fn network_traffic_volume(State(state): State<AppState>, headers: HeaderMa
         db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND eligible_for_total=1 ORDER BY interface").and_then(|mut statement| statement.query_map(params![from,to], |row| row.get::<_,String>(0)).map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())).unwrap_or_default()
     };
     let fresh_at = buckets.last().and_then(|bucket| bucket["at"].as_i64());
-    Ok(Json(json!({"from":from,"to":to,"granularity":granularity,"interface":selected_interface,"interfaces":interface_query,"buckets":buckets,"fresh_at":fresh_at,"enabled":setting_u64(&db,"history_enabled",1)==1,"timezone":"UTC"})))
+    Ok(Json(json!({"from":from,"to":to,"granularity":granularity,"interface":selected_interface,"interfaces":interface_query,"buckets":buckets,"fresh_at":fresh_at,"enabled":setting_u64(&db,"history_enabled",1)==1,"timezone":panel_timezone(&db)})))
 }
 #[derive(Deserialize, Default)]
 struct TerminalQuery {
@@ -2367,6 +2432,14 @@ mod update_progress_tests {
         assert!(super::valid_terminal_pty_path("/dev/pts/17"));
         assert!(!super::valid_terminal_pty_path("/dev/pts/../../etc/passwd"));
         assert!(!super::valid_terminal_pty_path("/dev/tty0"));
+    }
+
+    #[test]
+    fn panel_timezone_accepts_iana_names_and_rejects_path_traversal() {
+        assert!(super::valid_panel_timezone("UTC"));
+        assert!(super::valid_panel_timezone("Asia/Tehran"));
+        assert!(!super::valid_panel_timezone("../etc/passwd"));
+        assert!(!super::valid_panel_timezone("/etc/localtime"));
     }
 
     #[test]

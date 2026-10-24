@@ -1,5 +1,17 @@
 # ARG Change Log
 
+## v0.4.29 — 2026-10-24
+
+### Added
+- Let administrators set the panel's IANA time zone, with validation and a live time preview.
+- Apply the selected zone to traffic charts, resource charts, audit events, file timestamps, and account sessions.
+
+## v0.4.28 — 2026-10-24
+
+### Improved
+- Adapt the file manager toolbar, path controls, and search layout to narrow screens.
+- Replace the wide file table on phones with compact file cards and touch-friendly actions.
+
 ## v0.4.27 — 2026-10-24
 
 ### Fixed
