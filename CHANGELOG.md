@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.31 — 2026-10-24
+
+### Changed
+- Add a bounded disk-usage scanner that reports filesystem capacity and usage, largest directories, and largest files for a selected path.
+- Stop scans after 12 seconds or 100,000 entries, skip symbolic links and nested filesystems, and let administrators open large folders in the file manager.
+
 ## v0.4.30 — 2026-10-24
 
 ### Changed

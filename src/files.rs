@@ -7,6 +7,14 @@ pub(super) struct FileQuery {
 }
 
 #[derive(Deserialize)]
+pub(super) struct DiskScanInput {
+    #[serde(default = "default_scan_root")]
+    path: String,
+}
+
+fn default_scan_root() -> String { "/".into() }
+
+#[derive(Deserialize)]
 pub(super) struct FileActionInput {
     action: String,
     #[serde(default)]
@@ -48,6 +56,28 @@ pub(super) async fn list_files(
                 .unwrap_or("Could not list this directory"),
         ));
     }
+    Ok(Json(response["data"].clone()))
+}
+
+pub(super) async fn scan_disk(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<DiskScanInput>,
+) -> ApiResult {
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let path = input.path.trim().to_owned();
+    if path.is_empty() || path.len() > 4096 || !path.starts_with('/') || path.split('/').any(|part| part == "..") {
+        return Err(error(StatusCode::BAD_REQUEST, "مسیر باید یک آدرس مطلق معتبر باشد."));
+    }
+    let response = privileged_request_async(json!({"action":"file-disk-scan", "path":path})).await?;
+    if response["ok"] != true {
+        return Err(error(StatusCode::BAD_REQUEST, response["error"].as_str().unwrap_or("Disk scan failed")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "files.disk.scan", &format!("path={path}"));
     Ok(Json(response["data"].clone()))
 }
 
@@ -280,6 +310,87 @@ fn list_directory(path: &str) -> Result<Value, String> {
     )
 }
 
+struct DiskScanState {
+    device: u64,
+    entries: usize,
+    max_entries: usize,
+    started: std::time::Instant,
+    max_duration: std::time::Duration,
+    truncated: bool,
+    files: Vec<(String, u64)>,
+    directories: Vec<(String, u64)>,
+    seen_files: std::collections::HashSet<(u64, u64)>,
+}
+
+fn scan_directory_size(path: &std::path::Path, depth: usize, state: &mut DiskScanState) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    if depth > 64 || state.entries >= state.max_entries || state.started.elapsed() >= state.max_duration {
+        state.truncated = true;
+        return 0;
+    }
+    state.entries += 1;
+    let Ok(metadata) = std::fs::symlink_metadata(path) else { return 0 };
+    if metadata.dev() != state.device || metadata.file_type().is_symlink() { return 0; }
+    if metadata.is_file() {
+        if state.seen_files.insert((metadata.dev(), metadata.ino())) {
+            let allocated = metadata.blocks().saturating_mul(512);
+            state.files.push((path.to_string_lossy().into_owned(), allocated));
+            return allocated;
+        }
+        return 0;
+    }
+    if !metadata.is_dir() { return 0; }
+    let mut total = 0_u64;
+    let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+    for entry in entries {
+        if state.entries >= state.max_entries || state.started.elapsed() >= state.max_duration {
+            state.truncated = true;
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        let child = entry.path();
+        let child_name = entry.file_name();
+        if depth == 0 && path == std::path::Path::new("/")
+            && ["proc", "sys", "dev", "run"].iter().any(|name| child_name == *name) {
+            continue;
+        }
+        let size = scan_directory_size(&child, depth + 1, state);
+        total = total.saturating_add(size);
+    }
+    state.directories.push((path.to_string_lossy().into_owned(), total));
+    total
+}
+
+fn scan_disk_usage(path: &str) -> Result<Value, String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::ffi::OsStrExt;
+    let root = canonical_existing(path)?;
+    if !root.is_dir() { return Err("مسیر انتخاب‌شده پوشه نیست.".into()); }
+    let metadata = std::fs::metadata(&root).map_err(|error| error.to_string())?;
+    let mut state = DiskScanState {
+        device: metadata.dev(), entries: 0, max_entries: 100_000,
+        started: std::time::Instant::now(), max_duration: std::time::Duration::from_secs(12),
+        truncated: false, files: Vec::new(), directories: Vec::new(),
+        seen_files: std::collections::HashSet::new(),
+    };
+    let total_bytes = scan_directory_size(&root, 0, &mut state);
+    let c_root = std::ffi::CString::new(root.as_os_str().as_bytes()).map_err(|_| "مسیر معتبر نیست.")?;
+    let mut volume = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    let (volume_total, volume_used, volume_available) = if unsafe { libc::statvfs(c_root.as_ptr(), &mut volume) } == 0 {
+        let block_size = volume.f_frsize as u64;
+        let total = (volume.f_blocks as u64).saturating_mul(block_size);
+        let used = (volume.f_blocks.saturating_sub(volume.f_bfree) as u64).saturating_mul(block_size);
+        let available = (volume.f_bavail as u64).saturating_mul(block_size);
+        (total, used, available)
+    } else { (0, 0, 0) };
+    state.files.sort_by(|a, b| b.1.cmp(&a.1));
+    state.directories.sort_by(|a, b| b.1.cmp(&a.1));
+    let largest_files = state.files.into_iter().take(100).map(|(path, bytes)| json!({"path":path,"bytes":bytes})).collect::<Vec<_>>();
+    let largest_directories = state.directories.into_iter().take(100).map(|(path, bytes)| json!({"path":path,"bytes":bytes})).collect::<Vec<_>>();
+    let usage_percent = if volume_total == 0 { 0.0 } else { volume_used as f64 * 100.0 / volume_total as f64 };
+    Ok(json!({"root":root,"total_bytes":total_bytes,"volume_total":volume_total,"volume_used":volume_used,"volume_available":volume_available,"usage_percent":usage_percent,"entries_scanned":state.entries,"truncated":state.truncated,"elapsed_ms":state.started.elapsed().as_millis(),"largest_files":largest_files,"largest_directories":largest_directories,"note":"Symbolic links are skipped; nested filesystems and pseudo-filesystems are excluded. Select a mount path directly to scan it."}))
+}
+
 fn copy_tree(
     source: &std::path::Path,
     destination: &std::path::Path,
@@ -370,6 +481,7 @@ fn save_file_atomically(target: &std::path::Path, content: &[u8]) -> Result<(), 
 
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     let result = match action {
+        "file-disk-scan" => request["path"].as_str().ok_or_else(|| "A scan path is required.".to_owned()).and_then(scan_disk_usage),
         "file-list" => request["path"]
             .as_str()
             .ok_or_else(|| "A path is required.".to_owned())

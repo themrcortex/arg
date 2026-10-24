@@ -50,6 +50,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/docker", get(docker::docker_status))
         .route("/api/docker/action", post(docker::docker_operation))
         .route("/api/files", get(files::list_files))
+        .route("/api/files/disk-scan", post(files::scan_disk))
         .route("/api/files/content", get(files::read_file))
         .route("/api/files/download", get(files::download_file))
         .route(

@@ -2097,6 +2097,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("docker-status") => "docker-status",
         Some("docker-operation") => "docker-operation",
         Some("file-list") => "file-list",
+        Some("file-disk-scan") => "file-disk-scan",
         Some("file-read") => "file-read",
         Some("file-download") => "file-download",
         Some("file-action") => "file-action",
