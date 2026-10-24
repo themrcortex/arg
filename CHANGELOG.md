@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.4.21 — 2026-10-24
+
+### Fixed
+- Fix a quoting error in the update helper that prevented update checks and web-triggered updates from starting.
+- Sanitize update-state messages without leaving an unterminated shell quote.
+
 ## v0.4.20 — 2026-10-24
 
 ### Improved

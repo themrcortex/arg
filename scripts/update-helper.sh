@@ -29,13 +29,13 @@ clear_stale_update_lock() {
 write_update_state() {
   local state="$1" phase="$2" message="${3:-}" started job_id updated tmp previous_job
   job_id="${ARG_UPDATE_JOB_ID:-arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)}"
-  started="$(sed -n 's/.*"started_at":\([0-9][0-9]*\).*/\1/p' "$update_state_file" 2>/dev/null | head -n 1)"
-  previous_job="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1)"
+  started="$(sed -n 's/.*"started_at":\([0-9][0-9]*\).*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
+  previous_job="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
   if [[ ! "$started" =~ ^[0-9]+$ || "$previous_job" != "$job_id" ]]; then started="$(date +%s)"; fi
   updated="$(date +%s)"
   # Messages are fixed internal strings; strip control characters and JSON quotes defensively.
   message="${message//$'\n'/ }"
-  message="${message//\"/'}"
+  message="${message//\"/}"
   tmp="${update_state_file}.tmp.$$"
   printf '{"job_id":"%s","state":"%s","phase":"%s","started_at":%s,"updated_at":%s,"message":"%s"}\n' \
     "$job_id" "$state" "$phase" "$started" "$updated" "$message" > "$tmp"
