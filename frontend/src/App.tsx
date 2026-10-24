@@ -38,6 +38,7 @@ import {
 import { AccountPage, AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
 import { AptPage, ServicesPage } from './AdminOpsPage'
 import { DockerPage } from './DockerPage'
+import { FileManagerPage } from './FileManagerPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
@@ -831,7 +832,7 @@ export default function App() {
           <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'docker', 'terminal'].includes(item.id)) },
+              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'docker', 'files', 'terminal'].includes(item.id)) },
               { title: 'عملیات سیستم', pages: allowedPages.filter((item) => ['packages', 'services'].includes(item.id)) },
               { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} title={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>)}</div></nav>)}
@@ -866,6 +867,7 @@ export default function App() {
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
             {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'docker' && user.role === 'admin' && <DockerPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'files' && user.role === 'admin' && <FileManagerPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'terminal' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="ترمینال"/>}><TerminalPage Heading={PageHeading} /></Suspense>}
             {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}

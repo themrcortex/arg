@@ -1,5 +1,22 @@
 # ARG Change Log
 
+## v0.4.27 — 2026-10-24
+
+### Fixed
+- Prevent the privileged helper from claiming a root terminal's PTY as its own controlling terminal, allowing the root shell to attach cleanly.
+
+## v0.4.26 — 2026-10-24
+
+### Changed
+- Add a dedicated, administrator-only server file manager with directory browsing, search, create, rename, copy, move, paste, delete, upload, download, text editing, and Unix permission controls.
+- Route filesystem work through the privileged helper with path validation, upload and edit limits, confirmed destructive actions, protected system roots, and symlink-safe delete/copy behavior.
+
+## v0.4.25 — 2026-10-24
+
+### Changed
+- Split the Rust backend into focused `docker`, `metrics`, and `nginx` modules, keeping each manager's API handlers and privileged operations together.
+- Move the API route table into `routes` and keep shared authentication, database state, and application startup in the application entry point.
+
 ## v0.4.24 — 2026-10-24
 
 ### Added

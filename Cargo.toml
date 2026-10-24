@@ -1,6 +1,6 @@
 [package]
 name = "arg"
-version = "0.4.24"
+version = "0.4.27"
 edition = "2021"
 
 [dependencies]
@@ -15,6 +15,7 @@ argon2 = "0.5"
 rand = "0.8"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 if-addrs = "0.13"
 libc = "0.2"
 rust-embed = "8"

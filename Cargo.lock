@@ -31,11 +31,12 @@ dependencies = [
 
 [[package]]
 name = "arg"
-version = "0.4.24"
+version = "0.4.27"
 dependencies = [
  "argon2",
  "axum",
  "axum-server",
+ "base64",
  "futures-util",
  "hex",
  "if-addrs",
