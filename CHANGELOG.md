@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.4.22 — 2026-10-24
+
+### Improved
+- Group APT operations into clear update and cleanup sections with compact responsive action cards.
+- Show the exact system command beside each APT action and animate an indeterminate progress bar inside the active card while it runs.
+- Add paginated grid and list views for installed packages, with search and clearer per-package actions.
+
 ## v0.4.21 — 2026-10-24
 
 ### Fixed
