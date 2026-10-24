@@ -6,6 +6,7 @@ import { Input } from './components/ui/input'
 import { Badge } from './components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Alert, AlertDescription } from './components/ui/alert'
+import { Skeleton } from './components/ui/skeleton'
 
 type Heading = (props: { title: string; description: string }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
@@ -16,7 +17,7 @@ export function AptPage({ Heading, notify }: Common) {
   const [packages, setPackages] = useState<PackageRow[]>([])
   const [query, setQuery] = useState('')
   const [packageInput, setPackageInput] = useState('')
-  const [busy, setBusy] = useState('')
+  const [busy, setBusy] = useState('list')
   const [output, setOutput] = useState('')
   const [error, setError] = useState('')
   const refresh = useCallback(async () => {
@@ -47,6 +48,11 @@ export function AptPage({ Heading, notify }: Common) {
     { id: 'autoclean', title: 'پاک‌سازی کش قدیمی', note: 'حذف فایل‌های بستهٔ منقضی', icon: Package },
     { id: 'clean', title: 'پاک‌سازی کامل کش', note: 'حذف آرشیوهای دانلودشدهٔ APT', icon: Square },
   ]
+  if (busy === 'list' && !packages.length && !error) return <>
+    <Heading title="مدیریت APT" description="در حال دریافت فهرست بسته‌های نصب‌شده…"/>
+    <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{actions.map((action) => <Skeleton key={action.id} className="h-24 rounded-2xl"/>)}</div>
+    <Skeleton className="mb-5 h-36 rounded-2xl"/><div className="rounded-2xl border border-border bg-card/50 p-5"><Skeleton className="mb-5 h-6 w-48"/><Skeleton className="mb-4 h-10 w-full"/>{Array.from({ length: 5 }, (_, index) => <Skeleton key={index} className="mb-3 h-11 w-full last:mb-0"/>)}</div>
+  </>
   return <>
     <Heading title="مدیریت APT" description="مخازن، نصب و حذف بسته‌ها و نگهداری سیستم را از یک محل مدیریت کن." />
     <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{actions.map((item) => <button key={item.id} disabled={!!busy} onClick={() => void run(item.id)} className="group flex min-h-24 items-center gap-4 rounded-2xl border border-border bg-card/70 p-4 text-right transition hover:border-[#dda46f]/40 hover:bg-card disabled:opacity-50"><span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-[#dda46f]/10 text-[#dda46f]"><item.icon size={19} className={busy === item.id ? 'animate-spin' : ''}/></span><span className="min-w-0 flex-1"><b className="block text-sm">{item.title}</b><span className="mt-1 block text-xs text-muted-foreground">{item.note}</span></span>{busy === item.id && <LoaderCircle size={16} className="animate-spin"/>}</button>)}</div>
@@ -70,7 +76,7 @@ export function ServicesPage({ Heading, notify }: Common) {
   const [services, setServices] = useState<ServiceRow[]>([])
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all')
-  const [busy, setBusy] = useState('')
+  const [busy, setBusy] = useState('list')
   const [output, setOutput] = useState('')
   const [error, setError] = useState('')
   const refresh = useCallback(async () => {
@@ -92,6 +98,11 @@ export function ServicesPage({ Heading, notify }: Common) {
     const matches = `${service.unit} ${service.description}`.toLowerCase().includes(query.toLowerCase())
     return matches && (filter === 'all' || (filter === 'active' ? service.state === 'active' : filter === 'failed' ? service.state === 'failed' : service.state !== 'active'))
   }), [services, query, filter])
+  if (busy === 'list' && !services.length && !error) return <>
+    <Heading title="سرویس‌های سیستم" description="در حال شناسایی سرویس‌های systemd…"/>
+    <div className="mb-5 grid gap-3 sm:grid-cols-3">{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="h-24 rounded-2xl"/>)}</div>
+    <div className="rounded-2xl border border-border bg-card/50 p-5"><div className="mb-5 flex items-center justify-between"><Skeleton className="h-6 w-36"/><Skeleton className="h-9 w-28 rounded-lg"/></div><Skeleton className="mb-4 h-10 w-full"/>{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="mb-2 h-14 w-full last:mb-0"/>)}</div>
+  </>
   return <>
     <Heading title="سرویس‌های سیستم" description="سرویس‌های systemd را جست‌وجو کن و وضعیت اجرا و فعال‌سازی آن‌ها را مدیریت کن." />
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><Card><CardContent className="flex items-center gap-3 p-4"><ServerCog className="text-[#dda46f]"/><div><div className="text-xl font-semibold tabular-nums">{services.length.toLocaleString('en-US')}</div><div className="text-xs text-muted-foreground">سرویس شناسایی‌شده</div></div></CardContent></Card><Card><CardContent className="flex items-center gap-3 p-4"><Activity className="text-emerald-300"/><div><div className="text-xl font-semibold tabular-nums">{services.filter((service) => service.state === 'active').length.toLocaleString('en-US')}</div><div className="text-xs text-muted-foreground">در حال اجرا</div></div></CardContent></Card><Card><CardContent className="flex items-center gap-3 p-4"><CircleAlert className="text-rose-300"/><div><div className="text-xl font-semibold tabular-nums">{services.filter((service) => service.state === 'failed').length.toLocaleString('en-US')}</div><div className="text-xs text-muted-foreground">دارای خطا</div></div></CardContent></Card></div>

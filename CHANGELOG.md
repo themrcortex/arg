@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.4.20 — 2026-10-24
+
+### Improved
+- Show a soft, responsive page skeleton during navigation and let page content fade upward smoothly when ready.
+- Replace the sharp pulse skeleton with a gentle shimmer and tune shared button and card motion to use softer easing.
+- Add initial loading skeletons to APT and system service management while their data is fetched.
+
 ## v0.4.19 — 2026-10-24
 
 ### Fixed

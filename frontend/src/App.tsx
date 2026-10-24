@@ -23,6 +23,7 @@ import { cn } from './lib/utils'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
+import { Skeleton } from './components/ui/skeleton'
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Alert, AlertDescription, AlertTitle } from './components/ui/alert'
@@ -438,11 +439,22 @@ function PageHeading({
   )
 }
 
+function PageRouteSkeleton({ label }: { label: string }) {
+  return <div className="arg-route-skeleton space-y-5" role="status" aria-busy="true" aria-label={`در حال بارگذاری ${label}`}>
+    <span className="sr-only">در حال آماده‌سازی صفحه…</span>
+    <div className="flex items-center justify-between gap-4"><div className="space-y-2"><Skeleton className="h-7 w-44"/><Skeleton className="h-4 w-64 max-w-[70vw]"/></div><Skeleton className="h-10 w-28 rounded-xl"/></div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-28 rounded-2xl"/>)}</div>
+    <div className="grid gap-4 xl:grid-cols-[1.4fr_1fr]"><section className="rounded-2xl border border-border bg-card/50 p-5"><Skeleton className="mb-5 h-5 w-40"/><Skeleton className="h-48 w-full rounded-xl"/></section><section className="rounded-2xl border border-border bg-card/50 p-5"><Skeleton className="mb-5 h-5 w-32"/>{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="mb-3 h-9 w-full last:mb-0"/>)}</section></div>
+    <section className="rounded-2xl border border-border bg-card/50 p-5"><div className="mb-5 flex items-center justify-between"><Skeleton className="h-5 w-36"/><Skeleton className="h-9 w-24 rounded-lg"/></div>{Array.from({ length: 3 }, (_, index) => <Skeleton key={index} className="mb-3 h-12 w-full last:mb-0"/>)}</section>
+  </div>
+}
+
 export default function App() {
   const [boot, setBoot] = useState(true)
   const [installed, setInstalled] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [page, setPage] = useState<PageId>(() => pageFromHash(window.location.hash))
+  const [pageReady, setPageReady] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const mobileMenuButton = useRef<HTMLButtonElement>(null)
   const mobileCloseButton = useRef<HTMLButtonElement>(null)
@@ -498,6 +510,12 @@ export default function App() {
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   }, [])
+  useLayoutEffect(() => {
+    if (boot || !installed || !user) { setPageReady(false); return }
+    setPageReady(false)
+    const timer = window.setTimeout(() => setPageReady(true), 260)
+    return () => window.clearTimeout(timer)
+  }, [page, boot, installed, user?.id, user?.role])
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
     document.documentElement.scrollTop = 0
@@ -838,14 +856,15 @@ export default function App() {
           </header>
           <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             <ResourceAlertNotice />
-            <div key={currentPage} className="arg-page-enter">
+            <div key={currentPage}>
+            {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <div className="arg-page-enter">
             {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
             {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'terminal' && user.role === 'admin' && <Suspense fallback={<div className="py-20 text-center text-sm text-muted-foreground">در حال آماده‌سازی ترمینال…</div>}><TerminalPage Heading={PageHeading} /></Suspense>}
+            {currentPage === 'terminal' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="ترمینال"/>}><TerminalPage Heading={PageHeading} /></Suspense>}
             {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'users' && user.role === 'admin' && (
@@ -860,6 +879,7 @@ export default function App() {
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
             </footer>
+            </div>}
             </div>
           </main>
         </div>
