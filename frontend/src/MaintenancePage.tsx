@@ -1,0 +1,110 @@
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { AlertTriangle, Archive, CheckCircle2, Clock3, Cpu, Download, HardDrive, MemoryStick, RefreshCw, RotateCcw, Server, ShieldCheck, Trash2, Wrench } from 'lucide-react'
+import { api, formatBytes, formatNumber, formatUptime, type Dashboard } from './lib/api'
+import { Button } from './components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
+import { Skeleton } from './components/ui/skeleton'
+
+type Common = { Heading: (props: { title: string; description: string; action?: ReactNode }) => ReactNode; notify: (message: string) => void }
+type Backup = { id: string; size_bytes: number; modified_at?: number | null }
+type SystemInfo = { os: string; kernel: string; architecture: string; cpu: string; hostname: string }
+
+export function MaintenancePage({ Heading, notify }: Common) {
+  const [dashboard, setDashboard] = useState<Dashboard | null>(null)
+  const [system, setSystem] = useState<SystemInfo | null>(null)
+  const [backups, setBackups] = useState<Backup[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState('')
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [metrics, host, stored] = await Promise.all([
+        api<Dashboard>('dashboard'), api<SystemInfo>('maintenance/system'), api<{ backups: Backup[] }>('maintenance/backups'),
+      ])
+      setDashboard(metrics); setSystem(host); setBackups(stored.backups)
+    } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : 'دریافت اطلاعات سرور ناموفق بود'}`) }
+    finally { setLoading(false) }
+  }, [notify])
+  useEffect(() => { void refresh() }, [refresh])
+
+  async function action(kind: 'repair' | 'reboot' | 'uninstall') {
+    const labels = { repair: ['REPAIR ARG', 'بازسازی کامل ARG'], reboot: ['REBOOT SERVER', 'راه‌اندازی مجدد سرور'], uninstall: ['DELETE ARG', 'حذف کامل ARG'] } as const
+    const [phrase, title] = labels[kind]
+    if (!window.confirm(`${title}\n\n${kind === 'repair' ? 'فایل‌های ARG با سازوکار آپدیت امن بازسازی می‌شوند و در صورت شکست rollback انجام می‌شود.' : kind === 'reboot' ? 'اتصال پنل قطع می‌شود و سرور دوباره بالا می‌آید.' : 'سرویس، فایل‌ها، تنظیمات و دیتابیس ARG برای همیشه پاک می‌شوند.'}\n\nبرای ادامه عبارت ${phrase} را در مرحله بعد وارد کن.`)) return
+    const typed = window.prompt(`برای تأیید دقیقاً وارد کن: ${phrase}`)
+    if (typed !== phrase) { if (typed !== null) notify('خطا: عبارت تأیید مطابقت نداشت'); return }
+    setBusy(kind)
+    try {
+      let branch: 'main' | 'development' = 'main'
+      try { branch = window.localStorage.getItem('arg.update-branch') === 'development' ? 'development' : 'main' } catch { /* Stable is the safe default. */ }
+      const result = await api<{ message?: string; ok?: boolean }>('maintenance/action', { method: 'POST', body: JSON.stringify({ action: kind, confirmation: phrase, ...(kind === 'repair' ? { branch } : {}) }) })
+      notify(result.message || `${title} انجام شد`)
+    } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : `${title} ناموفق بود`}`) }
+    finally { setBusy('') }
+  }
+
+  async function createBackup() {
+    setBusy('backup')
+    try {
+      const backup = await api<Backup & { message: string }>('maintenance/backups', { method: 'POST', body: '{}' })
+      setBackups((items) => [backup, ...items.filter((item) => item.id !== backup.id)])
+      notify(`بکاپ دیتابیس ARG ساخته شد · ${formatBytes(backup.size_bytes)}`)
+    } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : 'ساخت بکاپ ناموفق بود'}`) }
+    finally { setBusy('') }
+  }
+
+  async function downloadBackup(id: string) {
+    setBusy(`download:${id}`)
+    try {
+      const response = await fetch(`/api/maintenance/backups/${encodeURIComponent(id)}/download`, { credentials: 'same-origin' })
+      const body = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`)
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a'); link.href = url; link.download = id; link.click(); URL.revokeObjectURL(url)
+      notify('دانلود بکاپ آغاز شد')
+    } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : 'دانلود بکاپ ناموفق بود'}`) }
+    finally { setBusy('') }
+  }
+
+  async function restoreBackup(id: string) {
+    if (!window.confirm(`بازیابی ${id}\n\nدیتابیس فعلی با نسخهٔ داخل بکاپ جایگزین می‌شود. ابتدا یک نسخهٔ محافظتی خودکار از دیتابیس فعلی گرفته خواهد شد.`)) return
+    if (window.prompt('برای تأیید دقیقاً وارد کن: RESTORE ARG') !== 'RESTORE ARG') { notify('خطا: عبارت تأیید مطابقت نداشت'); return }
+    setBusy(`restore:${id}`)
+    try {
+      const result = await api<{ message: string }>(`maintenance/backups/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({ confirmation: 'RESTORE ARG' }) })
+      notify(result.message)
+      window.setTimeout(() => window.location.reload(), 1800)
+    } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : 'بازیابی بکاپ ناموفق بود'}`) }
+    finally { setBusy('') }
+  }
+
+  const specs = [
+    { icon: Server, label: 'نام سرور', value: system?.hostname || dashboard?.hostname || '—', dir: 'ltr' as const },
+    { icon: ShieldCheck, label: 'سیستم‌عامل', value: system?.os || '—' },
+    { icon: Cpu, label: 'پردازنده', value: system?.cpu && dashboard?.cpu_cores ? `${system.cpu} · ${formatNumber(dashboard.cpu_cores)} هسته` : system?.cpu || '—' },
+    { icon: MemoryStick, label: 'حافظه RAM', value: dashboard ? formatBytes(dashboard.memory_kib * 1024) : '—' },
+    { icon: HardDrive, label: 'دیسک ریشه', value: dashboard?.disk_total_bytes ? `${formatBytes(dashboard.disk_total_bytes - (dashboard.disk_free_bytes || 0))} / ${formatBytes(dashboard.disk_total_bytes)}` : '—' },
+    { icon: Clock3, label: 'Kernel · Architecture · Uptime', value: `${system?.kernel || '—'} · ${system?.architecture || '—'} · ${dashboard ? formatUptime(dashboard.uptime_seconds) : '—'}`, dir: 'ltr' as const },
+  ]
+
+  return <>
+    <Heading title="مدیریت سرور و ARG" description="مشخصات سرور، تعمیر امن پنل، راه‌اندازی مجدد و پشتیبان‌گیری از داده‌های ARG." action={<Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/>تازه‌سازی</Button>}/>
+    <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="مشخصات سیستم">
+      {loading && !dashboard ? Array.from({ length: 6 }, (_, i) => <Skeleton key={i} className="h-[96px] rounded-2xl"/>) : specs.map(({ icon: Icon, label, value, dir }) => <Card key={label} className="min-w-0 rounded-2xl border-border/80 bg-card/80"><CardContent className="flex items-center gap-3 p-4"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-primary/15 bg-primary/[.08] text-primary"><Icon size={18}/></span><span className="min-w-0"><span className="block text-xs text-muted-foreground">{label}</span><b className="mt-1 block truncate text-sm font-semibold text-foreground" dir={dir} title={value}>{value}</b></span></CardContent></Card>)}
+    </section>
+
+    <div className="mt-5 grid gap-4 xl:grid-cols-2">
+      <Card className="rounded-2xl border-border/80 bg-card/80"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Wrench size={18} className="text-primary"/>تعمیر فایل‌های ARG</CardTitle><CardDescription>نسخهٔ نصب‌شده با آپدیتر امن و ساخت کامل بازسازی می‌شود؛ در صورت خطا، نسخهٔ قبلی برمی‌گردد.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><div className="text-xs text-muted-foreground">این عملیات ممکن است چند دقیقه طول بکشد و پنل موقتاً در دسترس نباشد.</div><Button onClick={() => void action('repair')} disabled={!!busy}><Wrench size={15}/>{busy === 'repair' ? 'در حال تعمیر…' : 'تعمیر و بازسازی ARG'}</Button></CardContent></Card>
+      <Card className="rounded-2xl border-amber-400/20 bg-amber-400/[.035]"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><RotateCcw size={18} className="text-amber-300"/>راه‌اندازی مجدد سرور</CardTitle><CardDescription>تمام سرویس‌ها برای مدتی قطع می‌شوند؛ پس از بالا آمدن سیستم، پنل دوباره در دسترس خواهد بود.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-2 text-xs text-amber-100/70"><AlertTriangle size={15}/>اتصال SSH و پنل موقتاً قطع می‌شود</div><Button variant="outline" className="border-amber-300/30 text-amber-100 hover:bg-amber-400/10" onClick={() => void action('reboot')} disabled={!!busy}>{busy === 'reboot' ? 'در حال ارسال…' : 'ریبوت سرور'}</Button></CardContent></Card>
+    </div>
+
+    <Card className="mt-5 rounded-2xl border-border/80 bg-card/80"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Archive size={18} className="text-primary"/>بکاپ و بازیابی ARG</CardTitle><CardDescription className="mt-1.5">بکاپ دیتابیس ARG شامل حساب‌ها، تنظیمات پنل، تاریخچه و اطلاعات اتصالات است. فایل بکاپ را خارج از سرور هم نگه دار.</CardDescription></div><Button onClick={() => void createBackup()} disabled={!!busy}><Archive size={15}/>{busy === 'backup' ? 'در حال ساخت…' : 'ساخت بکاپ'}</Button></CardHeader><CardContent>
+      <div className="mb-3 flex items-start gap-2 rounded-xl border border-sky-400/15 bg-sky-400/[.045] p-3 text-xs leading-6 text-muted-foreground"><CheckCircle2 size={16} className="mt-1 shrink-0 text-sky-300"/>بازیابی قبل از جایگزینی، یک بکاپ محافظتی از دیتابیس فعلی می‌سازد. پس از بازیابی صفحه تازه‌سازی می‌شود تا نشست‌ها و داده‌ها از نسخهٔ بازگردانده‌شده خوانده شوند.</div>
+      <p className="mb-3 text-[11px] leading-5 text-muted-foreground">فایل‌های نصب و گواهی TLS در این نسخهٔ بکاپ قرار نمی‌گیرند.</p>
+      {backups.length ? <div className="overflow-x-auto rounded-xl border border-border/70"><table className="w-full min-w-[520px] text-sm"><thead className="bg-secondary/50 text-xs text-muted-foreground"><tr><th className="px-4 py-3 text-right">نسخهٔ پشتیبان</th><th className="px-4 py-3 text-right">حجم</th><th className="px-4 py-3 text-left">عملیات</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id} className="border-t border-border/70"><td className="px-4 py-3 font-mono text-xs" dir="ltr">{backup.id}</td><td className="px-4 py-3 font-mono text-xs" dir="ltr">{formatBytes(backup.size_bytes)}</td><td className="px-4 py-3"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void downloadBackup(backup.id)} disabled={!!busy}><Download size={14}/><span className="hidden sm:inline">دانلود</span></Button><Button size="sm" variant="outline" onClick={() => void restoreBackup(backup.id)} disabled={!!busy}><RotateCcw size={14}/><span className="hidden sm:inline">بازیابی</span></Button></div></td></tr>)}</tbody></table></div> : <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">هنوز بکاپی ثبت نشده است. برای اولین نسخه، «ساخت بکاپ» را بزن.</div>}
+    </CardContent></Card>
+
+    <Card className="mt-5 rounded-2xl border-rose-400/20 bg-rose-400/[.025]"><CardHeader><CardTitle className="flex items-center gap-2 text-base text-rose-100"><Trash2 size={17}/>حذف کامل ARG</CardTitle><CardDescription>سرویس، فایل‌های نصب، تنظیمات و دیتابیس ARG پاک می‌شوند. این کار روی سایت‌ها و سرویس‌های دیگر سرور اثری ندارد.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">پیش از حذف، بکاپ بساز و آن را دانلود کن؛ بکاپ‌های محلی هم با حذف کامل پاک می‌شوند.</p><Button variant="destructive" onClick={() => void action('uninstall')} disabled={!!busy}><Trash2 size={15}/>{busy === 'uninstall' ? 'در حال حذف…' : 'حذف کامل ARG'}</Button></CardContent></Card>
+  </>
+}

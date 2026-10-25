@@ -1,9 +1,16 @@
 # ARG Change Log
 
-## v0.6.1-dev.1 — 2026-10-25
+## Unreleased
 
-### Development
-- Development prerelease based on the next patch after main.
+## v0.6.1 — 2026-10-25
+
+### Added
+- Calculate S3 Bucket usage from paginated object listings, cache byte and object totals in SQLite, refresh on demand or when older than 24 hours, and invalidate snapshots after uploads and deletes.
+- Add background scan state, stale-result recovery after restart, and a single global scanner to bound S3 request load; remove manual entry of used-space values.
+- Add an administrator-only MySQL/MariaDB manager with installation, catalog inspection, bounded SQL execution, and password reset support.
+- Require fresh ARG administrator authentication for database operations; keep MySQL credentials ephemeral and never expose stored password hashes.
+- Add an administrator-only server maintenance page with live host specifications, safe ARG repair, server reboot, ARG database backup download, and integrity-checked restore points.
+- Add an explicit confirmation flow for full ARG removal; application data removal is scheduled outside the panel service so the uninstall can finish after the panel shuts down.
 
 ## v0.6.0 — 2026-10-25
 

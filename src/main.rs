@@ -58,6 +58,8 @@ mod docker;
 mod files;
 mod fast_actions;
 mod metrics;
+mod maintenance;
+mod mysql;
 mod nginx;
 mod routes;
 mod s3;
@@ -2924,6 +2926,14 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("file-action") => "file-action",
         Some("terminal-root-start") => "terminal-root-start",
         Some("terminal-root-stop") => "terminal-root-stop",
+        Some("maintenance-repair") => "maintenance-repair",
+        Some("maintenance-reboot") => "maintenance-reboot",
+        Some("maintenance-uninstall") => "maintenance-uninstall",
+        Some("mysql-status") => "mysql-status",
+        Some("mysql-install") => "mysql-install",
+        Some("mysql-query") => "mysql-query",
+        Some("mysql-catalog") => "mysql-catalog",
+        Some("mysql-service") => "mysql-service",
         Some("s3-secret-write") => "s3-secret-write",
         Some("s3-secret-update-config") => "s3-secret-update-config",
         Some("s3-secret-delete") => "s3-secret-delete",
@@ -2931,6 +2941,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("s3-test") => "s3-test",
         Some("s3-create-bucket") => "s3-create-bucket",
         Some("s3-list-objects") => "s3-list-objects",
+        Some("s3-scan-usage") => "s3-scan-usage",
         Some("s3-delete-object") => "s3-delete-object",
         Some("s3-upload-object") => "s3-upload-object",
         Some("s3-download-object") => "s3-download-object",
@@ -2950,6 +2961,51 @@ fn execute_privileged_request(request: &Value) -> Value {
         return match stop_root_terminal(request) {
             Ok(()) => json!({"ok":true}),
             Err(error) => json!({"ok":false,"error":error}),
+        };
+    }
+    if action == "maintenance-repair" {
+        let branch_output = std::process::Command::new("git")
+            .args(["-C", "/opt/arg/source", "branch", "--show-current"])
+            .output();
+        let fallback_branch = branch_output
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .filter(|branch| ["main", "development"].contains(&branch.as_str()))
+            .unwrap_or_else(|| "main".to_owned());
+        let branch = request["branch"]
+            .as_str()
+            .filter(|branch| valid_update_branch(branch))
+            .unwrap_or(&fallback_branch);
+        return match std::process::Command::new("/usr/local/lib/arg/update-helper")
+            .args(["run", "complete", &branch])
+            .output()
+        {
+            Ok(output) if output.status.success() => json!({"ok":true,"scheduled":true,"message":"ARG repair was scheduled with the protected complete-build updater. Follow its progress in the update overlay.","output":String::from_utf8_lossy(&output.stdout)}),
+            Ok(output) => json!({"ok":false,"error":String::from_utf8_lossy(&output.stderr).trim(),"output":String::from_utf8_lossy(&output.stdout)}),
+            Err(error) => json!({"ok":false,"error":error.to_string()}),
+        };
+    }
+    if action == "maintenance-reboot" {
+        return match std::process::Command::new("systemctl")
+            .args(["--no-block", "reboot"])
+            .spawn()
+        {
+            Ok(_) => json!({"ok":true,"message":"Server reboot was queued."}),
+            Err(error) => json!({"ok":false,"error":error.to_string()}),
+        };
+    }
+    if action == "maintenance-uninstall" {
+        return match std::process::Command::new("systemd-run").args([
+            "--quiet",
+            "--collect",
+            "--unit=arg-web-uninstall",
+            "--property=Type=oneshot",
+            "/usr/local/bin/arg", "delete", "--purge-confirmed",
+        ]).output() {
+            Ok(output) if output.status.success() => json!({"ok":true,"message":"Full ARG removal was queued. The panel will shut down when removal begins."}),
+            Ok(output) => json!({"ok":false,"error":String::from_utf8_lossy(&output.stderr).trim()}),
+            Err(error) => json!({"ok":false,"error":format!("Could not schedule ARG removal: {error}")}),
         };
     }
     if action == "docker-status" {
@@ -2972,6 +3028,9 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     if action.starts_with("s3-") {
         return s3::execute_privileged_request(action, request);
+    }
+    if action.starts_with("mysql-") {
+        return mysql::execute_privileged_request(action, request);
     }
     let mut args = vec![action.to_owned()];
     if action == "add" || action == "remove" {

@@ -42,6 +42,8 @@ import { AccountPage, AuditPage, DashboardPage, FirewallPage, NetworkPage, Nginx
 import { AptPage, ServicesPage } from './AdminOpsPage'
 import { DockerPage } from './DockerPage'
 import { FileManagerPage } from './FileManagerPage'
+import { MaintenancePage } from './MaintenancePage'
+import { MysqlPage } from './MysqlPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
@@ -923,8 +925,8 @@ export default function App() {
           <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'docker', 'files', 's3', 'terminal'].includes(item.id)) },
-              { title: 'عملیات سیستم', pages: allowedPages.filter((item) => ['packages', 'services'].includes(item.id)) },
+              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'maintenance', 'network', 'ports', 'firewall', 'nginx', 'docker', 'files', 's3', 'terminal'].includes(item.id)) },
+              { title: 'عملیات سیستم', pages: allowedPages.filter((item) => ['packages', 'services', 'mysql'].includes(item.id)) },
               { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><TooltipProvider delayDuration={220}><div className="space-y-1">{section.pages.map((item) => {
               const button = <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} aria-label={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>
@@ -957,6 +959,7 @@ export default function App() {
             {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <div className="arg-page-enter">
             {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
             {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'maintenance' && user.role === 'admin' && <MaintenancePage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
@@ -966,6 +969,7 @@ export default function App() {
             {currentPage === 's3' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="فضای ابری S3"/>}><S3StoragePage Heading={PageHeading} notify={notifyUser}/></Suspense>}
             {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'mysql' && user.role === 'admin' && <MysqlPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'users' && user.role === 'admin' && (
               <UsersPage current={user} Heading={PageHeading} notify={notifyUser} />
             )}

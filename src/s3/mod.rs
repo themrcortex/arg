@@ -11,6 +11,24 @@ use url::Url;
 
 const SECRET_DIR: &str = "/etc/arg/s3";
 const MAX_PAGE_SIZE: usize = 1000;
+static S3_SCAN_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+fn invalidate_usage_cache(db: &Connection, connection_id: i64, bucket_name: &str) {
+    let _ = db.execute(
+        "UPDATE s3_usage_snapshots SET scan_status='stale',measured_at=0 WHERE id=(SELECT u.id FROM s3_usage_snapshots u JOIN s3_buckets b ON b.id=u.bucket_id WHERE b.connection_id=?1 AND b.bucket_name=?2 ORDER BY u.id DESC LIMIT 1)",
+        params![connection_id,bucket_name],
+    );
+}
+
+fn usage_scan_allowed(status: Option<&str>, measured_at: Option<i64>, now: i64, force: bool) -> bool {
+    let age = measured_at.map(|time| now.saturating_sub(time));
+    if status == Some("scanning") {
+        return age.is_some_and(|seconds| seconds >= 6 * 3600);
+    }
+    if force { return true; }
+    let max_age = if status == Some("failed") { 3600 } else { 24 * 3600 };
+    age.is_none_or(|seconds| seconds >= max_age)
+}
 
 #[derive(Serialize)]
 struct S3ConnectionRecord {
@@ -63,8 +81,7 @@ pub(super) struct BucketInput {
     description: String,
 }
 #[derive(Deserialize)]
-pub(super) struct ManualBucketUsageInput {
-    used_bytes: u64,
+pub(super) struct BucketQuotaInput {
     quota_bytes: Option<u64>,
 }
 #[derive(Deserialize)]
@@ -301,7 +318,10 @@ fn input_error(input: &ConnectionInput, is_create: bool) -> Option<String> {
 }
 
 pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS s3_connections (id INTEGER PRIMARY KEY,display_name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',provider_type TEXT NOT NULL,endpoint TEXT NOT NULL DEFAULT '',region TEXT NOT NULL DEFAULT '',address_style TEXT NOT NULL DEFAULT 'auto',allow_private_endpoint INTEGER NOT NULL DEFAULT 0,credential_present INTEGER NOT NULL DEFAULT 1,last_rotated_at INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'unverified',last_test_at INTEGER,last_error TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS s3_buckets (id INTEGER PRIMARY KEY,connection_id INTEGER NOT NULL REFERENCES s3_connections(id) ON DELETE CASCADE,bucket_name TEXT NOT NULL,display_name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,verified_at INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(connection_id,bucket_name)); CREATE INDEX IF NOT EXISTS s3_buckets_connection ON s3_buckets(connection_id); CREATE TABLE IF NOT EXISTS s3_usage_snapshots (id INTEGER PRIMARY KEY,bucket_id INTEGER NOT NULL REFERENCES s3_buckets(id) ON DELETE CASCADE,used_bytes INTEGER,object_count INTEGER,quota_bytes INTEGER,quota_source TEXT,usage_source TEXT NOT NULL DEFAULT 'unknown',scan_status TEXT NOT NULL DEFAULT 'not_measured',measured_at INTEGER,error TEXT); CREATE INDEX IF NOT EXISTS s3_usage_bucket_time ON s3_usage_snapshots(bucket_id,measured_at DESC); CREATE TABLE IF NOT EXISTS s3_mounts(id INTEGER PRIMARY KEY,bucket_id INTEGER NOT NULL REFERENCES s3_buckets(id) ON DELETE CASCADE,method TEXT NOT NULL,mount_path TEXT NOT NULL UNIQUE,read_only INTEGER NOT NULL DEFAULT 1,auto_mount INTEGER NOT NULL DEFAULT 0,cache_config_json TEXT NOT NULL DEFAULT '{}',status TEXT NOT NULL DEFAULT 'unmounted',last_error TEXT,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS s3_contracts(id INTEGER PRIMARY KEY,title TEXT NOT NULL,seller TEXT,contract_ref TEXT,billing_interval_months INTEGER NOT NULL DEFAULT 1,billing_calendar TEXT NOT NULL DEFAULT 'gregorian',billing_anchor_day INTEGER NOT NULL,timezone TEXT NOT NULL DEFAULT 'Asia/Tehran',start_date TEXT NOT NULL,next_due_date TEXT NOT NULL,end_date TEXT,amount_minor_units INTEGER,currency TEXT,included_quota_bytes INTEGER,auto_renew_recorded INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'active',notes TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);")
+    db.execute_batch("CREATE TABLE IF NOT EXISTS s3_connections (id INTEGER PRIMARY KEY,display_name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',provider_type TEXT NOT NULL,endpoint TEXT NOT NULL DEFAULT '',region TEXT NOT NULL DEFAULT '',address_style TEXT NOT NULL DEFAULT 'auto',allow_private_endpoint INTEGER NOT NULL DEFAULT 0,credential_present INTEGER NOT NULL DEFAULT 1,last_rotated_at INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'unverified',last_test_at INTEGER,last_error TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS s3_buckets (id INTEGER PRIMARY KEY,connection_id INTEGER NOT NULL REFERENCES s3_connections(id) ON DELETE CASCADE,bucket_name TEXT NOT NULL,display_name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,verified_at INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(connection_id,bucket_name)); CREATE INDEX IF NOT EXISTS s3_buckets_connection ON s3_buckets(connection_id); CREATE TABLE IF NOT EXISTS s3_usage_snapshots (id INTEGER PRIMARY KEY,bucket_id INTEGER NOT NULL REFERENCES s3_buckets(id) ON DELETE CASCADE,used_bytes INTEGER,object_count INTEGER,quota_bytes INTEGER,quota_source TEXT,usage_source TEXT NOT NULL DEFAULT 'unknown',scan_status TEXT NOT NULL DEFAULT 'not_measured',measured_at INTEGER,error TEXT); CREATE INDEX IF NOT EXISTS s3_usage_bucket_time ON s3_usage_snapshots(bucket_id,measured_at DESC); CREATE TABLE IF NOT EXISTS s3_mounts(id INTEGER PRIMARY KEY,bucket_id INTEGER NOT NULL REFERENCES s3_buckets(id) ON DELETE CASCADE,method TEXT NOT NULL,mount_path TEXT NOT NULL UNIQUE,read_only INTEGER NOT NULL DEFAULT 1,auto_mount INTEGER NOT NULL DEFAULT 0,cache_config_json TEXT NOT NULL DEFAULT '{}',status TEXT NOT NULL DEFAULT 'unmounted',last_error TEXT,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS s3_contracts(id INTEGER PRIMARY KEY,title TEXT NOT NULL,seller TEXT,contract_ref TEXT,billing_interval_months INTEGER NOT NULL DEFAULT 1,billing_calendar TEXT NOT NULL DEFAULT 'gregorian',billing_anchor_day INTEGER NOT NULL,timezone TEXT NOT NULL DEFAULT 'Asia/Tehran',start_date TEXT NOT NULL,next_due_date TEXT NOT NULL,end_date TEXT,amount_minor_units INTEGER,currency TEXT,included_quota_bytes INTEGER,auto_renew_recorded INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL DEFAULT 'active',notes TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);")?;
+    db.execute("UPDATE s3_usage_snapshots SET scan_status='stale',measured_at=0 WHERE scan_status='scanning'", [])?;
+    db.execute("UPDATE s3_usage_snapshots SET used_bytes=NULL,object_count=NULL,usage_source='inventory',scan_status='not_measured',measured_at=NULL,error=NULL WHERE usage_source='manual'", [])?;
+    Ok(())
 }
 
 fn read_connection(
@@ -488,7 +508,7 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
             Ok(()) => json!({"ok":true}),
             Err(error) => json!({"ok":false,"error":error}),
         },
-        "s3-list-buckets" | "s3-test" | "s3-create-bucket" | "s3-list-objects"
+        "s3-list-buckets" | "s3-test" | "s3-create-bucket" | "s3-list-objects" | "s3-scan-usage"
         | "s3-delete-object" | "s3-upload-object" | "s3-download-object"
         | "s3-upload-local-file" | "s3-download-local-file" => {
             let secret = match read_secret_file(id) {
@@ -803,6 +823,39 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                     json!({"ok":true,"objects":objects,"prefixes":prefixes,"is_truncated":page.is_truncated,"next_token":page.next_continuation_token,"key_count":key_count})
                 }
                 Err(error) => json!({"ok":false,"error":helper_error(&error)}),
+            }
+        }
+        "s3-scan-usage" => {
+            let Some(name) = request["bucket"].as_str().filter(|value| valid_bucket_name(value)) else {
+                return json!({"ok":false,"error":"نام Bucket معتبر نیست."});
+            };
+            let bucket = match make_bucket(name, secret) {
+                Ok(bucket) => bucket,
+                Err(error) => return json!({"ok":false,"error":error}),
+            };
+            let mut token: Option<String> = None;
+            let mut used_bytes: u64 = 0;
+            let mut object_count: u64 = 0;
+            loop {
+                match bucket.list_page(String::new(), None, token, None, Some(MAX_PAGE_SIZE)).await {
+                    Ok((page, _)) => {
+                        for object in page.contents {
+                            let Some(total) = used_bytes.checked_add(object.size) else {
+                                return json!({"ok":false,"error":"حجم آبجکت‌ها از محدودهٔ قابل محاسبه بیشتر است."});
+                            };
+                            used_bytes = total;
+                            object_count = object_count.saturating_add(1);
+                        }
+                        if !page.is_truncated {
+                            return json!({"ok":true,"used_bytes":used_bytes,"object_count":object_count});
+                        }
+                        token = page.next_continuation_token;
+                        if token.is_none() {
+                            return json!({"ok":false,"error":"ارائه‌دهنده صفحهٔ ادامهٔ فهرست را برنگرداند؛ اسکن کامل نشد."});
+                        }
+                    }
+                    Err(error) => return json!({"ok":false,"error":helper_error(&error)}),
+                }
             }
         }
         "s3-delete-object" => {
@@ -1139,6 +1192,19 @@ mod tests {
         assert!(mount_paths(0, 3, 8).is_none());
         assert!(mount_paths(12, -1, 8).is_none());
     }
+
+    #[test]
+    fn bucket_usage_scan_uses_a_cache_and_retries_failures_slowly() {
+        let now = 1_000_000;
+        assert!(usage_scan_allowed(None, None, now, false));
+        assert!(!usage_scan_allowed(Some("measured"), Some(now - 23 * 3600), now, false));
+        assert!(usage_scan_allowed(Some("measured"), Some(now - 24 * 3600), now, false));
+        assert!(!usage_scan_allowed(Some("failed"), Some(now - 30), now, false));
+        assert!(usage_scan_allowed(Some("failed"), Some(now - 3600), now, false));
+        assert!(usage_scan_allowed(Some("measured"), Some(now), now, true));
+        assert!(!usage_scan_allowed(Some("scanning"), Some(now - 10), now, true));
+        assert!(usage_scan_allowed(Some("scanning"), Some(now - 6 * 3600), now, false));
+    }
 }
 
 pub(super) async fn list_providers(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -1214,8 +1280,12 @@ pub(super) async fn summary(State(state): State<AppState>, headers: HeaderMap) -
     require_user(&db, &headers)?;
     let (connections, healthy, buckets, mounted): (i64,i64,i64,i64) = db.query_row("SELECT (SELECT COUNT(*) FROM s3_connections),(SELECT COUNT(*) FROM s3_connections WHERE status='connected'),(SELECT COUNT(*) FROM s3_buckets WHERE enabled=1),(SELECT COUNT(*) FROM s3_mounts WHERE status='mounted')", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap_or((0,0,0,0));
     let due_soon: i64 = db.query_row("SELECT COUNT(*) FROM s3_contracts WHERE status IN ('active','upcoming') AND next_due_date BETWEEN date('now') AND date('now','+7 days')", [], |row| row.get(0)).unwrap_or(0);
+    let (usage_sum,quota_sum,measured,min_measured,total,quota_count):(Option<i64>,Option<i64>,i64,Option<i64>,i64,i64) = db.query_row("SELECT SUM(u.used_bytes),SUM(u.quota_bytes),SUM(CASE WHEN u.scan_status IN ('measured','stale') AND u.used_bytes IS NOT NULL THEN 1 ELSE 0 END),MIN(CASE WHEN u.scan_status IN ('measured','stale') AND u.used_bytes IS NOT NULL THEN u.measured_at END),COUNT(*),SUM(CASE WHEN u.quota_bytes IS NOT NULL THEN 1 ELSE 0 END) FROM s3_buckets b LEFT JOIN s3_usage_snapshots u ON u.id=(SELECT s.id FROM s3_usage_snapshots s WHERE s.bucket_id=b.id ORDER BY s.id DESC LIMIT 1) WHERE b.enabled=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).unwrap_or((None,None,0,None,0,0));
+    let usage_bytes = (total > 0 && measured == total).then_some(usage_sum).flatten();
+    let quota_bytes = (total > 0 && quota_count == total).then_some(quota_sum).flatten();
+    let usage_status = if measured == 0 { "not_measured" } else if min_measured.is_none_or(|value| value <= 0 || now().saturating_sub(value) >= 24 * 3600) { "stale" } else { "fresh" };
     Ok(Json(
-        json!({"connections":connections,"healthy_connections":healthy,"buckets":buckets,"mounted_buckets":mounted,"contracts_due_soon":due_soon,"usage_bytes":null,"quota_bytes":null,"usage_status":"not_measured"}),
+        json!({"connections":connections,"healthy_connections":healthy,"buckets":buckets,"mounted_buckets":mounted,"contracts_due_soon":due_soon,"usage_bytes":usage_bytes,"quota_bytes":quota_bytes,"usage_status":usage_status}),
     ))
 }
 pub(super) async fn list_connections(
@@ -1492,26 +1562,33 @@ pub(super) async fn list_buckets(
         }
         remote["buckets"].clone()
     };
+    let local_buckets: Vec<(i64,String)> = {
+        let db = state.lock().unwrap();
+        let mut statement = db.prepare("SELECT id,bucket_name FROM s3_buckets WHERE connection_id=?1 AND enabled=1").map_err(db_error)?;
+        let rows = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(db_error)?;
+        rows.filter_map(Result::ok).collect()
+    };
+    for (bucket_id, name) in local_buckets {
+        let _ = begin_usage_scan(state.clone(), bucket_id, id, name, false).await;
+    }
     let db = state.lock().unwrap();
-    let mut statement=db.prepare("SELECT b.id,b.bucket_name,b.display_name,b.description,b.enabled,b.verified_at,b.created_at,u.used_bytes,u.quota_bytes,u.usage_source,u.scan_status,u.measured_at FROM s3_buckets b LEFT JOIN s3_usage_snapshots u ON u.id=(SELECT s.id FROM s3_usage_snapshots s WHERE s.bucket_id=b.id ORDER BY s.id DESC LIMIT 1) WHERE b.connection_id=?1 ORDER BY b.display_name").map_err(db_error)?;
-    let stored:Vec<Value>=statement.query_map([id],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"bucket_name":row.get::<_,String>(1)?,"display_name":row.get::<_,String>(2)?,"description":row.get::<_,String>(3)?,"enabled":row.get::<_,bool>(4)?,"verified_at":row.get::<_,Option<i64>>(5)?,"created_at":row.get::<_,i64>(6)?,"used_bytes":row.get::<_,Option<i64>>(7)?,"quota_bytes":row.get::<_,Option<i64>>(8)?,"usage_source":row.get::<_,Option<String>>(9)?,"scan_status":row.get::<_,Option<String>>(10)?,"measured_at":row.get::<_,Option<i64>>(11)?}))).map_err(db_error)?.filter_map(Result::ok).collect();
+    let mut statement=db.prepare("SELECT b.id,b.bucket_name,b.display_name,b.description,b.enabled,b.verified_at,b.created_at,u.used_bytes,u.object_count,u.quota_bytes,u.quota_source,u.usage_source,u.scan_status,u.measured_at,u.error FROM s3_buckets b LEFT JOIN s3_usage_snapshots u ON u.id=(SELECT s.id FROM s3_usage_snapshots s WHERE s.bucket_id=b.id ORDER BY s.id DESC LIMIT 1) WHERE b.connection_id=?1 ORDER BY b.display_name").map_err(db_error)?;
+    let stored:Vec<Value>=statement.query_map([id],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"bucket_name":row.get::<_,String>(1)?,"display_name":row.get::<_,String>(2)?,"description":row.get::<_,String>(3)?,"enabled":row.get::<_,bool>(4)?,"verified_at":row.get::<_,Option<i64>>(5)?,"created_at":row.get::<_,i64>(6)?,"used_bytes":row.get::<_,Option<i64>>(7)?,"object_count":row.get::<_,Option<i64>>(8)?,"quota_bytes":row.get::<_,Option<i64>>(9)?,"quota_source":row.get::<_,Option<String>>(10)?,"usage_source":row.get::<_,Option<String>>(11)?,"scan_status":row.get::<_,Option<String>>(12)?,"measured_at":row.get::<_,Option<i64>>(13)?,"error":row.get::<_,Option<String>>(14)?}))).map_err(db_error)?.filter_map(Result::ok).collect();
     Ok(Json(
         json!({"provider_buckets":provider_buckets,"connections":stored}),
     ))
 }
-pub(super) async fn set_manual_bucket_usage(
+pub(super) async fn set_bucket_quota(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     headers: HeaderMap,
-    Json(input): Json<ManualBucketUsageInput>,
+    Json(input): Json<BucketQuotaInput>,
 ) -> ApiResult {
     check_origin(&headers)?;
     let actor = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?
     };
-    let used_bytes = i64::try_from(input.used_bytes)
-        .map_err(|_| error(StatusCode::BAD_REQUEST, "حجم مصرف‌شده خارج از محدوده است."))?;
     let quota_bytes = input.quota_bytes
         .map(i64::try_from)
         .transpose()
@@ -1522,10 +1599,77 @@ pub(super) async fn set_manual_bucket_usage(
     let db = state.lock().unwrap();
     let bucket: String = db.query_row("SELECT bucket_name FROM s3_buckets WHERE id=?1", [id], |row| row.get(0))
         .map_err(|_| error(StatusCode::NOT_FOUND, "Bucket در ARG پیدا نشد."))?;
-    let measured_at = now();
-    db.execute("INSERT INTO s3_usage_snapshots(bucket_id,used_bytes,quota_bytes,quota_source,usage_source,scan_status,measured_at) VALUES (?1,?2,?3,?4,'manual','measured',?5)", params![id,used_bytes,quota_bytes,quota_bytes.map(|_| "manual"),measured_at]).map_err(db_error)?;
-    audit(&db, &actor.username, "s3.bucket.usage.manual", &format!("bucket_id={id}; used_bytes={used_bytes}; quota_bytes={}", quota_bytes.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into())));
-    Ok(Json(json!({"ok":true,"usage":{"used_bytes":used_bytes,"quota_bytes":quota_bytes,"usage_source":"manual","scan_status":"measured","measured_at":measured_at},"bucket":bucket})))
+    let latest_id: Option<i64> = db.query_row("SELECT id FROM s3_usage_snapshots WHERE bucket_id=?1 ORDER BY id DESC LIMIT 1", [id], |row| row.get(0)).ok();
+    if let Some(snapshot_id) = latest_id {
+        db.execute("UPDATE s3_usage_snapshots SET quota_bytes=?1,quota_source=?2 WHERE id=?3", params![quota_bytes,quota_bytes.map(|_| "manual"),snapshot_id]).map_err(db_error)?;
+    } else {
+        db.execute("INSERT INTO s3_usage_snapshots(bucket_id,quota_bytes,quota_source,usage_source,scan_status) VALUES (?1,?2,?3,'inventory','not_measured')", params![id,quota_bytes,quota_bytes.map(|_| "manual")]).map_err(db_error)?;
+    }
+    audit(&db, &actor.username, "s3.bucket.quota.update", &format!("bucket_id={id}; quota_bytes={}", quota_bytes.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into())));
+    Ok(Json(json!({"ok":true,"quota_bytes":quota_bytes,"bucket":bucket})))
+}
+
+pub(super) async fn bucket_usage(State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db,&headers)?;
+    let usage: Value = db.query_row("SELECT used_bytes,object_count,quota_bytes,quota_source,usage_source,scan_status,measured_at,error FROM s3_usage_snapshots WHERE bucket_id=?1 ORDER BY id DESC LIMIT 1", [id], |row| Ok(json!({"used_bytes":row.get::<_,Option<i64>>(0)?,"object_count":row.get::<_,Option<i64>>(1)?,"quota_bytes":row.get::<_,Option<i64>>(2)?,"quota_source":row.get::<_,Option<String>>(3)?,"usage_source":row.get::<_,Option<String>>(4)?,"scan_status":row.get::<_,Option<String>>(5)?,"measured_at":row.get::<_,Option<i64>>(6)?,"error":row.get::<_,Option<String>>(7)?}))).optional().map_err(db_error)?.unwrap_or_else(|| json!({"used_bytes":null,"object_count":null,"quota_bytes":null,"quota_source":null,"usage_source":"inventory","scan_status":"not_measured","measured_at":null,"error":null}));
+    Ok(Json(json!({"usage":usage})))
+}
+
+async fn begin_usage_scan(state: AppState, bucket_id: i64, connection_id: i64, bucket_name: String, force: bool) -> Result<bool, (StatusCode, Json<Value>)> {
+    let snapshot_id = {
+        let db = state.lock().unwrap();
+        let latest: Option<(String,Option<i64>)> = db.query_row("SELECT scan_status,measured_at FROM s3_usage_snapshots WHERE bucket_id=?1 ORDER BY id DESC LIMIT 1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).ok();
+        if let Some((status, measured_at)) = latest {
+            if !usage_scan_allowed(Some(&status),measured_at,now(),force) { return Ok(false); }
+        } else if !usage_scan_allowed(None,None,now(),force) {
+            return Ok(false);
+        }
+        let quota: Option<(i64,Option<String>)> = db.query_row("SELECT quota_bytes,quota_source FROM s3_usage_snapshots WHERE bucket_id=?1 ORDER BY id DESC LIMIT 1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).ok();
+        db.execute("INSERT INTO s3_usage_snapshots(bucket_id,quota_bytes,quota_source,usage_source,scan_status,measured_at) VALUES (?1,?2,?3,'inventory','scanning',?4)", params![bucket_id,quota.as_ref().map(|item|item.0),quota.as_ref().and_then(|item|item.1.as_deref()),now()]).map_err(db_error)?;
+        db.last_insert_rowid()
+    };
+    tokio::spawn(async move {
+        let _scan_permit = S3_SCAN_SEMAPHORE.acquire().await.expect("S3 scan semaphore remains open");
+        let result = privileged_request_async(json!({"action":"s3-scan-usage","id":connection_id,"bucket":bucket_name})).await;
+        let db = state.lock().unwrap();
+        match result {
+            Ok(value) if value["ok"] == true => {
+                let used = value["used_bytes"].as_u64().and_then(|n| i64::try_from(n).ok());
+                let count = value["object_count"].as_u64().and_then(|n| i64::try_from(n).ok());
+                if let (Some(used), Some(count)) = (used,count) {
+                    let _ = db.execute("UPDATE s3_usage_snapshots SET used_bytes=?1,object_count=?2,usage_source='inventory',scan_status='measured',measured_at=?3,error=NULL WHERE id=?4", params![used,count,now(),snapshot_id]);
+                } else {
+                    let _ = db.execute("UPDATE s3_usage_snapshots SET scan_status='failed',measured_at=?1,error='مقادیر اسکن خارج از محدوده بودند.' WHERE id=?2", params![now(),snapshot_id]);
+                }
+            }
+            Ok(value) => {
+                let message = value["error"].as_str().unwrap_or("خواندن فهرست آبجکت‌ها ناموفق بود.");
+                let _ = db.execute("UPDATE s3_usage_snapshots SET scan_status='failed',measured_at=?1,error=?2 WHERE id=?3", params![now(),message,snapshot_id]);
+            }
+            Err((_, Json(value))) => {
+                let message = value["error"].as_str().unwrap_or("اسکن Bucket ناموفق بود.");
+                let _ = db.execute("UPDATE s3_usage_snapshots SET scan_status='failed',measured_at=?1,error=?2 WHERE id=?3", params![now(),message,snapshot_id]);
+            }
+        }
+    });
+    Ok(true)
+}
+
+pub(super) async fn scan_bucket_usage(State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let (actor,connection_id,name) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db,&headers)?;
+        let (connection_id,name): (i64,String) = db.query_row("SELECT connection_id,bucket_name FROM s3_buckets WHERE id=?1 AND enabled=1", [id], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| error(StatusCode::NOT_FOUND,"Bucket فعال پیدا نشد."))?;
+        (actor,connection_id,name)
+    };
+    let started = begin_usage_scan(state.clone(),id,connection_id,name,true).await?;
+    if started {
+        let db = state.lock().unwrap();
+        audit(&db,&actor.username,"s3.bucket.usage.scan",&format!("bucket_id={id}"));
+    }
+    Ok(Json(json!({"ok":true,"started":started,"scan_status":if started {"scanning"} else {"cached_or_running"}})))
 }
 pub(super) async fn attach_bucket(
     State(state): State<AppState>,
@@ -1698,6 +1842,7 @@ pub(super) async fn delete_object(
         ));
     }
     let db = state.lock().unwrap();
+    invalidate_usage_cache(&db,id,input["bucket"].as_str().unwrap_or(""));
     audit(
         &db,
         &actor.username,
@@ -1806,6 +1951,7 @@ pub(super) async fn upload_object(
         ));
     }
     let db = state.lock().unwrap();
+    invalidate_usage_cache(&db,id,&query.bucket);
     audit(
         &db,
         &actor.username,
@@ -1959,6 +2105,7 @@ pub(super) async fn transfer_local_to_bucket(
         return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("انتقال فایل به فضای ابری ناموفق بود.")));
     }
     let db = state.lock().unwrap();
+    invalidate_usage_cache(&db,id,&input.bucket);
     audit(&db, &actor.username, "s3.transfer.local_to_bucket", &format!("connection={id}; bucket={}; key_length={}; size_bytes={}", input.bucket, input.key.len(), result["size_bytes"].as_u64().unwrap_or(0)));
     Ok(Json(result))
 }

@@ -13,7 +13,7 @@ import { Switch } from './components/ui/switch'
 
 type Provider = { id: string; label: string; rclone_provider: string; endpoint_required: boolean; region_required: boolean; region_default?: string; create_bucket: boolean; docs: string; endpoints?: { id: string; label: string; endpoint: string; region?: string }[] }
 type S3Connection = { id: number; display_name: string; description: string; provider_type: string; endpoint: string; region: string; address_style: string; allow_private_endpoint: boolean; credential_present: boolean; last_rotated_at: number; status: string; last_test_at: number | null; last_error: string | null; created_at: number; updated_at: number }
-type BucketRow = { id: number; bucket_name: string; display_name: string; description: string; enabled: boolean; verified_at: number | null; used_bytes: number | null; quota_bytes: number | null; usage_source: string | null; scan_status: string | null; measured_at: number | null }
+type BucketRow = { id: number; bucket_name: string; display_name: string; description: string; enabled: boolean; verified_at: number | null; used_bytes: number | null; object_count: number | null; quota_bytes: number | null; quota_source: string | null; usage_source: string | null; scan_status: string | null; measured_at: number | null; error?: string | null }
 type S3Object = { key: string; size_bytes: number; last_modified: string; etag?: string | null; storage_class?: string | null }
 type BrowserPage = { objects: S3Object[]; prefixes: string[]; is_truncated: boolean; next_token: string | null; key_count: number }
 type MountInfo = { id: number; connection_id: number; bucket_id: number; bucket: string; mount_path: string; method: 'rclone'; read_only: boolean; auto_mount: boolean; status: 'mounted' | 'unmounted' | 'failed' | 'mounting'; last_error: string | null; capacity: 'unknown'; capacity_note: string }
@@ -45,9 +45,6 @@ export function S3StoragePage({ Heading, notify }: Props) {
   const [working, setWorking] = useState('')
   const [bucketName, setBucketName] = useState('')
   const [manualBucket, setManualBucket] = useState('')
-  const [usageDialogOpen, setUsageDialogOpen] = useState(false)
-  const [usedSizeGib, setUsedSizeGib] = useState('')
-  const [quotaSizeGib, setQuotaSizeGib] = useState('')
   const [prefix, setPrefix] = useState('')
   const [searchPrefix, setSearchPrefix] = useState('')
   const [cursor, setCursor] = useState<string | null>(null)
@@ -97,6 +94,15 @@ export function S3StoragePage({ Heading, notify }: Props) {
     return () => { cancelled = true }
   }, [selectedId])
   useEffect(() => {
+    if (!selectedId || !bucketData?.connections.some((bucket) => bucket.scan_status === 'scanning')) return
+    let cancelled = false
+    const timer = window.setInterval(() => {
+      api<{ provider_buckets: string[] | null; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`)
+        .then((result) => { if (!cancelled) setBucketData(result) }).catch(() => undefined)
+    }, 3000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [selectedId, bucketData?.connections])
+  useEffect(() => {
     let cancelled = false
     setMount(null)
     if (!selectedBucket) return () => { cancelled = true }
@@ -128,6 +134,8 @@ export function S3StoragePage({ Heading, notify }: Props) {
     try {
       await api(`s3/connections/${selected.id}/objects/upload?${new URLSearchParams({ bucket: bucketName, key, content_type: file.type || 'application/octet-stream' })}`, { method: 'POST', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' } })
       notify('فایل با موفقیت بارگذاری شد.')
+      const updatedBuckets = await api<{ provider_buckets: string[] | null; connections: BucketRow[] }>(`s3/connections/${selected.id}/buckets?local_only=1`)
+      setBucketData(updatedBuckets)
       await refreshObjects(prefix)
     } catch (error) { notify(error instanceof Error ? error.message : 'بارگذاری فایل ناموفق بود.') }
     finally { setWorking(''); if (uploadInput.current) uploadInput.current.value = '' }
@@ -184,28 +192,15 @@ export function S3StoragePage({ Heading, notify }: Props) {
     } catch (error) { notify(error instanceof Error ? error.message : 'افزودن Bucket ناموفق بود.') }
     finally { setWorking('') }
   }
-  const openUsageEditor = () => {
-    setUsedSizeGib(selectedBucket?.used_bytes != null ? (selectedBucket.used_bytes / 1024 ** 3).toFixed(2) : '')
-    setQuotaSizeGib(selectedBucket?.quota_bytes != null ? (selectedBucket.quota_bytes / 1024 ** 3).toFixed(2) : '')
-    setUsageDialogOpen(true)
-  }
-  const saveManualUsage = async (event: FormEvent) => {
-    event.preventDefault()
+  const scanBucketUsage = async () => {
     if (!selectedBucket || !selectedId) return
-    const usedGib = Number(usedSizeGib)
-    const quotaGib = quotaSizeGib.trim() ? Number(quotaSizeGib) : null
-    const maxGib = Number.MAX_SAFE_INTEGER / (1024 ** 3)
-    if (!Number.isFinite(usedGib) || usedGib < 0 || usedGib > maxGib || (quotaGib !== null && (!Number.isFinite(quotaGib) || quotaGib <= 0 || quotaGib > maxGib))) {
-      notify('حجم مصرفی و سقف را به GiB معتبر وارد کن؛ سقف را اگر نمی‌دانی خالی بگذار.')
-      return
-    }
     setWorking('usage')
     try {
-      await api(`s3/buckets/${selectedBucket.id}/usage`, { method: 'PUT', body: JSON.stringify({ used_bytes: Math.round(usedGib * 1024 ** 3), quota_bytes: quotaGib === null ? null : Math.round(quotaGib * 1024 ** 3) }) })
-      const result = await api<{ provider_buckets: string[] | null; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`)
-      setBucketData(result); setUsageDialogOpen(false)
-      notify('اندازهٔ Bucket با برچسب «ثبت دستی» ذخیره شد.')
-    } catch (error) { notify(error instanceof Error ? error.message : 'ثبت اندازهٔ Bucket انجام نشد.') }
+      const result = await api<{ started: boolean }>(`s3/buckets/${selectedBucket.id}/usage/scan`, { method: 'POST' })
+      const refreshed = await api<{ provider_buckets: string[] | null; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`)
+      setBucketData(refreshed)
+      notify(result.started ? 'اسکن فهرست آبجکت‌ها در پس‌زمینه شروع شد؛ نتیجه خودکار به‌روز می‌شود.' : 'اسکن برای این Bucket در حال اجراست یا آمار آن تازه است.')
+    } catch (error) { notify(error instanceof Error ? error.message : 'شروع اسکن حجم Bucket ناموفق بود.') }
     finally { setWorking('') }
   }
   const createBucket = async (name: string) => {
@@ -363,6 +358,10 @@ export function S3StoragePage({ Heading, notify }: Props) {
       setTransferOpen(false)
       setTransferProgress(null)
       notify(`انتقال ${transferIsDirectory ? `${folderFiles.length} فایل` : 'فایل'} · ${formatBytes(transferredBytes)} انجام شد`)
+      if (transferDirection === 'upload') {
+        const updatedBuckets = await api<{ provider_buckets: string[] | null; connections: BucketRow[] }>(`s3/connections/${selected.id}/buckets?local_only=1`)
+        setBucketData(updatedBuckets)
+      }
       if (transferDirection === 'upload') await refreshObjects(prefix)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'انتقال فایل ناموفق بود.'
@@ -381,10 +380,10 @@ export function S3StoragePage({ Heading, notify }: Props) {
         <Card className="rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0 p-4"><div><CardTitle className="text-sm">Bucketها</CardTitle><CardDescription className="mt-1">فهرست راه‌دور فقط با درخواست صریح و مجوز ListBuckets خوانده می‌شود.</CardDescription></div><div className="flex items-center gap-3"><Button size="sm" variant="outline" onClick={() => void refreshBucketList()} disabled={!!working}><RefreshCw size={13} className={working === 'list-buckets' ? 'animate-spin' : ''}/>بررسی فهرست Provider</Button><a className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary" href={providers.find((item) => item.id === selected.provider_type)?.docs} target="_blank" rel="noreferrer">راهنمای Provider <ExternalLink size={12}/></a></div></CardHeader><CardContent className="space-y-3 p-4 pt-0">
           {remoteError && <Alert className="border-amber-400/20 bg-amber-400/[.04]"><AlertDescription>{remoteError} اگر کلید به یک Bucket محدود است، نام را دستی اضافه کن؛ اتصال به‌خاطر نداشتن ListBuckets رد نمی‌شود.</AlertDescription></Alert>}
           {!bucketData ? <Skeleton className="h-16"/> : bucketData.provider_buckets === null ? <p className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">برای دیدن Bucketهای سرویس‌دهنده، «بررسی فهرست Provider» را بزن. اگر ListBuckets مجاز نباشد می‌توانی نام Bucket را دستی وارد کنی.</p> : <div className="flex flex-wrap gap-2">{(bucketData.provider_buckets || []).map((name) => { const attached = bucketData.connections.some((item) => item.bucket_name === name); return <div key={name} className={`flex items-center gap-1 rounded-lg border px-2 py-1 ${bucketName === name ? 'border-primary/40 bg-primary/[.07]' : 'border-border bg-background/40'}`}><button type="button" className="flex items-center gap-2 px-1 py-1 text-xs" onClick={() => { setBucketName(name); setPrefix(''); setCursor(null); setPage(null) }}><Database size={13} className="text-primary"/><span className="font-mono" dir="ltr">{name}</span></button>{attached ? <Badge variant="outline">متصل در ARG</Badge> : <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => void attachBucket(name)} disabled={!!working}>افزودن</Button>}</div>})}</div>}
-          {bucketData?.connections.length ? <div className="divide-y divide-border rounded-lg border border-border">{bucketData.connections.map((bucket) => <div key={bucket.id} className="flex items-center gap-2 p-2.5"><button type="button" className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-right text-xs" onClick={() => { setBucketName(bucket.bucket_name); setPrefix(''); setPage(null) }}><Database size={14} className="shrink-0 text-primary"/><span className="truncate">{bucket.display_name}</span><code className="truncate text-muted-foreground" dir="ltr">{bucket.bucket_name}</code><span className="mr-auto flex items-center gap-1 text-[10px] text-muted-foreground">حجم: {bucket.used_bytes == null ? 'نامشخص' : formatBytes(bucket.used_bytes)}{bucket.usage_source === 'manual' && <Badge variant="outline" className="px-1 py-0 text-[9px]">دستی</Badge>}</span></button><Button size="icon" variant="ghost" aria-label={`قطع اتصال ${bucket.bucket_name} از ARG`} onClick={() => void detachBucket(bucket)} disabled={!!working}><X size={14}/></Button></div>)}</div> : <p className="text-xs text-muted-foreground">Bucketی در ARG متصل نشده است.</p>}
+          {bucketData?.connections.length ? <div className="divide-y divide-border rounded-lg border border-border">{bucketData.connections.map((bucket) => <div key={bucket.id} className="flex items-center gap-2 p-2.5"><button type="button" className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-right text-xs" onClick={() => { setBucketName(bucket.bucket_name); setPrefix(''); setPage(null) }}><Database size={14} className="shrink-0 text-primary"/><span className="truncate">{bucket.display_name}</span><code className="truncate text-muted-foreground" dir="ltr">{bucket.bucket_name}</code><span className="mr-auto flex items-center gap-1 text-[10px] text-muted-foreground">حجم: {bucket.used_bytes == null ? (bucket.scan_status === 'scanning' ? 'در حال محاسبه…' : 'محاسبه نشده') : formatBytes(bucket.used_bytes)}</span></button><Button size="icon" variant="ghost" aria-label={`قطع اتصال ${bucket.bucket_name} از ARG`} onClick={() => void detachBucket(bucket)} disabled={!!working}><X size={14}/></Button></div>)}</div> : <p className="text-xs text-muted-foreground">Bucketی در ARG متصل نشده است.</p>}
           <form className="flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); void attachBucket(manualBucket) }}><Input aria-label="نام Bucket موجود" dir="ltr" className="min-w-[180px] flex-1" placeholder="نام Bucket موجود را وارد کن" value={manualBucket} onChange={(event) => setManualBucket(event.target.value)}/><Button type="submit" variant="outline" disabled={!manualBucket || !!working}><Plus size={14}/>اتصال موجود</Button>{provider?.create_bucket && <Button type="button" variant="outline" disabled={!manualBucket || !!working} onClick={() => void createBucket(manualBucket)}>ساخت Bucket</Button>}</form>
         </CardContent></Card>
-        {selectedBucket && <Card className="rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3 space-y-0 p-4"><div><CardTitle className="flex items-center gap-2 text-sm"><HardDrive size={15} className="text-primary"/>اندازهٔ Bucket</CardTitle><CardDescription className="mt-1">ARG حجم مصرفی را از API این Provider نگرفته؛ اگر مقدارش را می‌دانی دستی ثبتش کن.</CardDescription></div><Button size="sm" variant="outline" onClick={openUsageEditor}><HardDrive size={14}/>{selectedBucket.used_bytes == null ? 'تکمیل اطلاعات حجم' : 'ویرایش حجم'}</Button></CardHeader><CardContent className="grid gap-3 border-t border-border p-4 sm:grid-cols-3"><InfoCell label="حجم مصرف‌شده" value={selectedBucket.used_bytes == null ? 'ثبت نشده' : formatBytes(selectedBucket.used_bytes)} ltr/><InfoCell label="سقف سرویس / قرارداد" value={selectedBucket.quota_bytes == null ? 'نامشخص' : formatBytes(selectedBucket.quota_bytes)} ltr/><InfoCell label="منبع و زمان ثبت" value={selectedBucket.usage_source === 'manual' && selectedBucket.measured_at ? `ثبت دستی · ${new Date(selectedBucket.measured_at * 1000).toISOString().slice(0, 16).replace('T', ' ')}` : 'هنوز ثبت نشده'}/><p className="text-[10px] leading-5 text-muted-foreground sm:col-span-3">مقدار دستی آمار تأییدشدهٔ سرویس‌دهنده نیست و در گزارش با منبع «ثبت دستی» مشخص می‌شود. سقف را اگر نمی‌دانی خالی بگذار؛ نمودار یا درصد ظرفیت ساختگی نمایش داده نمی‌شود.</p></CardContent></Card>}
+        {selectedBucket && <Card className="rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3 space-y-0 p-4"><div><CardTitle className="flex items-center gap-2 text-sm"><HardDrive size={15} className="text-primary"/>مصرف واقعی Bucket</CardTitle><CardDescription className="mt-1">حجم با جمع اندازهٔ تمام آبجکت‌ها محاسبه می‌شود؛ نتیجه cache می‌شود و حداکثر هر 24 ساعت خودکار تازه می‌شود.</CardDescription></div><Button size="sm" variant="outline" onClick={() => void scanBucketUsage()} disabled={!!working || selectedBucket.scan_status === 'scanning'}>{working === 'usage' || selectedBucket.scan_status === 'scanning' ? <LoaderCircle size={14} className="animate-spin"/> : <RefreshCw size={14}/>}محاسبه / بازشماری</Button></CardHeader><CardContent className="grid gap-3 border-t border-border p-4 sm:grid-cols-3"><InfoCell label="حجم آبجکت‌ها" value={selectedBucket.used_bytes == null ? selectedBucket.scan_status === 'scanning' ? 'در حال محاسبه' : 'هنوز محاسبه نشده' : formatBytes(selectedBucket.used_bytes)} ltr/><InfoCell label="تعداد آبجکت‌ها" value={selectedBucket.object_count == null ? '—' : formatNumber(selectedBucket.object_count)}/><InfoCell label="آخرین اسکن" value={selectedBucket.scan_status === 'scanning' ? 'در حال اجرا' : selectedBucket.measured_at && selectedBucket.measured_at > 0 ? new Date(selectedBucket.measured_at * 1000).toISOString().slice(0, 16).replace('T', ' ') : '—'} ltr/>{selectedBucket.error && <p className="text-xs text-destructive sm:col-span-3">{selectedBucket.error}</p>}<p className="text-[10px] leading-5 text-muted-foreground sm:col-span-3">اسکن صفحه‌به‌صفحه و در پس‌زمینه انجام می‌شود؛ آبجکت‌ها در حافظه جمع نمی‌شوند. اسکن خودکار حداکثر روزی یک بار اجرا می‌شود. ارائه‌دهنده ممکن است سقف یا حجم صورتحسابی جداگانه داشته باشد.</p></CardContent></Card>}
         {bucketName && <Card className="min-w-0 rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3 space-y-0 p-4"><div className="min-w-0"><CardTitle className="text-sm">مدیریت Objectها</CardTitle><CardDescription className="mt-1 truncate font-mono" dir="ltr">{bucketName}{prefix}</CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void refreshObjects(prefix)} disabled={pageLoading}><RefreshCw size={13} className={pageLoading ? 'animate-spin' : ''}/>تازه‌سازی</Button><Button size="sm" variant={transferOpen && transferDirection === 'upload' ? 'secondary' : 'outline'} onClick={() => transferOpen && transferDirection === 'upload' ? setTransferOpen(false) : openTransfer('upload', prefix)} disabled={!!working}><HardDrive size={14}/>{transferOpen && transferDirection === 'upload' ? 'بستن انتقال VPS' : 'انتقال از دیسک VPS'}</Button><input ref={uploadInput} type="file" className="hidden" aria-label="انتخاب فایل برای بارگذاری" onChange={(event) => void uploadFile(event.target.files?.[0])}/><Button size="sm" variant="outline" onClick={() => uploadInput.current?.click()} disabled={!!working}><UploadCloud size={14}/>{working === 'upload' ? 'در حال بارگذاری…' : 'آپلود'}</Button></div></CardHeader><CardContent className="space-y-3 p-4 pt-0">
           <form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); void refreshObjects(searchPrefix) }}><Input dir="ltr" value={searchPrefix} onChange={(event) => setSearchPrefix(event.target.value)} placeholder="Prefix / مسیر مجازی"/><Button size="sm" variant="outline" type="submit" disabled={pageLoading}>بازکردن</Button></form>
           {transferOpen && transferDirection === 'upload' && <section className="space-y-3 rounded-xl border border-primary/25 bg-primary/[.025] p-3 sm:p-4" aria-label="انتقال فایل و پوشه از دیسک VPS">
@@ -403,16 +402,6 @@ export function S3StoragePage({ Heading, notify }: Props) {
       </section>
     </div>}
 
-    <Dialog open={usageDialogOpen} onOpenChange={(open) => { if (!working) setUsageDialogOpen(open) }}>
-      <DialogContent className="max-w-md">
-        <DialogHeader><DialogTitle>تکمیل اندازهٔ Bucket</DialogTitle><DialogDescription>برای {selectedBucket?.bucket_name} حجم مصرف‌شده را وارد کن. واحد ورودی GiB است و سقف اختیاری است.</DialogDescription></DialogHeader>
-        <form className="space-y-4" onSubmit={(event) => void saveManualUsage(event)}>
-          <div className="space-y-1.5"><Label htmlFor="s3-used-size">حجم مصرف‌شده (GiB)</Label><Input id="s3-used-size" type="number" min="0" step="0.01" inputMode="decimal" dir="ltr" className="text-left font-mono" value={usedSizeGib} onChange={(event) => setUsedSizeGib(event.target.value)} placeholder="مثلاً 125.5"/><p className="text-[10px] text-muted-foreground">اندازهٔ داده‌های فعلی داخل Bucket را وارد کن.</p></div>
-          <div className="space-y-1.5"><Label htmlFor="s3-quota-size">سقف فضای Bucket (GiB) · اختیاری</Label><Input id="s3-quota-size" type="number" min="0.01" step="0.01" inputMode="decimal" dir="ltr" className="text-left font-mono" value={quotaSizeGib} onChange={(event) => setQuotaSizeGib(event.target.value)} placeholder="اگر Provider یا قرارداد سقف ندارد، خالی بگذار"/><p className="text-[10px] text-muted-foreground">در صورت خالی‌بودن، درصد ظرفیت محاسبه نمی‌شود.</p></div>
-          <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setUsageDialogOpen(false)} disabled={!!working}>انصراف</Button><Button type="submit" disabled={!!working || !usedSizeGib.trim()}>{working === 'usage' ? <LoaderCircle size={14} className="animate-spin"/> : <HardDrive size={14}/>}ذخیرهٔ اندازه</Button></div>
-        </form>
-      </DialogContent>
-    </Dialog>
     <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setPrivateConfirm(false); setStep(0); setEditingId(null) } }}>
       <DialogContent className="max-h-[92vh] max-w-2xl overflow-y-auto">
         <DialogHeader><DialogTitle>{editingId ? 'تنظیمات اتصال S3' : 'اتصال فضای S3'}</DialogTitle><DialogDescription>{editingId ? 'مشخصات اتصال را ویرایش کن. برای نگه‌داشتن کلید فعلی، فیلدهای کلید را خالی بگذار.' : `مرحلهٔ ${step + 1} از 2 · کلیدها فقط در فایل محافظت‌شدهٔ سرور ذخیره می‌شوند.`}</DialogDescription></DialogHeader>
