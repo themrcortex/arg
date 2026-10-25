@@ -7,6 +7,17 @@
 - Retry transient Let's Encrypt API network timeouts up to three times, restore any temporarily stopped web service, and explain how to diagnose persistent outbound connectivity failures.
 - Preserve the current panel configuration when certificate issuance fails; show that the failure is in ACME connectivity rather than public-IP detection.
 
+## v0.6.4 — 2026-10-25
+
+### Added
+- Try ZeroSSL as a second ACME source after Let's Encrypt fails. The installer asks for ZeroSSL EAB credentials when needed and keeps them in a temporary root-only file.
+- Add panel SSL settings for certificate/private-key paths and HTTPS port, with automatic discovery of existing Certbot certificates.
+
+### Fixed
+- Keep HTTPS optional during installation: skip at the host prompt or decline fallback, and continue installing ARG when certificate tooling, port availability, or issuance fails.
+- Validate certificate expiry, host/IP SAN, and public/private key matching before activation; install the key root-owned with ARG-group read access and restart the service safely.
+- Keep a persistent warning on login and panel pages when the connection uses unencrypted HTTP.
+
 ## v0.6.3-dev.8 — 2026-10-25
 
 ### Fixed
