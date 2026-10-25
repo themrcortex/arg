@@ -34,6 +34,7 @@ use std::{
     env, fs,
     io::{self, BufRead, BufReader},
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -3312,14 +3313,24 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         };
         let mut command = std::process::Command::new("systemctl");
         command.args(["show", "--no-pager", "--property=CPUUsageNSec,MemoryCurrent,CPUQuotaPerSecUSec,MemoryMax", unit]);
-        return match command_result(&mut command) {
-            Ok((true, output)) => {
-                let values: HashMap<String, String> = output.lines().filter_map(|line| line.split_once('=')).map(|(key,value)|(key.to_owned(),value.to_owned())).collect();
-                json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":values.get("CPUUsageNSec").and_then(|v|v.parse::<u64>().ok()),"memory_current_bytes":values.get("MemoryCurrent").and_then(|v|v.parse::<u64>().ok()),"cpu_quota_per_second_usec":values.get("CPUQuotaPerSecUSec").and_then(|v|v.parse::<u64>().ok()),"memory_max_bytes":values.get("MemoryMax").and_then(|v|v.parse::<u64>().ok())}})
-            },
-            Ok((false, output)) => json!({"ok":false,"error":output}),
-            Err(error) => json!({"ok":false,"error":error}),
+        let (show_ok, output) = match command_result(&mut command) {
+            Ok(result) => result,
+            Err(error) => return json!({"ok":false,"error":error}),
         };
+        let values: HashMap<String, String> = output.lines().filter_map(|line| line.split_once('=')).map(|(key,value)|(key.trim().to_owned(),value.trim().to_owned())).collect();
+        let mut cpu_usage_ns = values.get("CPUUsageNSec").and_then(|v| parse_systemd_u64(v));
+        let mut memory_current_bytes = values.get("MemoryCurrent").and_then(|v| parse_systemd_u64(v));
+        let mut measurement_error = (!show_ok).then(|| output.trim().to_owned()).filter(|text| !text.is_empty());
+        if cpu_usage_ns.is_none() || memory_current_bytes.is_none() {
+            if let Some(cgroup) = read_systemd_control_group(unit) {
+                let (cgroup_cpu, cgroup_memory) = read_cgroup_resource_usage(&cgroup);
+                cpu_usage_ns = cpu_usage_ns.or(cgroup_cpu);
+                memory_current_bytes = memory_current_bytes.or(cgroup_memory);
+            }
+        }
+        if cpu_usage_ns.is_some() || memory_current_bytes.is_some() { measurement_error = None; }
+        else if measurement_error.is_none() { measurement_error = Some("systemd accounting is not enabled for this service. Save its settings once to enable CPU and memory accounting.".into()); }
+        return json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":cpu_usage_ns,"memory_current_bytes":memory_current_bytes,"cpu_quota_per_second_usec":values.get("CPUQuotaPerSecUSec").and_then(|v|parse_systemd_u64(v)),"memory_max_bytes":values.get("MemoryMax").and_then(|v|parse_systemd_u64(v)),"measurement_error":measurement_error}});
     }
     if action == "service-limits" {
         let Some(unit) = request["unit"].as_str().filter(|u| valid_service_unit(u)) else {
@@ -3341,7 +3352,7 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         }
         let [cpu_property, memory_property] = service_resource_properties(cpu, memory);
         let mut command = std::process::Command::new("systemctl");
-        command.args(["set-property", unit, &cpu_property, &memory_property]);
+        command.args(["set-property", unit, "CPUAccounting=yes", "MemoryAccounting=yes", &cpu_property, &memory_property]);
         return match command_result(&mut command) {
             Ok((true, output)) => json!({"ok":true,"stdout":output}),
             Ok((false, output)) => json!({"ok":false,"error":output}),
@@ -3428,6 +3439,43 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         Ok((false, output)) => json!({"ok":false,"error":output}),
         Err(error) => json!({"ok":false,"error":error}),
     }
+}
+
+fn parse_systemd_u64(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok().filter(|value| *value != u64::MAX)
+}
+
+fn valid_control_group_path(path: &str) -> bool {
+    path.starts_with('/') && path.len() <= 4096 && path != "/" && path.split('/').skip(1).all(|part| {
+        !part.is_empty() && part != "." && part != ".." && part.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || b"-_.@:+\\".contains(&byte)
+        })
+    })
+}
+
+fn read_systemd_control_group(unit: &str) -> Option<String> {
+    let output = std::process::Command::new("systemctl")
+        .args(["show", "--no-pager", "--property=ControlGroup", "--value", unit])
+        .output().ok()?;
+    if !output.status.success() { return None; }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    valid_control_group_path(&path).then_some(path)
+}
+
+fn read_cgroup_resource_usage(control_group: &str) -> (Option<u64>, Option<u64>) {
+    if !valid_control_group_path(control_group) { return (None, None); }
+    let directory = PathBuf::from("/sys/fs/cgroup").join(control_group.trim_start_matches('/'));
+    let cpu_ns = fs::read_to_string(directory.join("cpu.stat")).ok().and_then(|contents| parse_cpu_stat_usage_ns(&contents));
+    let memory_bytes = fs::read_to_string(directory.join("memory.current")).ok().and_then(|value| parse_systemd_u64(&value));
+    (cpu_ns, memory_bytes)
+}
+
+fn parse_cpu_stat_usage_ns(contents: &str) -> Option<u64> {
+    contents.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        if fields.next()? != "usage_usec" { return None; }
+        fields.next()?.parse::<u64>().ok()?.checked_mul(1000)
+    })
 }
 
 fn service_resource_properties(cpu_percent: Option<f64>, memory_bytes: Option<u64>) -> [String; 2] {
@@ -3750,6 +3798,18 @@ mod update_progress_tests {
             super::service_resource_properties(None, None),
             ["CPUQuota=infinity", "MemoryMax=infinity"]
         );
+    }
+
+    #[test]
+    fn systemd_resource_reading_handles_cgroup_values_and_unavailable_counters() {
+        assert_eq!(super::parse_systemd_u64("536870912"), Some(536_870_912));
+        assert_eq!(super::parse_systemd_u64("18446744073709551615"), None);
+        assert_eq!(super::parse_systemd_u64("[not set]"), None);
+        assert_eq!(super::parse_cpu_stat_usage_ns("usage_usec 1250\nuser_usec 900\nsystem_usec 350\n"), Some(1_250_000));
+        assert_eq!(super::parse_cpu_stat_usage_ns("user_usec 900\nsystem_usec 350\n"), None);
+        assert!(super::valid_control_group_path("/system.slice/customer-app.service"));
+        assert!(!super::valid_control_group_path("/system.slice/../../etc"));
+        assert!(!super::valid_control_group_path("relative/path"));
     }
 
     #[test]

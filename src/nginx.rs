@@ -552,8 +552,8 @@ pub(super) async fn api_nginx_site_runtime(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    nginx_manager_request_async(json!({"action":"nginx-get", "name":name})).await?;
     if method == axum::http::Method::PUT {
+        nginx_manager_request_async(json!({"action":"nginx-get", "name":name})).await?;
         let input = body.ok_or_else(|| error(StatusCode::BAD_REQUEST, "تنظیمات منابع ارسال نشده است."))?.0;
         let unit = input.unit.trim();
         if !super::valid_service_unit(unit) {
@@ -595,16 +595,16 @@ pub(super) async fn api_nginx_site_runtime(
     }
     let data = result["data"].clone();
     let cpu_now = data["cpu_usage_ns"].as_u64();
-    let sampled_at = now();
+    let sampled_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;
     let cpu_percent = match (previous_cpu.and_then(|value| u64::try_from(value).ok()), previous_at) {
-        (Some(old_cpu), Some(old_at)) if sampled_at > old_at => cpu_now.filter(|current| *current >= old_cpu).map(|current| (current - old_cpu) as f64 / ((sampled_at - old_at) as f64 * 10_000_000.0)),
+        (Some(old_cpu), Some(old_at)) if old_at > 1_000_000_000_000 && sampled_at > old_at && sampled_at - old_at <= 60_000 => cpu_now.filter(|current| *current >= old_cpu).map(|current| (current - old_cpu) as f64 / ((sampled_at - old_at) as f64 * 10_000.0)),
         _ => None,
     };
     {
         let db = state.lock().unwrap();
         db.execute("UPDATE nginx_site_runtime SET last_cpu_usage_ns=?1,last_sampled_at=?2 WHERE site_name=?3", params![cpu_now.map(|value| value as i64), sampled_at, name]).map_err(db_error)?;
     }
-    Ok(Json(json!({"configured":true,"unit":unit,"cpu_quota_percent":cpu_limit,"memory_max_bytes":memory_limit,"cpu_percent":cpu_percent,"memory_current_bytes":data["memory_current_bytes"],"sampled_at":sampled_at,"note":"Resource values apply to the associated systemd unit. A shared PHP-FPM unit affects every site using that pool."})))
+    Ok(Json(json!({"configured":true,"unit":unit,"cpu_quota_percent":cpu_limit,"memory_max_bytes":memory_limit,"cpu_percent":cpu_percent,"memory_current_bytes":data["memory_current_bytes"],"measurement_error":data["measurement_error"],"sampled_at":sampled_at,"note":"Resource values apply to the associated systemd unit. A shared PHP-FPM unit affects every site using that pool."})))
 }
 
 pub(super) async fn api_nginx_site_repository(
