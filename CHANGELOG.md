@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.6.3-dev.3 — 2026-10-25
+
+### Fixed
+- Align root-disk capacity with the storage inventory, count filesystem-reserved blocks separately, and clearly distinguish the root filesystem from the aggregate of local disks.
+
+### Added
+- Record root-disk read/write throughput and used/total capacity in resource history; add capacity and read/write charts to System and Resources.
+- Add idempotent SQLite migration and tests for the new disk history fields.
+
 ## v0.6.3-dev.2 — 2026-10-25
 
 ### Added
