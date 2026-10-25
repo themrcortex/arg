@@ -2,286 +2,190 @@
 
 # ARG
 
-### کنترل‌سنتر سبک و امن برای مدیریت VPS
+### Self-hosted VPS Control Center
 
-پنل فارسی و راست‌چین برای دیدن وضعیت سرور، مدیریت کاربران و بررسی شبکه؛ ساخته‌شده با **Rust، React و TypeScript** و قابل اجرا به‌صورت سرویس systemd.
+Manage Linux servers, services, websites, storage, and databases from a single web panel.
 
-[![Rust](https://img.shields.io/badge/backend-Rust-DDA46F?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![React](https://img.shields.io/badge/frontend-React-DDA46F?style=flat-square&logo=react&logoColor=white)](https://react.dev/)
-[![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu-DDA46F?style=flat-square&logo=linux&logoColor=white)](#پیش‌نیازها)
+[![Rust](https://img.shields.io/badge/backend-Rust-DEA574?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![React](https://img.shields.io/badge/frontend-React-DEA574?style=flat-square&logo=react&logoColor=white)](https://react.dev/)
+[![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu-DEA574?style=flat-square&logo=linux&logoColor=white)](#requirements)
+[![Docs](https://img.shields.io/badge/docs-bilingual-DEA574?style=flat-square)](https://themrcortex.github.io/arg/)
 
-**ساخته‌شده توسط [𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex)**
+**Stable release:** `v0.6.5`
 
-**[📚 مستندات کامل دوزبانه](https://themrcortex.github.io/arg/)** · [فارسی](docs/fa/overview.md) · [English](docs/en/overview.md)
+[Documentation](https://themrcortex.github.io/arg/) · [Report an issue](https://github.com/themrcortex/arg/issues) · [Maintainer](https://t.me/mrc0rtex)
 
 </div>
 
 ---
 
-## نصب سریع
+ARG is a self-hosted control panel for administering a Linux VPS. A lightweight Rust service provides the API and privileged operations; the web interface is built with React and TypeScript. ARG is designed for direct administration of one server at a time.
 
-نصب‌کنندهٔ مستقل را مستقیم روی سرور دریافت و اجرا کنید؛ نیازی به clone کردن مخزن نیست.
+## Contents
 
-**[⬇ دریافت مستقیم install.sh](https://github.com/themrcortex/arg/releases/latest/download/install.sh)**
+- [Features](#features)
+- [Quick install](#quick-install)
+- [First login](#first-login)
+- [CLI](#command-line-management)
+- [Updates](#updates)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Development](#development)
+- [Documentation and support](#documentation-and-support)
+- [Security notes](#security-notes)
+
+## Features
+
+- **Dashboard and monitoring:** CPU, memory, swap, storage, network interfaces, traffic history, and system health.
+- **Network and firewall:** interface and port inventory, UFW status and rules, and TCP/UDP port management.
+- **Nginx sites:** inspect and edit site configurations, manage enablement, domains, TLS, maintenance pages, site actions, and supported resource limits.
+- **Docker:** manage containers, images, networks, volumes, and Compose projects exposed by the installed Docker Engine.
+- **Server files:** browse, edit, upload, download, copy, move, rename, ZIP, and safely extract files; analyze disk usage.
+- **S3-compatible storage:** connect supported providers, browse objects, transfer files and folders, mount with Rclone, and scan bucket usage.
+- **MySQL and MariaDB:** inspect databases and users, run bounded SQL operations, and manage credentials.
+- **System administration:** manage APT packages and systemd services; use the web terminal, including a separately confirmed root terminal.
+- **Panel administration:** manage accounts, sessions, audit history, and ARG backup and restore operations.
+- **Installer and service manager:** install, repair, update, cancel an update, roll back, configure TLS, and uninstall ARG.
+
+Availability depends on installed system tools, permissions, and provider capabilities. The documentation describes feature-specific constraints; ARG does not present unsupported data as real measurements.
+
+## Quick install
+
+The installer is downloaded directly; cloning the repository is not required. Review the script before running it on a server:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/themrcortex/arg/main/install.sh \
   -o arg.sh
+less arg.sh
 sudo bash arg.sh install
 ```
 
-برای بازکردن منوی نصب و مدیریت به‌جای نصب مستقیم، آرگومان `install` را حذف کنید:
+The installer targets Debian and Ubuntu systems using systemd. It installs build dependencies, compiles ARG, and configures its systemd services. Installation requires root or `sudo`, network access, and temporary free disk space for compilation.
 
-```bash
-sudo bash arg.sh
-```
+HTTPS setup is optional during installation. Enter `skip` to continue without a certificate and configure TLS later. Until HTTPS is enabled, do not expose the login page over an untrusted public connection; use an SSH tunnel or a trusted private network.
 
-پس از نصب، ARG با systemd اجرا می‌شود. برای دیدن وضعیت یا بازکردن منوی مدیریت:
+## First login
 
-```bash
-sudo arg status
-sudo arg
-```
-
-اگر نسخهٔ قبلی پنل نصب باشد، دریافت نصب‌کنندهٔ ARG و اجرای نصب، سرویس، پیکربندی و پایگاه‌داده را منتقل می‌کند.
-
-در نصب اولیه، IP عمومی سرور برای تأیید نمایش داده می‌شود. سپس می‌توانید همان IP یا دامنهٔ متصل به سرور را برای راه‌اندازی HTTPS انتخاب کنید. نصب‌کننده تلاش می‌کند گواهی Let's Encrypt را خودکار دریافت کند. برای دسترسی عمومی، پورت پنل و پورت ۸۰ جهت اعتبارسنجی گواهی باید در فایروال سرور و فایروال ارائه‌دهنده باز باشند.
-
-> نصب خودکار برای Debian و Ubuntu دارای systemd طراحی شده و برای دریافت وابستگی‌ها و build به اینترنت نیاز دارد.
-
-هنگام کامپایل، نصب‌کننده نشانگر زنده و زمان سپری‌شده را نمایش می‌دهد. اگر build خطا کند، خروجی کامل کامپایلر برای عیب‌یابی چاپ می‌شود.
-
-## فهرست
-
-- [قابلیت‌ها](#قابلیت‌ها)
-- [ساختار پنل](#ساختار-پنل)
-- [آشنایی با پنل](#آشنایی-با-پنل)
-- [مدیریت با دستور arg](#مدیریت-با-دستور-arg)
-- [ساخت نخستین حساب مدیر](#ساخت-نخستین-حساب-مدیر)
-- [سرویس، تنظیمات و داده‌ها](#سرویس-تنظیمات-و-داده‌ها)
-- [پیش‌نیازها](#پیش‌نیازها)
-- [توسعه](#توسعه)
-- [محدودیت‌های فعلی و نقشهٔ راه](#محدودیت‌های-فعلی-و-نقشهٔ-راه)
-
-## قابلیت‌ها
-
-| بخش | امکانات فعلی |
-| --- | --- |
-| **داشبورد سیستم** | مصرف CPU و حافظه، Swap، فضای دیسک، uptime، load average و مصرف منابع خود ARG |
-| **شبکه** | نام و وضعیت رابط‌ها، MAC، IP، سرعت و MTU در صورت گزارش سیستم، بایت‌ها، بسته‌ها، خطاها و موارد حذف‌شده |
-| **کاربران** | ساخت و مدیریت نقش‌های مدیر، اپراتور و ناظر؛ فعال یا غیرفعال‌کردن حساب‌ها |
-| **امنیت** | هش گذرواژه با Argon2، نشست امن، محدودسازی تلاش ورود و ثبت رویدادهای مدیریتی |
-| **فایروال** | روشن یا خاموش‌کردن UFW، ساخت قانون اجازه یا مسدودسازی TCP/UDP، ویرایش، توقف موقت و حذف قوانین ARG |
-| **سایت‌های Nginx** | فهرست سایت‌های `sites-available`، روشن یا خاموش‌کردن با ساخت یا حذف خودکار symlink، و ویرایش تنظیمات با اجرای `nginx -t` و بازگردانی فایل در صورت خطا |
-| **مدیریت Docker** | وضعیت Engine و Compose، کانتینرها و آمار مصرف، Imageها، شبکه‌ها و Volumeها؛ ساخت و اجرای کانتینر، مدیریت سرویس، عملیات Compose و پاک‌سازی‌های تأییدشده |
-| **مدیریت MySQL** | نصب MySQL یا MariaDB، کنترل سرویس، فهرست دیتابیس‌ها و کاربران، اجرای SQL با خروجی و زمان محدود، و بازنشانی رمز با تأیید مجدد مدیر |
-| **فایل‌های سرور** | مرور مسیرهای سرور، جست‌وجو، ساخت فایل و پوشه، ویرایش متن، تغییر دسترسی، کپی، انتقال، تغییر نام، حذف، آپلود و دانلود؛ فشرده‌سازی ZIP و استخراج امن ZIP؛ تحلیل مصرف دیسک با بزرگ‌ترین فایل‌ها و پوشه‌ها |
-| **فضای ابری S3** | اتصال AWS S3، R2، آروان، پارس‌پک و سرویس‌های S3-compatible؛ مرور و انتقال Objectها، Mount با Rclone، و محاسبهٔ مصرف از جمع اندازهٔ آبجکت‌ها با اسکن صفحه‌ای cache‌شده؛ کلیدها در فایل root-only نگهداری می‌شوند |
-| **پنل وب** | رابط React و TypeScript، فارسی و RTL، سایدبار گروه‌بندی‌شده، جدول‌ها و ابزارهای ویژهٔ هر بخش، نمودارهای تاریخچه‌دار، اعلان نسخهٔ جدید و به‌روزرسانی از داخل پنل |
-| **فونت** | فونت‌های محلی Peyda برای متن، Abar برای عنوان‌های فارسی و Oxanium برای نشان نوشتاری لاتین |
-| **نصب و نگهداری** | نصب‌کنندهٔ Bash مستقل، سرویس systemd، به‌روزرسانی و حذف با امکان نگه‌داشتن یا پاک‌کردن داده‌ها |
-
-مدیریت MySQL رمز مدیر ARG را برای هر عملیات حساس دوباره بررسی می‌کند. گذرواژهٔ MySQL فقط در حافظهٔ موقت صفحه و فایل دسترسی محدود کوتاه‌عمر روی سرور استفاده می‌شود؛ در دیتابیس ARG یا لاگ ذخیره نمی‌شود. رمز قبلی کاربران MySQL قابل بازیابی نیست، چون MySQL آن را به‌شکل hash نگه می‌دارد؛ امکان تنظیم رمز تازه وجود دارد.
-
-تاریخچهٔ CPU، حافظه، دیسک و نرخ ترافیک شبکه در پس‌زمینه توسط سرویس Rust در SQLite ثبت می‌شود؛ برای ثبت آن نیازی به بازبودن پنل نیست. از تنظیمات می‌توان ثبت را روشن یا خاموش کرد، فاصلهٔ نمونه‌برداری را بین 5 تا 60 ثانیه و مدت نگه‌داری را بین 1 تا 30 روز تغییر داد. بازه‌های 5 دقیقه، 1 ساعت و 24 ساعت در داشبورد قابل انتخاب‌اند. آستانه‌های هشدار CPU، حافظه و دیسک از پنل تنظیم می‌شوند. پورت‌های شنونده نیز نمایش داده می‌شوند؛ در نسخهٔ فعلی حجم ترافیک به تفکیک هر پورت محاسبه نمی‌شود. تست اتصال TCP محلی، مدیریت کاربران، دریافت خروجی قوانین UFW و خروجی CSV گزارش عملیات هم در پنل قرار دارند.
-
-## ساختار پنل
-
-هر بخش یک صفحهٔ متناسب با کار خودش دارد. داده‌های مرتبط در جدول، نمودار یا فرم همان صفحه قرار می‌گیرند و برای هر شاخص یک صفحهٔ تکراری ساخته نمی‌شود.
-
-| صفحه | آنچه در آن انجام می‌شود |
-| --- | --- |
-| نمای کلی | وضعیت زنده، روند منابع، شبکه و مصرف خود ARG |
-| سیستم و منابع | جدول CPU، بار سیستم، RAM، Swap و دیسک؛ تاریخچه و تنظیم آستانه‌ها |
-| شبکه | کارت‌های شبکه، آدرس‌ها، شمارنده‌ها و نمودار نرخ ترافیک |
-| پورت‌ها | جست‌وجو و فیلتر TCP/UDP و IPv4/IPv6؛ تست اتصال TCP محلی |
-| فایروال | تغییر وضعیت UFW، ساخت و ویرایش قوانین allow/deny، فعال یا غیرفعال‌کردن و حذف آن‌ها |
-| کاربران | ساخت حساب و تغییر نقش و وضعیت دسترسی |
-| گزارش عملیات | مشاهده و دریافت CSV رویدادها |
-| تنظیمات | تغییر پورت HTTP پنل، وضعیت ثبت تاریخچه، فاصلهٔ نمونه‌برداری، ماندگاری داده و نشست، تغییر گذرواژه |
-| مدیریت فایل‌ها | مرور و ویرایش فایل‌ها، اسکن محدودشدهٔ دیسک، ZIP و استخراج امن در پوشهٔ تازه |
-| فضای ابری S3 | اتصال Provider، آزمایش اتصال، مرور Bucket و Object، انتقال فایل و پوشه، Mount اختیاری با Rclone و اسکن پس‌زمینهٔ مصرف واقعی Bucket؛ اسکن cache می‌شود و به‌طور خودکار حداکثر هر 24 ساعت تکرار می‌شود |
-
-سرویس با فاصلهٔ انتخاب‌شده نمونهٔ منابع و شبکه را در پایگاه‌داده ذخیره می‌کند و تاریخچه پس از بستن مرورگر یا راه‌اندازی دوبارهٔ سرویس باقی می‌ماند. حجم ترافیک به‌تفکیک پورت هنوز اندازه‌گیری نمی‌شود.
-
-## آشنایی با پنل
-
-پس از نصب و راه‌اندازی HTTPS، نشانی پنل در خروجی نصب‌کننده و منوی `arg` نمایش داده می‌شود. پنل به‌طور پیش‌فرض روی پورت `8282` در دسترس است؛ هنگام فعال‌بودن TLS، نصب‌کننده پورت امن آزاد را تنظیم می‌کند. برای تغییر پورت از صفحهٔ تنظیمات، منوی مدیریت یا دستور زیر استفاده کنید:
-
-```bash
-sudo arg manage port
-```
-
-### ساخت نخستین حساب مدیر
-
-ساخت مدیر اول از یکی از این دو روش انجام می‌شود:
-
-1. **از طریق HTTPS عمومی:** در صفحهٔ راه‌اندازی، کد یک‌بارمصرفی را وارد کنید که نصب‌کننده روی سرور نشان می‌دهد. در منوی `arg` نیز گزینهٔ دریافت کد راه‌اندازی وجود دارد؛ این گزینه فقط تا پیش از ساخت اولین مدیر فعال است.
-2. **از طریق SSH tunnel:** اگر HTTPS هنوز آماده نیست، روی رایانهٔ خود tunnel بسازید و صفحهٔ محلی را باز کنید:
+After installation, the installer prints the panel address and a one-time setup code for creating the first administrator. Keep the code private. If the panel is bound to the server's local interface, connect through an SSH tunnel:
 
 ```bash
 ssh -N -L 8282:127.0.0.1:8282 <SSH_USER>@<SERVER_IP>
 ```
 
-سپس به [http://127.0.0.1:8282](http://127.0.0.1:8282) بروید. جای `<SSH_USER>` و `<SERVER_IP>` را با نام کاربری SSH و IP سرور خود عوض کنید. tunnel را تا پایان ساخت حساب باز نگه دارید.
+Then open `http://127.0.0.1:8282` on your computer. Replace `8282` with the configured panel port if it has changed. For direct public access, configure HTTPS and allow the panel port in both the VPS firewall and the hosting provider's firewall.
 
-برای فعال‌کردن HTTPS پس از نصب نیز اجرا کنید:
+## Command-line management
 
-```bash
-sudo arg ssl
-```
+Once installed, use `arg` to manage the service:
 
-اگر سرویس systemd دیگری پورت ۸۰ را گرفته باشد، نصب‌کننده برای صدور گواهی آن را موقتاً متوقف می‌کند و پس از پایان کار دوباره راه می‌اندازد. همین روال برای تمدید خودکار گواهی نیز تنظیم می‌شود. گواهی IP در Let's Encrypt کوتاه‌عمر است و به‌صورت خودکار تمدید می‌شود. اگر پورت HTTPS پیش‌فرض در دسترس نباشد، ARG پورت آزاد دیگری انتخاب می‌کند؛ بازبودن آن پورت در فایروال ارائه‌دهنده را هم بررسی کنید.
-
-## مدیریت با دستور `arg`
-
-اجرای دستور بدون آرگومان، منوی تعاملی را باز می‌کند. با کلیدهای بالا و پایین حرکت کنید و گزینه را با Enter اجرا کنید. منو هنگام اجرا وضعیت سرویس، نشانی پنل و وضعیت نسخه را بررسی می‌کند.
-
-| دستور | کار |
+| Command | Action |
 | --- | --- |
-| `sudo arg` | منوی کامل مدیریت |
-| `sudo arg status` | وضعیت سرویس |
-| `sudo arg start` | شروع سرویس |
-| `sudo arg stop` | توقف سرویس |
-| `sudo arg restart` | راه‌اندازی مجدد سرویس |
-| `sudo arg logs` | نمایش گزارش‌های اخیر |
-| `sudo arg logs 300` | نمایش تعداد دلخواه خط از گزارش |
-| `sudo arg manage port` | تغییر پورت پنل |
-| `sudo arg ssl` | راه‌اندازی HTTPS و گواهی |
-| `sudo arg update` | انتخاب تعاملی شاخه و حالت Cache و سپس به‌روزرسانی |
-| `sudo arg password` | بازنشانی رمز حساب با دسترسی root |
-| `sudo arg delete` | حذف برنامه و سرویس با امکان نگه‌داشتن داده‌ها |
-| `sudo arg delete --purge` | حذف برنامه، تنظیمات و داده‌ها |
+| `sudo arg` | Open the interactive management menu |
+| `sudo arg status` | Show service status |
+| `sudo arg start` / `stop` / `restart` | Control the ARG service |
+| `sudo arg logs [lines]` | View recent service logs |
+| `sudo arg ssl` | Configure HTTPS for the panel |
+| `sudo arg update` | Select update branch and build-cache mode interactively |
+| `sudo arg cancel-update` | Cancel a running update or clear a stale update lock |
+| `sudo arg rollback` | Restore the previous saved ARG binary |
+| `sudo arg password` | Reset an account password as root |
+| `sudo arg delete` | Uninstall while preserving application data |
+| `sudo arg delete --purge` | Uninstall and remove ARG data |
 
-گزینهٔ حذف کامل برای تأیید، عبارت مشخصی را از شما می‌گیرد. پیش از پاک‌کردن داده‌ها از پایگاه‌دادهٔ خود نسخهٔ پشتیبان تهیه کنید.
-
-برای آزمایش Update Manager، یک نسخهٔ تازه روی شاخهٔ `main` منتشر شده است. در پنل، از بخش «تنظیمات ← درباره و به‌روزرسانی» وضعیت نصب را دنبال کنید؛ پس از پایان فرایند، پنل به‌صورت خودکار تازه می‌شود.
-
-## سرویس، تنظیمات و داده‌ها
-
-ARG به‌عنوان سرویس `arg.service` نصب می‌شود و با راه‌اندازی سرور به‌صورت خودکار اجرا خواهد شد.
+The installer menu is also available before installation:
 
 ```bash
-systemctl status arg
-journalctl -u arg -f
+sudo bash arg.sh
 ```
 
-| مسیر | محتوا |
-| --- | --- |
-| `/etc/arg/arg.env` | تنظیمات اجرای سرویس |
-| `/var/lib/arg` | پایگاه‌داده و داده‌های برنامه |
+## Updates
 
-## پیش‌نیازها
+ARG supports two source branches:
 
-- Debian یا Ubuntu با `systemd`
-- دسترسی `root` یا `sudo`
-- اتصال اینترنت هنگام نصب و build
-- پورت پنل و در صورت فعال‌سازی HTTPS، پورت‌های لازم در فایروال سرور و ارائه‌دهنده
+- **`main`** — stable releases.
+- **`development`** — prerelease changes; use on test systems if stability matters.
 
-## توسعه
+Choose a build-cache mode when updating:
 
-### شاخه‌های مخزن
+- **`fast`** keeps Rust build artifacts to make later updates faster, at the cost of disk space.
+- **`complete`** clears the build cache before and after compilation. It saves persistent cache space but takes longer; compilation still needs temporary disk space.
 
-- `main` شاخهٔ پایدار ARG است و منبع پیش‌فرض نصب و به‌روزرسانی محسوب می‌شود. نسخهٔ این شاخه SemVer پایدار است؛ نسخهٔ فعلی `0.6.5` است.
-- `development` شاخهٔ یکپارچه‌سازی تغییرهای در حال توسعه است و باید همواره شامل `main` و یک نسخهٔ جلوتر با قالب `X.Y.(Z+1)-dev.N` باشد؛ برای نمونه `0.6.6-dev.1` از `0.6.5` جلوتر است. این build آزمایشی است و برای سرورهای حساس پیشنهاد نمی‌شود.
-- برای انتشار تغییرهای آزمایش‌شده، ابتدا آن‌ها را در `development` بررسی کنید و سپس با نسخه‌بندی و یادداشت انتشار به `main` ادغام کنید.
-- در منوی SSH یا با `sudo arg update` می‌توان شاخهٔ `main` یا `development` و حالت Build را انتخاب کرد. `fast` نگه‌داشتن Cache را برای Buildهای بعدی ترجیح می‌دهد؛ `complete` Cache را پیش و پس از کامپایل پاک می‌کند و زمان بیشتری می‌برد. برای اجرای بدون پرسش می‌توان نوشت `sudo arg update development fast` یا `sudo arg update main complete`.
-- در پنل، از دیالوگ «به‌روزرسانی» نیز می‌توان شاخهٔ دریافت و حالت Build را انتخاب کرد. `main` پایدار است و `development` شامل نسخه‌های آزمایشی است.
-- نسخهٔ نصب‌شده از `Cargo.toml` داخل باینری Rust درج می‌شود؛ نسخهٔ GitHub از همان فایل در شاخهٔ انتخاب‌شده خوانده می‌شود. شناسهٔ commit و نسخهٔ SemVer هر دو در صفحهٔ به‌روزرسانی نشان داده می‌شوند.
-
-برای build محلی به Rust stable و Node.js 20 یا جدیدتر نیاز دارید. مراحل را جداگانه اجرا کنید تا خروجی هر بخش روشن باشد:
+Examples:
 
 ```bash
-git clone https://github.com/themrcortex/arg.git
-cd arg
+sudo arg update main fast
+sudo arg update development complete
 ```
 
-### ۱. آماده‌سازی رابط وب
+Updates retain a previous binary for rollback. Rollback is a recovery aid, not a substitute for an independent database and server backup. Do not interrupt power or remove files while an update is replacing the service.
+
+## Architecture
+
+```text
+React + TypeScript web interface
+              │ authenticated API
+              ▼
+        Rust / Axum service ─── SQLite application data
+              │
+              ▼
+   Restricted privileged helper ─── system services and host operations
+```
+
+The privileged helper is intended to expose validated operations rather than execute arbitrary shell strings from the browser. The panel and helper run as systemd services. Application data and configuration are stored under `/var/lib/arg` and `/etc/arg` on standard installations; consult the [installation guide](docs/en/install.md) for current paths and details.
+
+## Requirements
+
+- Debian or Ubuntu Linux with systemd.
+- Root or `sudo` access for installation and host-level administration.
+- Internet access to GitHub and the operating system's package repositories during installation and updates.
+- Free disk space for Rust dependencies and a release build. The amount and build time vary with cache state and dependencies.
+- Network access to the configured panel port. HTTP-01 certificate issuance also requires inbound TCP port 80 during validation.
+
+Other distributions may work, but are outside the installer's supported target.
+
+## Development
+
+The application uses Rust for the backend and React, TypeScript, Vite, and Tailwind CSS for the frontend. The frontend build is embedded into the Rust release binary.
 
 ```bash
+# Frontend checks and production build
 cd frontend
 npm ci
+npm run check
 npm run build
 cd ..
-```
 
-### ۲. اجرای بک‌اند Rust
-
-```bash
-cargo run
-```
-
-برای کامپایل نسخهٔ بهینه‌شده به‌جای اجرای توسعه:
-
-```bash
+# Backend tests and release build
+cargo test --locked
 cargo build --locked --release
 ```
 
-### توسعهٔ فرانت‌اند
+See the [development guide](https://themrcortex.github.io/arg/development/) for local setup, project layout, testing, and versioning conventions. Stable changes belong on `main`; prerelease work belongs on `development`.
 
-برای اجرای رابط در حالت توسعه، از پوشهٔ `frontend` اجرا کنید:
+## Documentation and support
 
-```bash
-cd frontend
-npm run dev
-```
+The bilingual documentation site follows a guide-oriented structure and covers installation, security, the dashboard, networking, Nginx, Docker, files, S3, databases, terminal access, packages, updates, and troubleshooting:
 
-فرانت‌اند پس از build در `frontend/dist` قرار می‌گیرد و هنگام build در باینری Rust جاسازی می‌شود. بعد از هر تغییر در رابط، پیش از build بک‌اند `npm run build` را اجرا کنید.
+- [Open ARG documentation](https://themrcortex.github.io/arg/)
+- [English documentation source](docs/en/overview.md)
+- [Persian documentation source](docs/fa/overview.md)
+- [Open an issue](https://github.com/themrcortex/arg/issues)
 
-```text
-src/main.rs                  راه‌اندازی برنامه و سرویس‌های مشترک
-src/routes.rs                تعریف مسیرها و اتصال endpointها به handlerهای هر ماژول
-src/nginx.rs                 API، همگام‌سازی و عملیات مدیریتی Nginx
-src/docker.rs                API، وضعیت Engine و عملیات Docker / Compose
-src/mysql.rs                 کنترل MySQL/MariaDB، کاتالوگ و کنسول SQL محدودشده
-src/metrics.rs               جمع‌آوری شاخص‌های سیستم و محاسبهٔ بازه‌های ترافیک
-src/files.rs                 فایل‌منیجر مدیران با عملیات مسیرمحور و محدودیت اندازه
-install.sh                   نصب، سرویس systemd، به‌روزرسانی و حذف
-frontend/src/App.tsx         پوستهٔ پنل، ورود و ساخت مدیر
-frontend/src/pages.tsx       صفحات داشبورد و مدیریت
-frontend/src/navigation.ts  مسیرهای اصلی پنل
-frontend/src/components/ui   کامپوننت‌های رابط کاربری
-PLAN.md                      نقشهٔ راه قابلیت‌ها
-```
+## Security notes
 
-## نسخه‌بندی و انتشار
+ARG can change firewall rules, manage services, edit files, and perform other high-impact server operations. Install it only on systems you administer, keep SSH access available, and review confirmations before applying destructive changes.
 
-نسخهٔ پایدار ARG از قالب `MAJOR.MINOR.PATCH` پیروی می‌کند و نسخهٔ Rust، `frontend/package.json` و lockfile باید برابر باشند. اصلاح‌های کوچک `PATCH` را بالا می‌برند، قابلیت‌های سازگار `MINOR` را و تغییرهای ناسازگار `MAJOR` را. اسکریپت `scripts/bump-version.sh` فقط روی `main` اجرا می‌شود؛ برای نسخهٔ فعلی `0.6.5` از این دستور استفاده شده است:
-
-```bash
-scripts/bump-version.sh
-```
-
-روی `development`، این دستور نسخهٔ آزمایشی بعدی را بر اساس `origin/main` می‌سازد و فایل‌های Rust و فرانت‌اند را هماهنگ می‌کند:
-
-```bash
-scripts/bump-development-version.sh
-```
-
-پیش از ثبت نسخه و ساخت GitHub Release، این بررسی مطمئن می‌شود که شاخه‌ها، نسخه‌های Rust/فرانت‌اند و changelog هماهنگ‌اند و `development` از `main` جلوتر است:
-
-```bash
-git fetch origin main development
-scripts/check-versioning.sh
-```
-
-برای ارتقای نسخهٔ پایدار minor یا major، از `scripts/bump-version.sh minor` یا `scripts/bump-version.sh major` استفاده کنید. پیش از انتشار، یادداشت changelog را با جزئیات واقعی تکمیل کنید:
-
-```bash
-scripts/release.sh
-```
-
-اسکریپت هماهنگی نسخه‌ها و یادداشت changelog را بررسی می‌کند و Release را همراه `install.sh` می‌سازد.
-
-## محدودیت‌های فعلی و نقشهٔ راه
-
-مدیر می‌تواند از پنل وب قانون اجازهٔ TCP/UDP اضافه کند و فقط قوانین دارای برچسب ARG را حذف کند. اعمال این تغییرات نیازمند نصب یا به‌روزرسانی جدید برای نصب دستور کمکی محدود UFW است. بخش Docker به نصب و مدیریت Engine و منابع Docker می‌پردازد؛ نصب خود Docker ممکن است بسته به توزیع یا مخازن سیستم در دسترس نباشد. مصرف S3 از جمع Size آبجکت‌های فهرست‌شده به دست می‌آید؛ اسکن صفحه‌به‌صفحه در helper انجام می‌شود، فقط مجموع و شمارش ذخیره می‌شوند و نتیجه برای 24 ساعت cache می‌ماند. پس از بارگذاری یا حذف آبجکت cache باطل می‌شود. سهمیه و صورتحساب Providerهایی که API معتبر ارائه نمی‌کنند همچنان نامشخص می‌ماند و حدس زده نمی‌شود. Mount با Rclone و انتقال دستی فایل/پوشه به Bucket موجود است؛ همگام‌سازی زمان‌بندی‌شده و مدیریت قرارداد هنوز در دسترس نیست. پایش شبکه شامل آمار کلی هر رابط و فهرست پورت‌های شنونده است؛ شمارش بایت به‌ازای هر پورت و Speedtest از داخل پنل در حال حاضر ارائه نشده‌اند. وضعیت این موارد و برنامهٔ توسعه در [PLAN.md](PLAN.md) آمده است.
+- Enable HTTPS before using the panel over the public internet. Plain HTTP does not protect passwords or session cookies in transit.
+- Use a strong, unique administrator password and keep the initial setup code private.
+- Back up important data independently before upgrades or administrative changes. ARG rollback does not restore all external services or user data.
+- Limit access to the panel port at both the host and provider firewall layers.
+- S3 provider features and reported capacity vary. Unknown quotas remain unknown; a scan of object sizes is not a provider billing statement.
 
 ---
 
 <div align="center">
 
-ساخته‌شده با دقت برای مدیریت ساده‌تر سرورها · **[𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex)**
+Built by [𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex) · [GitHub repository](https://github.com/themrcortex/arg)
 
 </div>
