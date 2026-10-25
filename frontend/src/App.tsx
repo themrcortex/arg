@@ -925,9 +925,10 @@ export default function App() {
           <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'maintenance', 'network', 'ports', 'firewall', 'nginx', 'docker', 'files', 's3', 'terminal'].includes(item.id)) },
-              { title: 'عملیات سیستم', pages: allowedPages.filter((item) => ['packages', 'services', 'mysql'].includes(item.id)) },
-              { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
+              { title: 'سرور و شبکه', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall'].includes(item.id)) },
+              { title: 'سایت‌ها و ذخیره‌سازی', pages: allowedPages.filter((item) => ['nginx', 'docker', 'files', 's3'].includes(item.id)) },
+              { title: 'عملیات سرور', pages: allowedPages.filter((item) => ['terminal', 'packages', 'services', 'mysql', 'maintenance'].includes(item.id)) },
+              { title: 'مدیریت ARG', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><TooltipProvider delayDuration={220}><div className="space-y-1">{section.pages.map((item) => {
               const button = <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} aria-label={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>
               return sidebarCollapsed ? <Tooltip key={item.id}><TooltipTrigger asChild>{button}</TooltipTrigger><TooltipContent side="left" align="center">{item.label}</TooltipContent></Tooltip> : button

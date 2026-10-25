@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { AlertTriangle, Archive, CheckCircle2, Clock3, Cpu, Download, HardDrive, MemoryStick, RefreshCw, RotateCcw, Server, ShieldCheck, Trash2, Wrench } from 'lucide-react'
-import { api, formatBytes, formatNumber, formatUptime, type Dashboard } from './lib/api'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { AlertTriangle, Archive, CheckCircle2, Clock3, Cpu, Download, HardDrive, MemoryStick, RefreshCw, RotateCcw, Server, ShieldCheck, Trash2, Upload, Wrench } from 'lucide-react'
+import { api, formatBytes, formatNumber, type Dashboard } from './lib/api'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Skeleton } from './components/ui/skeleton'
@@ -9,12 +9,20 @@ type Common = { Heading: (props: { title: string; description: string; action?: 
 type Backup = { id: string; size_bytes: number; modified_at?: number | null }
 type SystemInfo = { os: string; kernel: string; architecture: string; cpu: string; hostname: string }
 
+function UptimeValue({ seconds }: { seconds: number }) {
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  return <span dir="rtl" className="inline-flex flex-wrap items-baseline gap-x-1.5" aria-label={`${formatNumber(days)} روز و ${formatNumber(hours)} ساعت روشن`}>{days > 0 ? <><bdi dir="ltr" className="font-mono tabular-nums">{formatNumber(days)}</bdi><span>روز و</span><bdi dir="ltr" className="font-mono tabular-nums">{formatNumber(hours)}</bdi><span>ساعت</span></> : hours > 0 ? <><bdi dir="ltr" className="font-mono tabular-nums">{formatNumber(hours)}</bdi><span>ساعت و</span><bdi dir="ltr" className="font-mono tabular-nums">{formatNumber(minutes)}</bdi><span>دقیقه</span></> : <><bdi dir="ltr" className="font-mono tabular-nums">{formatNumber(minutes)}</bdi><span>دقیقه</span></>}</span>
+}
+
 export function MaintenancePage({ Heading, notify }: Common) {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null)
   const [system, setSystem] = useState<SystemInfo | null>(null)
   const [backups, setBackups] = useState<Backup[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
+  const backupUploadRef = useRef<HTMLInputElement>(null)
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
@@ -53,6 +61,27 @@ export function MaintenancePage({ Heading, notify }: Common) {
     finally { setBusy('') }
   }
 
+  async function uploadBackup(file?: File) {
+    if (!file) return
+    if (file.size > 512 * 1024 * 1024) {
+      notify('خطا: اندازهٔ فایل بکاپ نباید از 512 MiB بیشتر باشد.')
+      if (backupUploadRef.current) backupUploadRef.current.value = ''
+      return
+    }
+    setBusy('upload')
+    try {
+      const response = await fetch('/api/maintenance/backups/upload', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/vnd.sqlite3' }, body: file,
+      })
+      const result = await response.json().catch(() => null) as (Backup & { message?: string; error?: string }) | null
+      if (!response.ok || !result?.id) throw new Error(result?.error || `HTTP ${response.status}`)
+      setBackups((items) => [result, ...items.filter((item) => item.id !== result.id)])
+      notify(`بکاپ آپلود و بررسی شد · ${formatBytes(result.size_bytes)}`)
+    } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : 'آپلود بکاپ ناموفق بود'}`) }
+    finally { setBusy(''); if (backupUploadRef.current) backupUploadRef.current.value = '' }
+  }
+
   async function downloadBackup(id: string) {
     setBusy(`download:${id}`)
     try {
@@ -85,13 +114,15 @@ export function MaintenancePage({ Heading, notify }: Common) {
     { icon: Cpu, label: 'پردازنده', value: system?.cpu && dashboard?.cpu_cores ? `${system.cpu} · ${formatNumber(dashboard.cpu_cores)} هسته` : system?.cpu || '—' },
     { icon: MemoryStick, label: 'حافظه RAM', value: dashboard ? formatBytes(dashboard.memory_kib * 1024) : '—' },
     { icon: HardDrive, label: 'دیسک ریشه', value: dashboard?.disk_total_bytes ? `${formatBytes(dashboard.disk_total_bytes - (dashboard.disk_free_bytes || 0))} / ${formatBytes(dashboard.disk_total_bytes)}` : '—' },
-    { icon: Clock3, label: 'Kernel · Architecture · Uptime', value: `${system?.kernel || '—'} · ${system?.architecture || '—'} · ${dashboard ? formatUptime(dashboard.uptime_seconds) : '—'}`, dir: 'ltr' as const },
+    { icon: Server, label: 'Kernel', value: system?.kernel || '—', dir: 'ltr' as const },
+    { icon: Cpu, label: 'Architecture', value: system?.architecture || '—', dir: 'ltr' as const },
+    { icon: Clock3, label: 'مدت روشن بودن سرور', value: dashboard ? <UptimeValue seconds={dashboard.uptime_seconds}/> : '—' },
   ]
 
   return <>
     <Heading title="مدیریت سرور و ARG" description="مشخصات سرور، تعمیر امن پنل، راه‌اندازی مجدد و پشتیبان‌گیری از داده‌های ARG." action={<Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/>تازه‌سازی</Button>}/>
     <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="مشخصات سیستم">
-      {loading && !dashboard ? Array.from({ length: 6 }, (_, i) => <Skeleton key={i} className="h-[96px] rounded-2xl"/>) : specs.map(({ icon: Icon, label, value, dir }) => <Card key={label} className="min-w-0 rounded-2xl border-border/80 bg-card/80"><CardContent className="flex items-center gap-3 p-4"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-primary/15 bg-primary/[.08] text-primary"><Icon size={18}/></span><span className="min-w-0"><span className="block text-xs text-muted-foreground">{label}</span><b className="mt-1 block truncate text-sm font-semibold text-foreground" dir={dir} title={value}>{value}</b></span></CardContent></Card>)}
+      {loading && !dashboard ? Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-[96px] rounded-2xl"/>) : specs.map(({ icon: Icon, label, value, dir }) => <Card key={label} className="min-w-0 rounded-2xl border-border/80 bg-card/80"><CardContent className="flex items-center gap-3 p-4"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-primary/15 bg-primary/[.08] text-primary"><Icon size={18}/></span><span className="min-w-0"><span className="block text-xs text-muted-foreground">{label}</span><b className="mt-1 block text-sm font-semibold text-foreground" dir={dir || 'rtl'} title={typeof value === 'string' ? value : undefined}>{value}</b></span></CardContent></Card>)}
     </section>
 
     <div className="mt-5 grid gap-4 xl:grid-cols-2">
@@ -99,10 +130,10 @@ export function MaintenancePage({ Heading, notify }: Common) {
       <Card className="rounded-2xl border-amber-400/20 bg-amber-400/[.035]"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><RotateCcw size={18} className="text-amber-300"/>راه‌اندازی مجدد سرور</CardTitle><CardDescription>تمام سرویس‌ها برای مدتی قطع می‌شوند؛ پس از بالا آمدن سیستم، پنل دوباره در دسترس خواهد بود.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-2 text-xs text-amber-100/70"><AlertTriangle size={15}/>اتصال SSH و پنل موقتاً قطع می‌شود</div><Button variant="outline" className="border-amber-300/30 text-amber-100 hover:bg-amber-400/10" onClick={() => void action('reboot')} disabled={!!busy}>{busy === 'reboot' ? 'در حال ارسال…' : 'ریبوت سرور'}</Button></CardContent></Card>
     </div>
 
-    <Card className="mt-5 rounded-2xl border-border/80 bg-card/80"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Archive size={18} className="text-primary"/>بکاپ و بازیابی ARG</CardTitle><CardDescription className="mt-1.5">بکاپ دیتابیس ARG شامل حساب‌ها، تنظیمات پنل، تاریخچه و اطلاعات اتصالات است. فایل بکاپ را خارج از سرور هم نگه دار.</CardDescription></div><Button onClick={() => void createBackup()} disabled={!!busy}><Archive size={15}/>{busy === 'backup' ? 'در حال ساخت…' : 'ساخت بکاپ'}</Button></CardHeader><CardContent>
+    <Card className="mt-5 rounded-2xl border-border/80 bg-card/80"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Archive size={18} className="text-primary"/>بکاپ و بازیابی ARG</CardTitle><CardDescription className="mt-1.5">بکاپ دیتابیس ARG شامل حساب‌ها، تنظیمات پنل، تاریخچه و اطلاعات اتصالات است. فایل بکاپ را خارج از سرور هم نگه دار.</CardDescription></div><div className="flex flex-wrap gap-2"><input ref={backupUploadRef} type="file" accept=".db,application/vnd.sqlite3,application/x-sqlite3" className="hidden" aria-label="انتخاب فایل بکاپ ARG برای آپلود" onChange={(event) => void uploadBackup(event.target.files?.[0])}/><Button type="button" variant="outline" onClick={() => backupUploadRef.current?.click()} disabled={!!busy}><Upload size={15}/>{busy === 'upload' ? 'در حال آپلود و بررسی…' : 'آپلود بکاپ'}</Button><Button onClick={() => void createBackup()} disabled={!!busy}><Archive size={15}/>{busy === 'backup' ? 'در حال ساخت…' : 'ساخت بکاپ'}</Button></div></CardHeader><CardContent>
       <div className="mb-3 flex items-start gap-2 rounded-xl border border-sky-400/15 bg-sky-400/[.045] p-3 text-xs leading-6 text-muted-foreground"><CheckCircle2 size={16} className="mt-1 shrink-0 text-sky-300"/>بازیابی قبل از جایگزینی، یک بکاپ محافظتی از دیتابیس فعلی می‌سازد. پس از بازیابی صفحه تازه‌سازی می‌شود تا نشست‌ها و داده‌ها از نسخهٔ بازگردانده‌شده خوانده شوند.</div>
       <p className="mb-3 text-[11px] leading-5 text-muted-foreground">فایل‌های نصب و گواهی TLS در این نسخهٔ بکاپ قرار نمی‌گیرند.</p>
-      {backups.length ? <div className="overflow-x-auto rounded-xl border border-border/70"><table className="w-full min-w-[520px] text-sm"><thead className="bg-secondary/50 text-xs text-muted-foreground"><tr><th className="px-4 py-3 text-right">نسخهٔ پشتیبان</th><th className="px-4 py-3 text-right">حجم</th><th className="px-4 py-3 text-left">عملیات</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id} className="border-t border-border/70"><td className="px-4 py-3 font-mono text-xs" dir="ltr">{backup.id}</td><td className="px-4 py-3 font-mono text-xs" dir="ltr">{formatBytes(backup.size_bytes)}</td><td className="px-4 py-3"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void downloadBackup(backup.id)} disabled={!!busy}><Download size={14}/><span className="hidden sm:inline">دانلود</span></Button><Button size="sm" variant="outline" onClick={() => void restoreBackup(backup.id)} disabled={!!busy}><RotateCcw size={14}/><span className="hidden sm:inline">بازیابی</span></Button></div></td></tr>)}</tbody></table></div> : <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">هنوز بکاپی ثبت نشده است. برای اولین نسخه، «ساخت بکاپ» را بزن.</div>}
+      {backups.length ? <div className="overflow-x-auto rounded-xl border border-border/70"><table className="w-full min-w-[520px] text-sm"><thead className="bg-secondary/50 text-xs text-muted-foreground"><tr><th className="px-4 py-3 text-right">نسخهٔ پشتیبان</th><th className="px-4 py-3 text-right">حجم</th><th className="px-4 py-3 text-left">عملیات</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id} className="border-t border-border/70"><td className="px-4 py-3 font-mono text-xs" dir="ltr">{backup.id}</td><td className="px-4 py-3 font-mono text-xs" dir="ltr">{formatBytes(backup.size_bytes)}</td><td className="px-4 py-3"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void downloadBackup(backup.id)} disabled={!!busy}><Download size={14}/><span className="hidden sm:inline">دانلود</span></Button><Button size="sm" variant="outline" onClick={() => void restoreBackup(backup.id)} disabled={!!busy}><RotateCcw size={14}/><span className="hidden sm:inline">بازیابی</span></Button></div></td></tr>)}</tbody></table></div> : <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">بکاپی ثبت نشده؛ می‌توانی یک بکاپ تازه بسازی یا فایل `.db` قبلی را آپلود کنی.</div>}
     </CardContent></Card>
 
     <Card className="mt-5 rounded-2xl border-rose-400/20 bg-rose-400/[.025]"><CardHeader><CardTitle className="flex items-center gap-2 text-base text-rose-100"><Trash2 size={17}/>حذف کامل ARG</CardTitle><CardDescription>سرویس، فایل‌های نصب، تنظیمات و دیتابیس ARG پاک می‌شوند. این کار روی سایت‌ها و سرویس‌های دیگر سرور اثری ندارد.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">پیش از حذف، بکاپ بساز و آن را دانلود کن؛ بکاپ‌های محلی هم با حذف کامل پاک می‌شوند.</p><Button variant="destructive" onClick={() => void action('uninstall')} disabled={!!busy}><Trash2 size={15}/>{busy === 'uninstall' ? 'در حال حذف…' : 'حذف کامل ARG'}</Button></CardContent></Card>

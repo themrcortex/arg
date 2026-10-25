@@ -30,6 +30,10 @@ pub(super) fn router(state: AppState) -> Router {
             get(maintenance::list_backups).post(maintenance::create_backup),
         )
         .route(
+            "/api/maintenance/backups/upload",
+            post(maintenance::upload_backup),
+        )
+        .route(
             "/api/maintenance/backups/{id}/restore",
             post(maintenance::restore_backup),
         )

@@ -1,6 +1,16 @@
 use super::*;
 use axum::{body::Body, http::header::CONTENT_DISPOSITION};
+use futures_util::StreamExt;
 use std::path::{Path as FsPath, PathBuf};
+
+const MAX_BACKUP_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
+struct PendingBackup(PathBuf);
+impl Drop for PendingBackup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 fn db_path() -> PathBuf {
     env::var_os("ARG_DB")
@@ -46,6 +56,28 @@ fn backup_file(id: &str) -> Result<PathBuf, (StatusCode, Json<Value>)> {
         return Err(error(StatusCode::NOT_FOUND, "Backup not found"));
     }
     Ok(path)
+}
+
+fn validate_backup(path: &FsPath) -> Result<(), &'static str> {
+    let candidate = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| "File is not a valid ARG database backup")?;
+    let integrity: String = candidate
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|_| "Could not check uploaded backup integrity")?;
+    if integrity != "ok" {
+        return Err("Backup failed the SQLite integrity check");
+    }
+    let has_users: bool = candidate
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='users')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "File does not contain ARG account data")?;
+    if !has_users {
+        return Err("File does not contain ARG account data");
+    }
+    Ok(())
 }
 
 pub(super) async fn list_backups(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -97,6 +129,95 @@ pub(super) async fn create_backup(State(state): State<AppState>, headers: Header
     ))
 }
 
+pub(super) async fn upload_backup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let dir = backup_dir();
+    fs::create_dir_all(&dir).map_err(|e| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not create backup directory: {e}"),
+        )
+    })?;
+    let temporary = dir.join(format!(".arg-upload-{}.tmp", &token()[..24]));
+    let pending = PendingBackup(temporary.clone());
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|e| {
+                error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Could not create temporary backup: {e}"),
+                )
+            })?
+    };
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::from_std(file);
+    let mut stream = body.into_data_stream();
+    let mut size = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| error(StatusCode::BAD_REQUEST, "Backup upload was interrupted"))?;
+        size = size.saturating_add(chunk.len() as u64);
+        if size > MAX_BACKUP_UPLOAD_BYTES {
+            return Err(error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Backup files may not exceed 512 MiB.",
+            ));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Could not save backup: {e}")))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Could not save backup: {e}")))?;
+    file.sync_all()
+        .await
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Could not sync backup: {e}")))?;
+    drop(file);
+
+    if size < 100 {
+        return Err(error(StatusCode::BAD_REQUEST, "Uploaded file is too small to be an ARG database backup."));
+    }
+    let mut header = [0u8; 16];
+    std::io::Read::read_exact(&mut fs::File::open(&temporary).map_err(|e| {
+        error(StatusCode::INTERNAL_SERVER_ERROR, &format!("Could not inspect uploaded backup: {e}"))
+    })?, &mut header)
+    .map_err(|_| error(StatusCode::BAD_REQUEST, "Uploaded file is not a valid SQLite database."))?;
+    if &header != b"SQLite format 3\0" {
+        return Err(error(StatusCode::BAD_REQUEST, "Uploaded file is not a valid SQLite database."));
+    }
+    let validation_path = temporary.clone();
+    tokio::task::spawn_blocking(move || validate_backup(&validation_path))
+        .await
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Backup validation task failed"))?
+        .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+
+    let id = format!("arg-{}-{}.db", now(), &token()[..8]);
+    let destination = dir.join(&id);
+    fs::rename(&temporary, &destination).map_err(|e| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Could not register uploaded backup: {e}"),
+        )
+    })?;
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "maintenance.backup.upload", &id);
+    drop(pending);
+    Ok(Json(json!({"id":id,"size_bytes":size,"message":"ARG backup uploaded and verified."})))
+}
+
 pub(super) async fn download_backup(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -135,38 +256,7 @@ pub(super) async fn restore_backup(
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
     let source = backup_file(&id)?;
-    let candidate =
-        Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(
-            |_| {
-                error(
-                    StatusCode::BAD_REQUEST,
-                    "Backup is not a valid ARG database",
-                )
-            },
-        )?;
-    let integrity: String = candidate
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(db_error)?;
-    if integrity != "ok" {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Backup integrity check failed",
-        ));
-    }
-    let has_users: bool = candidate
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='users')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(db_error)?;
-    if !has_users {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Backup does not contain ARG account data",
-        ));
-    }
-    drop(candidate);
+    validate_backup(&source).map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
     let current = db_path();
     let rollback = backup_dir().join(format!("arg-before-restore-{}-{}.db", now(), &token()[..8]));
     backup_database(&current, &rollback).map_err(|e| {
@@ -265,7 +355,7 @@ pub(super) async fn run_action(
 
 #[cfg(test)]
 mod tests {
-    use super::valid_backup_id;
+    use super::{valid_backup_id, validate_backup};
 
     #[test]
     fn backup_ids_reject_paths_and_unrelated_files() {
@@ -273,5 +363,22 @@ mod tests {
         assert!(!valid_backup_id("../arg-secret.db"));
         assert!(!valid_backup_id("arg-backup.tar.gz"));
         assert!(!valid_backup_id("arg-../../etc/passwd.db"));
+    }
+
+    #[test]
+    fn uploaded_backup_must_be_integral_sqlite_with_arg_users_table() {
+        let valid = std::env::temp_dir().join(format!("arg-backup-test-{}.db", super::now()));
+        let _ = std::fs::remove_file(&valid);
+        let db = rusqlite::Connection::open(&valid).unwrap();
+        db.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL);")
+            .unwrap();
+        drop(db);
+        assert_eq!(validate_backup(&valid), Ok(()));
+        std::fs::remove_file(&valid).unwrap();
+
+        let invalid = std::env::temp_dir().join(format!("arg-backup-invalid-{}.db", super::now()));
+        std::fs::write(&invalid, b"not a sqlite backup").unwrap();
+        assert!(validate_backup(&invalid).is_err());
+        std::fs::remove_file(invalid).unwrap();
     }
 }
