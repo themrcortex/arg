@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.5.4 — 2026-10-25
+
+### Fixed
+- Preserve the update function's local state during successful cleanup and disable the exit trap before returning, even when optional setup-code display returns a nonzero status.
+
 ## v0.5.3 — 2026-10-25
 
 ### Fixed

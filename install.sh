@@ -1120,7 +1120,7 @@ update_app() {
     fi
   }
   cleanup_update_reservation() {
-    local exit_code=$?
+    local exit_code="${1:-$?}"
     if (( exit_code != 0 )); then
       if [[ -e "$UPDATE_CANCEL_FILE" ]]; then
         "$UPDATE_HELPER" state cancelled cancelled "The update was cancelled by an administrator." >/dev/null 2>&1 || true
@@ -1204,7 +1204,7 @@ update_app() {
     "$UPDATE_HELPER" state succeeded complete "ARG is updated and the service is active." >/dev/null 2>&1 || true
     binary_swapped=0
     show_setup_code_if_needed
-    cleanup_update_reservation
+    cleanup_update_reservation 0
     trap - EXIT
     if (( MENU_ACTIVE )); then
       exec "$CLI" menu
