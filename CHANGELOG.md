@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.6.5 — 2026-10-25
+
+### Improved
+- Let the SSH installer update flow choose the stable `main` or prerelease `development` branch before fetching and building.
+- Add `fast` builds that retain Rust compilation cache and `complete` builds that clear it before and after compilation to reduce persistent disk usage.
+- Allow non-interactive updates with `arg update main complete` or `arg update development fast`.
+
+### Fixed
+- Apply complete cache cleanup to both SSH and web-triggered updates without affecting initial installations.
+
 ## v0.6.5-dev.1 — 2026-10-25
 
 ### Added
@@ -28,84 +38,11 @@
 - Validate certificate expiry, host/IP SAN, and public/private key matching before activation; install the key root-owned with ARG-group read access and restart the service safely.
 - Keep a persistent warning on login and panel pages when the connection uses unencrypted HTTP.
 
-## v0.6.3-dev.8 — 2026-10-25
-
-### Fixed
-- Read per-service CPU and memory usage from cgroup v2 when systemd accounting counters are unavailable; ignore unset and overflow sentinel values instead of treating them as measurements.
-- Use millisecond sampling windows for CPU percentages, discard stale samples from the older seconds-based format, and return a readable measurement status rather than failing the whole Nginx resource panel.
-
-### Improved
-- Enable CPU and memory accounting when an administrator saves a service’s resource settings, including when both limits are left unlimited.
-- Refresh service usage automatically every 5 seconds while the Nginx resource panel is open, without repeatedly reloading the service catalog or site configuration.
-
 ## v0.6.3 — 2026-10-25
 
 ### Fixed
 - Detect the server's public IPv4 address through multiple independent services and reject malformed, private, or non-public addresses.
 - Retry transient Let's Encrypt API network timeouts up to three times, restore any temporarily stopped web service, and explain how to diagnose persistent outbound connectivity failures.
-
-## v0.6.3-dev.7 — 2026-10-25
-
-### Added
-- Add database-scoped MySQL user creation with read-only, read/write and full-per-database privilege profiles, plus direct reset-password actions from the user list.
-- Create ARG’s internal MySQL manager account automatically with global database privileges; keep its random credential in a root-only config file and never return it to the UI or logs.
-- Require one panel-password recheck when entering MySQL management, then retain authorization for the current login session and revoke it on logout/session removal.
-
-### Fixed
-- Keep MySQL option-file arguments in the supported first-argument `--defaults-extra-file=PATH` format and cover the format with a regression test.
-- Prevent duplicate database-user creation from silently changing an existing account’s password, and protect system schemas and ARG’s internal account from the regular reset flow.
-
-### Improved
-- Stream Cargo compiler output into the live update journal so the update modal can show build activity as it happens; automatically open and follow the log during updates.
-- Explain that Cargo does not provide a reliable overall build percentage and show the active update phase and elapsed time instead of a misleading estimate.
-
-## v0.6.3-dev.6 — 2026-10-25
-
-### Added
-- Upload ARG database backups from the server management page; stream files to a private temporary file, enforce a 512 MiB cap, validate SQLite integrity and ARG account data, then register the backup.
-- Add backup validation coverage and expose a protected upload endpoint for administrators.
-
-### Improved
-- Reorganize sidebar pages into server/network, sites/storage, server operations and ARG management groups; use distinct container and site-management icons for Docker and Nginx.
-- Separate server uptime from kernel and architecture information, with bidi-isolated numbers for clean Persian RTL rendering.
-
-## v0.6.3-dev.5 — 2026-10-25
-
-### Fixed
-- Format systemd `MemoryMax` values as plain bytes; remove the unsupported `B` suffix that caused resource-limit updates to fail with a pattern parsing error.
-- Add regression coverage for CPU/RAM property formatting and clearing limits.
-
-## v0.6.3-dev.4 — 2026-10-25
-
-### Fixed
-- Pass the MySQL credential option file path in the required single-argument `--defaults-extra-file=PATH` form so MySQL and MariaDB clients accept it.
-- Add a regression test for the option format.
-
-## v0.6.3-dev.3 — 2026-10-25
-
-### Fixed
-- Align root-disk capacity with the storage inventory, count filesystem-reserved blocks separately, and clearly distinguish the root filesystem from the aggregate of local disks.
-
-### Added
-- Record root-disk read/write throughput and used/total capacity in resource history; add capacity and read/write charts to System and Resources.
-- Add idempotent SQLite migration and tests for the new disk history fields.
-
-## v0.6.3-dev.2 — 2026-10-25
-
-### Added
-- Add per-site Nginx maintenance mode with an ARG page, a project-root HTML file, or a selected static HTML page.
-- Add graceful maintenance activation that drains in-flight HTTP requests, plus a separately confirmed Force restart option.
-- Validate Nginx configuration before applying maintenance and restore the previous config if activation fails.
-
-## v0.6.3-dev.1 — 2026-10-25
-
-### Development
-- Development prerelease based on the next patch after main.
-
-## v0.6.2-dev.1 — 2026-10-25
-
-### Development
-- Development prerelease based on the next patch after main.
 
 ## Unreleased
 
