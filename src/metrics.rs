@@ -180,21 +180,21 @@ pub(super) fn process_instance_id() -> &'static str {
     })
 }
 #[cfg(unix)]
-pub(super) fn disk_usage() -> (u64, u64) {
+pub(super) fn disk_usage() -> (u64, u64, u64) {
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     let root = std::ffi::CString::new("/").unwrap();
     if unsafe { libc::statvfs(root.as_ptr(), &mut stat) } == 0 {
-        (
-            stat.f_blocks.saturating_mul(stat.f_frsize),
-            stat.f_bavail.saturating_mul(stat.f_frsize),
-        )
+        let total = stat.f_blocks.saturating_mul(stat.f_frsize);
+        let used = total.saturating_sub(stat.f_bfree.saturating_mul(stat.f_frsize));
+        let available = stat.f_bavail.saturating_mul(stat.f_frsize);
+        (total, used, available)
     } else {
-        (0, 0)
+        (0, 0, 0)
     }
 }
 #[cfg(not(unix))]
-pub(super) fn disk_usage() -> (u64, u64) {
-    (0, 0)
+pub(super) fn disk_usage() -> (u64, u64, u64) {
+    (0, 0, 0)
 }
 pub(super) fn listening_ports() -> Vec<Value> {
     let mut ports = Vec::new();

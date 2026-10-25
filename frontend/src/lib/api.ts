@@ -30,6 +30,8 @@ export type StorageVolume = {
   available_bytes: number | null
   reserved_bytes: number | null
   use_percent: number | null
+  read_bytes_per_sec?: number | null
+  write_bytes_per_sec?: number | null
   read_only: boolean
   mount_status: 'mounted' | 'unknown'
   is_remote: boolean
@@ -66,6 +68,7 @@ export type Dashboard = {
   process_rss_bytes: number
   process_cpu_percent: number
   disk_total_bytes?: number
+  disk_used_bytes?: number
   disk_free_bytes?: number
   storage?: StorageInventory
   interfaces: Interface[]

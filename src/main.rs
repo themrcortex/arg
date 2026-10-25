@@ -205,6 +205,28 @@ fn ensure_sessions_metadata(db: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+fn ensure_metric_storage_columns(db: &Connection) -> Result<(), rusqlite::Error> {
+    let mut statement = db.prepare("PRAGMA table_info(metric_samples)")?;
+    let existing: Vec<String> = statement
+        .query_map([], |row| row.get(1))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(statement);
+    for (name, definition) in [
+        ("disk_read_rate", "REAL"),
+        ("disk_write_rate", "REAL"),
+        ("disk_used_bytes", "INTEGER"),
+        ("disk_total_bytes", "INTEGER"),
+    ] {
+        if !existing.iter().any(|column| column == name) {
+            db.execute_batch(&format!(
+                "ALTER TABLE metric_samples ADD COLUMN {name} {definition}"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 fn update_guard_exempt(path: &str) -> bool {
     matches!(
         path,
@@ -1031,6 +1053,7 @@ async fn collect_metrics(state: AppState) {
     let mut previous_network = metrics::network_totals();
     let mut previous_traffic = metrics::network_interface_counters();
     let mut previous_traffic_at = now();
+    let mut previous_disk_io = storage_mounts::root_disk_io_counters();
     let mut previous_at = Instant::now();
     let mut sample_count = 0u64;
     loop {
@@ -1091,12 +1114,22 @@ async fn collect_metrics(state: AppState) {
         } else {
             0.0
         };
-        let (disk_total, disk_free) = metrics::disk_usage();
+        let (disk_total, disk_used, _disk_available) = metrics::disk_usage();
         let disk = if disk_total > 0 {
-            (100.0 * (1.0 - disk_free as f64 / disk_total as f64)).clamp(0.0, 100.0)
+            (100.0 * disk_used as f64 / disk_total as f64).clamp(0.0, 100.0)
         } else {
             0.0
         };
+        let current_disk_io = storage_mounts::root_disk_io_counters();
+        let disk_read_rate = previous_disk_io.zip(current_disk_io).and_then(
+            |((previous_read, previous_write), (read, write))| {
+                (read >= previous_read && write >= previous_write).then_some((
+                    (read - previous_read) as f64 / elapsed,
+                    (write - previous_write) as f64 / elapsed,
+                ))
+            },
+        );
+        previous_disk_io = current_disk_io;
         let rx_rate = current_network.0.saturating_sub(previous_network.0) as f64 / elapsed;
         let tx_rate = current_network.1.saturating_sub(previous_network.1) as f64 / elapsed;
         previous_cpu = current_cpu;
@@ -1107,7 +1140,7 @@ async fn collect_metrics(state: AppState) {
                 if setting_u64(&db, "history_enabled", 1) != 1 {
                     continue;
                 }
-                let _ = db.execute("INSERT OR REPLACE INTO metric_samples(at,cpu,memory,disk,rx_rate,tx_rate) VALUES (?1,?2,?3,?4,?5,?6)", params![at,cpu,memory,disk,rx_rate,tx_rate]);
+                let _ = db.execute("INSERT OR REPLACE INTO metric_samples(at,cpu,memory,disk,rx_rate,tx_rate,disk_read_rate,disk_write_rate,disk_used_bytes,disk_total_bytes) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)", params![at,cpu,memory,disk,rx_rate,tx_rate,disk_read_rate.map(|rates|rates.0),disk_read_rate.map(|rates|rates.1),disk_used.min(i64::MAX as u64) as i64,disk_total.min(i64::MAX as u64) as i64]);
                 for (hour, interface, rx_bytes, tx_bytes, eligible) in traffic_rows {
                     let _ = db.execute("INSERT INTO network_traffic_hourly(hour_start,interface,rx_bytes,tx_bytes,eligible_for_total) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(hour_start,interface) DO UPDATE SET rx_bytes=network_traffic_hourly.rx_bytes+excluded.rx_bytes,tx_bytes=network_traffic_hourly.tx_bytes+excluded.tx_bytes,eligible_for_total=MAX(network_traffic_hourly.eligible_for_total,excluded.eligible_for_total)", params![hour,interface,rx_bytes.min(i64::MAX as u64) as i64,tx_bytes.min(i64::MAX as u64) as i64,if eligible {1} else {0}]);
                 }
@@ -1168,11 +1201,13 @@ async fn history(
         }
     };
     let mut stmt = db.prepare(
-        "SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM (SELECT at,cpu,memory,disk,rx_rate,tx_rate,ROW_NUMBER() OVER (ORDER BY at) AS sample_index FROM metric_samples WHERE at>=?1 AND at<=?2) WHERE (sample_index - 1) % ?3 = 0 ORDER BY at",
+        "SELECT at,cpu,memory,disk,rx_rate,tx_rate,disk_read_rate,disk_write_rate,disk_used_bytes,disk_total_bytes FROM (SELECT at,cpu,memory,disk,rx_rate,tx_rate,disk_read_rate,disk_write_rate,disk_used_bytes,disk_total_bytes,ROW_NUMBER() OVER (ORDER BY at) AS sample_index FROM metric_samples WHERE at>=?1 AND at<=?2) WHERE (sample_index - 1) % ?3 = 0 ORDER BY at",
     ).map_err(db_error)?;
     let rows = stmt.query_map(params![from, to, step as i64], |row| Ok(json!({
         "at": row.get::<_, i64>(0)?, "cpu": row.get::<_, f64>(1)?, "memory": row.get::<_, f64>(2)?, "disk": row.get::<_, f64>(3)?,
-        "rx": row.get::<_, f64>(4)?, "tx": row.get::<_, f64>(5)?
+        "rx": row.get::<_, f64>(4)?, "tx": row.get::<_, f64>(5)?,
+        "disk_read": row.get::<_, Option<f64>>(6)?, "disk_write": row.get::<_, Option<f64>>(7)?,
+        "disk_used_bytes": row.get::<_, Option<i64>>(8)?, "disk_total_bytes": row.get::<_, Option<i64>>(9)?
     }))).map_err(db_error)?;
     let samples: Vec<Value> = rows.filter_map(Result::ok).collect();
     Ok(Json(
@@ -2126,8 +2161,20 @@ async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         .to_owned();
     let (cpu_total, cpu_idle) = metrics::cpu_ticks();
     let (process_rss_bytes, process_cpu_percent) = metrics::process_usage();
-    let (disk_total_bytes, disk_free_bytes) = metrics::disk_usage();
     let storage_inventory = storage_mounts::inventory();
+    let fallback_disk = metrics::disk_usage();
+    let root_volume = storage_inventory["volumes"]
+        .as_array()
+        .and_then(|volumes| volumes.iter().find(|volume| volume["mount_point"] == "/"));
+    let disk_total_bytes = root_volume
+        .and_then(|volume| volume["total_bytes"].as_u64())
+        .unwrap_or(fallback_disk.0);
+    let disk_used_bytes = root_volume
+        .and_then(|volume| volume["used_bytes"].as_u64())
+        .unwrap_or(fallback_disk.1);
+    let disk_free_bytes = root_volume
+        .and_then(|volume| volume["available_bytes"].as_u64())
+        .unwrap_or(fallback_disk.2);
     Ok(Json(json!({
         "hostname": hostname,
         "uptime_seconds": uptime as u64,
@@ -2151,6 +2198,7 @@ async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "process_rss_bytes": process_rss_bytes,
         "process_cpu_percent": process_cpu_percent,
         "disk_total_bytes": disk_total_bytes,
+        "disk_used_bytes": disk_used_bytes,
         "disk_free_bytes": disk_free_bytes,
         "storage": storage_inventory,
         "interfaces": metrics::network(),
@@ -3500,6 +3548,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
     db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_runtime (site_name TEXT PRIMARY KEY,unit TEXT NOT NULL,cpu_quota_percent REAL,memory_max_bytes INTEGER,last_cpu_usage_ns INTEGER,last_sampled_at INTEGER,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS fast_actions (id INTEGER PRIMARY KEY,title TEXT NOT NULL,operation TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',site_name TEXT,include_access_log INTEGER NOT NULL DEFAULT 0,include_error_log INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_actions (id INTEGER PRIMARY KEY,site_name TEXT NOT NULL,title TEXT NOT NULL,icon TEXT NOT NULL,operation TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(site_name,title));")?;
+    ensure_metric_storage_columns(&db)?;
     s3::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
     db.execute(
@@ -3598,8 +3647,9 @@ async fn clear_trusted_transport_marker(
 #[cfg(test)]
 mod update_progress_tests {
     use super::{
-        backup_database, default_update_build_mode, firewall_rule_validation_error,
-        update_progress_payload, valid_update_build_mode, Connection, FirewallRuleInput,
+        backup_database, default_update_build_mode, ensure_metric_storage_columns,
+        firewall_rule_validation_error, update_progress_payload, valid_update_build_mode,
+        Connection, FirewallRuleInput,
     };
 
     #[test]
@@ -3617,6 +3667,24 @@ mod update_progress_tests {
         assert!(super::update_guard_exempt("/api/update/progress"));
         assert!(!super::update_guard_exempt("/api/update/rollback"));
         assert!(!super::update_guard_exempt("/api/nginx/restart"));
+    }
+
+    #[test]
+    fn disk_history_migration_adds_columns_idempotently_to_existing_database() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL);").unwrap();
+
+        ensure_metric_storage_columns(&db).unwrap();
+        ensure_metric_storage_columns(&db).unwrap();
+
+        let columns = {
+            let mut statement = db.prepare("PRAGMA table_info(metric_samples)").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(1)).unwrap()
+                .filter_map(Result::ok).collect::<Vec<_>>()
+        };
+        for column in ["disk_read_rate", "disk_write_rate", "disk_used_bytes", "disk_total_bytes"] {
+            assert_eq!(columns.iter().filter(|existing| existing.as_str() == column).count(), 1);
+        }
     }
 
     #[test]

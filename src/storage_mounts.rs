@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::CString,
     fs,
     os::unix::ffi::OsStrExt,
@@ -10,6 +10,68 @@ use std::{
 };
 
 static INVENTORY_CACHE: OnceLock<Mutex<Option<(Instant, Value)>>> = OnceLock::new();
+static DISK_IO_CACHE: OnceLock<Mutex<Option<(Instant, HashMap<String, (u64, u64)>)>>> =
+    OnceLock::new();
+
+fn parse_diskstats(content: &str) -> HashMap<String, (u64, u64)> {
+    content
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 10 {
+                return None;
+            }
+            let key = format!("{}:{}", fields[0], fields[1]);
+            // Linux reports sectors in 512-byte units in /proc/diskstats.
+            let read = fields[5].parse::<u64>().ok()?.saturating_mul(512);
+            let written = fields[9].parse::<u64>().ok()?.saturating_mul(512);
+            Some((key, (read, written)))
+        })
+        .collect()
+}
+
+fn disk_io_rates() -> HashMap<String, (Option<f64>, Option<f64>)> {
+    let current = fs::read_to_string("/proc/diskstats")
+        .map(|value| parse_diskstats(&value))
+        .unwrap_or_default();
+    let cache = DISK_IO_CACHE.get_or_init(|| Mutex::new(None));
+    let Ok(mut previous) = cache.lock() else {
+        return HashMap::new();
+    };
+    let now = Instant::now();
+    let rates = previous
+        .as_ref()
+        .map(|(at, before)| {
+            let elapsed = now.duration_since(*at).as_secs_f64().max(0.001);
+            current
+                .iter()
+                .map(|(device, (read, written))| {
+                    let rate = before.get(device).map(|(old_read, old_written)| {
+                        (
+                            read.checked_sub(*old_read).map(|delta| delta as f64 / elapsed),
+                            written
+                                .checked_sub(*old_written)
+                                .map(|delta| delta as f64 / elapsed),
+                        )
+                    });
+                    (device.clone(), rate.unwrap_or((None, None)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    *previous = Some((now, current));
+    rates
+}
+
+pub(super) fn root_disk_io_counters() -> Option<(u64, u64)> {
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let device = mountinfo.lines().find_map(|line| {
+        let (left, _) = line.split_once(" - ")?;
+        let fields: Vec<_> = left.split_whitespace().collect();
+        (fields.get(4).copied() == Some("/")).then(|| fields.get(2).copied().unwrap_or("").to_owned())
+    })?;
+    parse_diskstats(&fs::read_to_string("/proc/diskstats").ok()?).get(&device).copied()
+}
 
 fn unescape_mount_field(value: &str) -> String {
     value
@@ -76,13 +138,26 @@ fn stat_filesystem(path: &str) -> Option<(u64, u64, u64, u64)> {
     if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
         return None;
     }
-    let block = stat.f_frsize as u64;
-    let total = (stat.f_blocks as u64).saturating_mul(block);
-    let free_all = (stat.f_bfree as u64).saturating_mul(block);
-    let available = (stat.f_bavail as u64).saturating_mul(block);
+    Some(capacity_values(
+        stat.f_blocks as u64,
+        stat.f_bfree as u64,
+        stat.f_bavail as u64,
+        stat.f_frsize as u64,
+    ))
+}
+
+fn capacity_values(
+    blocks: u64,
+    free_blocks: u64,
+    available_blocks: u64,
+    block_size: u64,
+) -> (u64, u64, u64, u64) {
+    let total = blocks.saturating_mul(block_size);
+    let free_all = free_blocks.saturating_mul(block_size);
+    let available = available_blocks.saturating_mul(block_size);
     let used = total.saturating_sub(free_all);
     let reserved = total.saturating_sub(used).saturating_sub(available);
-    Some((total, used, available, reserved))
+    (total, used, available, reserved)
 }
 
 /// Inventory mounted filesystems without summing pseudo, remote or cloud filesystems into local disk totals.
@@ -109,6 +184,7 @@ fn build_inventory() -> Value {
     let mut counted_devices = HashSet::new();
     let (mut total, mut used, mut available, mut reserved) = (0u64, 0u64, 0u64, 0u64);
     let mut aggregation_reliable = true;
+    let io_rates = disk_io_rates();
 
     for line in content.lines() {
         let Some((before, after)) = line.split_once(" - ") else {
@@ -129,7 +205,7 @@ fn build_inventory() -> Value {
         let is_remote = kind == "remote";
         let is_cloud = kind == "cloud";
         let counts_as_local = kind == "local";
-        let stats = if counts_as_local {
+        let stats = if counts_as_local || mount_point == "/" {
             stat_filesystem(&mount_point)
         } else {
             None
@@ -166,6 +242,10 @@ fn build_inventory() -> Value {
             .filter(|value| *value > 0)
             .zip(used_bytes)
             .map(|(size, usage)| ((usage as f64 / size as f64) * 100.0).clamp(0.0, 100.0));
+        let (read_bytes_per_sec, write_bytes_per_sec) = io_rates
+            .get(device_id)
+            .cloned()
+            .unwrap_or((None, None));
         let is_mount = Path::new(&mount_point).exists();
         volumes.push(json!({
             "id": format!("{}:{}:{}", device_id, filesystem, mount_point),
@@ -179,6 +259,8 @@ fn build_inventory() -> Value {
             "available_bytes": available_bytes,
             "reserved_bytes": reserved_bytes,
             "use_percent": use_percent,
+            "read_bytes_per_sec": read_bytes_per_sec,
+            "write_bytes_per_sec": write_bytes_per_sec,
             "read_only": read_only,
             "mount_status": if is_mount { "mounted" } else { "unknown" },
             "is_remote": is_remote,
@@ -220,7 +302,16 @@ fn build_inventory() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{filesystem_kind, unescape_mount_field};
+    use super::{capacity_values, filesystem_kind, parse_diskstats, unescape_mount_field};
+
+    #[test]
+    fn capacity_separates_used_available_and_reserved_blocks() {
+        // 100 blocks total, 30 free overall and 20 available to unprivileged users.
+        assert_eq!(
+            capacity_values(100, 30, 20, 4096),
+            (409_600, 286_720, 81_920, 40_960)
+        );
+    }
 
     #[test]
     fn mount_fields_decode_kernel_escapes() {
@@ -237,5 +328,11 @@ mod tests {
         assert_eq!(filesystem_kind("nfs4", "/mnt/nas"), "remote");
         assert_eq!(filesystem_kind("overlay", "/"), "virtual");
         assert_eq!(filesystem_kind("ext4", "/"), "local");
+    }
+
+    #[test]
+    fn diskstats_sectors_are_reported_as_bytes_and_keyed_by_device_id() {
+        let stats = parse_diskstats("  8  1 sda1 10 0 42 2 20 0 84 3 0 0 0");
+        assert_eq!(stats.get("8:1"), Some(&(42 * 512, 84 * 512)));
     }
 }
