@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.6.3-dev.6 — 2026-10-25
+
+### Added
+- Upload ARG database backups from the server management page; stream files to a private temporary file, enforce a 512 MiB cap, validate SQLite integrity and ARG account data, then register the backup.
+- Add backup validation coverage and expose a protected upload endpoint for administrators.
+
+### Improved
+- Reorganize sidebar pages into server/network, sites/storage, server operations and ARG management groups; use distinct container and site-management icons for Docker and Nginx.
+- Separate server uptime from kernel and architecture information, with bidi-isolated numbers for clean Persian RTL rendering.
+
 ## v0.6.3-dev.5 — 2026-10-25
 
 ### Fixed
