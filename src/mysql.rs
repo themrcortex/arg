@@ -191,9 +191,11 @@ fn run_mysql(
     };
     let result = (|| {
         let mut command = std::process::Command::new("mysql");
+        // MySQL option-file switches must be the first option and take their path
+        // with '='; passing the path as the next argv element makes some clients
+        // treat the switch as an unknown flag.
+        command.arg(defaults_extra_file_arg(&config_path));
         command.args([
-            "--defaults-extra-file",
-            &config_path,
             "--batch",
             "--raw",
             "--column-names",
@@ -249,6 +251,10 @@ fn run_mysql(
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     })();
     result
+}
+
+fn defaults_extra_file_arg(path: &str) -> String {
+    format!("--defaults-extra-file={path}")
 }
 fn read_bounded<R: Read>(
     mut reader: R,
@@ -723,5 +729,11 @@ mod tests {
         assert!(validate_sql("SELECT authentication_string FROM mysql.user", None, false).is_err());
         assert!(validate_sql("SELECT user FROM mysql.user", None, true).is_ok());
         assert_eq!(safe_mysql_config_value("a\\b\"c"), "a\\\\b\\\"c");
+    }
+
+    #[test]
+    fn defaults_extra_file_option_uses_required_equals_form() {
+        let argument = super::defaults_extra_file_arg("/run/arg-mysql-test.cnf");
+        assert_eq!(argument, "--defaults-extra-file=/run/arg-mysql-test.cnf");
     }
 }
