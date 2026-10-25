@@ -347,6 +347,7 @@ function UpdateLogDetails({ active = false }: { active?: boolean }) {
   const [following, setFollowing] = useState(true)
   const logViewport = useRef<HTMLPreElement>(null)
   const followTail = useRef(true)
+  useEffect(() => { if (active) { followTail.current = true; setFollowing(true); setOpen(true) } }, [active])
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -455,7 +456,7 @@ function UpdateOverlay({ active, stage, startedAt, shared, refreshing, canCancel
         <div className="mt-2 flex gap-1.5" dir="rtl">{labels.map((label, index) => <div key={label} className="relative h-2 flex-1 overflow-hidden rounded-full bg-white/10"><span className={cn('absolute inset-0 rounded-full', index < stage - 1 ? 'bg-emerald-400/80' : index === stage - 1 ? 'arg-update-active-segment' : 'bg-transparent')}/></div>)}</div>
         <p className="mt-3 text-xs leading-6 text-slate-400">مراحل پایان‌یافته تیک می‌خورند؛ مراحل سریع ممکن است بین دو گزارش سرور تکمیل شوند.</p>
       </div>}
-      <div className="mt-5"><UpdateLogDetails active={!refreshing}/></div><div className="mt-3 flex flex-wrap items-center justify-between gap-3"><p role="status" aria-live="polite" className="text-xs text-slate-400">{refreshing ? 'پس از بازشدن نسخهٔ جدید، گزارش تغییرات نمایش داده می‌شود.' : 'در طول نصب، عملیات مدیریتی دیگر موقتاً متوقف می‌شوند.'}</p>{canCancel && !refreshing && <Button type="button" variant="outline" disabled={canceling} onClick={onCancel} className="border-rose-300/25 bg-rose-300/[.06] text-rose-100 hover:bg-rose-300/10"><X size={15}/>{canceling ? 'در حال لغو امن…' : 'لغو به‌روزرسانی'}</Button>}</div>
+      <div className="mt-5"><UpdateLogDetails active={!refreshing}/></div><div className="mt-3 flex flex-wrap items-center justify-between gap-3"><p role="status" aria-live="polite" className="text-xs leading-6 text-slate-400">{refreshing ? 'پس از بازشدن نسخهٔ جدید، گزارش تغییرات نمایش داده می‌شود.' : stage === 2 ? 'کامپایل Rust ممکن است چند دقیقه طول بکشد. گزارش زنده نام بخش‌های درحال ساخت را نشان می‌دهد؛ درصد دقیق و قابل اتکایی از Cargo در دسترس نیست.' : 'در طول نصب، عملیات مدیریتی دیگر موقتاً متوقف می‌شوند.'}</p>{canCancel && !refreshing && <Button type="button" variant="outline" disabled={canceling} onClick={onCancel} className="border-rose-300/25 bg-rose-300/[.06] text-rose-100 hover:bg-rose-300/10"><X size={15}/>{canceling ? 'در حال لغو امن…' : 'لغو به‌روزرسانی'}</Button>}</div>
     </div>
   </div>
 }

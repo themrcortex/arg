@@ -7,32 +7,20 @@ use std::thread;
 #[derive(Deserialize)]
 pub(super) struct InstallRequest {
     provider: String,
-    admin_password: String,
     confirmation: String,
 }
 #[derive(Deserialize)]
 pub(super) struct ServiceRequest {
     action: String,
-    admin_password: String,
     #[serde(default)]
     confirmed: bool,
 }
 #[derive(Deserialize)]
-pub(super) struct CredentialsRequest {
-    admin_password: String,
-    mysql_user: String,
-    mysql_password: String,
-}
-#[derive(Deserialize)]
 pub(super) struct CatalogRequest {
-    #[serde(flatten)]
-    credentials: CredentialsRequest,
     kind: String,
 }
 #[derive(Deserialize)]
 pub(super) struct QueryRequest {
-    #[serde(flatten)]
-    credentials: CredentialsRequest,
     database: Option<String>,
     sql: String,
     #[serde(default)]
@@ -40,11 +28,49 @@ pub(super) struct QueryRequest {
 }
 #[derive(Deserialize)]
 pub(super) struct ResetPasswordRequest {
-    #[serde(flatten)]
-    credentials: CredentialsRequest,
     username: String,
     host: String,
     new_password: String,
+}
+#[derive(Deserialize)]
+pub(super) struct UnlockRequest {
+    password: String,
+}
+#[derive(Deserialize)]
+pub(super) struct CreateUserRequest {
+    database: String,
+    username: String,
+    host: String,
+    password: String,
+    privileges: String,
+}
+
+const MANAGER_CONFIG: &str = "/etc/arg/mysql-manager.cnf";
+static MYSQL_MANAGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn session_hash_for(headers: &HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
+    cookie_token(headers)
+        .map(|raw| session_hash(&raw))
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Login required"))
+}
+
+fn require_mysql_access(
+    db: &Connection,
+    headers: &HeaderMap,
+) -> Result<User, (StatusCode, Json<Value>)> {
+    let actor = require_admin(db, headers)?;
+    let hash = session_hash_for(headers)?;
+    let allowed = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mysql_authorizations a JOIN sessions s ON s.token_hash=a.session_hash WHERE a.session_hash=?1 AND a.user_id=?2 AND s.expires_at>?3)",
+        params![hash, actor.id, now()], |row| row.get::<_, bool>(0),
+    ).unwrap_or(false);
+    if !allowed {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "برای فعال‌سازی مدیریت MySQL، یک بار رمز پنل را تأیید کن.",
+        ));
+    }
+    Ok(actor)
 }
 
 fn reauthenticate_admin(
@@ -256,6 +282,164 @@ fn run_mysql(
 fn defaults_extra_file_arg(path: &str) -> String {
     format!("--defaults-extra-file={path}")
 }
+
+fn run_mysql_with_config(
+    sql: &str,
+    database: Option<&str>,
+    allow_catalog: bool,
+    config_path: &str,
+) -> Result<String, String> {
+    validate_sql(sql, database, allow_catalog)?;
+    let mut command = std::process::Command::new("mysql");
+    command.arg(defaults_extra_file_arg(config_path));
+    command.args([
+        "--batch",
+        "--raw",
+        "--column-names",
+        "--binary-mode",
+        "--local-infile=0",
+        "--connect-timeout=5",
+    ]);
+    if let Some(name) = database {
+        command.arg(format!("--database={name}"));
+    }
+    command
+        .env("MYSQL_HISTFILE", "/dev/null")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("MySQL client is unavailable: {e}"))?;
+    let pid = child.id() as i32;
+    if let Some(mut input) = child.stdin.take() {
+        input.write_all(sql.as_bytes()).map_err(|e| e.to_string())?;
+        input.write_all(b"\n").map_err(|e| e.to_string())?;
+    }
+    let overflow = Arc::new(AtomicBool::new(false));
+    let out_flag = overflow.clone();
+    let out = child.stdout.take().ok_or("Could not read MySQL output")?;
+    let stdout = thread::spawn(move || read_bounded(out, 1024 * 1024, pid, out_flag));
+    let err_flag = overflow.clone();
+    let err = child.stderr.take().ok_or("Could not read MySQL errors")?;
+    let stderr = thread::spawn(move || read_bounded(err, 64 * 1024, pid, err_flag));
+    let started = Instant::now();
+    let status = loop {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+            break child.wait().map_err(|e| e.to_string())?;
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        thread::sleep(std::time::Duration::from_millis(40));
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if overflow.load(Ordering::Relaxed) {
+        return Err("خروجی SQL از سقف 1 MiB عبور کرد و برای محافظت از سرور متوقف شد.".into());
+    }
+    if !status.success() {
+        return Err(sanitize_mysql_error(&String::from_utf8_lossy(&stderr)));
+    }
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+fn ensure_manager_account() -> Result<(), String> {
+    let _bootstrap_guard = MYSQL_MANAGER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if let Ok(metadata) = fs::symlink_metadata(MANAGER_CONFIG) {
+            if metadata.file_type().is_file()
+                && metadata.uid() == 0
+                && metadata.permissions().mode() & 0o077 == 0
+                && run_mysql_with_config("SELECT 1;", None, false, MANAGER_CONFIG).is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+    let existing = run_mysql(
+        "SELECT COUNT(*) FROM mysql.user WHERE user='arg_manager' AND host='localhost';",
+        "root",
+        "",
+        None,
+        true,
+    )?;
+    if existing
+        .lines()
+        .nth(1)
+        .is_some_and(|count| count.trim() != "0")
+    {
+        return Err("حساب arg_manager از قبل وجود دارد اما فایل امن اعتبار آن موجود یا معتبر نیست؛ برای جلوگیری از تغییر حسابی که متعلق به ARG نیست، آن را خودکار بازنویسی نکردم.".into());
+    }
+    let secret = token();
+    let literal = mysql_password_literal(&secret)?;
+    let bootstrap = format!("CREATE USER 'arg_manager'@'localhost' IDENTIFIED BY {literal}; GRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;");
+    run_mysql(&bootstrap, "root", "", None, false).map_err(|e| format!("راه‌اندازی دسترسی مدیریتی ARG ناموفق بود؛ احراز هویت root از Unix socket در دسترس نیست: {e}"))?;
+    let manager_path = PathBuf::from(MANAGER_CONFIG);
+    let directory = manager_path
+        .parent()
+        .ok_or("Invalid ARG MySQL config path")?;
+    fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+    let temporary = format!("{MANAGER_CONFIG}.{}.tmp", &token()[..12]);
+    let config = format!(
+        "[client]\nuser=\"arg_manager\"\npassword=\"{}\"\nprotocol=socket\n",
+        safe_mysql_config_value(&secret)
+    );
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|e| e.to_string())?;
+        file.write_all(config.as_bytes())
+            .map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+    }
+    fs::rename(&temporary, MANAGER_CONFIG).map_err(|e| {
+        let _ = fs::remove_file(&temporary);
+        e.to_string()
+    })?;
+    run_mysql_with_config("SELECT 1;", None, false, MANAGER_CONFIG).map(|_| ())
+}
+
+fn mysql_create_user_sql(input: &CreateUserRequest) -> Result<String, String> {
+    if !valid_identifier(&input.database, 64)
+        || !valid_identifier(&input.username, 32)
+        || !["localhost", "127.0.0.1", "%"].contains(&input.host.as_str())
+    {
+        return Err("نام دیتابیس، کاربر یا Host معتبر نیست.".into());
+    }
+    if ["mysql", "sys", "performance_schema", "information_schema"]
+        .contains(&input.database.as_str())
+    {
+        return Err(
+            "برای محافظت از دیتابیس‌های سیستمی، ساخت کاربر برنامه روی این دیتابیس مجاز نیست.".into(),
+        );
+    }
+    let password = mysql_password_literal(&input.password)?;
+    let grants = match input.privileges.as_str() {
+        "read_only" => "SELECT, SHOW VIEW",
+        "read_write" => {
+            "SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, EXECUTE, SHOW VIEW"
+        }
+        "full" => "ALL PRIVILEGES",
+        _ => return Err("سطح دسترسی معتبر نیست.".into()),
+    };
+    let db = input.database.replace('`', "``");
+    let username = input.username.replace('\'', "''");
+    let host = input.host.replace('\'', "''");
+    Ok(format!("CREATE USER IF NOT EXISTS '{username}'@'{host}' IDENTIFIED BY {password}; GRANT {grants} ON `{db}`.* TO '{username}'@'{host}'; FLUSH PRIVILEGES;"))
+}
 fn read_bounded<R: Read>(
     mut reader: R,
     limit: usize,
@@ -292,13 +476,16 @@ fn mysql_password_literal(password: &str) -> Result<String, String> {
     if !(12..=128).contains(&password.len()) || password.chars().any(char::is_control) {
         return Err("رمز جدید باید 12 تا 128 نویسه باشد و نویسهٔ کنترلی نداشته باشد.".into());
     }
-    Ok(format!("'{}'", password.replace('\'', "''")))
+    Ok(format!(
+        "'{}'",
+        password.replace('\\', "\\\\").replace('\'', "''")
+    ))
 }
 
 pub(super) async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
         let db = state.lock().unwrap();
-        require_admin(&db, &headers)?;
+        require_mysql_access(&db, &headers)?;
     }
     let output = privileged_request_async(json!({"action":"mysql-status"})).await?;
     if output["ok"] != true {
@@ -310,6 +497,60 @@ pub(super) async fn status(State(state): State<AppState>, headers: HeaderMap) ->
         ));
     }
     Ok(Json(output["data"].clone()))
+}
+pub(super) async fn access_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    let _actor = require_admin(&db, &headers)?;
+    let hash = session_hash_for(&headers)?;
+    let authorized = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mysql_authorizations WHERE session_hash=?1)",
+            [&hash],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    Ok(Json(json!({"authorized":authorized})))
+}
+pub(super) async fn unlock(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UnlockRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let (actor, hash, installed) = {
+        let db = state.lock().unwrap();
+        let actor = reauthenticate_admin(&db, &headers, &input.password)?;
+        let hash = session_hash_for(&headers)?;
+        let installed = std::process::Command::new("systemctl")
+            .args(["cat", "mysql.service"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+            || std::process::Command::new("systemctl")
+                .args(["cat", "mariadb.service"])
+                .output()
+                .is_ok_and(|o| o.status.success());
+        (actor, hash, installed)
+    };
+    if installed {
+        let result = privileged_request_async(json!({"action":"mysql-ensure-manager"})).await?;
+        if result["ok"] != true {
+            return Err(error(
+                StatusCode::BAD_GATEWAY,
+                result["error"]
+                    .as_str()
+                    .unwrap_or("ساخت دسترسی مدیریتی MySQL ناموفق بود."),
+            ));
+        }
+    }
+    let db = state.lock().unwrap();
+    db.execute("INSERT INTO mysql_authorizations(session_hash,user_id,authorized_at) VALUES (?1,?2,?3) ON CONFLICT(session_hash) DO UPDATE SET user_id=excluded.user_id,authorized_at=excluded.authorized_at", params![hash, actor.id, now()]).map_err(db_error)?;
+    audit(
+        &db,
+        &actor.username,
+        "mysql.unlock",
+        "panel password re-authenticated once for this login session",
+    );
+    Ok(Json(json!({"authorized":true})))
 }
 pub(super) async fn install(
     State(state): State<AppState>,
@@ -331,7 +572,7 @@ pub(super) async fn install(
     }
     let actor = {
         let db = state.lock().unwrap();
-        reauthenticate_admin(&db, &headers, &input.admin_password)?
+        require_mysql_access(&db, &headers)?
     };
     let _apt_guard = APT_OPERATION_LOCK.lock().await;
     let output =
@@ -341,6 +582,15 @@ pub(super) async fn install(
         return Err(error(
             StatusCode::BAD_GATEWAY,
             output["error"].as_str().unwrap_or("نصب MySQL ناموفق بود."),
+        ));
+    }
+    let manager = privileged_request_async(json!({"action":"mysql-ensure-manager"})).await?;
+    if manager["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            manager["error"]
+                .as_str()
+                .unwrap_or("ساخت حساب داخلی ARG در MySQL ناموفق بود."),
         ));
     }
     let db = state.lock().unwrap();
@@ -379,7 +629,7 @@ pub(super) async fn service_action(
     }
     let actor = {
         let db = state.lock().unwrap();
-        reauthenticate_admin(&db, &headers, &input.admin_password)?
+        require_mysql_access(&db, &headers)?
     };
     let result =
         privileged_request_async(json!({"action":"mysql-service", "operation":input.action}))
@@ -391,6 +641,17 @@ pub(super) async fn service_action(
                 .as_str()
                 .unwrap_or("عملیات سرویس MySQL ناموفق بود."),
         ));
+    }
+    if ["start", "restart", "enable-now"].contains(&input.action.as_str()) {
+        let manager = privileged_request_async(json!({"action":"mysql-ensure-manager"})).await?;
+        if manager["ok"] != true {
+            return Err(error(
+                StatusCode::BAD_GATEWAY,
+                manager["error"]
+                    .as_str()
+                    .unwrap_or("ساخت حساب داخلی ARG در MySQL ناموفق بود."),
+            ));
+        }
     }
     let db = state.lock().unwrap();
     audit(&db, &actor.username, "mysql.service.action", &input.action);
@@ -409,14 +670,16 @@ pub(super) async fn catalog(
     }
     let actor = {
         let db = state.lock().unwrap();
-        reauthenticate_admin(&db, &headers, &input.credentials.admin_password)?
+        require_mysql_access(&db, &headers)?
     };
     let query = if input.kind == "databases" {
         "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME"
     } else {
         "SELECT user,host,plugin,account_locked FROM mysql.user ORDER BY user,host"
     };
-    let result = privileged_request_async(json!({"action":"mysql-catalog","kind":input.kind,"user":input.credentials.mysql_user,"password":input.credentials.mysql_password,"sql":query})).await?;
+    let result =
+        privileged_request_async(json!({"action":"mysql-catalog","kind":input.kind,"sql":query}))
+            .await?;
     if result["ok"] != true {
         return Err(error(
             StatusCode::BAD_GATEWAY,
@@ -442,10 +705,7 @@ pub(super) async fn query(
     Json(input): Json<QueryRequest>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    if input.sql.len() > 64 * 1024
-        || input.credentials.mysql_user.len() > 128
-        || input.credentials.mysql_password.len() > 1024
-    {
+    if input.sql.len() > 64 * 1024 {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "درخواست SQL از اندازهٔ مجاز بزرگ‌تر است.",
@@ -470,7 +730,7 @@ pub(super) async fn query(
     }
     let actor = {
         let db = state.lock().unwrap();
-        reauthenticate_admin(&db, &headers, &input.credentials.admin_password)?
+        require_mysql_access(&db, &headers)?
     };
     let keyword = input
         .sql
@@ -482,7 +742,10 @@ pub(super) async fn query(
         .take(24)
         .collect::<String>()
         .to_ascii_uppercase();
-    let result = privileged_request_async(json!({"action":"mysql-query","user":input.credentials.mysql_user,"password":input.credentials.mysql_password,"database":input.database,"sql":input.sql})).await?;
+    let result = privileged_request_async(
+        json!({"action":"mysql-query","database":input.database,"sql":input.sql}),
+    )
+    .await?;
     if result["ok"] != true {
         return Err(error(
             StatusCode::BAD_GATEWAY,
@@ -509,6 +772,7 @@ pub(super) async fn reset_password(
 ) -> ApiResult {
     check_origin(&headers)?;
     if !valid_identifier(&input.username, 32)
+        || input.username == "arg_manager"
         || !(input.host == "localhost" || input.host == "127.0.0.1" || input.host == "%")
     {
         return Err(error(
@@ -523,9 +787,9 @@ pub(super) async fn reset_password(
     let sql = format!("ALTER USER `{user}`@`{host}` IDENTIFIED BY {literal};");
     let actor = {
         let db = state.lock().unwrap();
-        reauthenticate_admin(&db, &headers, &input.credentials.admin_password)?
+        require_mysql_access(&db, &headers)?
     };
-    let result = privileged_request_async(json!({"action":"mysql-query","user":input.credentials.mysql_user,"password":input.credentials.mysql_password,"sql":sql})).await?;
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
     if result["ok"] != true {
         return Err(error(
             StatusCode::BAD_GATEWAY,
@@ -546,8 +810,47 @@ pub(super) async fn reset_password(
     ))
 }
 
+pub(super) async fn create_user(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<CreateUserRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_mysql_access(&db, &headers)?
+    };
+    mysql_create_user_sql(&input).map_err(|e| error(StatusCode::BAD_REQUEST, &e))?;
+    let result = privileged_request_async(json!({"action":"mysql-create-user","database":input.database,"username":input.username,"host":input.host,"password":input.password,"privileges":input.privileges})).await?;
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            result["error"]
+                .as_str()
+                .unwrap_or("ساخت کاربر MySQL ناموفق بود."),
+        ));
+    }
+    let db = state.lock().unwrap();
+    audit(
+        &db,
+        &actor.username,
+        "mysql.user.create",
+        &format!(
+            "user={}@{} database={} privileges={}",
+            input.username, input.host, input.database, input.privileges
+        ),
+    );
+    Ok(Json(
+        json!({"created":true,"message":"کاربر دیتابیس ساخته شد و دسترسی فقط به دیتابیس انتخاب‌شده داده شد."}),
+    ))
+}
+
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     match action {
+        "mysql-ensure-manager" => match ensure_manager_account() {
+            Ok(()) => json!({"ok":true,"ready":true}),
+            Err(error) => json!({"ok":false,"error":error}),
+        },
         "mysql-status" => {
             let mysql_unit = std::process::Command::new("systemctl")
                 .args(["cat", "mysql.service"])
@@ -669,10 +972,8 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
         }
         "mysql-query" => {
             let sql = request["sql"].as_str().unwrap_or("");
-            let user = request["user"].as_str().unwrap_or("");
-            let password = request["password"].as_str().unwrap_or("");
             let database = request["database"].as_str();
-            match run_mysql(sql, user, password, database, false) {
+            match run_mysql_with_config(sql, database, false, MANAGER_CONFIG) {
                 Ok(output) => json!({"ok":true,"output":output}),
                 Err(error) => json!({"ok":false,"error":error}),
             }
@@ -692,10 +993,47 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
             if request["sql"].as_str() != Some(expected) {
                 return json!({"ok":false,"error":"Catalog query does not match the safe allowlist"});
             }
-            let user = request["user"].as_str().unwrap_or("");
-            let password = request["password"].as_str().unwrap_or("");
-            match run_mysql(expected, user, password, None, true) {
+            match run_mysql_with_config(expected, None, true, MANAGER_CONFIG) {
                 Ok(output) => json!({"ok":true,"output":output}),
+                Err(error) => json!({"ok":false,"error":error}),
+            }
+        }
+        "mysql-create-user" => {
+            let parsed = CreateUserRequest {
+                database: request["database"].as_str().unwrap_or("").to_owned(),
+                username: request["username"].as_str().unwrap_or("").to_owned(),
+                host: request["host"].as_str().unwrap_or("").to_owned(),
+                password: request["password"].as_str().unwrap_or("").to_owned(),
+                privileges: request["privileges"].as_str().unwrap_or("").to_owned(),
+            };
+            let sql = match mysql_create_user_sql(&parsed) {
+                Ok(sql) => sql,
+                Err(error) => return json!({"ok":false,"error":error}),
+            };
+            let user_check = format!(
+                "SELECT COUNT(*) FROM mysql.user WHERE user='{}' AND host='{}';",
+                parsed.username.replace('\'', "''"),
+                parsed.host.replace('\'', "''")
+            );
+            if run_mysql_with_config(&user_check, None, true, MANAGER_CONFIG)
+                .is_ok_and(|out| out.lines().nth(1).is_some_and(|count| count.trim() != "0"))
+            {
+                return json!({"ok":false,"error":"این حساب از قبل وجود دارد. برای تغییر رمز آن از بخش بازنشانی رمز استفاده کن."});
+            }
+            let exists = run_mysql_with_config(
+                &format!(
+                    "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='{}';",
+                    parsed.database.replace('\'', "''")
+                ),
+                None,
+                true,
+                MANAGER_CONFIG,
+            );
+            if !exists.is_ok_and(|v| v.lines().skip(1).any(|line| line == parsed.database)) {
+                return json!({"ok":false,"error":"دیتابیس انتخاب‌شده وجود ندارد یا قابل دسترسی نیست."});
+            }
+            match run_mysql_with_config(&sql, None, true, MANAGER_CONFIG) {
+                Ok(_) => json!({"ok":true}),
                 Err(error) => json!({"ok":false,"error":error}),
             }
         }
@@ -735,5 +1073,23 @@ mod tests {
     fn defaults_extra_file_option_uses_required_equals_form() {
         let argument = super::defaults_extra_file_arg("/run/arg-mysql-test.cnf");
         assert_eq!(argument, "--defaults-extra-file=/run/arg-mysql-test.cnf");
+    }
+
+    #[test]
+    fn database_user_grants_are_scoped_to_one_database() {
+        let request = super::CreateUserRequest {
+            database: "app_db".into(),
+            username: "app_user".into(),
+            host: "localhost".into(),
+            password: "long-enough-secret".into(),
+            privileges: "read_write".into(),
+        };
+        let sql = super::mysql_create_user_sql(&request).unwrap();
+        assert!(sql.contains("ON `app_db`.*"));
+        assert!(!sql.contains("ON *.*"));
+        assert!(sql.contains("SELECT, INSERT, UPDATE"));
+        let mut invalid = request;
+        invalid.database = "app_db; GRANT ALL ON *".into();
+        assert!(super::mysql_create_user_sql(&invalid).is_err());
     }
 }

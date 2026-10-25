@@ -241,13 +241,16 @@ run_with_progress() {
 
   if [[ ! -t 1 || ! -t 2 ]]; then
     say "$label"
-    if "$@" >"$log_file" 2>&1; then
+    set +e
+    "$@" 2>&1 | tee "$log_file"
+    local -a pipeline_status=("${PIPESTATUS[@]}")
+    set -e
+    result="${pipeline_status[0]}"
+    if (( result == 0 )); then
       info "Build completed successfully."
       rm -f "$log_file"
       return 0
     else
-      result=$?
-      cat "$log_file" >&2
       rm -f "$log_file"
       return "$result"
     fi
