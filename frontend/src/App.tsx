@@ -44,6 +44,7 @@ import { FileManagerPage } from './FileManagerPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import changelog from '../../CHANGELOG.md?raw'
 const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
@@ -69,6 +70,7 @@ const updateStageFor = (phase?: string): UpdateStage => {
 
 function ResourceAlertNotice() {
   const [alerts, setAlerts] = useState<ResourceAlert[]>([])
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const previousCpu = useRef<{ total: number; idle: number } | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -102,9 +104,12 @@ function ResourceAlertNotice() {
           { key: 'memory', label: 'حافظه', value: memory, threshold: thresholds.memory },
           { key: 'disk', label: 'دیسک', value: disk, threshold: thresholds.disk },
         ]
-        setAlerts(readings.flatMap((reading) => reading.value !== null && (reading.value >= reading.threshold || reading.value >= 95)
+        const activeReadings = readings.flatMap((reading) => reading.value !== null && (reading.value >= reading.threshold || reading.value >= 95)
           ? [{ key: reading.key, label: reading.label, value: reading.value, threshold: reading.threshold, critical: reading.value >= 95 }]
-          : []))
+          : [])
+        setAlerts(activeReadings)
+        const clearedKeys = new Set(readings.filter((reading) => reading.value !== null && reading.value < Math.min(reading.threshold, 95) - 3).map((reading) => reading.key))
+        if (clearedKeys.size) setDismissed((current) => new Set([...current].filter((key) => !clearedKeys.has(key))))
       } catch { /* An unavailable metrics read should not block or interrupt panel navigation. */ }
       if (!cancelled) timer = window.setTimeout(() => void poll(), 15000)
     }
@@ -112,13 +117,14 @@ function ResourceAlertNotice() {
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [])
 
-  if (!alerts.length) return null
-  const critical = alerts.some((alert) => alert.critical)
+  const visibleAlerts = alerts.filter((alert) => !dismissed.has(alert.key))
+  if (!visibleAlerts.length) return null
+  const critical = visibleAlerts.some((alert) => alert.critical)
   return <Alert role="status" className={critical ? 'mb-5 border-rose-400/30 bg-rose-400/[.08] text-rose-100' : 'mb-5 border-amber-400/30 bg-amber-400/[.07] text-amber-100'}>
     <AlertTriangle size={17} className={critical ? 'text-rose-300' : 'text-amber-300'}/>
-    <AlertTitle>{critical ? 'وضعیت بحرانی منابع سرور' : 'عبور از آستانهٔ هشدار'}</AlertTitle>
+    <AlertTitle className="flex items-center justify-between gap-3"><span>{critical ? 'وضعیت بحرانی منابع سرور' : 'عبور از آستانهٔ هشدار'}</span><button type="button" className="rounded-md p-1 text-current/65 transition hover:bg-white/10 hover:text-current" aria-label="بستن اعلان آستانه تا زمان بازگشت هشدار" title="پنهان‌کردن تا وقتی مصرف از محدودهٔ هشدار پایین‌تر برود" onClick={() => setDismissed((current) => new Set([...current, ...visibleAlerts.map((alert) => alert.key)]))}><X size={15}/></button></AlertTitle>
     <AlertDescription className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
-      {alerts.map((alert) => <span key={alert.key}>{alert.label}: <b className="font-mono" dir="ltr">{alert.value.toFixed(1)}%</b> <span className="text-current/70">(آستانهٔ تنظیم‌شده: <b className="font-mono" dir="ltr">{alert.threshold}%</b>)</span></span>)}
+      {visibleAlerts.map((alert) => <span key={alert.key}>{alert.label}: <b className="font-mono" dir="ltr">{alert.value.toFixed(1)}%</b> <span className="text-current/70">(آستانهٔ تنظیم‌شده: <b className="font-mono" dir="ltr">{alert.threshold}%</b>)</span></span>)}
     </AlertDescription>
   </Alert>
 }
@@ -447,10 +453,10 @@ function PageHeading({
   action?: ReactNode
 }) {
   return (
-    <div className="mb-7 flex flex-wrap items-end justify-between gap-4" dir="rtl">
+        <div className="arg-page-heading mb-7 flex flex-wrap items-end justify-between gap-4" dir="rtl">
       <div className="min-w-0 text-right" dir="rtl">
         <div className="mb-4 flex min-h-5 items-center justify-start text-xs font-bold tracking-[.12em] text-primary">
-          <span className="inline-flex items-center gap-2 leading-5" dir="ltr" style={{ unicodeBidi: 'isolate' }}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"/>SERVER CONTROL</span>
+          <span className="arg-page-eyebrow inline-flex items-center gap-2 leading-5" dir="ltr" style={{ unicodeBidi: 'isolate' }}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"/>SERVER CONTROL</span>
         </div>
         <h1 dir="rtl" className="mt-0 block text-3xl font-extrabold leading-[1.4] tracking-tight text-white md:text-[34px]">{title}</h1>
         <p dir="rtl" className="mt-2 text-sm leading-7 text-muted-foreground">{description}</p>
@@ -476,6 +482,7 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [panelTimeZone, setPanelTimeZone] = useState('UTC')
   const [page, setPage] = useState<PageId>(() => pageFromHash(window.location.hash))
+  const [terminalMounted, setTerminalMounted] = useState(() => pageFromHash(window.location.hash) === 'terminal')
   const [pageReady, setPageReady] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const mobileMenuButton = useRef<HTMLButtonElement>(null)
@@ -542,7 +549,9 @@ export default function App() {
   }, [updateReloadNotice, boot, installed, user?.id])
   useEffect(() => {
     const onHash = () => {
-      setPage(pageFromHash(window.location.hash))
+      const next = pageFromHash(window.location.hash)
+      setPage(next)
+      if (next === 'terminal') setTerminalMounted(true)
       setMobileOpen(false)
     }
     window.addEventListener('hashchange', onHash)
@@ -826,6 +835,7 @@ export default function App() {
   function selectPage(next: PageId) {
     if (!allowedPages.some((item) => item.id === next)) return
     setPage(next)
+    if (next === 'terminal') setTerminalMounted(true)
     window.location.hash = `/${next}`
     setMobileOpen(false)
   }
@@ -838,7 +848,7 @@ export default function App() {
           <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-1">
             <div className="arg-brand-lockup flex min-w-0 flex-1 items-center gap-1.5" aria-label="ARG VPS Control Manager">
               <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-9 w-9 shrink-0" />
-              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-product-label" dir="ltr"><span>VPS CONTROL</span><span>MANAGER</span></div></div>
+              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-product-label" dir="ltr"><span>VPS CONTROL CENTER</span></div></div>
             </div>
             <Button variant="ghost" size="icon" className="arg-collapse hidden h-8 w-8 shrink-0 lg:inline-flex" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{sidebarCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
             <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close h-8 w-8 shrink-0 lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button>
@@ -850,7 +860,10 @@ export default function App() {
               { title: 'زیرساخت', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nginx', 'docker', 'files', 's3', 'terminal'].includes(item.id)) },
               { title: 'عملیات سیستم', pages: allowedPages.filter((item) => ['packages', 'services'].includes(item.id)) },
               { title: 'مدیریت', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
-            ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><div className="space-y-1">{section.pages.map((item) => <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} title={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>)}</div></nav>)}
+            ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><TooltipProvider delayDuration={220}><div className="space-y-1">{section.pages.map((item) => {
+              const button = <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} aria-label={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>
+              return sidebarCollapsed ? <Tooltip key={item.id}><TooltipTrigger asChild>{button}</TooltipTrigger><TooltipContent side="left" align="center">{item.label}</TooltipContent></Tooltip> : button
+            })}</div></TooltipProvider></nav>)}
           </div>
           <div className="arg-sidebar-footer relative z-10 mt-auto pt-2">
             <div className="arg-divider mx-2 mb-3" aria-hidden="true" />
@@ -871,11 +884,12 @@ export default function App() {
             <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-[10px] font-semibold tracking-[.18em] text-primary sm:inline" dir="ltr">VPS CONTROL CENTER</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
             <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end" sideOffset={8} collisionPadding={16}><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
-          <main className="mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
+          <main className="arg-main-canvas relative mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             <ResourceAlertNotice />
+            {terminalMounted && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
             <div key={currentPage}>
             {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <div className="arg-page-enter">
-            {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
             {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
@@ -884,7 +898,6 @@ export default function App() {
             {currentPage === 'docker' && user.role === 'admin' && <DockerPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'files' && user.role === 'admin' && <FileManagerPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 's3' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="فضای ابری S3"/>}><S3StoragePage Heading={PageHeading} notify={notifyUser}/></Suspense>}
-            {currentPage === 'terminal' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="ترمینال"/>}><TerminalPage Heading={PageHeading} /></Suspense>}
             {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'users' && user.role === 'admin' && (
@@ -895,7 +908,7 @@ export default function App() {
             )}
             {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} panelTimeZone={panelTimeZone} onTimeZoneChange={setPanelTimeZone} />}
             {currentPage === 'account' && <AccountPage Heading={PageHeading} user={user} setUser={(next) => setUser(next)} logout={logout} notify={notifyUser} />}
-            <footer className="mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
+            <footer className="arg-page-footer mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
             </footer>

@@ -53,6 +53,7 @@ type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 mod docker;
 mod files;
+mod fast_actions;
 mod metrics;
 mod nginx;
 mod routes;
@@ -1719,6 +1720,7 @@ fn protected_service_mutation(unit: &str, operation: &str) -> bool {
             "disable",
             "disable-now",
             "mask",
+            "set-property",
         ]
         .contains(&operation)
 }
@@ -1865,9 +1867,12 @@ async fn managed_firewall_rules(State(state): State<AppState>, headers: HeaderMa
             })
         })
         .map_err(db_error)?;
-    Ok(Json(
-        json!({"rules": rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?}),
-    ))
+    let mut protected_ports: Vec<u16> = protected_firewall_ports().into_iter().collect();
+    protected_ports.sort_unstable();
+    Ok(Json(json!({
+        "rules": rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?,
+        "protected_ports": protected_ports,
+    })))
 }
 async fn add_firewall_rule(
     State(state): State<AppState>,
@@ -2509,6 +2514,10 @@ fn valid_service_unit(unit: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"@_.:-".contains(&b))
         && !unit.contains("..")
 }
+fn shared_web_service(unit: &str) -> bool {
+    matches!(unit, "nginx.service" | "apache2.service" | "httpd.service")
+        || (unit.starts_with("php") && unit.ends_with("-fpm.service"))
+}
 async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     check_origin(&headers)?;
     let _exclusive = UPDATE_OPERATION_GATE.write().await;
@@ -2753,6 +2762,8 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("apt-run") => "apt-run",
         Some("service-list") => "service-list",
         Some("service-action") => "service-action",
+        Some("service-resources") => "service-resources",
+        Some("service-limits") => "service-limits",
         Some("docker-status") => "docker-status",
         Some("docker-operation") => "docker-operation",
         Some("file-list") => "file-list",
@@ -3001,6 +3012,49 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         }).collect();
         return json!({"ok":true,"data":{"services":services}});
     }
+    if action == "service-resources" {
+        let Some(unit) = request["unit"].as_str().filter(|u| valid_service_unit(u)) else {
+            return json!({"ok":false,"error":"Invalid service unit"});
+        };
+        let mut command = std::process::Command::new("systemctl");
+        command.args(["show", "--no-pager", "--property=CPUUsageNSec,MemoryCurrent,CPUQuotaPerSecUSec,MemoryMax", unit]);
+        return match command_result(&mut command) {
+            Ok((true, output)) => {
+                let values: HashMap<String, String> = output.lines().filter_map(|line| line.split_once('=')).map(|(key,value)|(key.to_owned(),value.to_owned())).collect();
+                json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":values.get("CPUUsageNSec").and_then(|v|v.parse::<u64>().ok()),"memory_current_bytes":values.get("MemoryCurrent").and_then(|v|v.parse::<u64>().ok()),"cpu_quota_per_second_usec":values.get("CPUQuotaPerSecUSec").and_then(|v|v.parse::<u64>().ok()),"memory_max_bytes":values.get("MemoryMax").and_then(|v|v.parse::<u64>().ok())}})
+            },
+            Ok((false, output)) => json!({"ok":false,"error":output}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
+    }
+    if action == "service-limits" {
+        let Some(unit) = request["unit"].as_str().filter(|u| valid_service_unit(u)) else {
+            return json!({"ok":false,"error":"Invalid service unit"});
+        };
+        if protected_service_mutation(unit, "set-property") {
+            return json!({"ok":false,"error":format!("Resource limits cannot be applied to protected service {unit}")});
+        }
+        if shared_web_service(unit) {
+            return json!({"ok":false,"error":format!("{unit} is shared by multiple websites. Attach a dedicated application service to this site instead.")});
+        }
+        let cpu = request["cpu_quota_percent"].as_f64();
+        if cpu.is_some_and(|value| !value.is_finite() || !(1.0..=10000.0).contains(&value)) {
+            return json!({"ok":false,"error":"CPU quota must be between 1 and 10000 percent"});
+        }
+        let memory = request["memory_max_bytes"].as_u64();
+        if memory.is_some_and(|value| !(16 * 1024 * 1024..=1_099_511_627_776).contains(&value)) {
+            return json!({"ok":false,"error":"Memory limit must be between 16 MiB and 1 TiB"});
+        }
+        let cpu_property = cpu.map(|value| format!("CPUQuota={value:.2}%")).unwrap_or_else(|| "CPUQuota=infinity".into());
+        let memory_property = memory.map(|value| format!("MemoryMax={value}B")).unwrap_or_else(|| "MemoryMax=infinity".into());
+        let mut command = std::process::Command::new("systemctl");
+        command.args(["set-property", unit, &cpu_property, &memory_property]);
+        return match command_result(&mut command) {
+            Ok((true, output)) => json!({"ok":true,"stdout":output}),
+            Ok((false, output)) => json!({"ok":false,"error":output}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
+    }
     let Some(operation) = request["operation"].as_str() else {
         return json!({"ok":false,"error":"Missing systemd action"});
     };
@@ -3164,7 +3218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL);")?;
+    db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_runtime (site_name TEXT PRIMARY KEY,unit TEXT NOT NULL,cpu_quota_percent REAL,memory_max_bytes INTEGER,last_cpu_usage_ns INTEGER,last_sampled_at INTEGER,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS fast_actions (id INTEGER PRIMARY KEY,title TEXT NOT NULL,operation TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',site_name TEXT,include_access_log INTEGER NOT NULL DEFAULT 0,include_error_log INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_actions (id INTEGER PRIMARY KEY,site_name TEXT NOT NULL,title TEXT NOT NULL,icon TEXT NOT NULL,operation TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(site_name,title));")?;
     s3::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
     db.execute(
@@ -3265,6 +3319,9 @@ mod update_progress_tests {
 
     #[test]
     fn critical_services_cannot_be_stopped_or_disabled_from_panel() {
+        assert!(super::shared_web_service("nginx.service"));
+        assert!(super::shared_web_service("php8.3-fpm.service"));
+        assert!(!super::shared_web_service("customer-app.service"));
         for unit in [
             "arg.service",
             "ssh.service",
@@ -3274,6 +3331,7 @@ mod update_progress_tests {
         ] {
             assert!(super::protected_service_mutation(unit, "stop"));
             assert!(super::protected_service_mutation(unit, "disable-now"));
+            assert!(super::protected_service_mutation(unit, "set-property"));
             assert!(!super::protected_service_mutation(unit, "status"));
         }
         assert!(!super::protected_service_mutation(

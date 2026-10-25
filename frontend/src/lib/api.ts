@@ -74,6 +74,7 @@ export type Dashboard = {
 export type AuditEvent = { at: number; actor: string; action: string; detail: string }
 export type Firewall = { available: boolean; status: string; error?: string }
 export type ManagedFirewallRule = { id: number; port: number; protocol: 'tcp' | 'udp'; policy: 'allow' | 'deny'; enabled: boolean }
+export type ManagedFirewallRulesResponse = { rules: ManagedFirewallRule[]; protected_ports?: number[] }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/${path}`, {

@@ -63,6 +63,8 @@ pub(super) fn router(state: AppState) -> Router {
             axum::routing::delete(s3::detach_bucket),
         )
         .route("/api/history", get(history))
+        .route("/api/fast-actions", get(fast_actions::list).post(fast_actions::create))
+        .route("/api/fast-actions/{id}", put(fast_actions::update).delete(fast_actions::delete))
         .route("/api/network/traffic", get(network_traffic_volume))
         .route(
             "/api/monitoring/alerts",
@@ -117,12 +119,28 @@ pub(super) fn router(state: AppState) -> Router {
             put(nginx::update_nginx_site_metadata),
         )
         .route(
+            "/api/nginx/sites/{name}/actions",
+            get(nginx::list_site_actions).post(nginx::create_site_action),
+        )
+        .route(
+            "/api/nginx/sites/{name}/actions/{id}",
+            put(nginx::update_site_action).delete(nginx::delete_site_action),
+        )
+        .route(
+            "/api/nginx/sites/{name}/actions/{id}/run",
+            post(nginx::run_site_action),
+        )
+        .route(
             "/api/nginx/sites/{name}/logs",
             post(nginx::api_nginx_site_logs),
         )
         .route(
             "/api/nginx/sites/{name}/traffic",
             get(nginx::api_nginx_site_traffic),
+        )
+        .route(
+            "/api/nginx/sites/{name}/runtime",
+            get(nginx::api_nginx_site_runtime).put(nginx::api_nginx_site_runtime),
         )
         .route(
             "/api/nginx/sites/{name}/repository",

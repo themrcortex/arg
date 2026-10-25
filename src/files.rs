@@ -10,10 +10,16 @@ pub(super) struct FileQuery {
 pub(super) struct DiskScanInput {
     #[serde(default = "default_scan_root")]
     path: String,
+    #[serde(default = "default_scan_mode")]
+    mode: String,
 }
 
 fn default_scan_root() -> String {
     "/".into()
+}
+
+fn default_scan_mode() -> String {
+    "standard".into()
 }
 
 #[derive(Deserialize)]
@@ -81,8 +87,10 @@ pub(super) async fn scan_disk(
             "مسیر باید یک آدرس مطلق معتبر باشد.",
         ));
     }
-    let response =
-        privileged_request_async(json!({"action":"file-disk-scan", "path":path})).await?;
+    if !["standard", "deep"].contains(&input.mode.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "حالت اسکن معتبر نیست."));
+    }
+    let response = privileged_request_async(json!({"action":"file-disk-scan", "path":path, "mode":input.mode})).await?;
     if response["ok"] != true {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -90,7 +98,7 @@ pub(super) async fn scan_disk(
         ));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor, "files.disk.scan", &format!("path={path}"));
+    audit(&db, &actor, "files.disk.scan", &format!("path={path} mode={}",input.mode));
     Ok(Json(response["data"].clone()))
 }
 
@@ -329,6 +337,7 @@ struct DiskScanState {
     max_entries: usize,
     started: std::time::Instant,
     max_duration: std::time::Duration,
+    max_depth: usize,
     truncated: bool,
     files: Vec<(String, u64)>,
     directories: Vec<(String, u64)>,
@@ -337,7 +346,7 @@ struct DiskScanState {
 
 fn scan_directory_size(path: &std::path::Path, depth: usize, state: &mut DiskScanState) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    if depth > 64
+    if depth > state.max_depth
         || state.entries >= state.max_entries
         || state.started.elapsed() >= state.max_duration
     {
@@ -393,7 +402,7 @@ fn scan_directory_size(path: &std::path::Path, depth: usize, state: &mut DiskSca
     total
 }
 
-fn scan_disk_usage(path: &str) -> Result<Value, String> {
+fn scan_disk_usage(path: &str, mode: &str) -> Result<Value, String> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     let root = canonical_existing(path)?;
@@ -401,12 +410,18 @@ fn scan_disk_usage(path: &str) -> Result<Value, String> {
         return Err("مسیر انتخاب‌شده پوشه نیست.".into());
     }
     let metadata = std::fs::metadata(&root).map_err(|error| error.to_string())?;
+    let (max_entries, max_duration, max_depth) = if mode == "deep" {
+        (500_000, std::time::Duration::from_secs(90), 128)
+    } else {
+        (100_000, std::time::Duration::from_secs(12), 64)
+    };
     let mut state = DiskScanState {
         device: metadata.dev(),
         entries: 0,
-        max_entries: 100_000,
+        max_entries,
         started: std::time::Instant::now(),
-        max_duration: std::time::Duration::from_secs(12),
+        max_duration,
+        max_depth,
         truncated: false,
         files: Vec::new(),
         directories: Vec::new(),
@@ -447,7 +462,7 @@ fn scan_disk_usage(path: &str) -> Result<Value, String> {
         volume_used as f64 * 100.0 / volume_total as f64
     };
     Ok(
-        json!({"root":root,"total_bytes":total_bytes,"volume_total":volume_total,"volume_used":volume_used,"volume_available":volume_available,"usage_percent":usage_percent,"entries_scanned":state.entries,"truncated":state.truncated,"elapsed_ms":state.started.elapsed().as_millis(),"largest_files":largest_files,"largest_directories":largest_directories,"note":"Symbolic links are skipped; nested filesystems and pseudo-filesystems are excluded. Select a mount path directly to scan it."}),
+        json!({"root":root,"mode":mode,"limits":{"max_entries":max_entries,"max_duration_seconds":max_duration.as_secs(),"max_depth":max_depth},"total_bytes":total_bytes,"volume_total":volume_total,"volume_used":volume_used,"volume_available":volume_available,"usage_percent":usage_percent,"entries_scanned":state.entries,"truncated":state.truncated,"elapsed_ms":state.started.elapsed().as_millis(),"largest_files":largest_files,"largest_directories":largest_directories,"note":"Symbolic links are skipped; nested filesystems and pseudo-filesystems are excluded. Select a mount path directly to scan it."}),
     )
 }
 
@@ -544,7 +559,13 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
         "file-disk-scan" => request["path"]
             .as_str()
             .ok_or_else(|| "A scan path is required.".to_owned())
-            .and_then(scan_disk_usage),
+            .and_then(|path| {
+                let mode = request["mode"].as_str().unwrap_or("standard");
+                if !["standard", "deep"].contains(&mode) {
+                    return Err("Scan mode is invalid.".to_owned());
+                }
+                scan_disk_usage(path, mode)
+            }),
         "file-list" => request["path"]
             .as_str()
             .ok_or_else(|| "A path is required.".to_owned())

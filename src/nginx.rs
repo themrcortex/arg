@@ -59,6 +59,26 @@ pub(super) struct NginxSiteMetadataInput {
     description: String,
 }
 #[derive(Deserialize)]
+pub(super) struct NginxSiteRuntimeInput {
+    unit: String,
+    cpu_quota_percent: Option<f64>,
+    memory_max_bytes: Option<u64>,
+}
+#[derive(Serialize)]
+struct NginxSiteAction {
+    id: i64,
+    site_name: String,
+    title: String,
+    icon: String,
+    operation: String,
+}
+#[derive(Deserialize)]
+pub(super) struct NginxSiteActionInput {
+    title: String,
+    icon: String,
+    operation: String,
+}
+#[derive(Deserialize)]
 pub(super) struct NginxSiteLogInput {
     kind: String,
 }
@@ -269,6 +289,10 @@ pub(super) async fn delete_nginx_site(
         .map_err(db_error)?;
     db.execute("DELETE FROM nginx_site_config_state WHERE name=?1", [&name])
         .map_err(db_error)?;
+    db.execute("DELETE FROM nginx_site_runtime WHERE site_name=?1", [&name])
+        .map_err(db_error)?;
+    db.execute("DELETE FROM nginx_site_actions WHERE site_name=?1", [&name])
+        .map_err(db_error)?;
     audit(&db, &actor, "nginx.site.delete", &name);
     Ok(Json(result))
 }
@@ -310,6 +334,16 @@ pub(super) async fn rename_nginx_site(
         params![name, input.new_name],
     )
     .map_err(db_error)?;
+    db.execute(
+        "UPDATE nginx_site_runtime SET site_name=?2 WHERE site_name=?1",
+        params![name, input.new_name],
+    )
+    .map_err(db_error)?;
+    db.execute(
+        "UPDATE nginx_site_actions SET site_name=?2 WHERE site_name=?1",
+        params![name, input.new_name],
+    )
+    .map_err(db_error)?;
     result["description"] = json!(old_description);
     audit(
         &db,
@@ -341,6 +375,110 @@ pub(super) async fn update_nginx_site_metadata(
     Ok(Json(
         json!({"name":name,"description":input.description.trim(),"message":"توضیحات سایت ذخیره شد."}),
     ))
+}
+
+fn read_site_action(db: &Connection, site: &str, id: i64) -> Result<NginxSiteAction, rusqlite::Error> {
+    db.query_row("SELECT id,site_name,title,icon,operation FROM nginx_site_actions WHERE site_name=?1 AND id=?2", params![site,id], |row| Ok(NginxSiteAction { id:row.get(0)?,site_name:row.get(1)?,title:row.get(2)?,icon:row.get(3)?,operation:row.get(4)? }))
+}
+
+fn validate_site_action(input: &NginxSiteActionInput) -> Result<(), (StatusCode, Json<Value>)> {
+    if input.title.trim().is_empty() || input.title.chars().count() > 40 {
+        return Err(error(StatusCode::BAD_REQUEST, "عنوان دکمه باید بین 1 تا 40 نویسه باشد."));
+    }
+    if !["Play", "RotateCw", "ShieldCheck", "FolderOpen", "ScrollText", "Globe", "Zap", "Terminal", "Power", "Activity"].contains(&input.icon.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "آیکون انتخاب‌شده پشتیبانی نمی‌شود."));
+    }
+    if !["nginx-test", "nginx-reload", "nginx-restart", "site-enable", "site-disable", "site-access-log", "site-error-log", "site-files", "app-start", "app-restart", "app-reload"].contains(&input.operation.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "اکشن انتخاب‌شده پشتیبانی نمی‌شود."));
+    }
+    Ok(())
+}
+
+pub(super) async fn list_site_actions(State(state): State<AppState>, Path(name): Path<String>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap(); require_admin(&db, &headers)?;
+    if !valid_nginx_site_name(&name) { return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست.")); }
+    let mut stmt = db.prepare("SELECT id,site_name,title,icon,operation FROM nginx_site_actions WHERE site_name=?1 ORDER BY id").map_err(db_error)?;
+    let rows = stmt.query_map([&name], |row| Ok(NginxSiteAction { id:row.get(0)?,site_name:row.get(1)?,title:row.get(2)?,icon:row.get(3)?,operation:row.get(4)? })).map_err(db_error)?;
+    Ok(Json(json!({"actions":rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?})))
+}
+
+pub(super) async fn create_site_action(State(state): State<AppState>, Path(name): Path<String>, headers: HeaderMap, Json(input): Json<NginxSiteActionInput>) -> ApiResult {
+    check_origin(&headers)?; validate_site_action(&input)?;
+    let actor = { let db=state.lock().unwrap(); require_admin(&db,&headers)?.username };
+    if !valid_nginx_site_name(&name) { return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست.")); }
+    nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await?;
+    let db=state.lock().unwrap();
+    db.execute("INSERT INTO nginx_site_actions(site_name,title,icon,operation,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?5)", params![name,input.title.trim(),input.icon,input.operation,now()]).map_err(db_error)?;
+    let action=read_site_action(&db,&name,db.last_insert_rowid()).map_err(db_error)?;
+    audit(&db,&actor,"nginx.site.action.create",&format!("site={name} action={} operation={}",action.id,action.operation));
+    Ok(Json(json!({"action":action})))
+}
+
+pub(super) async fn update_site_action(State(state): State<AppState>, Path((name,id)): Path<(String,i64)>, headers: HeaderMap, Json(input): Json<NginxSiteActionInput>) -> ApiResult {
+    check_origin(&headers)?; validate_site_action(&input)?;
+    let actor={let db=state.lock().unwrap();require_admin(&db,&headers)?.username};
+    if !valid_nginx_site_name(&name) { return Err(error(StatusCode::BAD_REQUEST,"نام سایت معتبر نیست.")); }
+    let db=state.lock().unwrap();
+    read_site_action(&db,&name,id).map_err(|_|error(StatusCode::NOT_FOUND,"دکمهٔ سایت پیدا نشد."))?;
+    db.execute("UPDATE nginx_site_actions SET title=?1,icon=?2,operation=?3,updated_at=?4 WHERE site_name=?5 AND id=?6",params![input.title.trim(),input.icon,input.operation,now(),name,id]).map_err(db_error)?;
+    let action=read_site_action(&db,&name,id).map_err(db_error)?;
+    audit(&db,&actor,"nginx.site.action.update",&format!("site={name} action={id} operation={}",action.operation));
+    Ok(Json(json!({"action":action})))
+}
+
+pub(super) async fn delete_site_action(State(state): State<AppState>, Path((name,id)): Path<(String,i64)>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let db=state.lock().unwrap();let actor=require_admin(&db,&headers)?.username;
+    if !valid_nginx_site_name(&name) { return Err(error(StatusCode::BAD_REQUEST,"نام سایت معتبر نیست.")); }
+    let action=read_site_action(&db,&name,id).map_err(|_|error(StatusCode::NOT_FOUND,"دکمهٔ سایت پیدا نشد."))?;
+    db.execute("DELETE FROM nginx_site_actions WHERE site_name=?1 AND id=?2",params![name,id]).map_err(db_error)?;
+    audit(&db,&actor,"nginx.site.action.delete",&format!("site={name} action={id}"));
+    Ok(Json(json!({"ok":true,"deleted":action.title})))
+}
+
+pub(super) async fn run_site_action(State(state): State<AppState>, Path((name,id)): Path<(String,i64)>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let (actor,action,app_unit)={
+        let db=state.lock().unwrap();let actor=require_admin(&db,&headers)?.username;
+        if !valid_nginx_site_name(&name) { return Err(error(StatusCode::BAD_REQUEST,"نام سایت معتبر نیست.")); }
+        let action=read_site_action(&db,&name,id).map_err(|_|error(StatusCode::NOT_FOUND,"دکمهٔ سایت پیدا نشد."))?;
+        let unit=db.query_row("SELECT unit FROM nginx_site_runtime WHERE site_name=?1",[&name],|row|row.get::<_,String>(0)).optional().map_err(db_error)?;
+        (actor,action,unit)
+    };
+    let result=match action.operation.as_str() {
+        "nginx-test"|"nginx-reload"|"nginx-restart" => {
+            let op=action.operation.trim_start_matches("nginx-");
+            let result=nginx_manager_request_async(json!({"action":format!("nginx-{op}")})).await?;
+            json!({"message":format!("Nginx {op} completed"),"output":result})
+        },
+        "site-enable"|"site-disable" => {
+            let enabled=action.operation=="site-enable";
+            let result=nginx_manager_request_async(json!({"action":"nginx-toggle","name":name,"enabled":enabled})).await?;
+            json!({"message":if enabled{"سایت فعال شد."}else{"سایت غیرفعال شد."},"output":result})
+        },
+        "site-access-log"|"site-error-log" => {
+            let kind=if action.operation=="site-access-log"{"access"}else{"error"};
+            nginx_manager_request_async(json!({"action":"nginx-site-logs","name":name,"kind":kind})).await?
+        },
+        "site-files" => {
+            let (path,_)=nginx_site_paths(&name).map_err(|message|error(StatusCode::BAD_REQUEST,&message))?;
+            let config=fs::read_to_string(path).map_err(|_|error(StatusCode::BAD_REQUEST,"فایل کانفیگ سایت خوانده نشد."))?;
+            let root=config.lines().find_map(|line|{let mut parts=line.trim().trim_end_matches(';').split_whitespace();(parts.next()?=="root").then(||parts.next().unwrap_or("").to_owned())}).unwrap_or_default();
+            json!({"message":"مسیر فایل‌های سایت آماده است.","path":root})
+        },
+        "app-start"|"app-restart"|"app-reload" => {
+            let unit=app_unit.ok_or_else(||error(StatusCode::BAD_REQUEST,"برای این سایت هنوز سرویس اختصاصی برنامه در تنظیمات منابع ثبت نشده است."))?;
+            if !super::valid_service_unit(&unit)||super::protected_service_mutation(&unit,action.operation.trim_start_matches("app-")) {return Err(error(StatusCode::BAD_REQUEST,"سرویس متصل‌شده برای این عملیات معتبر نیست."));}
+            let operation=action.operation.trim_start_matches("app-");
+            let response=privileged_request_async(json!({"action":"service-action","operation":operation,"unit":unit})).await?;
+            if response["ok"]!=true {return Err(error(StatusCode::BAD_GATEWAY,response["error"].as_str().unwrap_or("عملیات سرویس برنامه انجام نشد.")));}
+            json!({"message":format!("سرویس {unit} {operation} شد."),"output":response["stdout"]})
+        },
+        _=>return Err(error(StatusCode::BAD_REQUEST,"اکشن پشتیبانی نمی‌شود.")),
+    };
+    let db=state.lock().unwrap();
+    audit(&db,&actor,"nginx.site.action.run",&format!("site={name} action={id} operation={}",action.operation));
+    Ok(Json(result))
 }
 
 pub(super) async fn api_nginx_site_logs(
@@ -387,6 +525,76 @@ pub(super) async fn api_nginx_site_traffic(
     Ok(Json(
         nginx_manager_request_async(json!({"action":"nginx-site-traffic", "name":name})).await?,
     ))
+}
+
+pub(super) async fn api_nginx_site_runtime(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    method: axum::http::Method,
+    body: Option<Json<NginxSiteRuntimeInput>>,
+) -> ApiResult {
+    if method == axum::http::Method::PUT { check_origin(&headers)?; }
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    nginx_manager_request_async(json!({"action":"nginx-get", "name":name})).await?;
+    if method == axum::http::Method::PUT {
+        let input = body.ok_or_else(|| error(StatusCode::BAD_REQUEST, "تنظیمات منابع ارسال نشده است."))?.0;
+        let unit = input.unit.trim();
+        if !super::valid_service_unit(unit) {
+            return Err(error(StatusCode::BAD_REQUEST, "نام واحد systemd معتبر نیست."));
+        }
+        if super::shared_web_service(unit) {
+            return Err(error(StatusCode::BAD_REQUEST, "سرویس وب یا PHP-FPM بین چند سایت مشترک است و محدودیتش همه را تحت‌تأثیر می‌گذارد. برای این سایت یک سرویس برنامهٔ مستقل معرفی کن."));
+        }
+        if input.cpu_quota_percent.is_some_and(|value| !value.is_finite() || !(1.0..=10000.0).contains(&value))
+            || input.memory_max_bytes.is_some_and(|value| !(16 * 1024 * 1024..=1_099_511_627_776).contains(&value))
+        {
+            return Err(error(StatusCode::BAD_REQUEST, "واحد systemd یا سقف CPU/RAM معتبر نیست. CPU باید 1 تا 10000 درصد و RAM حداقل 16 MiB باشد."));
+        }
+        let result = privileged_request_async(json!({
+            "action":"service-limits", "unit":unit,
+            "cpu_quota_percent":input.cpu_quota_percent,
+            "memory_max_bytes":input.memory_max_bytes
+        })).await?;
+        if result["ok"] != true {
+            return Err(error(StatusCode::BAD_REQUEST, result["error"].as_str().unwrap_or("اعمال محدودیت منابع سرویس ناموفق بود.")));
+        }
+        let db = state.lock().unwrap();
+        db.execute("INSERT INTO nginx_site_runtime(site_name,unit,cpu_quota_percent,memory_max_bytes,last_cpu_usage_ns,last_sampled_at,updated_at) VALUES (?1,?2,?3,?4,NULL,NULL,?5) ON CONFLICT(site_name) DO UPDATE SET unit=excluded.unit,cpu_quota_percent=excluded.cpu_quota_percent,memory_max_bytes=excluded.memory_max_bytes,last_cpu_usage_ns=NULL,last_sampled_at=NULL,updated_at=excluded.updated_at", params![name, unit, input.cpu_quota_percent, input.memory_max_bytes.map(|value| value as i64), now()]).map_err(db_error)?;
+        audit(&db, &actor, "nginx.site.runtime.limits", &format!("site={name} unit={unit}"));
+    }
+    let (unit, cpu_limit, memory_limit, previous_cpu, previous_at): (String, Option<f64>, Option<i64>, Option<i64>, Option<i64>) = {
+        let db = state.lock().unwrap();
+        db.query_row("SELECT unit,cpu_quota_percent,memory_max_bytes,last_cpu_usage_ns,last_sampled_at FROM nginx_site_runtime WHERE site_name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
+            .optional().map_err(db_error)?
+            .map(|row| row)
+            .unwrap_or_else(|| (String::new(),None,None,None,None))
+    };
+    if unit.is_empty() {
+        return Ok(Json(json!({"configured":false,"site":name})));
+    }
+    let result = privileged_request_async(json!({"action":"service-resources","unit":unit})).await?;
+    if result["ok"] != true {
+        return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("خواندن مصرف سرویس ناموفق بود.")));
+    }
+    let data = result["data"].clone();
+    let cpu_now = data["cpu_usage_ns"].as_u64();
+    let sampled_at = now();
+    let cpu_percent = match (previous_cpu.and_then(|value| u64::try_from(value).ok()), previous_at) {
+        (Some(old_cpu), Some(old_at)) if sampled_at > old_at => cpu_now.filter(|current| *current >= old_cpu).map(|current| (current - old_cpu) as f64 / ((sampled_at - old_at) as f64 * 10_000_000.0)),
+        _ => None,
+    };
+    {
+        let db = state.lock().unwrap();
+        db.execute("UPDATE nginx_site_runtime SET last_cpu_usage_ns=?1,last_sampled_at=?2 WHERE site_name=?3", params![cpu_now.map(|value| value as i64), sampled_at, name]).map_err(db_error)?;
+    }
+    Ok(Json(json!({"configured":true,"unit":unit,"cpu_quota_percent":cpu_limit,"memory_max_bytes":memory_limit,"cpu_percent":cpu_percent,"memory_current_bytes":data["memory_current_bytes"],"sampled_at":sampled_at,"note":"Resource values apply to the associated systemd unit. A shared PHP-FPM unit affects every site using that pool."})))
 }
 
 pub(super) async fn api_nginx_site_repository(

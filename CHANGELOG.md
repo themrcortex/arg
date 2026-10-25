@@ -1,5 +1,18 @@
 # ARG Change Log
 
+## v0.4.35 — 2026-10-25
+
+### Added
+- Add dashboard Fast Actions and per-site Nginx action buttons with custom names and icons, editable actions, execution results, server status, and optional site logs.
+- Add a bounded deep disk scan mode for larger paths, with the selected scan limits shown in the interface.
+
+### Changed
+- Keep terminal tabs and connections mounted while navigating between pages; improve empty-state behavior, fullscreen fallback, scrollback, and output-following.
+- Make long-range charts identify dates as well as times, and make traffic-volume bars reveal the exact bucket timestamp and RX/TX values when selected.
+- Make resource threshold notices dismissible and automatically clear them when readings return below the alert range.
+- Apply subtle ARG geometric patterns and softer interaction feedback across the panel, while honoring reduced-motion preferences.
+- Protect active panel and SSH firewall ports and prevent changes to protected systemd services.
+
 ## v0.4.34 — 2026-10-25
 
 ### Added
