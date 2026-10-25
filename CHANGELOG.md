@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.6.3-dev.2 — 2026-10-25
+
+### Added
+- Add per-site Nginx maintenance mode with an ARG page, a project-root HTML file, or a selected static HTML page.
+- Add graceful maintenance activation that drains in-flight HTTP requests, plus a separately confirmed Force restart option.
+- Validate Nginx configuration before applying maintenance and restore the previous config if activation fails.
+
 ## v0.6.3-dev.1 — 2026-10-25
 
 ### Development
