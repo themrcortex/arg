@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.4.37 — 2026-10-25
+
+### Added
+- Add a custom Dashboard Fast Action editor and runner. Custom commands run as the ARG service account, are limited to 30 seconds and 2048 bytes, cap captured output, and write start/result audit entries.
+- Add an optional “نمایش لاگ‌های اجرا” setting for custom actions.
+
+### Changed
+- Replace the Dashboard Fast Actions Access Log option with “نمایش لاگ‌های اجرا”; keep the optional site Error Log display.
+
 ## v0.4.36 — 2026-10-25
 
 ### Performance

@@ -65,6 +65,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/history", get(history))
         .route("/api/fast-actions", get(fast_actions::list).post(fast_actions::create))
         .route("/api/fast-actions/{id}", put(fast_actions::update).delete(fast_actions::delete))
+        .route("/api/fast-actions/{id}/run", post(fast_actions::run))
         .route("/api/network/traffic", get(network_traffic_volume))
         .route(
             "/api/monitoring/alerts",
