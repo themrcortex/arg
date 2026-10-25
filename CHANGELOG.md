@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.3 — 2026-10-25
+
+### Fixed
+- Detect the server's public IPv4 address through multiple independent services and reject malformed, private, or non-public addresses.
+- Retry transient Let's Encrypt API network timeouts up to three times, restore any temporarily stopped web service, and explain how to diagnose persistent outbound connectivity failures.
+
 ## Unreleased
 
 ## v0.6.2 — 2026-10-25
