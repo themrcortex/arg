@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.7-dev.1 — 2026-10-25
+
+### Fixed
+- Allow uploads to new S3 object keys when compatible providers return a 404 HEAD response, while still rejecting explicit missing-bucket responses.
+- Distinguish missing objects from missing buckets in S3 transfer errors.
+
 ## v0.6.6-dev.3 — 2026-10-25
 
 ### Added
