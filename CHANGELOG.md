@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.3-dev.4 — 2026-10-25
+
+### Fixed
+- Pass the MySQL credential option file path in the required single-argument `--defaults-extra-file=PATH` form so MySQL and MariaDB clients accept it.
+- Add a regression test for the option format.
+
 ## v0.6.3-dev.3 — 2026-10-25
 
 ### Fixed
