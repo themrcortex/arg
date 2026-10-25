@@ -445,10 +445,37 @@ panel_port() {
 }
 
 detect_public_ipv4() {
-  local address
-  address="$(curl -4 --connect-timeout 3 --max-time 6 -fsS https://api.ipify.org 2>/dev/null || true)"
-  [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
-  printf '%s\n' "$address"
+  local address endpoint octet valid index
+  local -a octets
+  # Public-IP services can be unreachable from some providers or filtered
+  # networks. Try independent HTTPS endpoints and accept only globally usable
+  # IPv4 addresses; never mistake a proxy/private address for the VPS address.
+  for endpoint in \
+    https://api.ipify.org \
+    https://checkip.amazonaws.com \
+    https://ipv4.icanhazip.com \
+    https://ifconfig.me/ip; do
+    address="$(curl -4 --connect-timeout 3 --max-time 6 -fsS "$endpoint" 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ "$address" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || continue
+    IFS=. read -r -a octets <<< "$address"
+    valid=1
+    for index in 0 1 2 3; do
+      octet="${octets[$index]}"
+      octets[$index]="$((10#$octet))"
+      (( octets[$index] <= 255 )) || { valid=0; break; }
+    done
+    (( valid == 1 )) || continue
+    # Reject non-public ranges, including RFC1918, loopback, link-local,
+    # carrier-grade NAT, and multicast/reserved address space.
+    (( octets[0] != 0 && octets[0] != 10 && octets[0] != 127 && octets[0] < 224 )) || continue
+    (( octets[0] != 169 || octets[1] != 254 )) || continue
+    (( octets[0] != 172 || octets[1] < 16 || octets[1] > 31 )) || continue
+    (( octets[0] != 192 || octets[1] != 168 )) || continue
+    (( octets[0] != 100 || octets[1] < 64 || octets[1] > 127 )) || continue
+    printf '%d.%d.%d.%d\n' "${octets[0]}" "${octets[1]}" "${octets[2]}" "${octets[3]}"
+    return 0
+  done
+  return 1
 }
 
 check_update_status() {
@@ -723,6 +750,7 @@ copy_certificate_files() {
 
 issue_certificate() {
   local host="$1" email="$2" port80_unit="$3" is_ip="$4" stopped="n"
+  local attempt output_file retryable
   local -a hooks=() identifier_args=()
   write_cert_deploy_hook
   if [[ "$is_ip" == "y" ]]; then
@@ -739,19 +767,33 @@ issue_certificate() {
     hooks+=(--pre-hook "systemctl stop $port80_unit" --post-hook "systemctl start $port80_unit")
   fi
 
-  if "$CERTBOT_BIN" certonly --standalone --preferred-challenges http --non-interactive \
-    --agree-tos --email "$email" --cert-name "$CERT_NAME" "${identifier_args[@]}" \
-    --deploy-hook "$CERT_DEPLOY_HOOK" "${hooks[@]}"; then
-    if [[ "$stopped" == "y" ]] && ! restore_port80_service; then
-      die "The certificate was issued, but $port80_unit could not be restarted."
+  output_file="$(mktemp /tmp/arg-certbot.XXXXXX)"
+  for attempt in 1 2 3; do
+    if "$CERTBOT_BIN" certonly --standalone --preferred-challenges http --non-interactive \
+      --agree-tos --email "$email" --cert-name "$CERT_NAME" "${identifier_args[@]}" \
+      --deploy-hook "$CERT_DEPLOY_HOOK" "${hooks[@]}" >"$output_file" 2>&1; then
+      cat "$output_file"
+      rm -f "$output_file"
+      if [[ "$stopped" == "y" ]] && ! restore_port80_service; then
+        die "The certificate was issued, but $port80_unit could not be restarted."
+      fi
+      trap - EXIT INT TERM
+      return 0
     fi
-    trap - EXIT INT TERM
-    return 0
-  fi
+    cat "$output_file"
+    retryable="$(rg -qi 'ReadTimeout|ConnectTimeout|timed out|ConnectionError|Temporary failure in name resolution|Name or service not known|Network is unreachable' "$output_file" && printf y || printf n)"
+    if [[ "$retryable" != "y" || "$attempt" == 3 ]]; then
+      break
+    fi
+    warn "The ACME service could not be reached (attempt $attempt/3). Retrying in $((attempt * 5)) seconds."
+    sleep "$((attempt * 5))"
+  done
+  rm -f "$output_file"
   if [[ "$stopped" == "y" ]] && ! restore_port80_service; then
     die "Certificate issuance failed and $port80_unit could not be restarted."
   fi
   trap - EXIT INT TERM
+  warn "Certificate issuance could not reach Let's Encrypt after up to 3 attempts. Check outbound TCP 443, DNS resolution, server time, and provider egress filtering; then retry with 'sudo arg ssl'."
   return 1
 }
 
@@ -821,7 +863,7 @@ configure_https() {
   port80_unit="$(port80_systemd_service)" || die "TCP port 80 is occupied by a process that cannot be safely paused as a systemd service. Stop it manually, then run 'sudo arg ssl' again."
   if ! issue_certificate "$host" "$email" "$port80_unit" "$is_ip"; then
     rm -f "$CERT_DEPLOY_HOOK"
-    warn "Certificate issuance failed. The panel remains available through localhost or an SSH tunnel."
+    warn "Certificate issuance failed. The panel remains available on its current address; HTTPS configuration was not changed."
     return 0
   fi
 
