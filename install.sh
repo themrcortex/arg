@@ -1203,7 +1203,7 @@ update_app() {
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
     "$UPDATE_HELPER" state succeeded complete "ARG is updated and the service is active." >/dev/null 2>&1 || true
     binary_swapped=0
-    show_setup_code_if_needed
+    show_setup_code_if_needed || true
     cleanup_update_reservation 0
     trap - EXIT
     if (( MENU_ACTIVE )); then

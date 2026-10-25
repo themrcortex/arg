@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.5.5 — 2026-10-25
+
+### Fixed
+- Treat an unavailable first-admin setup code as a normal update state so it cannot abort cleanup or leave the update reservation locked.
+
 ## v0.5.4 — 2026-10-25
 
 ### Fixed
