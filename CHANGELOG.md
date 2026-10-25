@@ -1,5 +1,17 @@
 # ARG Change Log
 
+## v0.4.39 — 2026-10-25
+
+### Added
+- Add a server-side file browser and direct local-disk ↔ S3 object transfer, including optional source deletion only after a successful upload.
+- Add per-Bucket Rclone mount controls with read-only mode, systemd auto-start, and safe dedicated mount/cache paths.
+- Add the current ArvanCloud Iran Central 1 endpoint preset and prefill its `ir-central1` region from the selected panel endpoint.
+
+### Changed
+- Report cloud mounts separately from local disk capacity; bound Rclone's local VFS cache to 1 GiB.
+- Prevent deleting or detaching a Bucket/connection while its mount is active; refuse local-download overwrites and require explicit confirmation before replacing an S3 object.
+- Bump ARG to v0.4.39.
+
 ## v0.4.38 — 2026-10-25
 
 ### Security

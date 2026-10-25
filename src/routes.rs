@@ -59,9 +59,22 @@ pub(super) fn router(state: AppState) -> Router {
             get(s3::download_object),
         )
         .route(
+            "/api/s3/connections/{id}/transfer/local-to-bucket",
+            post(s3::transfer_local_to_bucket),
+        )
+        .route(
+            "/api/s3/connections/{id}/transfer/bucket-to-local",
+            post(s3::transfer_bucket_to_local),
+        )
+        .route(
             "/api/s3/buckets/{id}",
             axum::routing::delete(s3::detach_bucket),
         )
+        .route(
+            "/api/s3/buckets/{id}/mount",
+            get(s3::get_bucket_mount).put(s3::configure_bucket_mount),
+        )
+        .route("/api/s3/mounts/{id}/stop", post(s3::stop_bucket_mount))
         .route("/api/history", get(history))
         .route("/api/fast-actions", get(fast_actions::list).post(fast_actions::create))
         .route("/api/fast-actions/{id}", put(fast_actions::update).delete(fast_actions::delete))

@@ -100,7 +100,7 @@ fn providers() -> Value {
     json!([
       {"id":"aws","label":"Amazon S3","rclone_provider":"AWS","endpoint_required":false,"region_required":true,"create_bucket":true,"docs":"https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html"},
       {"id":"cloudflare_r2","label":"Cloudflare R2","rclone_provider":"Cloudflare","endpoint_required":true,"region_required":false,"region_default":"auto","create_bucket":true,"docs":"https://developers.cloudflare.com/r2/get-started/s3/"},
-      {"id":"arvancloud","label":"ابر آروان · ArvanCloud","rclone_provider":"ArvanCloud","endpoint_required":true,"region_required":true,"create_bucket":false,"docs":"https://docs.arvancloud.ir/fa/developer-tools/sdk/object-storage/","endpoints":[{"id":"simin","label":"سیمین","endpoint":"https://s3.ir-thr-at1.arvanstorage.ir"},{"id":"shahriar","label":"شهریار","endpoint":"https://s3.ir-tbz-sh1.arvanstorage.ir"}]},
+      {"id":"arvancloud","label":"ابر آروان · ArvanCloud","rclone_provider":"ArvanCloud","endpoint_required":true,"region_required":true,"create_bucket":false,"docs":"https://docs.arvancloud.ir/fa/developer-tools/sdk/object-storage/","endpoints":[{"id":"central1","label":"ایران مرکز ۱","endpoint":"https://s3.ir-central1.arvanstorage.ir","region":"ir-central1"},{"id":"simin","label":"سیمین","endpoint":"https://s3.ir-thr-at1.arvanstorage.ir"},{"id":"shahriar","label":"شهریار","endpoint":"https://s3.ir-tbz-sh1.arvanstorage.ir"}]},
       {"id":"parspack","label":"پارس‌پک · ParsPack","rclone_provider":"Other","endpoint_required":true,"region_required":false,"create_bucket":false,"docs":"https://docs.parspack.com/cloud-storage/"},
       {"id":"backblaze_b2","label":"Backblaze B2 S3","rclone_provider":"Other","endpoint_required":true,"region_required":true,"create_bucket":false,"docs":"https://www.backblaze.com/docs/cloud-storage-s3-compatible-api"},
       {"id":"digitalocean_spaces","label":"DigitalOcean Spaces","rclone_provider":"DigitalOcean","endpoint_required":true,"region_required":true,"create_bucket":true,"docs":"https://docs.digitalocean.com/products/spaces/"},
@@ -239,6 +239,9 @@ fn input_error(input: &ConnectionInput, is_create: bool) -> Option<String> {
     }
     if !["auto", "path", "virtual"].contains(&input.address_style.as_str()) {
         return Some("Addressing Style معتبر نیست.".into());
+    }
+    if input.region.len() > 128 || input.region.chars().any(char::is_control) {
+        return Some("Region نباید بیش از 128 نویسه یا نویسهٔ کنترلی داشته باشد.".into());
     }
     let endpoint_required = input.provider_type != "aws";
     if endpoint_required && input.endpoint.is_empty() {
@@ -426,6 +429,8 @@ fn helper_error(err: &::s3::error::S3Error) -> String {
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     let id = request["id"].as_i64().unwrap_or(0);
     match action {
+        "s3-mount-start" => return start_s3_mount(request),
+        "s3-mount-stop" => return stop_s3_mount(request),
         "s3-secret-write" => {
             let Some(secret) =
                 serde_json::from_value::<SecretConfig>(request["secret"].clone()).ok()
@@ -464,7 +469,8 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
             Err(error) => json!({"ok":false,"error":error}),
         },
         "s3-list-buckets" | "s3-test" | "s3-create-bucket" | "s3-list-objects"
-        | "s3-delete-object" | "s3-upload-object" | "s3-download-object" => {
+        | "s3-delete-object" | "s3-upload-object" | "s3-download-object"
+        | "s3-upload-local-file" | "s3-download-local-file" => {
             let secret = match read_secret_file(id) {
                 Ok(secret) => secret,
                 Err(error) => return json!({"ok":false,"error":error}),
@@ -479,6 +485,186 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
             runtime.block_on(async { execute_network_action(action, request, &secret).await })
         }
         _ => json!({"ok":false,"error":"Unsupported S3 operation"}),
+    }
+}
+
+fn mount_paths(mount_id: i64, connection_id: i64, bucket_id: i64) -> Option<(PathBuf, PathBuf, String)> {
+    if mount_id <= 0 || connection_id <= 0 || bucket_id <= 0 {
+        return None;
+    }
+    let mount_path = PathBuf::from(format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"));
+    let config_path = PathBuf::from(format!("{SECRET_DIR}/mount-{mount_id}.conf"));
+    let unit = format!("arg-s3-mount-{mount_id}.service");
+    Some((mount_path, config_path, unit))
+}
+
+fn run_systemctl(args: &[&str]) -> Result<String, String> {
+    let mut command = std::process::Command::new("systemctl");
+    command.args(args);
+    match super::command_result(&mut command) {
+        Ok((true, output)) => Ok(output),
+        Ok((false, output)) => Err(if output.trim().is_empty() { "systemd operation failed".into() } else { output }),
+        Err(error) => Err(error),
+    }
+}
+
+fn start_s3_mount(request: &Value) -> Value {
+    let mount_id = request["mount_id"].as_i64().unwrap_or(0);
+    let connection_id = request["connection_id"].as_i64().unwrap_or(0);
+    let bucket_id = request["bucket_id"].as_i64().unwrap_or(0);
+    let Some(bucket) = request["bucket"].as_str().filter(|value| valid_bucket_name(value)) else {
+        return json!({"ok":false,"error":"Bucket نامعتبر است."});
+    };
+    let Some((mount_path, config_path, unit)) = mount_paths(mount_id, connection_id, bucket_id) else {
+        return json!({"ok":false,"error":"شناسه Mount نامعتبر است."});
+    };
+    let secret = match read_secret_file(connection_id) {
+        Ok(secret) => secret,
+        Err(error) => return json!({"ok":false,"error":error}),
+    };
+    if secret.region.len() > 128 || secret.region.chars().any(char::is_control) {
+        return json!({"ok":false,"error":"Signing Region در تنظیمات اتصال معتبر نیست."});
+    }
+    let rclone = ["/usr/bin/rclone", "/usr/local/bin/rclone"]
+        .iter()
+        .find(|path| PathBuf::from(path).is_file())
+        .copied();
+    let Some(rclone) = rclone else {
+        return json!({"ok":false,"error":"Rclone نصب نیست. ابتدا بستهٔ rclone را از بخش مدیریت APT نصب کن."});
+    };
+    let rclone_provider = match secret.provider_type.as_str() {
+        "aws" => "AWS",
+        "cloudflare_r2" => "Cloudflare",
+        "arvancloud" => "ArvanCloud",
+        "digitalocean_spaces" => "DigitalOcean",
+        "wasabi" => "Wasabi",
+        "minio" => "Minio",
+        _ => "Other",
+    };
+    let remote = format!(
+        "[arg]\ntype = s3\nprovider = {rclone_provider}\naccess_key_id = {}\nsecret_access_key = {}\n",
+        secret.access_key_id, secret.secret_access_key
+    );
+    let mut config = remote;
+    if let Some(token) = secret.session_token.as_deref() {
+        config.push_str(&format!("session_token = {token}\n"));
+    }
+    if !secret.region.is_empty() {
+        config.push_str(&format!("region = {}\n", secret.region));
+    }
+    if !secret.endpoint.is_empty() {
+        config.push_str(&format!("endpoint = {}\n", secret.endpoint));
+    }
+    config.push_str(&format!("force_path_style = {}\n", secret.address_style != "virtual"));
+    let already_active = run_systemctl(&["is-active", "--quiet", &unit]).is_ok();
+    if let Err(error) = ensure_mount_directory(PathBuf::from("/mnt/arg-s3").as_path()) {
+        return json!({"ok":false,"error":format!("مسیر پایهٔ Mount امن نیست: {error}")});
+    }
+    let cache_root = PathBuf::from("/var/cache/arg-s3");
+    let cache_path = cache_root.join(format!("mount-{mount_id}"));
+    if ensure_mount_directory(&cache_root).is_err() || ensure_mount_directory(&cache_path).is_err() {
+        return json!({"ok":false,"error":"ساخت پوشهٔ Cache محلی امن ناموفق بود."});
+    }
+    if !already_active {
+        if let Err(error) = ensure_mount_directory(&mount_path) {
+            return json!({"ok":false,"error":format!("پوشهٔ Mount امن نیست: {error}")});
+        }
+    }
+    let mount_metadata = already_active || match fs::read_dir(&mount_path) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => false,
+    };
+    if !mount_metadata {
+        return json!({"ok":false,"error":"مسیر Mount خالی نیست یا قابل بررسی نیست."});
+    }
+    let mut conf_file = match fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&config_path) {
+        Ok(file) => file,
+        Err(_) => return json!({"ok":false,"error":"ساخت فایل تنظیمات امن Rclone ناموفق بود."}),
+    };
+    if conf_file.write_all(config.as_bytes()).is_err() || conf_file.sync_all().is_err() {
+        return json!({"ok":false,"error":"ذخیرهٔ تنظیمات امن Rclone ناموفق بود."});
+    }
+    let _ = fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600));
+    let uid = match std::process::Command::new("id").args(["-u", "arg"]).output() {
+        Ok(result) if result.status.success() => String::from_utf8_lossy(&result.stdout).trim().to_owned(),
+        _ => return json!({"ok":false,"error":"کاربر سرویس ARG پیدا نشد."}),
+    };
+    let gid = match std::process::Command::new("id").args(["-g", "arg"]).output() {
+        Ok(result) if result.status.success() => String::from_utf8_lossy(&result.stdout).trim().to_owned(),
+        _ => return json!({"ok":false,"error":"گروه سرویس ARG پیدا نشد."}),
+    };
+    if !uid.bytes().all(|byte| byte.is_ascii_digit()) || !gid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return json!({"ok":false,"error":"شناسهٔ کاربر سرویس ARG معتبر نیست."});
+    }
+    let mut args = vec!["mount".to_owned(), format!("arg:{bucket}"), mount_path.to_string_lossy().into_owned(), format!("--config={}", config_path.display()), "--allow-other".into(), "--default-permissions".into(), format!("--uid={uid}"), format!("--gid={gid}"), "--dir-perms=0700".into(), "--file-perms=0600".into(), "--vfs-cache-mode=writes".into(), format!("--cache-dir={}",cache_path.display()), "--vfs-cache-max-size=1G".into(), "--vfs-cache-max-age=24h".into()];
+    if request["read_only"].as_bool().unwrap_or(true) {
+        args.push("--read-only".into());
+    }
+    let args = args.iter().map(|arg| systemd_escape_arg(arg)).collect::<Vec<_>>().join(" ");
+    // Do not isolate the service mount namespace: ARG and host processes need to see this FUSE mount.
+    let unit_content = format!("[Unit]\nDescription=ARG S3 mount {mount_id}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=root\nExecStart={rclone} {args}\nRestart=on-failure\nRestartSec=5\nDeviceAllow=/dev/fuse rw\nCapabilityBoundingSet=CAP_SYS_ADMIN\nNoNewPrivileges=true\n\n[Install]\nWantedBy=multi-user.target\n");
+    let unit_path = PathBuf::from("/etc/systemd/system").join(&unit);
+    if fs::write(&unit_path, unit_content).is_err() || fs::set_permissions(&unit_path, fs::Permissions::from_mode(0o644)).is_err() {
+        return json!({"ok":false,"error":"ثبت سرویس systemd برای Mount ناموفق بود."});
+    }
+    if let Err(error) = run_systemctl(&["daemon-reload"]) {
+        return json!({"ok":false,"error":format!("بارگذاری تنظیمات systemd ناموفق بود: {error}")});
+    }
+    if request["auto_mount"].as_bool().unwrap_or(false) {
+        if let Err(error) = run_systemctl(&["enable", &unit]) {
+            return json!({"ok":false,"error":format!("فعال‌کردن اجرای خودکار Mount ناموفق بود: {error}")});
+        }
+    } else {
+        let _ = run_systemctl(&["disable", &unit]);
+    }
+    match run_systemctl(&["restart", &unit]) {
+        Ok(_) => json!({"ok":true,"mount_path":mount_path,"unit":unit}),
+        Err(error) => json!({"ok":false,"error":format!("Mount اجرا نشد: {error}")}),
+    }
+}
+
+fn systemd_escape_arg(value: &str) -> String {
+    if value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/_:=.-".contains(&byte)) {
+        value.to_owned()
+    } else {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"))
+    }
+}
+
+fn ensure_mount_directory(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || metadata.uid() != 0
+                || metadata.permissions().mode() & 0o022 != 0
+            {
+                return Err("پوشه باید واقعی، متعلق به root و بدون مجوز نوشتن برای دیگران باشد.".into());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(false).mode(0o755);
+            builder.create(path).map_err(|error| error.to_string())?;
+            let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() || metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+                return Err("مجوزهای پوشهٔ Mount ایمن نیست.".into());
+            }
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    Ok(())
+}
+
+fn stop_s3_mount(request: &Value) -> Value {
+    let mount_id = request["mount_id"].as_i64().unwrap_or(0);
+    let Some((_, config_path, unit)) = mount_paths(mount_id, request["connection_id"].as_i64().unwrap_or(0), request["bucket_id"].as_i64().unwrap_or(0)) else {
+        return json!({"ok":false,"error":"شناسه Mount نامعتبر است."});
+    };
+    match run_systemctl(&["stop", &unit]) {
+        Ok(_) => json!({"ok":true,"config":config_path}),
+        Err(error) => json!({"ok":false,"error":format!("توقف Mount ناموفق بود: {error}")}),
     }
 }
 
@@ -743,6 +929,120 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
             let _ = file.sync_all().await;
             json!({"ok":true,"size_bytes":size})
         }
+        "s3-upload-local-file" => {
+            let (Some(name), Some(key), Some(source)) = (
+                request["bucket"].as_str().filter(|value| valid_bucket_name(value)),
+                request["key"].as_str().filter(|value| valid_object_key(value)),
+                request["local_path"].as_str().filter(|value| value.starts_with('/')),
+            ) else {
+                return json!({"ok":false,"error":"مسیر فایل یا مشخصات Bucket معتبر نیست."});
+            };
+            let path = PathBuf::from(source);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(value) if value.file_type().is_file() && value.len() <= 512 * 1024 * 1024 => value,
+                Ok(_) => return json!({"ok":false,"error":"فقط فایل معمولی تا سقف 512 MiB قابل انتقال است؛ symlink پذیرفته نمی‌شود."}),
+                Err(_) => return json!({"ok":false,"error":"فایل مبدأ پیدا نشد یا قابل خواندن نیست."}),
+            };
+            let path = match fs::canonicalize(path) {
+                Ok(value) => value,
+                Err(_) => return json!({"ok":false,"error":"حل مسیر فایل مبدأ ناموفق بود."}),
+            };
+            let file = match tokio::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)
+                .await
+            {
+                Ok(value) => value,
+                Err(_) => return json!({"ok":false,"error":"بازکردن فایل مبدأ ناموفق بود."}),
+            };
+            let bucket = match make_bucket(name, secret) {
+                Ok(bucket) => bucket,
+                Err(error) => return json!({"ok":false,"error":error}),
+            };
+            let allow_overwrite = request["overwrite"].as_bool().unwrap_or(false);
+            match bucket.head_object(key).await {
+                Ok((_, status)) if (200..300).contains(&status) && !allow_overwrite => {
+                    return json!({"ok":false,"error":"Object مقصد از قبل وجود دارد. برای جایگزینی، تأیید بازنویسی را فعال کن."});
+                }
+                Ok((_, status)) if (200..300).contains(&status) || status == 404 => {}
+                Ok(_) if allow_overwrite => {}
+                Ok(_) => return json!({"ok":false,"error":"وجود Object مقصد قابل بررسی نیست؛ برای ادامه باید بازنویسی را صریحاً تأیید کنی."}),
+                Err(_) if allow_overwrite => {}
+                Err(error) => return json!({"ok":false,"error":format!("بررسی Object مقصد ناموفق بود؛ بازنویسی تأیید نشده: {}",helper_error(&error))}),
+            }
+            let content_type = request["content_type"].as_str().filter(|value| value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_graphic())).unwrap_or("application/octet-stream");
+            let mut file = file;
+            match bucket.put_object_stream_with_content_type(&mut file, key, content_type).await {
+                Ok(response) if response.status_code() < 300 => json!({"ok":true,"size_bytes":metadata.len()}),
+                Ok(_) => json!({"ok":false,"error":"ارائه‌دهنده انتقال فایل را تأیید نکرد."}),
+                Err(error) => json!({"ok":false,"error":helper_error(&error)}),
+            }
+        }
+        "s3-download-local-file" => {
+            let (Some(name), Some(key), Some(target)) = (
+                request["bucket"].as_str().filter(|value| valid_bucket_name(value)),
+                request["key"].as_str().filter(|value| valid_object_key(value)),
+                request["local_path"].as_str().filter(|value| value.starts_with('/')),
+            ) else {
+                return json!({"ok":false,"error":"مسیر مقصد یا مشخصات Bucket معتبر نیست."});
+            };
+            let target = PathBuf::from(target);
+            let Some(file_name) = target.file_name().filter(|name| !name.is_empty() && *name != "." && *name != "..") else {
+                return json!({"ok":false,"error":"مسیر مقصد باید نام فایل داشته باشد."});
+            };
+            let Some(parent) = target.parent() else {
+                return json!({"ok":false,"error":"پوشهٔ مقصد معتبر نیست."});
+            };
+            let parent = match fs::canonicalize(parent) {
+                Ok(value) if value.is_dir() => value,
+                _ => return json!({"ok":false,"error":"پوشهٔ مقصد وجود ندارد یا معتبر نیست."}),
+            };
+            let target = parent.join(file_name);
+            let bucket = match make_bucket(name, secret) {
+                Ok(bucket) => bucket,
+                Err(error) => return json!({"ok":false,"error":error}),
+            };
+            let mut response = match bucket.get_object_stream(key).await {
+                Ok(value) => value,
+                Err(error) => return json!({"ok":false,"error":helper_error(&error)}),
+            };
+            if response.status_code >= 300 {
+                return json!({"ok":false,"error":"دریافت Object از ارائه‌دهنده تأیید نشد."});
+            }
+            let mut file = match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&target)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return json!({"ok":false,"error":"فایلی با این نام از قبل وجود دارد؛ هیچ فایلی بازنویسی نشد."}),
+                Err(_) => return json!({"ok":false,"error":"ساخت فایل مقصد ناموفق بود."}),
+            };
+            let mut size = 0u64;
+            while let Some(chunk) = response.bytes.next().await {
+                let Ok(chunk) = chunk else {
+                    drop(file);
+                    let _ = fs::remove_file(&target);
+                    return json!({"ok":false,"error":"انتقال Object از ارائه‌دهنده قطع شد."});
+                };
+                size = size.saturating_add(chunk.len() as u64);
+                if size > 2 * 1024 * 1024 * 1024 || file.write_all(&chunk).await.is_err() {
+                    drop(file);
+                    let _ = fs::remove_file(&target);
+                    return json!({"ok":false,"error":"انتقال از سقف 2 GiB عبور کرد یا نوشتن فایل ناموفق بود."});
+                }
+            }
+            if file.sync_all().await.is_err() {
+                drop(file);
+                let _ = fs::remove_file(&target);
+                return json!({"ok":false,"error":"ذخیرهٔ فایل مقصد کامل نشد."});
+            }
+            json!({"ok":true,"size_bytes":size,"local_path":target})
+        }
         _ => json!({"ok":false,"error":"Unsupported S3 network action"}),
     }
 }
@@ -809,6 +1109,16 @@ mod tests {
         ));
         assert!(!valid_transfer_path("/etc/arg/s3/1.json"));
     }
+
+    #[test]
+    fn s3_mount_paths_are_generated_from_positive_ids_only() {
+        let (mount_path, config_path, unit) = mount_paths(12, 3, 8).unwrap();
+        assert_eq!(mount_path, PathBuf::from("/mnt/arg-s3/connection-3-bucket-8"));
+        assert_eq!(config_path, PathBuf::from("/etc/arg/s3/mount-12.conf"));
+        assert_eq!(unit, "arg-s3-mount-12.service");
+        assert!(mount_paths(0, 3, 8).is_none());
+        assert!(mount_paths(12, -1, 8).is_none());
+    }
 }
 
 pub(super) async fn list_providers(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -818,6 +1128,67 @@ pub(super) async fn list_providers(State(state): State<AppState>, headers: Heade
     }
     Ok(Json(json!({"providers":providers()})))
 }
+#[derive(Deserialize)]
+pub(super) struct MountConfigInput {
+    read_only: bool,
+    auto_mount: bool,
+}
+
+fn mount_public(mount_id: i64, connection_id: i64, bucket_id: i64, bucket: &str, read_only: bool, auto_mount: bool, status: &str, error: Option<&str>) -> Value {
+    json!({"id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket,"mount_path":format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"),"method":"rclone","read_only":read_only,"auto_mount":auto_mount,"status":status,"last_error":error,"capacity":"unknown","capacity_note":"S3 فضای ابری است؛ ظرفیت آن به دیسک محلی اضافه نمی‌شود و از statvfs قابل اتکا نیست."})
+}
+
+pub(super) async fn get_bucket_mount(State(state): State<AppState>, Path(bucket_id): Path<i64>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let bucket: (i64, String) = db.query_row("SELECT connection_id,bucket_name FROM s3_buckets WHERE id=?1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| error(StatusCode::NOT_FOUND,"Bucket پیدا نشد."))?;
+    let mount: Option<(i64,bool,bool,String,Option<String>)> = db.query_row("SELECT id,read_only!=0,auto_mount!=0,status,last_error FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional().map_err(db_error)?;
+    let value = mount.map(|(id,read_only,auto_mount,status,last_error)| mount_public(id,bucket.0,bucket_id,&bucket.1,read_only,auto_mount,&status,last_error.as_deref()));
+    Ok(Json(json!({"mount":value})))
+}
+
+pub(super) async fn configure_bucket_mount(State(state): State<AppState>, Path(bucket_id): Path<i64>, headers: HeaderMap, Json(input): Json<MountConfigInput>) -> ApiResult {
+    check_origin(&headers)?;
+    let (actor, connection_id, bucket_name, mount_id) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?;
+        let (connection_id,bucket_name): (i64,String) = db.query_row("SELECT connection_id,bucket_name FROM s3_buckets WHERE id=?1 AND enabled=1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(|_|error(StatusCode::NOT_FOUND,"Bucket فعال پیدا نشد."))?;
+        let mount_id: Option<i64> = db.query_row("SELECT id FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|row.get(0)).optional().map_err(db_error)?;
+        let mount_id = if let Some(id) = mount_id {
+            db.execute("UPDATE s3_mounts SET method='rclone',mount_path=?1,read_only=?2,auto_mount=?3,status='mounting',last_error=NULL,updated_at=?4 WHERE id=?5",params![format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"),input.read_only as i64,input.auto_mount as i64,now(),id]).map_err(db_error)?;
+            id
+        } else {
+            db.execute("INSERT INTO s3_mounts(bucket_id,method,mount_path,read_only,auto_mount,status,updated_at) VALUES (?1,'rclone',?2,?3,?4,'mounting',?5)",params![bucket_id,format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"),input.read_only as i64,input.auto_mount as i64,now()]).map_err(db_error)?;
+            db.last_insert_rowid()
+        };
+        (actor,connection_id,bucket_name,mount_id)
+    };
+    let result = privileged_request_async(json!({"action":"s3-mount-start","mount_id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket_name,"read_only":input.read_only,"auto_mount":input.auto_mount})).await?;
+    let ok = result["ok"] == true;
+    let error_message = result["error"].as_str();
+    let db = state.lock().unwrap();
+    db.execute("UPDATE s3_mounts SET status=?1,last_error=?2,updated_at=?3 WHERE id=?4",params![if ok {"mounted"} else {"failed"},error_message,now(),mount_id]).map_err(db_error)?;
+    audit(&db,&actor.username,"s3.mount.start",&format!("mount={mount_id}; bucket_id={bucket_id}; read_only={}; auto_mount={}",input.read_only,input.auto_mount));
+    if !ok { return Err(error(StatusCode::BAD_GATEWAY,error_message.unwrap_or("Mount فضای ابری ناموفق بود."))); }
+    Ok(Json(json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,input.read_only,input.auto_mount,"mounted",None)})))
+}
+
+pub(super) async fn stop_bucket_mount(State(state): State<AppState>, Path(mount_id): Path<i64>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let (actor,connection_id,bucket_id,bucket_name): (User,i64,i64,String) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db,&headers)?;
+        let (connection_id,bucket_id,bucket_name): (i64,i64,String) = db.query_row("SELECT b.connection_id,b.id,b.bucket_name FROM s3_mounts m JOIN s3_buckets b ON b.id=m.bucket_id WHERE m.id=?1",[mount_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|error(StatusCode::NOT_FOUND,"Mount پیدا نشد."))?;
+        (actor,connection_id,bucket_id,bucket_name)
+    };
+    let result = privileged_request_async(json!({"action":"s3-mount-stop","mount_id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY,result["error"].as_str().unwrap_or("توقف Mount ناموفق بود."))); }
+    let db = state.lock().unwrap();
+    db.execute("UPDATE s3_mounts SET status='unmounted',last_error=NULL,updated_at=?1 WHERE id=?2",params![now(),mount_id]).map_err(db_error)?;
+    audit(&db,&actor.username,"s3.mount.stop",&format!("mount={mount_id}; bucket_id={bucket_id}"));
+    Ok(Json(json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,true,false,"unmounted",None)})))
+}
+
 pub(super) async fn summary(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
@@ -1000,6 +1371,10 @@ pub(super) async fn delete_connection(
     }
     {
         let db = state.lock().unwrap();
+        let active_mounts: i64 = db.query_row("SELECT COUNT(*) FROM s3_mounts m JOIN s3_buckets b ON b.id=m.bucket_id WHERE b.connection_id=?1 AND m.status='mounted'",[id],|row|row.get(0)).map_err(db_error)?;
+        if active_mounts > 0 {
+            return Err(error(StatusCode::CONFLICT,"پیش از حذف اتصال، Mountهای فعال آن را Unmount کن."));
+        }
         db.execute("DELETE FROM s3_buckets WHERE connection_id=?1", [id])
             .map_err(db_error)?;
         db.execute("DELETE FROM s3_connections WHERE id=?1", [id])
@@ -1215,6 +1590,10 @@ pub(super) async fn detach_bucket(
             StatusCode::BAD_REQUEST,
             "برای قطع اتصال، نام Bucket را دقیقاً تأیید کن.",
         ));
+    }
+    let active_mount: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM s3_mounts WHERE bucket_id=?1 AND status='mounted')",[id],|row|row.get(0)).map_err(db_error)?;
+    if active_mount {
+        return Err(error(StatusCode::CONFLICT,"پیش از قطع Bucket از ARG، Mount فعال آن را Unmount کن."));
     }
     db.execute("DELETE FROM s3_buckets WHERE id=?1", [id])
         .map_err(db_error)?;
@@ -1493,4 +1872,75 @@ pub(super) async fn download_object(
         let _ = tokio::fs::remove_file(cleanup).await;
     });
     Ok(response)
+}
+
+#[derive(Deserialize)]
+pub(super) struct LocalTransferInput {
+    bucket: String,
+    key: String,
+    local_path: String,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+pub(super) async fn transfer_local_to_bucket(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<LocalTransferInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?;
+        let _ = read_connection(&db, id)?;
+        actor
+    };
+    if !valid_bucket_name(&input.bucket)
+        || !valid_object_key(&input.key)
+        || !input.local_path.starts_with('/')
+        || input.local_path.len() > 4096
+        || input.local_path.chars().any(char::is_control)
+    {
+        return Err(error(StatusCode::BAD_REQUEST, "مسیر فایل یا مقصد S3 معتبر نیست."));
+    }
+    let result = privileged_request_async(json!({"action":"s3-upload-local-file","id":id,"bucket":input.bucket,"key":input.key,"local_path":input.local_path,"content_type":input.content_type,"overwrite":input.overwrite})).await?;
+    if result["ok"] != true {
+        return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("انتقال فایل به فضای ابری ناموفق بود.")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "s3.transfer.local_to_bucket", &format!("connection={id}; bucket={}; key_length={}; size_bytes={}", input.bucket, input.key.len(), result["size_bytes"].as_u64().unwrap_or(0)));
+    Ok(Json(result))
+}
+
+pub(super) async fn transfer_bucket_to_local(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<LocalTransferInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?;
+        let _ = read_connection(&db, id)?;
+        actor
+    };
+    if !valid_bucket_name(&input.bucket)
+        || !valid_object_key(&input.key)
+        || !input.local_path.starts_with('/')
+        || input.local_path.len() > 4096
+        || input.local_path.chars().any(char::is_control)
+    {
+        return Err(error(StatusCode::BAD_REQUEST, "مسیر فایل یا مبدأ S3 معتبر نیست."));
+    }
+    let result = privileged_request_async(json!({"action":"s3-download-local-file","id":id,"bucket":input.bucket,"key":input.key,"local_path":input.local_path})).await?;
+    if result["ok"] != true {
+        return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("انتقال فایل به سرور ناموفق بود.")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "s3.transfer.bucket_to_local", &format!("connection={id}; bucket={}; key_length={}; size_bytes={}", input.bucket, input.key.len(), result["size_bytes"].as_u64().unwrap_or(0)));
+    Ok(Json(result))
 }

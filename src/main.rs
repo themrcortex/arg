@@ -2830,6 +2830,10 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("s3-delete-object") => "s3-delete-object",
         Some("s3-upload-object") => "s3-upload-object",
         Some("s3-download-object") => "s3-download-object",
+        Some("s3-upload-local-file") => "s3-upload-local-file",
+        Some("s3-download-local-file") => "s3-download-local-file",
+        Some("s3-mount-start") => "s3-mount-start",
+        Some("s3-mount-stop") => "s3-mount-stop",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
     if action == "terminal-root-start" {
