@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.6.6-dev.1 — 2026-10-25
+
+### Included
+- Carry forward the SSH update controls from `main`: select stable or development sources and choose whether Rust build cache is retained or cleared.
+
 ## v0.6.5 — 2026-10-25
 
 ### Improved
