@@ -24,6 +24,20 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/dashboard", get(dashboard))
         .route("/api/storage/volumes", get(storage_volumes))
+        .route("/api/maintenance/system", get(maintenance::system_info))
+        .route(
+            "/api/maintenance/backups",
+            get(maintenance::list_backups).post(maintenance::create_backup),
+        )
+        .route(
+            "/api/maintenance/backups/{id}/restore",
+            post(maintenance::restore_backup),
+        )
+        .route(
+            "/api/maintenance/backups/{id}/download",
+            get(maintenance::download_backup),
+        )
+        .route("/api/maintenance/action", post(maintenance::run_action))
         .route("/api/s3/providers", get(s3::list_providers))
         .route("/api/s3/summary", get(s3::summary))
         .route(
@@ -70,7 +84,8 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/s3/buckets/{id}",
             axum::routing::delete(s3::detach_bucket),
         )
-        .route("/api/s3/buckets/{id}/usage", axum::routing::put(s3::set_manual_bucket_usage))
+        .route("/api/s3/buckets/{id}/usage", axum::routing::get(s3::bucket_usage).put(s3::set_bucket_quota))
+        .route("/api/s3/buckets/{id}/usage/scan", post(s3::scan_bucket_usage))
         .route(
             "/api/s3/buckets/{id}/mount",
             get(s3::get_bucket_mount).put(s3::configure_bucket_mount),
@@ -111,6 +126,12 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/services/action", post(run_service_operation))
         .route("/api/docker", get(docker::docker_status))
         .route("/api/docker/action", post(docker::docker_operation))
+        .route("/api/mysql/status", get(mysql::status))
+        .route("/api/mysql/install", post(mysql::install))
+        .route("/api/mysql/service", post(mysql::service_action))
+        .route("/api/mysql/catalog", post(mysql::catalog))
+        .route("/api/mysql/query", post(mysql::query))
+        .route("/api/mysql/users/password", post(mysql::reset_password))
         .route("/api/files", get(files::list_files))
         .route("/api/files/disk-scan", post(files::scan_disk))
         .route("/api/files/content", get(files::read_file))

@@ -1514,7 +1514,9 @@ delete_app() {
   local purge="${1:-}"
   local keep_database="n" db_path entry answer
   local cert_name
-  if [[ "$purge" == "--purge" ]]; then
+  if [[ "$purge" == "--purge-confirmed" ]]; then
+    purge="--purge"
+  elif [[ "$purge" == "--purge" ]]; then
     warn "This removes the service, installer, source, configuration, and database."
     read_answer 'Type PURGE ARG to confirm: ' confirmation
     [[ "$confirmation" == "PURGE ARG" ]] || die "Purge cancelled."
