@@ -117,6 +117,10 @@ pub(super) fn router(state: AppState) -> Router {
             get(get_panel_timezone).put(change_panel_timezone),
         )
         .route(
+            "/api/settings/tls",
+            get(get_panel_tls_settings).put(update_panel_tls_settings),
+        )
+        .route(
             "/api/update",
             get(panel_update_status).post(schedule_panel_update),
         )

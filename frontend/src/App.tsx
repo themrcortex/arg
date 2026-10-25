@@ -238,7 +238,7 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
         </div>
         <Card className="soft-panel">
           <CardHeader className="pb-6">
-            <Badge className="mb-4 w-fit">{installer ? 'راه‌اندازی اولیه' : 'ورود امن'}</Badge>
+            <Badge className="mb-4 w-fit">{installer ? 'راه‌اندازی اولیه' : location.protocol === 'https:' ? 'ورود امن' : 'اتصال HTTP'}</Badge>
             <CardTitle className="text-2xl">{installer ? 'به ارگ خوش آمدید' : 'خوش آمدید'}</CardTitle>
             <CardDescription className="leading-7">
               {installer
@@ -247,6 +247,7 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
             </CardDescription>
           </CardHeader>
           <CardContent>
+            {location.protocol !== 'https:' && <Alert className="mb-5 border-amber-400/30 bg-amber-400/[.07] text-amber-100"><AlertTriangle size={17}/><AlertDescription className="leading-7"><strong className="block">این اتصال با HTTP رمزنگاری نشده است.</strong> ورود می‌تواند گذرواژه و نشست را در شبکه افشا کند. اگر از شبکهٔ عمومی وصل شده‌ای، ادامه نده؛ از SSH tunnel استفاده کن یا پس از ورود از تنظیمات، HTTPS را فعال کن.</AlertDescription></Alert>}
             {installer && (
               <Alert className="mb-5 border-primary/30 bg-primary/10 text-foreground">
                 <AlertDescription className="leading-7">
@@ -955,6 +956,7 @@ export default function App() {
             <div className="flex items-center gap-1.5"><Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه"><Github size={18}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end" sideOffset={8} collisionPadding={16}><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="arg-main-canvas relative mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
+            {location.protocol !== 'https:' && <Alert className="mb-6 border-amber-400/30 bg-amber-400/[.07] text-amber-100"><AlertTriangle size={17}/><div className="min-w-0 flex-1"><AlertTitle>اتصال این پنل امن نیست</AlertTitle><AlertDescription className="text-amber-100/75">این صفحه با HTTP باز شده است؛ رمز عبور و نشست می‌توانند در مسیر شبکه افشا شوند. برای راه‌اندازی HTTPS، گواهی SSL را در تنظیمات ثبت کن.</AlertDescription></div><Button size="sm" variant="outline" className="shrink-0 border-amber-300/30" onClick={() => selectPage('settings')}>تنظیم گواهی SSL</Button></Alert>}
             <ResourceAlertNotice />
             {terminalMounted && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
             <div key={currentPage}>

@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::os::unix::{
-    fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     io::AsRawFd,
     process::CommandExt,
 };
@@ -1049,6 +1049,85 @@ async fn change_panel_timezone(
     audit(&db, &actor.username, "panel.timezone", timezone);
     Ok(Json(json!({"timezone": timezone})))
 }
+
+#[derive(Deserialize)]
+struct PanelTlsInput {
+    certificate_path: String,
+    private_key_path: String,
+    server_name: String,
+    port: u16,
+}
+
+async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_user(&db, &headers)?;
+    let configured_cert = env::var("ARG_TLS_CERT").unwrap_or_default();
+    let configured_key = env::var("ARG_TLS_KEY").unwrap_or_default();
+    let mut discovered = None;
+    if configured_cert.is_empty() || configured_key.is_empty() {
+        let domain = fs::read_to_string("/etc/arg/https-domain").unwrap_or_default().trim().to_owned();
+        let mut names = vec!["arg".to_owned()];
+        if !domain.is_empty() && domain.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte)) && !names.contains(&domain) {
+            names.push(domain);
+        }
+        for name in names {
+            let cert = format!("/etc/letsencrypt/live/{name}/fullchain.pem");
+            let key = format!("/etc/letsencrypt/live/{name}/privkey.pem");
+            if PathBuf::from(&cert).is_file() && PathBuf::from(&key).is_file() {
+                discovered = Some((cert, key));
+                break;
+            }
+        }
+    }
+    let (certificate_path, private_key_path) = match discovered {
+        Some((cert, key)) if configured_cert.is_empty() || configured_key.is_empty() => (if configured_cert.is_empty() { cert } else { configured_cert }, if configured_key.is_empty() { key } else { configured_key }),
+        _ => (configured_cert, configured_key),
+    };
+    let bind = env::var("ARG_TLS_BIND").unwrap_or_else(|_| "0.0.0.0:443".to_owned());
+    let port = bind.rsplit(':').next().and_then(|part| part.parse::<u16>().ok()).unwrap_or(443);
+    let certificate_present = !certificate_path.is_empty() && PathBuf::from(&certificate_path).is_file();
+    let private_key_present = !private_key_path.is_empty() && PathBuf::from(&private_key_path).is_file();
+    Ok(Json(json!({
+        "enabled": certificate_present && private_key_present,
+        "certificate_path": certificate_path,
+        "private_key_path": private_key_path,
+        "port": port,
+        "certificate_present": certificate_present,
+        "private_key_present": private_key_present,
+        "default_certificate_path": if certificate_path.is_empty() { "/etc/arg/tls/fullchain.pem" } else { &certificate_path },
+        "default_private_key_path": if private_key_path.is_empty() { "/etc/arg/tls/privkey.pem" } else { &private_key_path }
+    })))
+}
+
+async fn update_panel_tls_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PanelTlsInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !(1024..=65535).contains(&input.port) {
+        return Err(error(StatusCode::BAD_REQUEST, "HTTPS port must be between 1024 and 65535"));
+    }
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?
+    };
+    let result = privileged_request_async(json!({
+        "action": "tls-configure",
+        "certificate_path": input.certificate_path,
+        "private_key_path": input.private_key_path,
+        "server_name": input.server_name,
+        "port": input.port
+    })).await?;
+    if result["ok"].as_bool() != Some(true) {
+        let message = result["error"].as_str().unwrap_or("Could not configure HTTPS");
+        return Err(error(StatusCode::BAD_REQUEST, message));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "panel.tls.configure", &format!("HTTPS certificate paths configured on port {}", input.port));
+    Ok(Json(json!({"scheduled":true,"port":input.port,"message":"HTTPS settings were saved. ARG will restart shortly; reopen the panel using HTTPS."})))
+}
+
 async fn collect_metrics(state: AppState) {
     let mut previous_cpu = metrics::cpu_ticks();
     let mut previous_network = metrics::network_totals();
@@ -2928,6 +3007,168 @@ fn stop_root_terminal(request: &Value) -> Result<(), String> {
     Ok(())
 }
 
+fn valid_tls_source_path(value: &str, private_key: bool) -> bool {
+    let expected = if private_key { "privkey.pem" } else { "fullchain.pem" };
+    if value == format!("/etc/arg/tls/{expected}") {
+        return true;
+    }
+    let Some(remainder) = value.strip_prefix("/etc/letsencrypt/live/") else {
+        return false;
+    };
+    let Some((name, file)) = remainder.split_once('/') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        && !name.starts_with('.')
+        && file == expected
+}
+
+fn tls_openssl_output(args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = std::process::Command::new("openssl")
+        .args(args)
+        .output()
+        .map_err(|error| format!("Could not run OpenSSL to validate the certificate: {error}"))?;
+    if !output.status.success() {
+        return Err("The certificate or private key is invalid, unreadable, or expired.".into());
+    }
+    Ok(output.stdout)
+}
+
+fn configure_panel_tls(request: &Value) -> Value {
+    let failure = |message: String| json!({"ok":false,"error":message});
+    let Some(certificate_source) = request["certificate_path"].as_str() else {
+        return failure("Certificate path is required.".into());
+    };
+    let Some(private_key_source) = request["private_key_path"].as_str() else {
+        return failure("Private key path is required.".into());
+    };
+    let Some(server_name) = request["server_name"].as_str().filter(|name| {
+        !name.is_empty() && name.len() <= 253 && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte))
+    }) else {
+        return failure("Enter the panel domain name or IP address covered by the certificate.".into());
+    };
+    let Some(port) = request["port"].as_u64().filter(|port| (1024..=65535).contains(port)) else {
+        return failure("HTTPS port must be between 1024 and 65535.".into());
+    };
+    let current_bind = fs::read_to_string("/etc/arg/arg.env").unwrap_or_default().lines()
+        .find_map(|line| line.strip_prefix("ARG_TLS_BIND="))
+        .and_then(|bind| bind.rsplit(':').next()?.parse::<u16>().ok());
+    if current_bind != Some(port as u16)
+        && std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port as u16)).is_err()
+    {
+        return failure(format!("HTTPS port {port} is already in use. Choose another free port, for example 8443."));
+    }
+    if !valid_tls_source_path(certificate_source, false)
+        || !valid_tls_source_path(private_key_source, true)
+    {
+        return failure("Use /etc/arg/tls/fullchain.pem and /etc/arg/tls/privkey.pem, or the matching files under /etc/letsencrypt/live/<certificate-name>/.".into());
+    }
+    let certificate_source = match PathBuf::from(certificate_source).canonicalize() {
+        Ok(path) => path,
+        Err(_) => return failure("Certificate file was not found. Upload or copy it to the server first.".into()),
+    };
+    let private_key_source = match PathBuf::from(private_key_source).canonicalize() {
+        Ok(path) => path,
+        Err(_) => return failure("Private key file was not found. Copy it to the server first.".into()),
+    };
+    if !certificate_source.starts_with("/etc/arg/tls") && !certificate_source.starts_with("/etc/letsencrypt/archive") {
+        return failure("Certificate symlink resolves outside the allowed certificate directories.".into());
+    }
+    if !private_key_source.starts_with("/etc/arg/tls") && !private_key_source.starts_with("/etc/letsencrypt/archive") {
+        return failure("Private-key symlink resolves outside the allowed certificate directories.".into());
+    }
+    let cert_meta = match fs::metadata(&certificate_source) { Ok(meta) => meta, Err(_) => return failure("Could not read the certificate file.".into()) };
+    let key_meta = match fs::metadata(&private_key_source) { Ok(meta) => meta, Err(_) => return failure("Could not read the private-key file.".into()) };
+    if !cert_meta.is_file() || !key_meta.is_file() || cert_meta.len() > 1024 * 1024 || key_meta.len() > 128 * 1024 {
+        return failure("Certificate or private key is not a regular file or exceeds the allowed size.".into());
+    }
+    if let Err(message) = tls_openssl_output(&["x509", "-in", certificate_source.to_string_lossy().as_ref(), "-checkend", "0", "-noout"]) {
+        return failure(message);
+    }
+    let hostname_check = if server_name.parse::<std::net::IpAddr>().is_ok() { "-checkip" } else { "-checkhost" };
+    if let Err(_) = tls_openssl_output(&["x509", "-in", certificate_source.to_string_lossy().as_ref(), hostname_check, server_name, "-noout"]) {
+        return failure("The certificate is not valid for the panel's domain/IP. Use a certificate whose SAN includes this address.".into());
+    }
+    let cert_public_key = match tls_openssl_output(&["x509", "-in", certificate_source.to_string_lossy().as_ref(), "-pubkey", "-noout"]) {
+        Ok(value) => value,
+        Err(message) => return failure(message),
+    };
+    let key_public_key = match tls_openssl_output(&["pkey", "-in", private_key_source.to_string_lossy().as_ref(), "-pubout"]) {
+        Ok(value) => value,
+        Err(message) => return failure(message),
+    };
+    if cert_public_key != key_public_key {
+        return failure("The certificate does not match the selected private key.".into());
+    }
+
+    let tls_dir = PathBuf::from("/etc/arg/tls");
+    if let Err(error) = fs::create_dir_all(&tls_dir) { return failure(format!("Could not prepare ARG certificate storage: {error}")); }
+    if let Err(error) = fs::set_permissions(&tls_dir, fs::Permissions::from_mode(0o750)) { return failure(format!("Could not secure ARG certificate directory: {error}")); }
+    let directory_owner = std::process::Command::new("chown").args(["root:arg", tls_dir.to_string_lossy().as_ref()]).status();
+    if !directory_owner.map(|status| status.success()).unwrap_or(false) { return failure("Could not set ARG certificate directory ownership.".into()); }
+    let staged_nonce = token();
+    let staged_cert = tls_dir.join(format!(".fullchain.{}.{}.tmp", std::process::id(), staged_nonce));
+    let staged_key = tls_dir.join(format!(".privkey.{}.{}.tmp", std::process::id(), token()));
+    if let Err(error) = fs::copy(&certificate_source, &staged_cert) { return failure(format!("Could not stage certificate: {error}")); }
+    if let Err(error) = fs::copy(&private_key_source, &staged_key) {
+        let _ = fs::remove_file(&staged_cert);
+        return failure(format!("Could not stage private key: {error}"));
+    }
+    for path in [&staged_cert, &staged_key] {
+        if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o640)) {
+            let _ = fs::remove_file(&staged_cert); let _ = fs::remove_file(&staged_key);
+            return failure(format!("Could not secure certificate permissions: {error}"));
+        }
+        let owner = std::process::Command::new("chown").args(["root:arg", path.to_string_lossy().as_ref()]).status();
+        if !owner.map(|status| status.success()).unwrap_or(false) {
+            let _ = fs::remove_file(&staged_cert); let _ = fs::remove_file(&staged_key);
+            return failure("Could not set certificate ownership to root:arg.".into());
+        }
+    }
+    let cert_target = tls_dir.join("fullchain.pem");
+    let key_target = tls_dir.join("privkey.pem");
+    if let Err(error) = fs::rename(&staged_cert, &cert_target) { let _ = fs::remove_file(&staged_key); return failure(format!("Could not install certificate: {error}")); }
+    if let Err(error) = fs::rename(&staged_key, &key_target) { return failure(format!("Could not install private key: {error}")); }
+
+    let env_file = PathBuf::from("/etc/arg/arg.env");
+    let existing = match fs::read_to_string(&env_file) {
+        Ok(contents) => contents,
+        Err(error) => return failure(format!("Could not read ARG environment configuration: {error}")),
+    };
+    let mut lines: Vec<&str> = existing.lines().filter(|line| {
+        !["ARG_TLS_CERT", "ARG_TLS_KEY", "ARG_TLS_BIND"].iter().any(|key| line.starts_with(&format!("{key}=")))
+    }).collect();
+    lines.extend(["ARG_TLS_CERT=/etc/arg/tls/fullchain.pem", "ARG_TLS_KEY=/etc/arg/tls/privkey.pem"]);
+    let tls_bind = format!("ARG_TLS_BIND=0.0.0.0:{port}");
+    let mut env_contents = lines.join("\n");
+    env_contents.push('\n');
+    env_contents.push_str(&tls_bind);
+    env_contents.push('\n');
+    let env_tmp = PathBuf::from(format!("/etc/arg/.arg.env.tls.{}.{}.tmp", std::process::id(), token()));
+    let write_result = fs::OpenOptions::new().write(true).create_new(true).mode(0o640).open(&env_tmp)
+        .and_then(|mut file| file.write_all(env_contents.as_bytes()));
+    if let Err(error) = write_result { return failure(format!("Could not stage ARG configuration: {error}")); }
+    let owner = std::process::Command::new("chown").args(["root:arg", env_tmp.to_string_lossy().as_ref()]).status();
+    if !owner.map(|status| status.success()).unwrap_or(false) { let _ = fs::remove_file(&env_tmp); return failure("Could not set ARG configuration ownership.".into()); }
+    if let Err(error) = fs::rename(&env_tmp, &env_file) { return failure(format!("Could not activate ARG HTTPS settings: {error}")); }
+
+    if std::process::Command::new("ufw").args(["status"]).output().ok().map(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).contains("Status: active")).unwrap_or(false) {
+        let _ = std::process::Command::new("ufw").args(["allow", "80/tcp", "comment", "ARG HTTPS challenge"]).status();
+        let _ = std::process::Command::new("ufw").args(["allow", &format!("{port}/tcp"), "comment", "ARG HTTPS panel"]).status();
+    }
+    let restart = std::process::Command::new("systemd-run").args([
+        "--quiet", "--collect", "--unit=arg-tls-restart", "--on-active=2s",
+        "--property=Type=oneshot", "/usr/bin/systemctl", "restart", "arg.service",
+    ]).output();
+    match restart {
+        Ok(output) if output.status.success() => json!({"ok":true,"port":port,"message":"TLS settings saved; ARG restart scheduled."}),
+        Ok(output) => failure(format!("TLS settings were saved, but restart scheduling failed: {}", String::from_utf8_lossy(&output.stderr).trim())),
+        Err(error) => failure(format!("TLS settings were saved, but systemd-run is unavailable: {error}")),
+    }
+}
+
 fn execute_privileged_request(request: &Value) -> Value {
     let action = match request["action"].as_str() {
         Some("status") => "status",
@@ -2991,6 +3232,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("mysql-catalog") => "mysql-catalog",
         Some("mysql-service") => "mysql-service",
         Some("mysql-create-user") => "mysql-create-user",
+        Some("tls-configure") => "tls-configure",
         Some("s3-secret-write") => "s3-secret-write",
         Some("s3-secret-update-config") => "s3-secret-update-config",
         Some("s3-secret-delete") => "s3-secret-delete",
@@ -3019,6 +3261,9 @@ fn execute_privileged_request(request: &Value) -> Value {
             Ok(()) => json!({"ok":true}),
             Err(error) => json!({"ok":false,"error":error}),
         };
+    }
+    if action == "tls-configure" {
+        return configure_panel_tls(request);
     }
     if action == "maintenance-repair" {
         let branch_output = std::process::Command::new("git")
@@ -3712,7 +3957,7 @@ mod update_progress_tests {
     use super::{
         backup_database, default_update_build_mode, ensure_metric_storage_columns,
         firewall_rule_validation_error, update_progress_payload, valid_update_build_mode,
-        Connection, FirewallRuleInput,
+        valid_tls_source_path, Connection, FirewallRuleInput,
     };
 
     #[test]
@@ -4063,5 +4308,17 @@ mod update_progress_tests {
             assert!(!super::valid_update_branch(invalid));
         }
         assert_eq!(super::default_update_branch(), "main");
+    }
+
+    #[test]
+    fn tls_certificate_paths_are_restricted_to_supported_system_locations() {
+        assert!(valid_tls_source_path("/etc/arg/tls/fullchain.pem", false));
+        assert!(valid_tls_source_path("/etc/arg/tls/privkey.pem", true));
+        assert!(valid_tls_source_path("/etc/letsencrypt/live/example.com/fullchain.pem", false));
+        assert!(valid_tls_source_path("/etc/letsencrypt/live/arg/privkey.pem", true));
+        assert!(!valid_tls_source_path("/etc/letsencrypt/live/example.com/privkey.pem", false));
+        assert!(!valid_tls_source_path("/etc/letsencrypt/live/../arg/privkey.pem", true));
+        assert!(!valid_tls_source_path("/home/admin/cert.pem", false));
+        assert!(!valid_tls_source_path("/etc/arg/tls/privkey.pem", false));
     }
 }

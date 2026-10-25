@@ -1591,6 +1591,7 @@ export function AuditPage({ Heading, notify }: Common) {
 type MonitoringConfig = { enabled: boolean; interval_seconds: number; retention_days: number; session_hours: number }
 
 type UpdateInfo = { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string }
+type PanelTlsSettings = { enabled: boolean; certificate_path: string; private_key_path: string; port: number; certificate_present: boolean; private_key_present: boolean; default_certificate_path: string; default_private_key_path: string }
 export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, updating, checkingUpdate, panelTimeZone, onTimeZoneChange }: { Heading: Heading; notify: (message: string) => void; user: User; update: UpdateInfo; openUpdateDialog: () => void; updating: boolean; checkingUpdate: boolean; panelTimeZone: string; onTimeZoneChange: (timezone: string) => void }) {
   const [config, setConfig] = useState<MonitoringConfig | null>(null)
   const [port, setPort] = useState(location.port || (location.protocol === 'https:' ? '443' : '80'))
@@ -1598,9 +1599,16 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
   const [scheduledPort, setScheduledPort] = useState<number | null>(null)
   const [timezoneDraft, setTimezoneDraft] = useState(panelTimeZone)
   const [timezoneBusy, setTimezoneBusy] = useState(false)
+  const [tls, setTls] = useState<PanelTlsSettings | null>(null)
+  const [tlsCertificate, setTlsCertificate] = useState('')
+  const [tlsPrivateKey, setTlsPrivateKey] = useState('')
+  const [tlsServerName, setTlsServerName] = useState(location.hostname)
+  const [tlsPort, setTlsPort] = useState('443')
+  const [tlsBusy, setTlsBusy] = useState(false)
   const isAdmin = user.role === 'admin'
   useEffect(() => { void api<MonitoringConfig>('monitoring/config').then(setConfig).catch((error) => notify(error instanceof Error ? error.message : 'دریافت تنظیمات ناموفق بود')) }, [notify])
   useEffect(() => { void api<{port: number}>('settings/port').then((result) => setPort(String(result.port))).catch(() => undefined) }, [])
+  useEffect(() => { void api<PanelTlsSettings>('settings/tls').then((result) => { setTls(result); setTlsCertificate(result.certificate_path || result.default_certificate_path); setTlsPrivateKey(result.private_key_path || result.default_private_key_path); setTlsPort(String(result.port || 443)) }).catch((error) => notify(error instanceof Error ? error.message : 'خواندن وضعیت گواهی SSL ناموفق بود')) }, [notify])
   useEffect(() => { setTimezoneDraft(panelTimeZone) }, [panelTimeZone])
   async function saveConfig(event: FormEvent) {
     event.preventDefault()
@@ -1632,6 +1640,19 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
     } catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ منطقهٔ زمانی ناموفق بود.') }
     finally { setTimezoneBusy(false) }
   }
+  async function saveTls(event: FormEvent) {
+    event.preventDefault()
+    setTlsBusy(true)
+    try {
+      const result = await api<{scheduled: boolean; port: number}>('settings/tls', { method: 'PUT', body: JSON.stringify({ certificate_path: tlsCertificate.trim(), private_key_path: tlsPrivateKey.trim(), server_name: tlsServerName.trim(), port: Number(tlsPort) }) })
+      notify('گواهی بررسی و تنظیمات HTTPS ذخیره شد؛ ARG تا چند ثانیهٔ دیگر راه‌اندازی می‌شود.')
+      window.setTimeout(() => {
+        const portPart = result.port === 443 ? '' : `:${result.port}`
+        window.location.assign(`https://${location.hostname}${portPart}/`)
+      }, 3500)
+    } catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ تنظیمات گواهی ناموفق بود') }
+    finally { setTlsBusy(false) }
+  }
   function selector(label: string, key: 'interval_seconds' | 'retention_days' | 'session_hours', values: number[], unit: string) {
     return <label className="space-y-2 text-sm"><span className="block font-medium text-white">{label}</span><Select disabled={!isAdmin} value={String(config?.[key] ?? values[0])} onValueChange={(value) => setConfig((old) => old && { ...old, [key]: Number(value) })}><SelectTrigger dir="ltr"><SelectValue/></SelectTrigger><SelectContent>{values.map((value) => <SelectItem key={value} value={String(value)}>{value} {unit}</SelectItem>)}</SelectContent></Select></label>
   }
@@ -1658,6 +1679,21 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
         {scheduledPort && <Alert className="mt-4"><AlertDescription>نشانی HTTP جدید: <a className="font-mono text-primary underline" dir="ltr" href={`http://${location.hostname}:${scheduledPort}`}>http://{location.hostname}:{scheduledPort}</a></AlertDescription></Alert>}
       </SectionCard>
     </div>
+    <div className="mt-5"><SectionCard title="گواهی‌های SSL پنل" description="گواهی و کلید خصوصی را از فایل‌های سرور تنظیم کن؛ ARG پیش از فعال‌سازی، انقضا و تطبیق کلید را بررسی می‌کند." right={<Badge variant={tls?.enabled ? 'success' : 'warning'}>{tls?.enabled ? 'HTTPS فعال' : 'HTTP ناامن'}</Badge>}>
+      {tls ? <form onSubmit={saveTls} className="space-y-4">
+        <Alert className={tls.enabled ? 'border-emerald-400/20 bg-emerald-400/[.04]' : 'border-amber-400/25 bg-amber-400/[.05]'}><ShieldCheck size={16}/><AlertDescription>{tls.enabled ? `گواهی از مسیرهای ثبت‌شده خوانده می‌شود. HTTPS روی پورت ${formatNumber(tls.port)} فعال است.` : 'گواهی برای TLS فعال نیست. تا زمان فعال‌سازی HTTPS، ورود و نشست‌ها روی HTTP در معرض شنود شبکه هستند.'}</AlertDescription></Alert>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">دامنه یا IP پنل</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsServerName} onChange={(event) => setTlsServerName(event.target.value)} placeholder="panel.example.com" disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">باید در SAN گواهی باشد؛ پیش از راه‌اندازی کنترل می‌شود.</span></label>
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">مسیر گواهی عمومی (fullchain.pem)</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsCertificate} onChange={(event) => setTlsCertificate(event.target.value)} placeholder="/etc/arg/tls/fullchain.pem" disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">گواهی و زنجیرهٔ میانی؛ فایل PEM عمومی است.</span></label>
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">مسیر کلید خصوصی (privkey.pem)</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsPrivateKey} onChange={(event) => setTlsPrivateKey(event.target.value)} placeholder="/etc/arg/tls/privkey.pem" disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">محتوای کلید هرگز به مرورگر فرستاده یا در پنل نمایش داده نمی‌شود.</span></label>
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">پورت HTTPS</span><Input type="number" min={1024} max={65535} dir="ltr" lang="en" value={tlsPort} onChange={(event) => setTlsPort(event.target.value)} disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">پورت 443 پیش‌فرض است؛ اگر اشغال باشد، پورت آزاد دیگری وارد کن.</span></label>
+        </div>
+        <div className="rounded-xl border border-border bg-background/45 p-3 text-xs leading-6 text-muted-foreground">صدور خودکار ابتدا از Let’s Encrypt انجام می‌شود و در صورت شکست، ZeroSSL به‌عنوان منبع دوم پیشنهاد می‌شود؛ ZeroSSL برای دامنه به EAB نیاز دارد و گواهی IP خام صادر نمی‌کند. اگر هیچ‌کدام در دسترس نبودند، گواهی را از منبع دیگری بگیر و با SSH/SFTP به مسیرهای زیر منتقل کن؛ از انتقال کلید خصوصی در اتصال HTTP خودداری کن. پس از ذخیره، ARG تطبیق certificate، private key و دامنه/IP را کنترل می‌کند و سرویس را دوباره راه می‌اندازد.
+          <div className="mt-2 grid gap-1 font-mono text-[11px] text-foreground" dir="ltr"><span>{tls.default_certificate_path}</span><span>{tls.default_private_key_path}</span></div>
+        </div>
+        {isAdmin && <Button type="submit" disabled={tlsBusy || !tlsCertificate.trim() || !tlsPrivateKey.trim() || !tlsServerName.trim() || !/^\d+$/.test(tlsPort)}><ShieldCheck size={15}/>{tlsBusy ? 'در حال بررسی و ذخیره…' : tls.enabled ? 'اعمال گواهی و راه‌اندازی مجدد' : 'فعال‌سازی HTTPS'}</Button>}
+      </form> : <Skeleton className="h-48"/>}
+    </SectionCard></div>
     <div className="mt-5"><SectionCard title="منطقهٔ زمانی پنل" description="زمان تاریخچه، گزارش‌ها، نشست‌ها و تغییر فایل‌ها بر اساس این منطقه نمایش داده می‌شود.">
       <form onSubmit={saveTimezone} className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <label className="min-w-0 space-y-2 text-sm"><span className="block font-medium text-white">شناسهٔ منطقهٔ زمانی (IANA)</span><Input list="arg-timezone-presets" dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={timezoneDraft} onChange={(event) => setTimezoneDraft(event.target.value)} placeholder="Asia/Tehran" disabled={!isAdmin || timezoneBusy}/><datalist id="arg-timezone-presets">{['UTC','Asia/Tehran','Asia/Dubai','Europe/London','Europe/Berlin','America/New_York','America/Los_Angeles','Asia/Tokyo','Australia/Sydney'].map((zone) => <option key={zone} value={zone}/>)}</datalist><span className="block text-xs text-muted-foreground">مثال: <code dir="ltr">Asia/Tehran</code> یا <code dir="ltr">UTC</code>. ساعت تابستانی به‌صورت خودکار اعمال می‌شود.</span><span className="block text-xs text-primary">نمونهٔ زمان اکنون: <b dir="ltr" className="font-mono">{timezonePreview}</b></span></label>
