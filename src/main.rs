@@ -205,13 +205,17 @@ fn ensure_sessions_metadata(db: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
+fn update_guard_exempt(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/update" | "/api/update/progress" | "/api/update/cancel" | "/api/state" | "/api/logout" | "/api/login"
+    )
+}
+
 async fn update_guard(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path();
-    let exempt = matches!(
-        path,
-        "/api/update" | "/api/update/progress" | "/api/state" | "/api/logout" | "/api/login"
-    );
+    let exempt = update_guard_exempt(path);
     let writes_api = method != axum::http::Method::GET
         && method != axum::http::Method::HEAD
         && path.starts_with("/api/")
@@ -3603,6 +3607,14 @@ mod update_progress_tests {
         assert!(!valid_update_build_mode("clean"));
         assert!(!valid_update_build_mode("../../tmp"));
         assert_eq!(default_update_build_mode(), "complete");
+    }
+
+    #[test]
+    fn cancellation_endpoint_remains_available_while_update_lock_is_active() {
+        assert!(super::update_guard_exempt("/api/update/cancel"));
+        assert!(super::update_guard_exempt("/api/update/progress"));
+        assert!(!super::update_guard_exempt("/api/update/rollback"));
+        assert!(!super::update_guard_exempt("/api/nginx/restart"));
     }
 
     #[test]
