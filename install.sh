@@ -540,15 +540,15 @@ ensure_ip_certbot() {
   [[ "$minimum" == "5.4.0" ]] && return 0
 
   say "Installing Certbot 5.4 or newer for IP address certificates"
-  apt-get install -y --no-install-recommends snapd
+  apt-get install -y --no-install-recommends snapd || { warn "Could not install snapd; HTTPS is optional and can be configured later."; return 1; }
   systemctl enable --now snapd.socket
-  snap install certbot --classic
-  [[ -x /snap/bin/certbot ]] || die "The current Certbot could not be installed from Snap."
+  snap install certbot --classic || { warn "Could not install the IP-certificate Certbot from Snap; HTTPS is optional."; return 1; }
+  [[ -x /snap/bin/certbot ]] || { warn "The Snap Certbot executable is unavailable; HTTPS is optional."; return 1; }
   CERTBOT_BIN="/snap/bin/certbot"
   version="$("$CERTBOT_BIN" --version 2>&1 | rg -o '[0-9]+(\.[0-9]+){1,2}' | head -n 1 || true)"
   [[ -n "$version" ]] || version="0.0.0"
   minimum="$(printf '%s\n' 5.4.0 "$version" | sort -V | head -n 1)"
-  [[ "$minimum" == "5.4.0" ]] || die "Certbot 5.4 or newer is required for IP certificates."
+  [[ "$minimum" == "5.4.0" ]] || { warn "Certbot 5.4 or newer is required for IP certificates; HTTPS is optional."; return 1; }
 }
 
 ensure_certbot_renewal() {
@@ -750,8 +750,9 @@ copy_certificate_files() {
 
 issue_certificate() {
   local host="$1" email="$2" port80_unit="$3" is_ip="$4" stopped="n"
-  local attempt output_file retryable
-  local -a hooks=() identifier_args=()
+  local server="${5:-}" config_file="${6:-}"
+  local attempt output_file retryable provider_label="Let's Encrypt"
+  local -a hooks=() identifier_args=() provider_args=()
   write_cert_deploy_hook
   if [[ "$is_ip" == "y" ]]; then
     identifier_args=(--ip-address "$host" --preferred-profile shortlived)
@@ -760,22 +761,30 @@ issue_certificate() {
   fi
   if [[ -n "$port80_unit" ]]; then
     info "Temporarily stopping $port80_unit to release TCP port 80."
-    systemctl stop "$port80_unit" || die "Could not stop $port80_unit; no certificate request was made."
+    if ! systemctl stop "$port80_unit"; then
+      warn "Could not safely stop $port80_unit; no certificate request was made. HTTPS can be configured later."
+      return 1
+    fi
     PORT80_STOPPED_UNIT="$port80_unit"
     trap 'restore_port80_service' EXIT INT TERM
     stopped="y"
     hooks+=(--pre-hook "systemctl stop $port80_unit" --post-hook "systemctl start $port80_unit")
   fi
+  [[ -z "$server" ]] || provider_args+=(--server "$server")
+  [[ -z "$config_file" ]] || provider_args+=(--config "$config_file")
+  [[ -z "$server" ]] || provider_label="the alternate ACME provider"
 
   output_file="$(mktemp /tmp/arg-certbot.XXXXXX)"
   for attempt in 1 2 3; do
     if "$CERTBOT_BIN" certonly --standalone --preferred-challenges http --non-interactive \
       --agree-tos --email "$email" --cert-name "$CERT_NAME" "${identifier_args[@]}" \
-      --deploy-hook "$CERT_DEPLOY_HOOK" "${hooks[@]}" >"$output_file" 2>&1; then
+      --deploy-hook "$CERT_DEPLOY_HOOK" "${provider_args[@]}" "${hooks[@]}" >"$output_file" 2>&1; then
       cat "$output_file"
       rm -f "$output_file"
       if [[ "$stopped" == "y" ]] && ! restore_port80_service; then
-        die "The certificate was issued, but $port80_unit could not be restarted."
+        warn "The certificate was issued, but $port80_unit could not be restarted. Start it manually; HTTPS activation was skipped."
+        trap - EXIT INT TERM
+        return 1
       fi
       trap - EXIT INT TERM
       return 0
@@ -790,10 +799,47 @@ issue_certificate() {
   done
   rm -f "$output_file"
   if [[ "$stopped" == "y" ]] && ! restore_port80_service; then
-    die "Certificate issuance failed and $port80_unit could not be restarted."
+    warn "Certificate issuance failed and $port80_unit could not be restarted. Start it manually; HTTPS activation was skipped."
+    trap - EXIT INT TERM
+    return 1
   fi
   trap - EXIT INT TERM
-  warn "Certificate issuance could not reach Let's Encrypt after up to 3 attempts. Check outbound TCP 443, DNS resolution, server time, and provider egress filtering; then retry with 'sudo arg ssl'."
+  warn "Certificate issuance could not reach $provider_label after up to 3 attempts. Check outbound TCP 443, DNS resolution, server time, and provider egress filtering; then retry with 'sudo arg ssl'."
+  return 1
+}
+
+try_zerossl_fallback() {
+  local host="$1" email="$2" port80_unit="$3" is_ip="$4"
+  local answer="" eab_kid="" eab_hmac="" config_file=""
+  if [[ "$is_ip" == "y" ]]; then
+    warn "ZeroSSL fallback requires a DNS name; it does not issue certificates for bare IP addresses. Use a domain, or install an IP certificate from a CA that supports IP certificates."
+    return 1
+  fi
+  say "ALTERNATE CERTIFICATE AUTHORITY · ZEROSSL"
+  info "ZeroSSL uses a separate ACME endpoint. It requires External Account Binding (EAB) credentials from your ZeroSSL account."
+  info "Create or retrieve EAB credentials at https://app.zerossl.com/developer"
+  read_answer 'Use ZeroSSL as the second certificate source? [Y/n]: ' answer 'y'
+  [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]] || return 1
+  IFS= read -r -p 'ZeroSSL EAB KID: ' eab_kid </dev/tty || true
+  IFS= read -r -s -p 'ZeroSSL EAB HMAC key: ' eab_hmac </dev/tty || true
+  printf '\n'
+  [[ "$eab_kid" =~ ^[A-Za-z0-9._-]{8,256}$ && "$eab_hmac" =~ ^[A-Za-z0-9_+/=-]{16,512}$ ]] || {
+    unset eab_kid eab_hmac
+    warn "The ZeroSSL EAB credentials are missing or malformed; no alternate request was made."
+    return 1
+  }
+  config_file="$(mktemp /run/arg-certbot-zerossl.XXXXXX)"
+  chmod 0600 "$config_file"
+  printf 'eab-kid = %s\neab-hmac-key = %s\n' "$eab_kid" "$eab_hmac" > "$config_file"
+  unset eab_kid eab_hmac
+  info "Requesting a domain certificate through ZeroSSL. EAB credentials are kept in a temporary root-only config and removed afterward."
+  if issue_certificate "$host" "$email" "$port80_unit" "$is_ip" \
+    "https://acme.zerossl.com/v2/DV90" "$config_file"; then
+    rm -f "$config_file"
+    return 0
+  fi
+  rm -f "$config_file"
+  warn "ZeroSSL could not issue the certificate either. Check outbound HTTPS access to acme.zerossl.com, DNS, inbound TCP 80, and the EAB credentials. You can install a certificate manually in Panel Settings → SSL Certificates."
   return 1
 }
 
@@ -831,6 +877,7 @@ configure_https() {
     return 0
   fi
 
+  info "HTTPS is optional. Type 'skip' at the address prompt, or decline the ZeroSSL fallback if certificate issuance is unavailable."
   read_answer "Domain name or server IP for HTTPS [$address] (type skip to skip): " host "$address"
   [[ "${host,,}" != "skip" && -n "$host" ]] || {
     info "HTTPS setup skipped. The panel remains private on localhost."
@@ -845,7 +892,10 @@ configure_https() {
     fi
   else
     is_ip="n"
-    [[ "$host" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die "Enter a valid fully qualified domain name or IPv4 address."
+    if [[ ! "$host" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]]; then
+      warn "The domain name is invalid. Installation will continue without HTTPS; run 'sudo arg ssl' later."
+      return 0
+    fi
     dns_matches="$(getent ahostsv4 "$host" | awk '{print $1}' | sort -u || true)"
     if [[ -z "$dns_matches" || ( -n "$address" && " $dns_matches " != *" $address "* ) ]]; then
       warn "The domain does not currently resolve to the detected server IP."
@@ -857,32 +907,54 @@ configure_https() {
   fi
 
   read_answer 'Email address for certificate expiry notices: ' email
-  [[ "$email" == *@*.* ]] || die "Enter a valid email address for the certificate."
-  install_https_dependencies
-  [[ "$is_ip" != "y" ]] || ensure_ip_certbot
-  port80_unit="$(port80_systemd_service)" || die "TCP port 80 is occupied by a process that cannot be safely paused as a systemd service. Stop it manually, then run 'sudo arg ssl' again."
-  if ! issue_certificate "$host" "$email" "$port80_unit" "$is_ip"; then
-    rm -f "$CERT_DEPLOY_HOOK"
-    warn "Certificate issuance failed. The panel remains available on its current address; HTTPS configuration was not changed."
+  if [[ ! "$email" == *@*.* ]]; then
+    warn "The certificate email is invalid. Installation will continue without HTTPS; run 'sudo arg ssl' later."
     return 0
+  fi
+  if ! install_https_dependencies; then
+    warn "Could not prepare certificate tools. Installation will continue without HTTPS; run 'sudo arg ssl' later."
+    return 0
+  fi
+  if [[ "$is_ip" == "y" ]] && ! ensure_ip_certbot; then
+    warn "The IP-certificate tools are unavailable. Installation will continue without HTTPS; run 'sudo arg ssl' later."
+    return 0
+  fi
+  port80_unit="$(port80_systemd_service)" || {
+    warn "TCP port 80 is occupied by a service ARG cannot safely pause. Installation will continue without HTTPS; configure HTTPS later after resolving the conflict."
+    return 0
+  }
+  if ! issue_certificate "$host" "$email" "$port80_unit" "$is_ip"; then
+    if [[ -n "$PORT80_STOPPED_UNIT" ]]; then
+      warn "A web service could not be restored after the certificate attempt. ZeroSSL fallback was skipped; restore the service and configure HTTPS later."
+      rm -f "$CERT_DEPLOY_HOOK"
+      return 0
+    fi
+    if ! try_zerossl_fallback "$host" "$email" "$port80_unit" "$is_ip"; then
+      rm -f "$CERT_DEPLOY_HOOK"
+      warn "Certificate issuance failed. The panel remains available on its current address; HTTPS configuration was not changed. Open Panel Settings → SSL Certificates after installing a certificate manually."
+      return 0
+    fi
   fi
 
   port="$(available_tls_port)" || {
-    certbot delete --cert-name "$CERT_NAME" --non-interactive >/dev/null 2>&1 || true
-    rm -f "$CERT_DEPLOY_HOOK"
-    die "No available HTTPS port was found (tried 443, 8443, 9443, and 10443)."
+    warn "No HTTPS port is available (tried 443, 8443, 9443, and 10443). The certificate remains on disk; ARG installation continues without HTTPS. Configure it later in Panel Settings → SSL Certificates."
+    return 0
   }
   env_backup="$(mktemp /etc/arg/.arg.env.backup.XXXXXX)"
-  cp -p "$ENV_FILE" "$env_backup"
-  copy_certificate_files "/etc/letsencrypt/live/$CERT_NAME"
-  printf '%s\n' "$host" > "$DOMAIN_FILE"
-  chown root:"$SERVICE_GROUP" "$DOMAIN_FILE"
-  chmod 0640 "$DOMAIN_FILE"
-  set_env_value ARG_TLS_CERT "$TLS_CERT"
-  set_env_value ARG_TLS_KEY "$TLS_KEY"
-  set_env_value ARG_TLS_BIND "0.0.0.0:$port"
-  sync_ufw_rules
-  ensure_certbot_renewal
+  if ! cp -p "$ENV_FILE" "$env_backup" || ! copy_certificate_files "/etc/letsencrypt/live/$CERT_NAME"; then
+    rm -f "$env_backup"
+    warn "The certificate was issued but could not be staged. Installation will continue without HTTPS; configure it later in Panel Settings."
+    return 0
+  fi
+  if ! printf '%s\n' "$host" > "$DOMAIN_FILE" || ! chown root:"$SERVICE_GROUP" "$DOMAIN_FILE" || ! chmod 0640 "$DOMAIN_FILE" \
+    || ! set_env_value ARG_TLS_CERT "$TLS_CERT" || ! set_env_value ARG_TLS_KEY "$TLS_KEY" || ! set_env_value ARG_TLS_BIND "0.0.0.0:$port"; then
+    mv -f "$env_backup" "$ENV_FILE"
+    rm -f "$DOMAIN_FILE" "$TLS_CERT" "$TLS_KEY" "$CERT_DEPLOY_HOOK"
+    warn "The certificate was issued but could not be activated. Installation will continue without HTTPS."
+    return 0
+  fi
+  sync_ufw_rules || warn "Could not update UFW rules automatically. Allow inbound TCP 80 and $port before using HTTPS."
+  ensure_certbot_renewal || warn "Automatic renewal scheduling failed. The certificate works now, but renew it manually or repair the Certbot timer."
   if ! systemctl restart "$SERVICE_NAME" || ! wait_until_active || ! wait_for_https "$host" "$port"; then
     journalctl -u "$SERVICE_NAME" -n 30 --no-pager || true
     mv -f "$env_backup" "$ENV_FILE"
