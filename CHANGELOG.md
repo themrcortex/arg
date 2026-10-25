@@ -2,6 +2,13 @@
 
 ## v0.6.3-dev.8 — 2026-10-25
 
+## v0.6.3 — 2026-10-25
+
+### Fixed
+- Detect the server's public IPv4 address through multiple independent services and reject malformed, private, or non-public addresses.
+- Retry transient Let's Encrypt API network timeouts up to three times, restore any temporarily stopped web service, and explain how to diagnose persistent outbound connectivity failures.
+
+
 ### Fixed
 - Read per-service CPU and memory usage from cgroup v2 when systemd accounting counters are unavailable; ignore unset and overflow sentinel values instead of treating them as measurements.
 - Use millisecond sampling windows for CPU percentages, discard stale samples from the older seconds-based format, and return a readable measurement status rather than failing the whole Nginx resource panel.
