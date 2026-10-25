@@ -1204,9 +1204,9 @@ update_app() {
     "$UPDATE_HELPER" state succeeded complete "ARG is updated and the service is active." >/dev/null 2>&1 || true
     binary_swapped=0
     show_setup_code_if_needed
+    cleanup_update_reservation
+    trap - EXIT
     if (( MENU_ACTIVE )); then
-      cleanup_update_reservation
-      trap - EXIT
       exec "$CLI" menu
     fi
     return

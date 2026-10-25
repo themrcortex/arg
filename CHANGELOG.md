@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.5.3 — 2026-10-25
+
+### Fixed
+- Run update cleanup before returning from the installer so shell exit traps do not reference expired local variables or leave the update lock behind.
+
 ## v0.5.2 — 2026-10-25
 
 ### Added
