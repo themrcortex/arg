@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.6.5-dev.1 — 2026-10-25
+
+### Added
+- Add a ZeroSSL second-source ACME flow after Let's Encrypt failure; domain issuance prompts for EAB credentials and stores them only in a temporary root-only config file.
+- Add panel SSL certificate settings with automatic discovery, safe certificate/key installation, host/IP SAN validation, and scheduled HTTPS activation.
+
+### Fixed
+- Keep HTTPS optional during installation and continue ARG setup when certificate tools are unavailable, ports conflict, or both issuers fail.
+- Show a persistent HTTP transport warning on login and throughout the panel.
+
 ## v0.6.4-dev.1 — 2026-10-25
 
 ### Fixed
