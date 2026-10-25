@@ -309,6 +309,16 @@ async fn login(
     Json(input): Json<Credentials>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     check_origin(&headers)?;
+    let secure_transport = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        == Some("https");
+    if !remote.ip().is_loopback() && !secure_transport {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Use the HTTPS panel URL to sign in. For initial setup, connect through an SSH tunnel.",
+        ));
+    }
     let db = state.lock().unwrap();
     let attempts: (i64, i64) = db
         .query_row(
@@ -370,13 +380,9 @@ async fn login(
     )
     .map_err(db_error)?;
     audit(&db, &input.username, "login", "Successful login");
-    let secure = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        == Some("https");
     let cookie = format!(
         "arg_session={raw}; HttpOnly; SameSite=Strict; Path=/; Max-Age={session_seconds}{}",
-        if secure { "; Secure" } else { "" }
+        if secure_transport { "; Secure" } else { "" }
     );
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response())
 }
@@ -2350,12 +2356,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(Mutex::new(db));
     tokio::spawn(collect_metrics(state.clone()));
     let app = routes::router(state);
-    let bind = env::var("ARG_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
-    let addr: SocketAddr = bind.parse()?;
-    println!("ARG listening at http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     let tls_cert = env::var("ARG_TLS_CERT").ok();
     let tls_key = env::var("ARG_TLS_KEY").ok();
+    let bind = env::var("ARG_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
+    let addr: SocketAddr = bind.parse()?;
+    let http_addr = if tls_cert.is_some() && tls_key.is_some() {
+        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
+    } else {
+        addr
+    };
+    println!("ARG listening at http://{http_addr}");
+    let listener = tokio::net::TcpListener::bind(http_addr).await?;
     match (tls_cert, tls_key) {
         (Some(cert), Some(key)) => {
             rustls::crypto::ring::default_provider()

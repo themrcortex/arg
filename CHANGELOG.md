@@ -1,5 +1,18 @@
 # ARG Change Log
 
+## v0.4.32 — 2026-10-25
+
+### Fixed
+- Show five server-driven update stages and an unmistakable copper active loading state instead of optimistic stage jumps.
+- Keep the phase monotonic for each running job and trust the privileged helper rather than arbitrary browser timeouts.
+- Hold the update overlay through reload and display new release notes only after the refreshed app authenticates.
+- Prevent an ordinary manual refresh from reopening the successful-update changelog.
+- Reject remote sign-ins over plaintext HTTP and keep the HTTP listener on loopback when TLS is configured.
+- Include the rebuilt React assets in the release bundle so small VPS installs do not need Node.js or an extra frontend build.
+
+### Documentation
+- Add an outstanding security risks and remediation report in docs/SECURITY_REVIEW.md.
+
 ## v0.4.31 — 2026-10-24
 
 ### Changed

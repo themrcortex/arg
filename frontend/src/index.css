@@ -286,10 +286,17 @@
 .arg-range [aria-pressed="false"] { color: var(--arg-muted); }
 .arg-range [aria-pressed="false"]:hover { color: #f2f0eb; }
 .arg-update-active-segment {
-  background: linear-gradient(90deg, hsl(var(--primary) / .55), hsl(var(--primary)), hsl(var(--primary) / .65));
+  background: linear-gradient(90deg, #d99052, #ffe3b6, #f9b46d);
   background-size: 220% 100%;
-  animation: arg-update-sheen 1.8s ease-in-out infinite;
-  box-shadow: 0 0 14px hsl(var(--primary) / .28);
+  animation: arg-update-sheen 1.6s ease-in-out infinite;
+  box-shadow: 0 0 18px rgba(255, 190, 117, .6);
+}
+.arg-update-active-step {
+  background: linear-gradient(140deg, rgba(221,164,111,.28), rgba(255,201,135,.09));
+  box-shadow: 0 0 0 1px rgba(255,204,143,.25), 0 0 24px rgba(221,164,111,.24), inset 0 0 18px rgba(221,164,111,.10);
+}
+@media (prefers-reduced-motion: reduce) {
+  .arg-update-active-segment { animation: none; background-position: 50% 0; }
 }
 @keyframes arg-update-sheen {
   0%, 100% { background-position: 100% 0; opacity: .76; }
