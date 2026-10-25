@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.3-dev.5 — 2026-10-25
+
+### Fixed
+- Format systemd `MemoryMax` values as plain bytes; remove the unsupported `B` suffix that caused resource-limit updates to fail with a pattern parsing error.
+- Add regression coverage for CPU/RAM property formatting and clearing limits.
+
 ## v0.6.3-dev.4 — 2026-10-25
 
 ### Fixed
