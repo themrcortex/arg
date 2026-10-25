@@ -90,6 +90,8 @@ case "${1:-}" in
     printf '%s %s %s\n' "$local_rev" "$remote_rev" "$remote_version"
     ;;
   run)
+    mode="${2:-complete}"
+    case "$mode" in fast|complete) ;; *) echo "Invalid update build mode." >&2; exit 2 ;; esac
     clear_stale_update_lock
     if ! mkdir "$update_lock_dir" 2>/dev/null; then
       echo "ARG_UPDATE_IN_PROGRESS: another update is already running." >&2
@@ -100,7 +102,7 @@ case "${1:-}" in
     export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
     write_update_state running scheduled "Update queued; waiting for the service helper."
     unit="arg-web-update-$$"
-    if ! systemd-run --quiet --collect --unit="$unit" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 --setenv="ARG_UPDATE_JOB_ID=$ARG_UPDATE_JOB_ID" /usr/local/bin/arg update; then
+    if ! systemd-run --quiet --collect --unit="$unit" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 --setenv="ARG_UPDATE_MODE=$mode" --setenv="ARG_UPDATE_JOB_ID=$ARG_UPDATE_JOB_ID" /usr/local/bin/arg update; then
       write_update_state failed scheduling "The system could not start the update job."
       rm -f "$update_status_file"
       rmdir "$update_lock_dir" 2>/dev/null || true

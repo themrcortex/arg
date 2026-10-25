@@ -217,6 +217,9 @@ prepare_source() {
 
 build_release() {
   [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the repository and main branch."
+  if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" && "${ARG_UPDATE_MODE:-complete}" == "complete" ]]; then
+    run_with_progress "Clearing previous Rust build cache" bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR"
+  fi
   run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"
   [[ -x "$SOURCE_DIR/target/release/arg" ]] || die "The ARG binary was not created."
 }
@@ -1055,7 +1058,9 @@ wait_for_panel() {
 update_app() {
   require_root update
   require_systemd
-  local was_installed=0
+  local was_installed=0 build_started=0
+  export ARG_UPDATE_MODE="${ARG_UPDATE_MODE:-complete}"
+  case "$ARG_UPDATE_MODE" in fast|complete) ;; *) die "Invalid update build mode." ;; esac
   [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
   (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
   if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" ]]; then
@@ -1083,11 +1088,21 @@ update_app() {
   chmod 0644 "$UPDATE_STATUS_FILE"
   [[ -n "${ARG_UPDATE_JOB_ID:-}" ]] || export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
   update_phase() { "$UPDATE_HELPER" state running "$1" "${2:-}" >/dev/null 2>&1 || true; }
+  cleanup_update_build_cache() {
+    (( build_started )) || return 0
+    [[ "$ARG_UPDATE_MODE" == "complete" ]] || return 0
+    if bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR" >/dev/null 2>&1; then
+      info "Removed the Rust build cache to reclaim disk space."
+    else
+      warn "The update succeeded, but the Rust build cache could not be removed. Run 'cargo clean' in $SOURCE_DIR later."
+    fi
+  }
   cleanup_update_reservation() {
     local exit_code=$?
     if (( exit_code != 0 )); then
       "$UPDATE_HELPER" state failed failed "The update stopped before successful verification. Review the update log and retry." >/dev/null 2>&1 || true
     fi
+    cleanup_update_build_cache
     rm -f "$UPDATE_STATUS_FILE"
     rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
     return "$exit_code"
@@ -1103,6 +1118,7 @@ update_app() {
   # Keep the privileged updater helper in sync before the replacement service starts polling it.
   configure_ufw_status
   update_phase building "Building the new ARG release."
+  build_started=1
   build_release
   update_phase installing "Installing the verified build."
   ensure_service_account

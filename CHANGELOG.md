@@ -1,5 +1,16 @@
 # ARG Change Log
 
+## v0.4.41 — 2026-10-25
+
+### Added
+- Add Quick and Complete update build modes. Quick retains Cargo's release cache for faster future updates; Complete clears it before compilation and after installing the verified binary.
+- Remember the selected update mode in the browser and explain the disk-space and build-time tradeoffs before starting an update.
+
+### Changed
+- Default updates to Complete mode and keep the existing installed binary intact if compilation or health verification fails.
+- Clarify that Complete mode removes retained build artifacts after the update but still needs temporary disk space while compiling.
+- Bump ARG to v0.4.41.
+
 ## v0.4.40 — 2026-10-25
 
 ### Changed

@@ -2565,8 +2565,29 @@ fn shared_web_service(unit: &str) -> bool {
     matches!(unit, "nginx.service" | "apache2.service" | "httpd.service")
         || (unit.starts_with("php") && unit.ends_with("-fpm.service"))
 }
-async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+#[derive(Deserialize)]
+struct PanelUpdateQuery {
+    #[serde(default = "default_update_build_mode")]
+    mode: String,
+}
+
+fn default_update_build_mode() -> String {
+    "complete".into()
+}
+
+fn valid_update_build_mode(mode: &str) -> bool {
+    matches!(mode, "fast" | "complete")
+}
+
+async fn schedule_panel_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(input): Query<PanelUpdateQuery>,
+) -> ApiResult {
     check_origin(&headers)?;
+    if !valid_update_build_mode(&input.mode) {
+        return Err(error(StatusCode::BAD_REQUEST, "Update build mode is invalid."));
+    }
     let _exclusive = UPDATE_OPERATION_GATE.write().await;
     if update_started_at().is_some() {
         return Err(error(
@@ -2576,7 +2597,7 @@ async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
-    let output = privileged_request(json!({"action":"update-run"}))?;
+    let output = privileged_request(json!({"action":"update-run","mode":input.mode}))?;
     if output["ok"] != true {
         let detail = output["error"]
             .as_str()
@@ -2902,10 +2923,21 @@ fn execute_privileged_request(request: &Value) -> Value {
             args.iter().map(String::as_str).collect(),
         )
     };
-    let output = match std::process::Command::new(helper)
-        .args(helper_args)
-        .output()
-    {
+    let update_mode = if action == "update-run" {
+        let mode = request["mode"].as_str().unwrap_or("complete");
+        if !valid_update_build_mode(mode) {
+            return json!({"ok":false,"error":"Update build mode is invalid."});
+        }
+        Some(mode)
+    } else {
+        None
+    };
+    let mut helper_command = std::process::Command::new(helper);
+    helper_command.args(helper_args);
+    if let Some(mode) = update_mode {
+        helper_command.arg(mode);
+    }
+    let output = match helper_command.output() {
         Ok(output) => output,
         Err(error) => {
             return json!({"ok":false,"available":false,"installed":false,"status":"","error":error.to_string()})
@@ -3374,7 +3406,19 @@ async fn clear_trusted_transport_marker(
 
 #[cfg(test)]
 mod update_progress_tests {
-    use super::{firewall_rule_validation_error, update_progress_payload, FirewallRuleInput};
+    use super::{
+        default_update_build_mode, firewall_rule_validation_error, update_progress_payload,
+        valid_update_build_mode, FirewallRuleInput,
+    };
+
+    #[test]
+    fn update_build_mode_only_accepts_supported_choices() {
+        assert!(valid_update_build_mode("fast"));
+        assert!(valid_update_build_mode("complete"));
+        assert!(!valid_update_build_mode("clean"));
+        assert!(!valid_update_build_mode("../../tmp"));
+        assert_eq!(default_update_build_mode(), "complete");
+    }
 
     #[test]
     fn firewall_protects_effective_ssh_and_arg_ports() {

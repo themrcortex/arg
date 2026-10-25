@@ -384,7 +384,7 @@ function UpdateLogDetails({ active = false }: { active?: boolean }) {
   </div>
 }
 
-function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, refreshing, failure, canInstall, changelog, onCheck, onInstall, onForceRefresh }: {
+function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, refreshing, failure, canInstall, changelog, buildMode, onBuildModeChange, onCheck, onInstall, onForceRefresh }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   update: { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string; error?: string }
@@ -395,8 +395,10 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
   failure: string | null
   canInstall: boolean
   changelog: string
+  buildMode: 'fast' | 'complete'
+  onBuildModeChange: (mode: 'fast' | 'complete') => void
   onCheck: () => void
-  onInstall: () => void
+  onInstall: (mode: 'fast' | 'complete') => void
   onForceRefresh: () => void
 }) {
   const [refreshingPanel, setRefreshingPanel] = useState(false)
@@ -406,10 +408,11 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
     window.setTimeout(() => setRefreshingPanel(false), 1800)
   }
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{failure ? 'به‌روزرسانی ناموفق بود' : finished ? 'به‌روزرسانی کامل شد' : 'به‌روزرسانی ARG'}</DialogTitle><DialogDescription>{failure ? 'نصب نسخه کامل نشد. گزارش زنده یا آخرین گزارش را برای جزئیات باز کن.' : finished ? 'نسخهٔ تازه بارگذاری شده است. تغییرات این نسخه:' : 'نسخهٔ نصب‌شده را با آخرین نسخهٔ GitHub بررسی کن.'}</DialogDescription></DialogHeader>
-    {failure ? <div className="space-y-4"><div role="alert" className="rounded-xl border border-rose-400/25 bg-rose-400/[.07] p-4 text-sm text-rose-100"><div className="mb-1 flex items-center gap-2 font-semibold"><X size={17}/>به‌روزرسانی انجام نشد</div><p className="leading-6">{failure}</p></div><UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>تلاش دوباره برای نصب</Button>}<Button variant="ghost" onClick={() => onOpenChange(false)}>بستن</Button></div></div> : finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>{refreshing ? 'در حال تازه‌سازی پنل…' : 'به‌روزرسانی کامل شد و نسخهٔ تازه بارگذاری شد.'}</div><p className="text-xs leading-6 text-muted-foreground">تغییرات زیر مربوط به نسخهٔ تازه‌بارگذاری‌شده است. برای بارگذاری دوباره در صورت نیاز از دکمهٔ رفرش استفاده کن.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><UpdateLogDetails/><div className="grid gap-2 sm:grid-cols-2"><Button onClick={refreshPanelManually} aria-busy={refreshingPanel}><RefreshCw size={15} className={refreshingPanel ? 'animate-spin' : ''}/>{refreshingPanel ? 'در حال پاک‌سازی و رفرش…' : 'رفرش کامل صفحه'}</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
+    {failure ? <div className="space-y-4"><div role="alert" className="rounded-xl border border-rose-400/25 bg-rose-400/[.07] p-4 text-sm text-rose-100"><div className="mb-1 flex items-center gap-2 font-semibold"><X size={17}/>به‌روزرسانی انجام نشد</div><p className="leading-6">{failure}</p></div><UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={() => onInstall(buildMode)}>تلاش دوباره برای نصب</Button>}<Button variant="ghost" onClick={() => onOpenChange(false)}>بستن</Button></div></div> : finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>{refreshing ? 'در حال تازه‌سازی پنل…' : 'به‌روزرسانی کامل شد و نسخهٔ تازه بارگذاری شد.'}</div><p className="text-xs leading-6 text-muted-foreground">تغییرات زیر مربوط به نسخهٔ تازه‌بارگذاری‌شده است. برای بارگذاری دوباره در صورت نیاز از دکمهٔ رفرش استفاده کن.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><UpdateLogDetails/><div className="grid gap-2 sm:grid-cols-2"><Button onClick={refreshPanelManually} aria-busy={refreshingPanel}><RefreshCw size={15} className={refreshingPanel ? 'animate-spin' : ''}/>{refreshingPanel ? 'در حال پاک‌سازی و رفرش…' : 'رفرش کامل صفحه'}</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.local_version ? `v${update.local_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخه</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.remote_version ? `v${update.remote_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.remote || '—'}</div></div></div>
       {checking ? <div role="status" className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground"><RefreshCw size={16} className="animate-spin text-primary"/>در حال بررسی نسخهٔ GitHub…</div> : update.status === 'available' ? <div className="rounded-xl border border-amber-400/25 bg-amber-400/[.06] p-4 text-sm text-amber-100">نسخهٔ جدید {update.remote_version ? `v${update.remote_version}` : update.remote} آمادهٔ نصب است.</div> : update.status === 'current' ? <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[.06] p-4 text-sm text-emerald-200">پنل به‌روز است.</div> : <div className="rounded-xl border border-rose-400/20 bg-rose-400/[.06] p-4 text-sm text-rose-200">{update.error || 'بررسی نسخه انجام نشد. اتصال سرور و دسترسی helper را بررسی کن.'}</div>}
-      <UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={onInstall}>نصب نسخهٔ جدید</Button>}</div>
+      {update.status === 'available' && canInstall && <section className="space-y-2 rounded-xl border border-border bg-background/35 p-3" aria-label="حالت ساخت نسخهٔ جدید"><p className="text-xs font-semibold">روش کامپایل و مصرف دیسک</p><div className="grid gap-2 sm:grid-cols-2"><button type="button" aria-pressed={buildMode === 'fast'} onClick={() => onBuildModeChange('fast')} className={`rounded-lg border p-3 text-right transition-colors ${buildMode === 'fast' ? 'border-primary/45 bg-primary/[.07]' : 'border-border hover:bg-secondary/50'}`}><span className="block text-xs font-semibold">آپدیت سریع</span><span className="mt-1 block text-[10px] leading-5 text-muted-foreground">Cache کامپایل را نگه می‌دارد تا آپدیت‌های بعدی سریع‌تر شوند. بر اساس اندازهٔ فعلی سرورتان، حدود 1.5 GB از دیسک برای فایل‌های Build اشغال می‌ماند.</span></button><button type="button" aria-pressed={buildMode === 'complete'} onClick={() => onBuildModeChange('complete')} className={`rounded-lg border p-3 text-right transition-colors ${buildMode === 'complete' ? 'border-primary/45 bg-primary/[.07]' : 'border-border hover:bg-secondary/50'}`}><span className="block text-xs font-semibold">آپدیت کامل · آزادسازی Cache</span><span className="mt-1 block text-[10px] leading-5 text-muted-foreground">Cache قبلی پیش از کامپایل و Cache جدید پس از نصب پاک می‌شود؛ هر آپدیت طولانی‌تر است. هنگام خودِ کامپایل موقتاً فضای دیسک لازم است و این مقدار با نسخه تغییر می‌کند.</span></button></div></section>}
+      <UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={() => onInstall(buildMode)}>نصب نسخهٔ جدید</Button>}</div>
     </div>}
   </DialogContent></Dialog>
 }
@@ -494,6 +497,9 @@ export default function App() {
   })
   const [loadError, setLoadError] = useState('')
   const [update, setUpdate] = useState<{ status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string; error?: string; instance?: string }>({ status: 'unavailable' })
+  const [updateBuildMode, setUpdateBuildMode] = useState<'fast' | 'complete'>(() => {
+    try { return window.localStorage.getItem('arg.update-build-mode') === 'fast' ? 'fast' : 'complete' } catch { return 'complete' }
+  })
   const [updating, setUpdating] = useState(false)
   const [updateFailure, setUpdateFailure] = useState<string | null>(null)
   const [updateStage, setUpdateStage] = useState<UpdateStage>(1)
@@ -710,7 +716,11 @@ export default function App() {
     setReloadQueued(true)
     window.setTimeout(() => void forceFreshPanelReload(true), 1200)
   }
-  async function runUpdate() {
+  function changeUpdateBuildMode(mode: 'fast' | 'complete') {
+    setUpdateBuildMode(mode)
+    try { window.localStorage.setItem('arg.update-build-mode', mode) } catch { /* The selected mode still applies for this session. */ }
+  }
+  async function runUpdate(mode: 'fast' | 'complete') {
     if (user?.role !== 'admin' || updating) return
     setUpdateFailure(null)
     setUpdateFinished(false)
@@ -727,7 +737,7 @@ export default function App() {
     setUpdateStartedAt(Date.now())
     setUpdating(true)
     try {
-      await api('update', { method: 'POST' })
+      await api(`update?mode=${mode}`, { method: 'POST' })
       setUpdateDialogOpen(false)
     } catch (e) {
       setUpdating(false)
@@ -912,7 +922,7 @@ export default function App() {
         </div>
         <Toaster />
         <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating} refreshing={reloadQueued}/>
-        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog} onCheck={() => void openUpdateDialog()} onInstall={() => void runUpdate()} onForceRefresh={() => void forceFreshPanelReload(false)}/>
+        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onForceRefresh={() => void forceFreshPanelReload(false)}/>
       </div>
     </PanelTimeZoneContext.Provider>
   )
