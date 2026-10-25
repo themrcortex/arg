@@ -1549,10 +1549,10 @@ pub(super) async fn delete_connection(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?
     };
-    {
+    let connection = {
         let db = state.lock().unwrap();
-        let _ = read_connection(&db, id)?;
-    }
+        read_connection(&db, id)?
+    };
     if input.confirm_name != connection.display_name {
         return Err(error(
             StatusCode::BAD_REQUEST,
