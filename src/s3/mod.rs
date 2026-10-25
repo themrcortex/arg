@@ -551,14 +551,77 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
     }
 }
 
-fn mount_paths(mount_id: i64, connection_id: i64, bucket_id: i64) -> Option<(PathBuf, PathBuf, String)> {
+fn mount_control_paths(mount_id: i64, connection_id: i64, bucket_id: i64) -> Option<(PathBuf, String)> {
     if mount_id <= 0 || connection_id <= 0 || bucket_id <= 0 {
         return None;
     }
-    let mount_path = PathBuf::from(format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"));
     let config_path = PathBuf::from(format!("{SECRET_DIR}/mount-{mount_id}.conf"));
     let unit = format!("arg-s3-mount-{mount_id}.service");
-    Some((mount_path, config_path, unit))
+    Some((config_path, unit))
+}
+
+fn valid_named_mount_path(value: &str) -> bool {
+    let Ok(relative) = std::path::Path::new(value).strip_prefix("/mnt/arg-s3") else {
+        return false;
+    };
+    let components = relative.components().collect::<Vec<_>>();
+    components.len() == 2 && components.iter().all(|component| match component {
+        std::path::Component::Normal(name) => {
+            let name = name.to_string_lossy();
+            !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        }
+        _ => false,
+    })
+}
+
+fn mount_slug(value: &str, fallback: &str) -> String {
+    let mut slug = String::new();
+    let mut separator = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            if separator && !slug.is_empty() && slug.len() < 47 {
+                slug.push('-');
+            }
+            if slug.len() < 48 {
+                slug.push((byte as char).to_ascii_lowercase());
+            }
+            separator = false;
+        } else {
+            separator = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() { fallback.to_owned() } else { slug.to_owned() }
+}
+
+fn bucket_mount_path(
+    db: &Connection,
+    connection_id: i64,
+    bucket_id: i64,
+    connection_name: &str,
+    bucket_name: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let connection_slug = mount_slug(connection_name, &format!("connection-{connection_id}"));
+    let bucket_slug = mount_slug(bucket_name, &format!("bucket-{bucket_id}"));
+    let readable = format!("/mnt/arg-s3/{connection_slug}/{bucket_slug}");
+    let used: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM s3_mounts WHERE mount_path=?1 AND bucket_id<>?2)",
+            params![readable, bucket_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if used {
+        Ok(format!(
+            "/mnt/arg-s3/{connection_slug}-c{connection_id}/{bucket_slug}-b{bucket_id}"
+        ))
+    } else {
+        Ok(readable)
+    }
 }
 
 fn run_systemctl(args: &[&str]) -> Result<String, String> {
@@ -578,8 +641,11 @@ fn start_s3_mount(request: &Value) -> Value {
     let Some(bucket) = request["bucket"].as_str().filter(|value| valid_bucket_name(value)) else {
         return json!({"ok":false,"error":"Bucket نامعتبر است."});
     };
-    let Some((mount_path, config_path, unit)) = mount_paths(mount_id, connection_id, bucket_id) else {
+    let Some((config_path, unit)) = mount_control_paths(mount_id, connection_id, bucket_id) else {
         return json!({"ok":false,"error":"شناسه Mount نامعتبر است."});
+    };
+    let Some(mount_path) = request["mount_path"].as_str().filter(|path| valid_named_mount_path(path)).map(PathBuf::from) else {
+        return json!({"ok":false,"error":"نام یا مسیر Mount معتبر نیست."});
     };
     let secret = match read_secret_file(connection_id) {
         Ok(secret) => secret,
@@ -628,10 +694,13 @@ fn start_s3_mount(request: &Value) -> Value {
     if ensure_mount_directory(&cache_root).is_err() || ensure_mount_directory(&cache_path).is_err() {
         return json!({"ok":false,"error":"ساخت پوشهٔ Cache محلی امن ناموفق بود."});
     }
-    if !already_active {
-        if let Err(error) = ensure_mount_directory(&mount_path) {
-            return json!({"ok":false,"error":format!("پوشهٔ Mount امن نیست: {error}")});
+    if let Some(parent) = mount_path.parent() {
+        if let Err(error) = ensure_mount_directory(parent) {
+            return json!({"ok":false,"error":format!("پوشهٔ نام اتصال امن نیست: {error}")});
         }
+    }
+    if let Err(error) = ensure_mount_directory(&mount_path) {
+        return json!({"ok":false,"error":format!("پوشهٔ Mount امن نیست: {error}")});
     }
     let mount_metadata = already_active || match fs::read_dir(&mount_path) {
         Ok(mut entries) => entries.next().is_none(),
@@ -722,7 +791,7 @@ fn ensure_mount_directory(path: &std::path::Path) -> Result<(), String> {
 
 fn stop_s3_mount(request: &Value) -> Value {
     let mount_id = request["mount_id"].as_i64().unwrap_or(0);
-    let Some((_, config_path, unit)) = mount_paths(mount_id, request["connection_id"].as_i64().unwrap_or(0), request["bucket_id"].as_i64().unwrap_or(0)) else {
+    let Some((config_path, unit)) = mount_control_paths(mount_id, request["connection_id"].as_i64().unwrap_or(0), request["bucket_id"].as_i64().unwrap_or(0)) else {
         return json!({"ok":false,"error":"شناسه Mount نامعتبر است."});
     };
     match run_systemctl(&["stop", &unit]) {
@@ -1329,12 +1398,16 @@ mod tests {
 
     #[test]
     fn s3_mount_paths_are_generated_from_positive_ids_only() {
-        let (mount_path, config_path, unit) = mount_paths(12, 3, 8).unwrap();
-        assert_eq!(mount_path, PathBuf::from("/mnt/arg-s3/connection-3-bucket-8"));
+        let (config_path, unit) = mount_control_paths(12, 3, 8).unwrap();
         assert_eq!(config_path, PathBuf::from("/etc/arg/s3/mount-12.conf"));
         assert_eq!(unit, "arg-s3-mount-12.service");
-        assert!(mount_paths(0, 3, 8).is_none());
-        assert!(mount_paths(12, -1, 8).is_none());
+        assert!(mount_control_paths(0, 3, 8).is_none());
+        assert!(mount_control_paths(12, -1, 8).is_none());
+        assert!(valid_named_mount_path("/mnt/arg-s3/backups/media-files"));
+        assert!(!valid_named_mount_path("/mnt/arg-s3/../../etc"));
+        assert!(!valid_named_mount_path("/mnt/arg-s3/backups/media/files"));
+        assert_eq!(mount_slug("Production Backups", "connection"), "production-backups");
+        assert_eq!(mount_slug("فضای پشتیبان", "connection-12"), "connection-12");
     }
 
     #[test]
@@ -1364,59 +1437,60 @@ pub(super) struct MountConfigInput {
     auto_mount: bool,
 }
 
-fn mount_public(mount_id: i64, connection_id: i64, bucket_id: i64, bucket: &str, read_only: bool, auto_mount: bool, status: &str, error: Option<&str>) -> Value {
-    json!({"id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket,"mount_path":format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"),"method":"rclone","read_only":read_only,"auto_mount":auto_mount,"status":status,"last_error":error,"capacity":"unknown","capacity_note":"S3 فضای ابری است؛ ظرفیت آن به دیسک محلی اضافه نمی‌شود و از statvfs قابل اتکا نیست."})
+fn mount_public(mount_id: i64, connection_id: i64, bucket_id: i64, bucket: &str, mount_path: &str, read_only: bool, auto_mount: bool, status: &str, error: Option<&str>) -> Value {
+    json!({"id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket,"mount_path":mount_path,"mount_name":format!("{bucket} · Mount شده در VPS"),"method":"rclone","read_only":read_only,"auto_mount":auto_mount,"status":status,"last_error":error,"capacity":"unknown","capacity_note":"S3 فضای ابری است؛ ظرفیت آن به دیسک محلی اضافه نمی‌شود و از statvfs قابل اتکا نیست."})
 }
 
 pub(super) async fn get_bucket_mount(State(state): State<AppState>, Path(bucket_id): Path<i64>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
     let bucket: (i64, String) = db.query_row("SELECT connection_id,bucket_name FROM s3_buckets WHERE id=?1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| error(StatusCode::NOT_FOUND,"Bucket پیدا نشد."))?;
-    let mount: Option<(i64,bool,bool,String,Option<String>)> = db.query_row("SELECT id,read_only!=0,auto_mount!=0,status,last_error FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional().map_err(db_error)?;
-    let value = mount.map(|(id,read_only,auto_mount,status,last_error)| mount_public(id,bucket.0,bucket_id,&bucket.1,read_only,auto_mount,&status,last_error.as_deref()));
+    let mount: Option<(i64,String,bool,bool,String,Option<String>)> = db.query_row("SELECT id,mount_path,read_only!=0,auto_mount!=0,status,last_error FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional().map_err(db_error)?;
+    let value = mount.map(|(id,mount_path,read_only,auto_mount,status,last_error)| mount_public(id,bucket.0,bucket_id,&bucket.1,&mount_path,read_only,auto_mount,&status,last_error.as_deref()));
     Ok(Json(json!({"mount":value})))
 }
 
 pub(super) async fn configure_bucket_mount(State(state): State<AppState>, Path(bucket_id): Path<i64>, headers: HeaderMap, Json(input): Json<MountConfigInput>) -> ApiResult {
     check_origin(&headers)?;
-    let (actor, connection_id, bucket_name, mount_id) = {
+    let (actor, connection_id, bucket_name, mount_path, mount_id) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?;
-        let (connection_id,bucket_name): (i64,String) = db.query_row("SELECT connection_id,bucket_name FROM s3_buckets WHERE id=?1 AND enabled=1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?))).map_err(|_|error(StatusCode::NOT_FOUND,"Bucket فعال پیدا نشد."))?;
+        let (connection_id,bucket_name,connection_name): (i64,String,String) = db.query_row("SELECT b.connection_id,b.bucket_name,c.display_name FROM s3_buckets b JOIN s3_connections c ON c.id=b.connection_id WHERE b.id=?1 AND b.enabled=1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|error(StatusCode::NOT_FOUND,"Bucket فعال پیدا نشد."))?;
+        let mount_path = bucket_mount_path(&db,connection_id,bucket_id,&connection_name,&bucket_name)?;
         let mount_id: Option<i64> = db.query_row("SELECT id FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|row.get(0)).optional().map_err(db_error)?;
         let mount_id = if let Some(id) = mount_id {
-            db.execute("UPDATE s3_mounts SET method='rclone',mount_path=?1,read_only=?2,auto_mount=?3,status='mounting',last_error=NULL,updated_at=?4 WHERE id=?5",params![format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"),input.read_only as i64,input.auto_mount as i64,now(),id]).map_err(db_error)?;
+            db.execute("UPDATE s3_mounts SET method='rclone',mount_path=?1,read_only=?2,auto_mount=?3,status='mounting',last_error=NULL,updated_at=?4 WHERE id=?5",params![mount_path,input.read_only as i64,input.auto_mount as i64,now(),id]).map_err(db_error)?;
             id
         } else {
-            db.execute("INSERT INTO s3_mounts(bucket_id,method,mount_path,read_only,auto_mount,status,updated_at) VALUES (?1,'rclone',?2,?3,?4,'mounting',?5)",params![bucket_id,format!("/mnt/arg-s3/connection-{connection_id}-bucket-{bucket_id}"),input.read_only as i64,input.auto_mount as i64,now()]).map_err(db_error)?;
+            db.execute("INSERT INTO s3_mounts(bucket_id,method,mount_path,read_only,auto_mount,status,updated_at) VALUES (?1,'rclone',?2,?3,?4,'mounting',?5)",params![bucket_id,mount_path,input.read_only as i64,input.auto_mount as i64,now()]).map_err(db_error)?;
             db.last_insert_rowid()
         };
-        (actor,connection_id,bucket_name,mount_id)
+        (actor,connection_id,bucket_name,mount_path,mount_id)
     };
-    let result = privileged_request_async(json!({"action":"s3-mount-start","mount_id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket_name,"read_only":input.read_only,"auto_mount":input.auto_mount})).await?;
+    let result = privileged_request_async(json!({"action":"s3-mount-start","mount_id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket_name,"mount_path":mount_path,"read_only":input.read_only,"auto_mount":input.auto_mount})).await?;
     let ok = result["ok"] == true;
     let error_message = result["error"].as_str();
     let db = state.lock().unwrap();
     db.execute("UPDATE s3_mounts SET status=?1,last_error=?2,updated_at=?3 WHERE id=?4",params![if ok {"mounted"} else {"failed"},error_message,now(),mount_id]).map_err(db_error)?;
     audit(&db,&actor.username,"s3.mount.start",&format!("mount={mount_id}; bucket_id={bucket_id}; read_only={}; auto_mount={}",input.read_only,input.auto_mount));
     if !ok { return Err(error(StatusCode::BAD_GATEWAY,error_message.unwrap_or("Mount فضای ابری ناموفق بود."))); }
-    Ok(Json(json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,input.read_only,input.auto_mount,"mounted",None)})))
+    Ok(Json(json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,&mount_path,input.read_only,input.auto_mount,"mounted",None)})))
 }
 
 pub(super) async fn stop_bucket_mount(State(state): State<AppState>, Path(mount_id): Path<i64>, headers: HeaderMap) -> ApiResult {
     check_origin(&headers)?;
-    let (actor,connection_id,bucket_id,bucket_name): (User,i64,i64,String) = {
+    let (actor,connection_id,bucket_id,bucket_name,mount_path): (User,i64,i64,String,String) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db,&headers)?;
-        let (connection_id,bucket_id,bucket_name): (i64,i64,String) = db.query_row("SELECT b.connection_id,b.id,b.bucket_name FROM s3_mounts m JOIN s3_buckets b ON b.id=m.bucket_id WHERE m.id=?1",[mount_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|error(StatusCode::NOT_FOUND,"Mount پیدا نشد."))?;
-        (actor,connection_id,bucket_id,bucket_name)
+        let (connection_id,bucket_id,bucket_name,mount_path): (i64,i64,String,String) = db.query_row("SELECT b.connection_id,b.id,b.bucket_name,m.mount_path FROM s3_mounts m JOIN s3_buckets b ON b.id=m.bucket_id WHERE m.id=?1",[mount_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).map_err(|_|error(StatusCode::NOT_FOUND,"Mount پیدا نشد."))?;
+        (actor,connection_id,bucket_id,bucket_name,mount_path)
     };
     let result = privileged_request_async(json!({"action":"s3-mount-stop","mount_id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id})).await?;
     if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY,result["error"].as_str().unwrap_or("توقف Mount ناموفق بود."))); }
     let db = state.lock().unwrap();
     db.execute("UPDATE s3_mounts SET status='unmounted',last_error=NULL,updated_at=?1 WHERE id=?2",params![now(),mount_id]).map_err(db_error)?;
     audit(&db,&actor.username,"s3.mount.stop",&format!("mount={mount_id}; bucket_id={bucket_id}"));
-    Ok(Json(json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,true,false,"unmounted",None)})))
+    Ok(Json(json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,&mount_path,true,false,"unmounted",None)})))
 }
 
 pub(super) async fn summary(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {

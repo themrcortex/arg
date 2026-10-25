@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.6.7-dev.3 — 2026-10-25
+
+### Improved
+- Name new S3 mount paths from the connection and bucket, with collision-safe suffixes; retain and return the actual persisted mount path.
+
 ## v0.6.7-dev.2 — 2026-10-25
 
 ### Fixed
