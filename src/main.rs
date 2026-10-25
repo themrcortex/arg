@@ -2896,6 +2896,8 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-list") => "nginx-list",
         Some("nginx-get") => "nginx-get",
         Some("nginx-save") => "nginx-save",
+        Some("nginx-maintenance-status") => "nginx-maintenance-status",
+        Some("nginx-maintenance-set") => "nginx-maintenance-set",
         Some("nginx-toggle") => "nginx-toggle",
         Some("nginx-status") => "nginx-status",
         Some("nginx-install") => "nginx-install",

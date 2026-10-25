@@ -15,6 +15,16 @@ pub(super) struct NginxSiteEnabledInput {
     enabled: bool,
 }
 #[derive(Deserialize)]
+pub(super) struct NginxMaintenanceInput {
+    enabled: bool,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    force: bool,
+}
+#[derive(Deserialize)]
 pub(super) struct NginxActionInput {
     action: String,
 }
@@ -887,6 +897,80 @@ pub(super) async fn toggle_nginx_site(
     Ok(Json(result))
 }
 
+pub(super) async fn nginx_site_maintenance_status(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    let result =
+        nginx_manager_request_async(json!({"action":"nginx-maintenance-status","name":name}))
+            .await?;
+    Ok(Json(result))
+}
+
+pub(super) async fn nginx_site_maintenance(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxMaintenanceInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    if input.file.len() > 1024 {
+        return Err(error(StatusCode::BAD_REQUEST, "مسیر فایل بیش از حد طولانی است."));
+    }
+    if input.enabled
+        && !matches!(
+            input.mode.as_str(),
+            "project-root" | "static-file" | "arg-default"
+        )
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "نوع صفحهٔ تعمیرات معتبر نیست.",
+        ));
+    }
+    let result=nginx_manager_request_async(json!({"action":"nginx-maintenance-set","name":name,"enabled":input.enabled,"mode":input.mode,"file":input.file,"force":input.force})).await?;
+    let current = nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await?;
+    let content = nginx_site_content(&current)?.to_owned();
+    let db = state.lock().unwrap();
+    let settings: Option<Option<String>> = db
+        .query_row(
+            "SELECT settings_json FROM nginx_site_config_state WHERE name=?1",
+            [&name],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let settings = settings
+        .flatten()
+        .and_then(|value| serde_json::from_str::<Value>(&value).ok());
+    store_nginx_snapshot(&db, &name, &content, settings.as_ref()).map_err(db_error)?;
+    audit(
+        &db,
+        &actor,
+        "nginx.site.maintenance",
+        &format!(
+            "site={name} enabled={} mode={} force={}",
+            input.enabled, input.mode, input.force
+        ),
+    );
+    Ok(Json(result))
+}
+
 fn valid_nginx_site_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
@@ -922,6 +1006,292 @@ fn nginx_site_paths(name: &str) -> Result<(std::path::PathBuf, std::path::PathBu
         return Err("Nginx نصب نیست یا پوشه‌های sites-available و sites-enabled پیدا نشدند.".into());
     }
     Ok((available_dir.join(name), enabled_dir.join(name)))
+}
+
+const NGINX_MAINTENANCE_ROOT: &str = "/var/lib/arg/nginx-maintenance";
+const NGINX_MAINTENANCE_PUBLIC: &str = "/etc/nginx/arg-maintenance";
+
+fn nginx_maintenance_paths(
+    name: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), String> {
+    if !valid_nginx_site_name(name) {
+        return Err("نام سایت معتبر نیست.".into());
+    }
+    Ok((
+        std::path::Path::new(NGINX_MAINTENANCE_ROOT).join(format!("{name}.json")),
+        std::path::Path::new(NGINX_MAINTENANCE_PUBLIC).join(format!("{name}.html")),
+        std::path::Path::new(NGINX_MAINTENANCE_PUBLIC).join(format!("{name}.flag")),
+    ))
+}
+
+fn nginx_server_open_offsets(content: &str) -> Vec<usize> {
+    let chars: Vec<char> = content.chars().collect();
+    let (mut depth, mut quote, mut escaped, mut comment) = (0i32, '\0', false, false);
+    let (mut token, mut server_pending) = (String::new(), false);
+    let mut offsets = Vec::new();
+    for (i, ch) in chars.iter().copied().enumerate() {
+        if comment {
+            if ch == '\n' {
+                comment = false;
+            }
+            continue;
+        }
+        if quote != '\0' {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                quote = '\0';
+            }
+            continue;
+        }
+        if ch == '#' {
+            comment = true;
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = ch;
+            token.clear();
+            continue;
+        }
+        if depth == 0 && (ch.is_ascii_alphanumeric() || ch == '_') {
+            token.push(ch);
+            continue;
+        }
+        if depth == 0 && !token.is_empty() {
+            server_pending = token == "server";
+            token.clear();
+        }
+        if ch == '{' {
+            if depth == 0 && server_pending {
+                offsets.push(
+                    content
+                        .char_indices()
+                        .nth(i)
+                        .map(|(byte, _)| byte)
+                        .unwrap_or(content.len())
+                        + 1,
+                );
+            }
+            depth += 1;
+            server_pending = false;
+        } else if ch == '}' {
+            depth -= 1;
+            server_pending = false;
+        } else if !ch.is_whitespace() {
+            server_pending = false;
+        }
+    }
+    offsets
+}
+
+fn nginx_maintenance_block(name: &str, file: &str) -> String {
+    format!("\n    # ARG_MAINTENANCE_BEGIN:{name}\n    if (-f {NGINX_MAINTENANCE_PUBLIC}/{name}.flag) {{ return 418; }}\n    error_page 418 =503 @arg_maintenance_{name};\n    location @arg_maintenance_{name} {{\n        internal;\n        root /;\n        try_files {file} =503;\n        default_type text/html;\n    }}\n    # ARG_MAINTENANCE_END:{name}\n")
+}
+
+fn nginx_ensure_maintenance_public_dir() -> Result<(), String> {
+    let directory = std::path::Path::new(NGINX_MAINTENANCE_PUBLIC);
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let metadata = fs::symlink_metadata(directory).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_dir() {
+        return Err("مسیر فایل‌های عمومی تعمیرات باید پوشهٔ واقعی باشد.".into());
+    }
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
+        .map_err(|error| error.to_string())
+}
+
+fn nginx_remove_maintenance_block(content: &str, name: &str) -> String {
+    let begin = format!("# ARG_MAINTENANCE_BEGIN:{name}");
+    let end = format!("# ARG_MAINTENANCE_END:{name}");
+    let mut skipping = false;
+    content
+        .lines()
+        .filter_map(|line| {
+            if line.contains(&begin) {
+                skipping = true;
+                return None;
+            }
+            if skipping {
+                if line.contains(&end) {
+                    skipping = false;
+                }
+                return None;
+            }
+            Some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn nginx_maintenance_file(
+    content: &str,
+    mode: &str,
+    requested: &str,
+    default_page: &std::path::Path,
+) -> Result<String, String> {
+    let path = match mode {
+        "arg-default" => {
+            let html = "<!doctype html><html lang=\"fa\" dir=\"rtl\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>در حال تعمیر</title><style>body{margin:0;background:#0b0d12;color:#f3eee8;font:16px system-ui;display:grid;min-height:100vh;place-items:center}.box{max-width:560px;padding:42px;border:1px solid #493c32;border-radius:18px;background:#111720;text-align:center}h1{color:#dda46f}</style><main class=\"box\"><h1>سایت موقتاً در دست تعمیر است</h1><p>برای بهبود خدمات، سایت برای مدت کوتاهی در دسترس نیست.</p><p>لطفاً کمی بعد دوباره تلاش کنید.</p></main></html>";
+            nginx_ensure_maintenance_public_dir()?;
+            nginx_atomic_write(default_page, html.as_bytes(), 0o644)?;
+            default_page.to_string_lossy().to_string()
+        }
+        "project-root" => {
+            if requested.is_empty()
+                || requested.starts_with('/')
+                || requested.split('/').any(|p| p == ".." || p.is_empty())
+                || !requested
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+            {
+                return Err("مسیر فایل باید نسبی و داخل ریشهٔ پروژه باشد.".into());
+            }
+            let root = content.lines().find_map(|line| { let line=line.trim(); line.strip_prefix("root ").and_then(|v| v.strip_suffix(';')).map(|v| v.trim().trim_matches('"').to_owned()) }).ok_or("در کانفیگ سایت دستور root ثابت پیدا نشد؛ فایل تعمیرات از ریشهٔ پروژه قابل تشخیص نیست.")?;
+            if root.contains('$') {
+                return Err(
+                    "ریشهٔ سایت متغیر دارد؛ برای این سایت از فایل استاتیک یا صفحهٔ ARG استفاده کن."
+                        .into(),
+                );
+            }
+            let candidate = std::path::Path::new(&root).join(requested);
+            let canonical =
+                fs::canonicalize(&candidate).map_err(|_| "فایل تعمیرات در ریشهٔ سایت پیدا نشد.")?;
+            let canonical_root = fs::canonicalize(&root).map_err(|_| "ریشهٔ سایت پیدا نشد.")?;
+            if !canonical.starts_with(&canonical_root)
+                || !canonical.is_file()
+                || !matches!(canonical.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "html" | "htm")
+                || fs::metadata(&canonical)
+                    .map(|m| m.len() > 2 * 1024 * 1024)
+                    .unwrap_or(true)
+            {
+                return Err(
+                    "فایل تعمیرات باید HTML معمولی (پسوند html یا htm) و حداکثر 2 MB داخل ریشهٔ سایت باشد.".into(),
+                );
+            }
+            canonical.to_string_lossy().to_string()
+        }
+        "static-file" => {
+            let canonical = fs::canonicalize(requested).map_err(|_| "فایل استاتیک پیدا نشد.")?;
+            let allowed = ["/var/www", "/srv/www", "/opt/sites"];
+            if !allowed.iter().any(|root| canonical.starts_with(root))
+                || !canonical.is_file()
+                || !matches!(canonical.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "html" | "htm")
+                || fs::metadata(&canonical)
+                    .map(|m| m.len() > 2 * 1024 * 1024)
+                    .unwrap_or(true)
+            {
+                return Err("فایل استاتیک باید HTML معمولی (پسوند html یا htm) و حداکثر 2 MB در /var/www، /srv/www یا /opt/sites باشد.".into());
+            }
+            canonical.to_string_lossy().to_string()
+        }
+        _ => return Err("نوع صفحهٔ تعمیرات نامعتبر است.".into()),
+    };
+    if !path
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+    {
+        return Err("مسیر فایل نویسهٔ پشتیبانی‌نشده دارد.".into());
+    }
+    Ok(path)
+}
+
+fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
+    let (available, _) = nginx_site_paths(name)?;
+    let (state_path, default_page, flag_path) = nginx_maintenance_paths(name)?;
+    let content = fs::read_to_string(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    let enabled = request["enabled"].as_bool().unwrap_or(false);
+    if !enabled {
+        let old = content.clone();
+        let next = nginx_remove_maintenance_block(&content, name);
+        if next != content {
+            nginx_atomic_write(&available, next.as_bytes(), 0o644)?;
+        }
+        let apply = nginx_config_test().and_then(|_| {
+            let _ = fs::remove_file(&flag_path);
+            nginx_reload_if_active()
+        });
+        if let Err(e) = apply {
+            let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
+            let _ = nginx_config_test();
+            let _ = nginx_reload_if_active();
+            return Err(format!(
+                "خروج از حالت تعمیرات اعمال نشد و تنظیمات قبلی بازگردانده شد: {e}"
+            ));
+        }
+        let _ = fs::remove_file(&state_path);
+        let _ = fs::remove_file(&default_page);
+        return Ok(
+            json!({"enabled":false,"message":"حالت تعمیرات خاموش شد؛ Nginx با reload نرم به وضعیت عادی برگشت."}),
+        );
+    }
+    if flag_path.exists() {
+        return Err("حالت تعمیرات از قبل فعال است؛ ابتدا آن را پایان بده و سپس تنظیماتش را تغییر بده.".into());
+    }
+    if !nginx_site_enabled(name)? {
+        return Err("برای فعال‌کردن حالت تعمیرات، ابتدا خود سایت Nginx را روشن کن.".into());
+    }
+    if !nginx_service_status()["active"].as_bool().unwrap_or(false) {
+        return Err("سرویس Nginx در حال اجرا نیست؛ ابتدا آن را راه‌اندازی کن.".into());
+    }
+    let mode = request["mode"].as_str().unwrap_or("");
+    let requested = request["file"].as_str().unwrap_or("");
+    let target = nginx_maintenance_file(&content, mode, requested, &default_page)?;
+    let old = content.clone();
+    let mut next = nginx_remove_maintenance_block(&content, name);
+    let offsets = nginx_server_open_offsets(&next);
+    if offsets.is_empty() {
+        return Err("هیچ server block معتبری برای تزریق تنظیمات پیدا نشد.".into());
+    }
+    let block = nginx_maintenance_block(name, &target);
+    for offset in offsets.into_iter().rev() {
+        next.insert_str(offset, &block);
+    }
+    fs::create_dir_all(NGINX_MAINTENANCE_ROOT).map_err(|e| e.to_string())?;
+    nginx_ensure_maintenance_public_dir()?;
+    nginx_atomic_write(&available, next.as_bytes(), 0o644)?;
+    if let Err(e) = nginx_config_test() {
+        let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
+        return Err(format!(
+            "تنظیمات تعمیرات نامعتبر بود؛ فایل قبلی حفظ شد: {e}"
+        ));
+    }
+    let state =
+        json!({"enabled":true,"mode":mode,"file":requested,"target":target,"updated_at":now()});
+    if let Err(error) = nginx_atomic_write(&state_path, state.to_string().as_bytes(), 0o600) {
+        let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
+        let _ = fs::remove_file(&default_page);
+        return Err(format!("ذخیرهٔ وضعیت تعمیرات ناموفق بود؛ کانفیگ قبلی حفظ شد: {error}"));
+    }
+    if let Err(error) = nginx_atomic_write(&flag_path, b"maintenance\n", 0o644) {
+        let _ = fs::remove_file(&state_path);
+        let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
+        let _ = fs::remove_file(&default_page);
+        return Err(format!("فعال‌سازی نشانگر تعمیرات ناموفق بود؛ کانفیگ قبلی حفظ شد: {error}"));
+    }
+    let command = if request["force"].as_bool().unwrap_or(false) {
+        "restart"
+    } else {
+        "reload"
+    };
+    let result = if command == "restart" {
+        nginx_manage("nginx-restart").map(|_| ())
+    } else {
+        nginx_reload_if_active()
+    };
+    if let Err(e) = result {
+        let _ = fs::remove_file(&flag_path);
+        let _ = fs::remove_file(&state_path);
+        let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
+        let _ = nginx_config_test();
+        let _ = nginx_reload_if_active();
+        return Err(format!(
+            "فعال‌سازی حالت تعمیرات ناموفق بود؛ وضعیت قبلی بازگردانده شد: {e}"
+        ));
+    }
+    Ok(
+        json!({"enabled":true,"mode":mode,"force":command=="restart","target":target,"message":if command=="restart" { "حالت تعمیرات فوراً فعال شد؛ سرویس Nginx راه‌اندازی مجدد شد." } else { "حالت تعمیرات فعال شد؛ درخواست‌های جاری فرصت پایان دارند و درخواست‌های جدید صفحهٔ تعمیرات می‌بینند." }}),
+    )
 }
 
 fn nginx_site_enabled(name: &str) -> Result<bool, String> {
@@ -1244,6 +1614,10 @@ fn nginx_save_site(name: &str, content: &str) -> Result<Value, String> {
         return Err("فقط فایل معمولی داخل sites-available قابل ویرایش است.".into());
     }
     let old_content = fs::read(&available).map_err(|error| error.to_string())?;
+    let (_, _, maintenance_flag) = nginx_maintenance_paths(name)?;
+    if maintenance_flag.exists() {
+        return Err("ابتدا حالت تعمیرات این سایت را خاموش کن؛ سپس تنظیمات Nginx را ویرایش کن.".into());
+    }
     let enabled = nginx_site_enabled(name)?;
     nginx_atomic_write(
         &available,
@@ -1486,6 +1860,11 @@ fn nginx_delete_site(name: &str) -> Result<Value, String> {
         let _ = nginx_reload_if_active();
         return Err(format!("حذف اعمال نشد و سایت بازگردانده شد: {error}"));
     }
+    if let Ok((state, page, flag)) = nginx_maintenance_paths(name) {
+        let _ = fs::remove_file(state);
+        let _ = fs::remove_file(page);
+        let _ = fs::remove_file(flag);
+    }
     Ok(json!({"message":"فایل سایت حذف شد."}))
 }
 
@@ -1498,6 +1877,9 @@ fn nginx_rename_site(name: &str, new_name: &str) -> Result<Value, String> {
     }
     let (old_available, old_enabled) = nginx_site_paths(name)?;
     let (new_available, new_enabled) = nginx_site_paths(new_name)?;
+    if nginx_maintenance_paths(name)?.2.exists() {
+        return Err("ابتدا حالت تعمیرات را خاموش کن و سپس نام سایت را تغییر بده.".into());
+    }
     let metadata = fs::symlink_metadata(&old_available).map_err(|_| "فایل سایت پیدا نشد.")?;
     if !metadata.file_type().is_file() {
         return Err("فقط فایل معمولی قابل تغییر نام است.".into());
@@ -1898,6 +2280,12 @@ fn execute_nginx_request(action: &str, request: &Value) -> Value {
                     .and_then(|content| nginx_save_site(name, content))
             })
             .map(|site| json!({"site":site})),
+        "nginx-maintenance-status" => request["name"]
+            .as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(|name| { let (state, _, flag)=nginx_maintenance_paths(name)?; let value=fs::read_to_string(state).ok().and_then(|text|serde_json::from_str::<Value>(&text).ok()).unwrap_or(json!({})); Ok(json!({"enabled":flag.exists(),"mode":value["mode"],"file":value["file"],"target":value["target"]})) }),
+        "nginx-maintenance-set" => request["name"]
+            .as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(|name| nginx_maintenance(name, request)),
         "nginx-toggle" => request["name"]
             .as_str()
             .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
@@ -1921,4 +2309,44 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     execute_nginx_request(action, request)
+}
+
+#[cfg(test)]
+mod maintenance_tests {
+    use super::{
+        nginx_maintenance_block, nginx_remove_maintenance_block, nginx_server_open_offsets,
+    };
+
+    #[test]
+    fn finds_server_blocks_without_matching_comments_or_nested_locations() {
+        let config = "# server { ignored }\nserver {\n  location / { return 200; }\n}\nserver { listen 443 ssl; }\n";
+        let offsets = nginx_server_open_offsets(config);
+        assert_eq!(offsets.len(), 2);
+        let mut expanded = config.to_owned();
+        for offset in offsets.into_iter().rev() {
+            expanded.insert_str(
+                offset,
+                &nginx_maintenance_block("site", "/etc/nginx/arg-maintenance/site.html"),
+            );
+        }
+        assert_eq!(expanded.matches("ARG_MAINTENANCE_BEGIN:site").count(), 2);
+        assert_eq!(
+            expanded.matches("location @arg_maintenance_site").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn removes_only_the_selected_sites_marked_block() {
+        let config = "server {\n # ARG_MAINTENANCE_BEGIN:a\n if (-f /run/a) { return 418; }\n # ARG_MAINTENANCE_END:a\n}\nserver {\n # ARG_MAINTENANCE_BEGIN:b\n if (-f /run/b) { return 418; }\n # ARG_MAINTENANCE_END:b\n}\n";
+        let cleaned = nginx_remove_maintenance_block(config, "a");
+        assert!(!cleaned.contains("ARG_MAINTENANCE_BEGIN:a"));
+        assert!(cleaned.contains("ARG_MAINTENANCE_BEGIN:b"));
+        assert_eq!(
+            nginx_remove_maintenance_block(&cleaned, "b")
+                .matches("ARG_MAINTENANCE_BEGIN")
+                .count(),
+            0
+        );
+    }
 }

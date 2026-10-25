@@ -203,6 +203,10 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/nginx/sites/{name}/enabled",
             put(nginx::toggle_nginx_site),
         )
+        .route(
+            "/api/nginx/sites/{name}/maintenance",
+            get(nginx::nginx_site_maintenance_status).put(nginx::nginx_site_maintenance),
+        )
         .route("/api/firewall", get(firewall).put(update_firewall_state))
         .route("/api/firewall/install", post(install_firewall))
         .route(
