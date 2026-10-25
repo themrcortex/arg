@@ -3533,8 +3533,7 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         if memory.is_some_and(|value| !(16 * 1024 * 1024..=1_099_511_627_776).contains(&value)) {
             return json!({"ok":false,"error":"Memory limit must be between 16 MiB and 1 TiB"});
         }
-        let cpu_property = cpu.map(|value| format!("CPUQuota={value:.2}%")).unwrap_or_else(|| "CPUQuota=infinity".into());
-        let memory_property = memory.map(|value| format!("MemoryMax={value}B")).unwrap_or_else(|| "MemoryMax=infinity".into());
+        let [cpu_property, memory_property] = service_resource_properties(cpu, memory);
         let mut command = std::process::Command::new("systemctl");
         command.args(["set-property", unit, &cpu_property, &memory_property]);
         return match command_result(&mut command) {
@@ -3623,6 +3622,19 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         Ok((false, output)) => json!({"ok":false,"error":output}),
         Err(error) => json!({"ok":false,"error":error}),
     }
+}
+
+fn service_resource_properties(cpu_percent: Option<f64>, memory_bytes: Option<u64>) -> [String; 2] {
+    [
+        cpu_percent
+            .map(|value| format!("CPUQuota={value:.2}%"))
+            .unwrap_or_else(|| "CPUQuota=infinity".into()),
+        // systemd size values are bytes when no suffix is present; appending `B`
+        // is rejected by some versions with “The string did not match the expected pattern.”
+        memory_bytes
+            .map(|value| format!("MemoryMax={value}"))
+            .unwrap_or_else(|| "MemoryMax=infinity".into()),
+    ]
 }
 
 async fn serve_privileged_connection(mut stream: UnixStream) {
@@ -3900,6 +3912,18 @@ mod update_progress_tests {
             "nginx.service",
             "restart"
         ));
+    }
+
+    #[test]
+    fn systemd_resource_limits_use_supported_property_values() {
+        assert_eq!(
+            super::service_resource_properties(Some(75.5), Some(536_870_912)),
+            ["CPUQuota=75.50%", "MemoryMax=536870912"]
+        );
+        assert_eq!(
+            super::service_resource_properties(None, None),
+            ["CPUQuota=infinity", "MemoryMax=infinity"]
+        );
     }
 
     #[test]
