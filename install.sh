@@ -6,7 +6,12 @@ readonly SERVICE_NAME="arg"
 readonly LEGACY_SERVICE_NAME="donatello"
 readonly REPOSITORY="https://github.com/themrcortex/arg.git"
 readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/themrcortex/arg/main/install.sh"
-readonly BRANCH="main"
+requested_branch="${ARG_UPDATE_BRANCH:-${ARG_BRANCH:-main}}"
+case "$requested_branch" in
+  main|development) ;;
+  *) printf 'Invalid ARG update branch. Allowed: main, development.\n' >&2; exit 2 ;;
+esac
+readonly BRANCH="$requested_branch"
 readonly INSTALL_DIR="/opt/arg"
 readonly SOURCE_DIR="/opt/arg/source"
 readonly BINARY="/usr/local/lib/arg/arg"
@@ -216,7 +221,7 @@ prepare_source() {
 }
 
 build_release() {
-  [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the repository and main branch."
+  [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the selected ARG branch and repository."
   if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" && "${ARG_UPDATE_MODE:-complete}" == "complete" ]]; then
     run_with_progress "Clearing previous Rust build cache" bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR"
   fi

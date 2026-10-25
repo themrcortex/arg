@@ -1,5 +1,16 @@
 # ARG Change Log
 
+## v0.4.42 — 2026-10-25
+
+### Added
+- Create a `development` branch alongside `main`; document the stable and integration branch roles.
+- Allow administrators to choose `main` or `development` in the update dialog, with branch-specific checks and installation.
+
+### Changed
+- Keep `main` as the default for installation and CLI updates, and persist the selected web update branch in the browser.
+- Validate update branch names in the API, privileged helper, and installer; only `main` and `development` are accepted.
+- Bump ARG to v0.4.42.
+
 ## v0.4.41 — 2026-10-25
 
 ### Added

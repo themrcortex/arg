@@ -2297,8 +2297,9 @@ async fn install_firewall(State(state): State<AppState>, headers: HeaderMap) -> 
     );
     Ok(Json(json!({"installed": true})))
 }
-async fn update_status() -> Value {
-    let output = match privileged_request_async(json!({"action":"update-check"})).await {
+async fn update_status(branch: &str) -> Value {
+    let branch = if valid_update_branch(branch) { branch } else { "main" };
+    let output = match privileged_request_async(json!({"action":"update-check","branch":branch})).await {
         Ok(output) if output["ok"] == true => {
             output["stdout"].as_str().unwrap_or_default().to_owned()
         }
@@ -2322,9 +2323,9 @@ async fn update_status() -> Value {
         .get(2)
         .copied()
         .filter(|value| *value != "unknown");
-    json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7], "local_version": env!("CARGO_PKG_VERSION"), "remote_version": remote_version})
+    json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7], "local_version": env!("CARGO_PKG_VERSION"), "remote_version": remote_version, "branch": branch})
 }
-async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<PanelUpdateQuery>) -> ApiResult {
     {
         let db = state.lock().unwrap();
         require_user(&db, &headers)?;
@@ -2332,7 +2333,7 @@ async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) 
     let mut status = if update_started_at().is_some() {
         json!({"status":"unavailable","error":"ARG_UPDATE_IN_PROGRESS"})
     } else {
-        update_status().await
+        update_status(&query.branch).await
     };
     status["instance"] = json!(metrics::process_instance_id());
     Ok(Json(status))
@@ -2569,14 +2570,24 @@ fn shared_web_service(unit: &str) -> bool {
 struct PanelUpdateQuery {
     #[serde(default = "default_update_build_mode")]
     mode: String,
+    #[serde(default = "default_update_branch")]
+    branch: String,
 }
 
 fn default_update_build_mode() -> String {
     "complete".into()
 }
 
+fn default_update_branch() -> String {
+    "main".into()
+}
+
 fn valid_update_build_mode(mode: &str) -> bool {
     matches!(mode, "fast" | "complete")
+}
+
+fn valid_update_branch(branch: &str) -> bool {
+    matches!(branch, "main" | "development")
 }
 
 async fn schedule_panel_update(
@@ -2588,6 +2599,9 @@ async fn schedule_panel_update(
     if !valid_update_build_mode(&input.mode) {
         return Err(error(StatusCode::BAD_REQUEST, "Update build mode is invalid."));
     }
+    if !valid_update_branch(&input.branch) {
+        return Err(error(StatusCode::BAD_REQUEST, "Update branch is invalid."));
+    }
     let _exclusive = UPDATE_OPERATION_GATE.write().await;
     if update_started_at().is_some() {
         return Err(error(
@@ -2597,7 +2611,7 @@ async fn schedule_panel_update(
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
-    let output = privileged_request(json!({"action":"update-run","mode":input.mode}))?;
+    let output = privileged_request(json!({"action":"update-run","mode":input.mode,"branch":input.branch}))?;
     if output["ok"] != true {
         let detail = output["error"]
             .as_str()
@@ -2913,9 +2927,17 @@ fn execute_privileged_request(request: &Value) -> Value {
         args.extend([port.to_string(), protocol.to_owned(), policy.to_owned()]);
     }
     let (helper, helper_args) = if action.starts_with("update-") {
+        let mut update_args = vec![action.trim_start_matches("update-")];
+        if action == "update-check" {
+            let branch = request["branch"].as_str().unwrap_or("main");
+            if !valid_update_branch(branch) {
+                return json!({"ok":false,"error":"Update branch is invalid."});
+            }
+            update_args.push(branch);
+        }
         (
             "/usr/local/lib/arg/update-helper",
-            vec![action.trim_start_matches("update-")],
+            update_args,
         )
     } else {
         (
@@ -2923,19 +2945,24 @@ fn execute_privileged_request(request: &Value) -> Value {
             args.iter().map(String::as_str).collect(),
         )
     };
-    let update_mode = if action == "update-run" {
+    let update_params = if action == "update-run" {
         let mode = request["mode"].as_str().unwrap_or("complete");
         if !valid_update_build_mode(mode) {
             return json!({"ok":false,"error":"Update build mode is invalid."});
         }
-        Some(mode)
+        let branch = request["branch"].as_str().unwrap_or("main");
+        if !valid_update_branch(branch) {
+            return json!({"ok":false,"error":"Update branch is invalid."});
+        }
+        Some((mode, branch))
     } else {
         None
     };
     let mut helper_command = std::process::Command::new(helper);
     helper_command.args(helper_args);
-    if let Some(mode) = update_mode {
+    if let Some((mode, branch)) = update_params {
         helper_command.arg(mode);
+        helper_command.arg(branch);
     }
     let output = match helper_command.output() {
         Ok(output) => output,
@@ -3678,5 +3705,15 @@ mod update_progress_tests {
             };
             assert!(firewall_rule_validation_error(&rule).is_some());
         }
+    }
+
+    #[test]
+    fn updater_accepts_only_stable_or_development_branches() {
+        assert!(super::valid_update_branch("main"));
+        assert!(super::valid_update_branch("development"));
+        for invalid in ["", "master", "feature/test", "main;id", "../main"] {
+            assert!(!super::valid_update_branch(invalid));
+        }
+        assert_eq!(super::default_update_branch(), "main");
     }
 }

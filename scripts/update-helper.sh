@@ -3,11 +3,14 @@ set -Eeuo pipefail
 
 readonly source_dir="${ARG_SOURCE_DIR:-/opt/arg/source}"
 readonly repository="${ARG_REPOSITORY:-https://github.com/themrcortex/arg.git}"
-readonly branch="${ARG_BRANCH:-main}"
 readonly update_lock_dir="/run/arg-update.lock"
 readonly update_status_file="/run/arg-update-in-progress"
 readonly update_state_file="/run/arg-update-state.json"
 readonly update_last_unit_file="/run/arg-update-last-unit"
+
+valid_branch() {
+  [[ "$1" == main || "$1" == development ]]
+}
 
 clear_stale_update_lock() {
   [[ -d "$update_lock_dir" ]] || return 0
@@ -78,6 +81,8 @@ case "${1:-}" in
     write_update_state "$2" "$3" "${4:-}"
     ;;
   check)
+    branch="${2:-main}"
+    valid_branch "$branch" || { echo "Invalid update branch. Allowed: main, development." >&2; exit 2; }
     [[ -d "$source_dir/.git" ]] || { echo "ARG source checkout is missing at $source_dir; run 'sudo arg update' to repair it." >&2; exit 3; }
     local_rev="$(git -C "$source_dir" rev-parse --verify HEAD 2>/dev/null || true)"
     if ! remote_rev="$(GIT_TERMINAL_PROMPT=0 timeout 8s git -c credential.helper= ls-remote "$repository" "refs/heads/$branch" 2>&1 | awk 'NR==1 {print $1}')" || [[ ! "$remote_rev" =~ ^[0-9a-f]{40}$ ]]; then
@@ -91,7 +96,9 @@ case "${1:-}" in
     ;;
   run)
     mode="${2:-complete}"
+    branch="${3:-main}"
     case "$mode" in fast|complete) ;; *) echo "Invalid update build mode." >&2; exit 2 ;; esac
+    valid_branch "$branch" || { echo "Invalid update branch. Allowed: main, development." >&2; exit 2; }
     clear_stale_update_lock
     if ! mkdir "$update_lock_dir" 2>/dev/null; then
       echo "ARG_UPDATE_IN_PROGRESS: another update is already running." >&2
@@ -102,7 +109,7 @@ case "${1:-}" in
     export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
     write_update_state running scheduled "Update queued; waiting for the service helper."
     unit="arg-web-update-$$"
-    if ! systemd-run --quiet --collect --unit="$unit" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 --setenv="ARG_UPDATE_MODE=$mode" --setenv="ARG_UPDATE_JOB_ID=$ARG_UPDATE_JOB_ID" /usr/local/bin/arg update; then
+    if ! systemd-run --quiet --collect --unit="$unit" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 --setenv="ARG_UPDATE_MODE=$mode" --setenv="ARG_UPDATE_BRANCH=$branch" --setenv="ARG_UPDATE_JOB_ID=$ARG_UPDATE_JOB_ID" /usr/local/bin/arg update; then
       write_update_state failed scheduling "The system could not start the update job."
       rm -f "$update_status_file"
       rmdir "$update_lock_dir" 2>/dev/null || true
