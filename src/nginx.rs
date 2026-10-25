@@ -25,6 +25,10 @@ pub(super) struct NginxMaintenanceInput {
     force: bool,
 }
 #[derive(Deserialize)]
+pub(super) struct NginxMaintenanceSecretInput {
+    action: String,
+}
+#[derive(Deserialize)]
 pub(super) struct NginxActionInput {
     action: String,
 }
@@ -971,6 +975,38 @@ pub(super) async fn nginx_site_maintenance(
     Ok(Json(result))
 }
 
+pub(super) async fn nginx_site_maintenance_secret(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<NginxMaintenanceSecretInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    if !matches!(input.action.as_str(), "create" | "rotate" | "revoke") {
+        return Err(error(StatusCode::BAD_REQUEST, "عملیات کلید تعمیرات معتبر نیست."));
+    }
+    let result = nginx_manager_request_async(json!({
+        "action":"nginx-maintenance-secret",
+        "name":name,
+        "operation":input.action
+    })).await?;
+    let db = state.lock().unwrap();
+    audit(
+        &db,
+        &actor,
+        "nginx.site.maintenance.secret",
+        &format!("site={name} operation={}", input.action),
+    );
+    Ok(Json(result))
+}
+
 fn valid_nginx_site_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
@@ -1010,6 +1046,10 @@ fn nginx_site_paths(name: &str) -> Result<(std::path::PathBuf, std::path::PathBu
 
 const NGINX_MAINTENANCE_ROOT: &str = "/var/lib/arg/nginx-maintenance";
 const NGINX_MAINTENANCE_PUBLIC: &str = "/etc/nginx/arg-maintenance";
+
+fn nginx_maintenance_secret_config_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(NGINX_MAINTENANCE_PUBLIC).join(format!("{name}.secret.conf"))
+}
 
 fn nginx_maintenance_paths(
     name: &str,
@@ -1086,8 +1126,73 @@ fn nginx_server_open_offsets(content: &str) -> Vec<usize> {
     offsets
 }
 
-fn nginx_maintenance_block(name: &str, file: &str) -> String {
-    format!("\n    # ARG_MAINTENANCE_BEGIN:{name}\n    if (-f {NGINX_MAINTENANCE_PUBLIC}/{name}.flag) {{ return 418; }}\n    error_page 418 =503 @arg_maintenance_{name};\n    location @arg_maintenance_{name} {{\n        internal;\n        root /;\n        try_files {file} =503;\n        default_type text/html;\n    }}\n    # ARG_MAINTENANCE_END:{name}\n")
+fn nginx_maintenance_cookie_name(name: &str) -> String {
+    let digest = Sha256::digest(name.as_bytes());
+    format!("arg_maint_{}", &hex::encode(digest)[..16])
+}
+
+fn nginx_valid_maintenance_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn nginx_maintenance_block(name: &str, file: &str, token: Option<&str>, _secure_cookie: bool) -> String {
+    let mut block = format!("\n    # ARG_MAINTENANCE_BEGIN:{name}\n");
+    if token.is_some_and(nginx_valid_maintenance_token) {
+        let cookie = nginx_maintenance_cookie_name(name);
+        let suffix = cookie.strip_prefix("arg_maint_").unwrap_or(&cookie);
+        block.push_str(&format!("    include {NGINX_MAINTENANCE_PUBLIC}/{name}.secret.conf;\n"));
+        block.push_str(&format!(
+            "    set $arg_maintenance_active_{suffix} 0;\n    if (-f {NGINX_MAINTENANCE_PUBLIC}/{name}.flag) {{ set $arg_maintenance_active_{suffix} 1; }}\n    if ($arg_maintenance_bypass_{suffix} = 1) {{ set $arg_maintenance_active_{suffix} 0; }}\n    if ($arg_maintenance_active_{suffix} = 1) {{ return 418; }}\n"
+        ));
+    } else {
+        block.push_str(&format!(
+            "    if (-f {NGINX_MAINTENANCE_PUBLIC}/{name}.flag) {{ return 418; }}\n"
+        ));
+    }
+    block.push_str(&format!(
+        "    error_page 418 =503 @arg_maintenance_{name};\n    location @arg_maintenance_{name} {{\n        internal;\n        root /;\n        try_files {file} =503;\n        default_type text/html;\n    }}\n    # ARG_MAINTENANCE_END:{name}\n"
+    ));
+    block
+}
+
+fn nginx_maintenance_secret_config(name: &str, token: &str) -> Result<String, String> {
+    if !nginx_valid_maintenance_token(token) {
+        return Err("کلید مخفی نامعتبر است.".into());
+    }
+    let cookie = nginx_maintenance_cookie_name(name);
+    let suffix = cookie.strip_prefix("arg_maint_").unwrap_or(&cookie);
+    Ok(format!(
+        "# ARG secret maintenance access; root-readable only\nlocation = /__arg_maintenance_{suffix}/{token} {{\n    access_log off;\n    add_header Set-Cookie \"{cookie}={token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Lax\" always;\n    add_header Cache-Control \"no-store\" always;\n    add_header Referrer-Policy \"no-referrer\" always;\n    return 302 /;\n}}\nset $arg_maintenance_bypass_{suffix} 0;\nif ($cookie_{cookie} = {token}) {{ set $arg_maintenance_bypass_{suffix} 1; }}\n"
+    ))
+}
+
+fn nginx_site_domains(content: &str) -> Vec<String> {
+    let mut domains = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        let Some(value) = line.strip_prefix("server_name ") else { continue };
+        for domain in value.trim_end_matches(';').split_whitespace() {
+            let candidate = domain.trim_matches(|character| character == '\'' || character == '"');
+            if candidate == "_"
+                || candidate.contains('*')
+                || candidate.contains('$')
+                || candidate.is_empty()
+                || !candidate.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.as_bytes()[0].is_ascii_alphanumeric()
+                        && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                        && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                })
+            {
+                continue;
+            }
+            let candidate = candidate.to_ascii_lowercase();
+            if !domains.contains(&candidate) {
+                domains.push(candidate);
+            }
+        }
+    }
+    domains
 }
 
 fn nginx_ensure_maintenance_public_dir() -> Result<(), String> {
@@ -1199,6 +1304,7 @@ fn nginx_maintenance_file(
 fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
     let (available, _) = nginx_site_paths(name)?;
     let (state_path, default_page, flag_path) = nginx_maintenance_paths(name)?;
+    let secret_config_path = nginx_maintenance_secret_config_path(name);
     let content = fs::read_to_string(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
     let enabled = request["enabled"].as_bool().unwrap_or(false);
     if !enabled {
@@ -1221,6 +1327,7 @@ fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
         }
         let _ = fs::remove_file(&state_path);
         let _ = fs::remove_file(&default_page);
+        let _ = fs::remove_file(&secret_config_path);
         return Ok(
             json!({"enabled":false,"message":"حالت تعمیرات خاموش شد؛ Nginx با reload نرم به وضعیت عادی برگشت."}),
         );
@@ -1243,7 +1350,11 @@ fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
     if offsets.is_empty() {
         return Err("هیچ server block معتبری برای تزریق تنظیمات پیدا نشد.".into());
     }
-    let block = nginx_maintenance_block(name, &target);
+    let secure_cookie = content.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("listen ") && line.contains("443") && line.contains("ssl")
+    });
+    let block = nginx_maintenance_block(name, &target, None, secure_cookie);
     for offset in offsets.into_iter().rev() {
         next.insert_str(offset, &block);
     }
@@ -1258,6 +1369,7 @@ fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
     }
     let state =
         json!({"enabled":true,"mode":mode,"file":requested,"target":target,"updated_at":now()});
+    let _ = fs::remove_file(&secret_config_path);
     if let Err(error) = nginx_atomic_write(&state_path, state.to_string().as_bytes(), 0o600) {
         let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
         let _ = fs::remove_file(&default_page);
@@ -1292,6 +1404,147 @@ fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
     Ok(
         json!({"enabled":true,"mode":mode,"force":command=="restart","target":target,"message":if command=="restart" { "حالت تعمیرات فوراً فعال شد؛ سرویس Nginx راه‌اندازی مجدد شد." } else { "حالت تعمیرات فعال شد؛ درخواست‌های جاری فرصت پایان دارند و درخواست‌های جدید صفحهٔ تعمیرات می‌بینند." }}),
     )
+}
+
+fn nginx_maintenance_status(name: &str) -> Result<Value, String> {
+    let (available, _) = nginx_site_paths(name)?;
+    let (state_path, _, flag_path) = nginx_maintenance_paths(name)?;
+    let content = fs::read_to_string(available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    let state = fs::read_to_string(state_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or_else(|| json!({}));
+    let secret_enabled = state["secret_token"]
+        .as_str()
+        .is_some_and(nginx_valid_maintenance_token);
+    let secure_cookie = content.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("listen ") && line.contains("443") && line.contains("ssl")
+    });
+    Ok(json!({
+        "enabled":flag_path.exists(),
+        "mode":state["mode"],
+        "file":state["file"],
+        "target":state["target"],
+        "secret_enabled":secret_enabled,
+        "domains":nginx_site_domains(&content),
+        "https_enabled":secure_cookie
+    }))
+}
+
+fn nginx_maintenance_secret(name: &str, request: &Value) -> Result<Value, String> {
+    let operation = request["operation"].as_str().unwrap_or("");
+    if !matches!(operation, "create" | "rotate" | "revoke") {
+        return Err("عملیات کلید تعمیرات معتبر نیست.".into());
+    }
+    let (available, _) = nginx_site_paths(name)?;
+    let (state_path, _, flag_path) = nginx_maintenance_paths(name)?;
+    let secret_config_path = nginx_maintenance_secret_config_path(name);
+    if !flag_path.exists() {
+        return Err("برای مدیریت لینک مخفی، ابتدا حالت تعمیرات سایت را فعال کن.".into());
+    }
+    let old_content = fs::read_to_string(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
+    let old_state_text = fs::read_to_string(&state_path).map_err(|_| "وضعیت تعمیرات سایت پیدا نشد.")?;
+    let mut state = serde_json::from_str::<Value>(&old_state_text).map_err(|_| "وضعیت تعمیرات سایت خوانده نشد.")?;
+    let previous_token = state["secret_token"]
+        .as_str()
+        .filter(|token| nginx_valid_maintenance_token(token))
+        .map(str::to_owned);
+    let secure_cookie = old_content.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("listen ") && line.contains("443") && line.contains("ssl")
+    });
+    if matches!(operation, "create" | "rotate") && !secure_cookie {
+        return Err("برای ساخت لینک مخفی، ابتدا HTTPS را برای سایت فعال کن؛ لینک دسترسی روی HTTP امن نیست.".into());
+    }
+    if operation == "create" && previous_token.is_some() {
+        return Err("لینک مخفی از قبل فعال است؛ برای ساخت لینک تازه، نشست‌های قبلی را بازنشانی کن.".into());
+    }
+    if operation == "revoke" && previous_token.is_none() {
+        return Err("کلید مخفی فعالی برای حذف وجود ندارد.".into());
+    }
+    let new_token = match operation {
+        "create" | "rotate" => {
+            let mut bytes = [0u8; 32];
+            OsRng.fill_bytes(&mut bytes);
+            Some(hex::encode(bytes))
+        }
+        _ => None,
+    };
+    let target = state["target"]
+        .as_str()
+        .ok_or("مسیر صفحهٔ تعمیرات در وضعیت ذخیره‌شده پیدا نشد.")?
+        .to_owned();
+    let mut next_content = nginx_remove_maintenance_block(&old_content, name);
+    let offsets = nginx_server_open_offsets(&next_content);
+    if offsets.is_empty() {
+        return Err("هیچ server block معتبری برای تنظیم لینک مخفی پیدا نشد.".into());
+    }
+    let block = nginx_maintenance_block(name, &target, new_token.as_deref(), secure_cookie);
+    for offset in offsets.into_iter().rev() {
+        next_content.insert_str(offset, &block);
+    }
+    if let Some(state_object) = state.as_object_mut() {
+        match new_token.as_deref() {
+            Some(token) => {
+                state_object.insert("secret_token".into(), json!(token));
+                state_object.insert("secret_created_at".into(), json!(now()));
+            }
+            None => {
+                state_object.remove("secret_token");
+                state_object.remove("secret_created_at");
+            }
+        }
+        state_object.insert("updated_at".into(), json!(now()));
+    }
+    let next_state = state.to_string();
+    let old_secret_config = fs::read(&secret_config_path).ok();
+    nginx_atomic_write(&available, next_content.as_bytes(), 0o644)?;
+    if let Err(error) = nginx_atomic_write(&state_path, next_state.as_bytes(), 0o600) {
+        let _ = nginx_atomic_write(&available, old_content.as_bytes(), 0o644);
+        return Err(format!("ذخیرهٔ کلید مخفی ناموفق بود؛ تنظیمات قبلی حفظ شد: {error}"));
+    }
+    let secret_write = match new_token.as_deref() {
+        Some(token) => nginx_maintenance_secret_config(name, token)
+            .and_then(|config| nginx_atomic_write(&secret_config_path, config.as_bytes(), 0o600)),
+        None => match fs::remove_file(&secret_config_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        },
+    };
+    if let Err(error) = secret_write {
+        let _ = nginx_atomic_write(&available, old_content.as_bytes(), 0o644);
+        let _ = nginx_atomic_write(&state_path, old_state_text.as_bytes(), 0o600);
+        return Err(format!("ذخیرهٔ فایل امن کلید ناموفق بود؛ وضعیت قبلی بازگردانده شد: {error}"));
+    }
+    if let Err(error) = nginx_config_test().and_then(|_| nginx_reload_if_active()) {
+        let _ = nginx_atomic_write(&available, old_content.as_bytes(), 0o644);
+        let _ = nginx_atomic_write(&state_path, old_state_text.as_bytes(), 0o600);
+        match old_secret_config {
+            Some(content) => { let _ = nginx_atomic_write(&secret_config_path, &content, 0o600); }
+            None => { let _ = fs::remove_file(&secret_config_path); }
+        }
+        let _ = nginx_config_test();
+        let _ = nginx_reload_if_active();
+        return Err(format!("تغییر کلید اعمال نشد؛ نشست‌های قبلی حفظ شدند: {error}"));
+    }
+
+    let cookie = nginx_maintenance_cookie_name(name);
+    let suffix = cookie.strip_prefix("arg_maint_").unwrap_or(&cookie);
+    Ok(json!({
+        "enabled":true,
+        "secret_enabled":new_token.is_some(),
+        "token":new_token,
+        "secret_path":new_token.as_ref().map(|token| format!("/__arg_maintenance_{suffix}/{token}")),
+        "domains":nginx_site_domains(&old_content),
+        "https_enabled":secure_cookie,
+        "message":match operation {
+            "create" => "لینک مخفی ساخته شد؛ تا 12 ساعت در مرورگر دسترسی به سایت را فراهم می‌کند.",
+            "rotate" => "تمام نشست‌ها و لینک قبلی باطل شدند؛ لینک تازه آماده است.",
+            _ => "کلید مخفی حذف شد و دسترسی نشست‌های مخفی فوراً لغو شد.",
+        }
+    }))
 }
 
 fn nginx_site_enabled(name: &str) -> Result<bool, String> {
@@ -1864,6 +2117,7 @@ fn nginx_delete_site(name: &str) -> Result<Value, String> {
         let _ = fs::remove_file(state);
         let _ = fs::remove_file(page);
         let _ = fs::remove_file(flag);
+        let _ = fs::remove_file(nginx_maintenance_secret_config_path(name));
     }
     Ok(json!({"message":"فایل سایت حذف شد."}))
 }
@@ -2281,11 +2535,16 @@ fn execute_nginx_request(action: &str, request: &Value) -> Value {
             })
             .map(|site| json!({"site":site})),
         "nginx-maintenance-status" => request["name"]
-            .as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
-            .and_then(|name| { let (state, _, flag)=nginx_maintenance_paths(name)?; let value=fs::read_to_string(state).ok().and_then(|text|serde_json::from_str::<Value>(&text).ok()).unwrap_or(json!({})); Ok(json!({"enabled":flag.exists(),"mode":value["mode"],"file":value["file"],"target":value["target"]})) }),
+            .as_str()
+            .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(nginx_maintenance_status),
         "nginx-maintenance-set" => request["name"]
             .as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
             .and_then(|name| nginx_maintenance(name, request)),
+        "nginx-maintenance-secret" => request["name"]
+            .as_str()
+            .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(|name| nginx_maintenance_secret(name, request)),
         "nginx-toggle" => request["name"]
             .as_str()
             .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
@@ -2314,7 +2573,8 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 #[cfg(test)]
 mod maintenance_tests {
     use super::{
-        nginx_maintenance_block, nginx_remove_maintenance_block, nginx_server_open_offsets,
+        nginx_maintenance_block, nginx_maintenance_cookie_name, nginx_maintenance_secret_config,
+        nginx_remove_maintenance_block, nginx_server_open_offsets, nginx_valid_maintenance_token,
     };
 
     #[test]
@@ -2326,7 +2586,7 @@ mod maintenance_tests {
         for offset in offsets.into_iter().rev() {
             expanded.insert_str(
                 offset,
-                &nginx_maintenance_block("site", "/etc/nginx/arg-maintenance/site.html"),
+                &nginx_maintenance_block("site", "/etc/nginx/arg-maintenance/site.html", None, true),
             );
         }
         assert_eq!(expanded.matches("ARG_MAINTENANCE_BEGIN:site").count(), 2);
@@ -2334,6 +2594,21 @@ mod maintenance_tests {
             expanded.matches("location @arg_maintenance_site").count(),
             2
         );
+    }
+
+    #[test]
+    fn secret_bypass_uses_opaque_cookie_and_private_exchange_path() {
+        let token = "ab".repeat(32);
+        let block = nginx_maintenance_block("site-name", "/srv/maintenance.html", Some(&token), true);
+        let secret_config = nginx_maintenance_secret_config("site-name", &token).unwrap();
+        assert!(block.contains("site-name.secret.conf"));
+        assert!(!block.contains(&token));
+        assert!(secret_config.contains(&format!("/{token} {{")));
+        assert!(secret_config.contains("access_log off;"));
+        assert!(secret_config.contains("HttpOnly; Secure; SameSite=Lax"));
+        assert!(secret_config.contains(&format!("$cookie_{} = {token}", nginx_maintenance_cookie_name("site-name"))));
+        assert!(nginx_valid_maintenance_token(&token));
+        assert!(!nginx_valid_maintenance_token("not-a-secret"));
     }
 
     #[test]

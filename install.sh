@@ -295,6 +295,7 @@ ensure_service_account() {
     useradd --system --gid "$SERVICE_GROUP" --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
   fi
   install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0750 "$DATA_DIR"
+  install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0700 "$DATA_DIR/s3-transfer"
   install -d -o root -g "$SERVICE_GROUP" -m 0750 "$ENV_DIR"
 }
 

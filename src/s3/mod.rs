@@ -10,6 +10,7 @@ use std::{
 use url::Url;
 
 const SECRET_DIR: &str = "/etc/arg/s3";
+const S3_TRANSFER_DIR: &str = "/var/lib/arg/s3-transfer";
 const MAX_PAGE_SIZE: usize = 1000;
 static S3_SCAN_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
@@ -708,6 +709,97 @@ fn stop_s3_mount(request: &Value) -> Value {
     }
 }
 
+async fn test_bucket_connection(bucket: &Bucket) -> Value {
+    const VERIFY_KEY: &str = "arg-verify";
+    const VERIFY_BODY: &[u8] = b"ARG S3 connection verification marker\n";
+
+    let list_objects = bucket
+        .list_page(String::new(), Some("/".into()), None, None, Some(1))
+        .await
+        .is_ok();
+
+    let write_marker = match bucket
+        .put_object_with_content_type(VERIFY_KEY, VERIFY_BODY, "text/plain; charset=utf-8")
+        .await
+    {
+        Ok(response) if response.status_code() < 300 => true,
+        Ok(_) => {
+            return json!({
+                "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},
+                "marker_key":VERIFY_KEY,"error":"سرویس‌دهنده آپلود فایل آزمایشی arg-verify را تأیید نکرد."
+            });
+        }
+        Err(error) => {
+            return json!({
+                "ok":false,"status":"failed","checks":{"endpoint":false,"list_objects":list_objects,"write_marker":false,"read_marker":false},
+                "marker_key":VERIFY_KEY,"error":format!("آپلود فایل آزمایشی arg-verify ناموفق بود: {}", helper_error(&error))
+            });
+        }
+    };
+
+    let (head_object, head_status) = match bucket.head_object(VERIFY_KEY).await {
+        Ok((_headers, status)) => (true, status),
+        Err(_) => (false, 0),
+    };
+    let mut response = match bucket.get_object_stream(VERIFY_KEY).await {
+        Ok(response) => response,
+        Err(error) => {
+            return json!({
+                "ok":true,"status":"degraded","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
+                "marker_key":VERIFY_KEY,"marker_persisted":true,"error":format!("فایل arg-verify آپلود شد، اما مجوز خواندن برای تأیید در دسترس نیست: {}", helper_error(&error))
+            });
+        }
+    };
+    if response.status_code >= 300 {
+        return json!({
+            "ok":true,"status":"degraded","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
+            "marker_key":VERIFY_KEY,"marker_persisted":true,"error":"فایل arg-verify آپلود شد، اما سرویس‌دهنده مجوز خواندن آن را نداد."
+        });
+    }
+    let mut body = Vec::with_capacity(VERIFY_BODY.len());
+    while let Some(chunk) = response.bytes.next().await {
+        let Ok(chunk) = chunk else {
+            return json!({
+                "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
+                "marker_key":VERIFY_KEY,"error":"پاسخ خواندن فایل arg-verify ناقص بود."
+            });
+        };
+        if body.len().saturating_add(chunk.len()) > 1024 {
+            return json!({
+                "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
+                "marker_key":VERIFY_KEY,"error":"محتوای arg-verify غیرمنتظره و بزرگ‌تر از حد مجاز است."
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let read_marker = body.as_slice() == VERIFY_BODY;
+    if !read_marker {
+        return json!({
+            "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
+            "marker_key":VERIFY_KEY,"error":"محتوای فایل arg-verify پس از آپلود با محتوای مورد انتظار یکسان نبود."
+        });
+    }
+    let status = if list_objects && head_object && (200..300).contains(&head_status) {
+        "connected"
+    } else {
+        "degraded"
+    };
+    let message = if status == "connected" {
+        "اتصال، فهرست، خواندن و نوشتن S3 تأیید شد؛ فایل arg-verify در Bucket قرار گرفت."
+    } else {
+        "اتصال و خواندن/نوشتن تأیید شد و فایل arg-verify در Bucket قرار گرفت؛ دسترسی فهرست یا HEAD محدود است."
+    };
+    json!({
+        "ok":true,
+        "status":status,
+        "message":message,
+        "checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object && (200..300).contains(&head_status),"read_marker":read_marker},
+        "marker_key":VERIFY_KEY,
+        "marker_size_bytes":VERIFY_BODY.len(),
+        "marker_persisted":true
+    })
+}
+
 async fn execute_network_action(action: &str, request: &Value, secret: &SecretConfig) -> Value {
     match action {
         "s3-list-buckets" => {
@@ -732,25 +824,7 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                 Ok(bucket) => bucket,
                 Err(error) => return json!({"ok":false,"error":error}),
             };
-            match bucket
-                .list_page(String::new(), Some("/".into()), None, None, Some(1))
-                .await
-            {
-                Ok((_, _)) => {
-                    json!({"ok":true,"status":"connected","capabilities":{"list_objects":true,"create_bucket":false},"message":"ارتباط و مجوز فهرست‌کردن Objectها تأیید شد."})
-                }
-                Err(error) => {
-                    let message = helper_error(&error);
-                    let endpoint_reached = message.contains("دسترسی این عملیات را رد کرد")
-                        || message.contains("احراز هویت یا Signing Region")
-                        || message.contains("Bucket پیدا نشد");
-                    if endpoint_reached {
-                        json!({"ok":true,"status":"degraded","capabilities":{"list_objects":false,"create_bucket":false},"message":message})
-                    } else {
-                        json!({"ok":false,"error":message})
-                    }
-                }
-            }
+            test_bucket_connection(&bucket).await
         }
         "s3-create-bucket" => {
             let Some(name) = request["bucket"]
@@ -901,15 +975,11 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                     value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_graphic())
                 })
                 .unwrap_or("application/octet-stream");
-            let metadata = match fs::symlink_metadata(path) {
+            let metadata = match validate_transfer_file(path, false) {
                 Ok(value) => value,
-                Err(_) => return json!({"ok":false,"error":"فایل موقت بارگذاری پیدا نشد."}),
+                Err(error) => return json!({"ok":false,"error":error}),
             };
-            if !metadata.file_type().is_file()
-                || metadata.uid() == 0
-                || metadata.permissions().mode() & 0o777 != 0o600
-                || metadata.len() > 512 * 1024 * 1024
-            {
+            if metadata.len() > 512 * 1024 * 1024 {
                 return json!({"ok":false,"error":"فایل موقت بارگذاری ناامن یا بزرگ‌تر از حد مجاز است."});
             }
             let bucket = match make_bucket(name, secret) {
@@ -952,15 +1022,11 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
             ) else {
                 return json!({"ok":false,"error":"مشخصات دانلود معتبر نیست."});
             };
-            let metadata = match fs::symlink_metadata(path) {
+            let metadata = match validate_transfer_file(path, true) {
                 Ok(value) => value,
-                Err(_) => return json!({"ok":false,"error":"فایل مقصد موقت پیدا نشد."}),
+                Err(error) => return json!({"ok":false,"error":error}),
             };
-            if !metadata.file_type().is_file()
-                || metadata.uid() == 0
-                || metadata.permissions().mode() & 0o777 != 0o600
-                || metadata.len() != 0
-            {
+            if metadata.len() != 0 {
                 return json!({"ok":false,"error":"فایل مقصد موقت ناامن است."});
             }
             let bucket = match make_bucket(name, secret) {
@@ -1124,10 +1190,44 @@ fn valid_object_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= 1024 && !key.chars().any(char::is_control)
 }
 fn valid_transfer_path(path: &str) -> bool {
-    path.starts_with("/tmp/arg-s3-transfer-")
-        && path[5..]
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    path.strip_prefix(&format!("{S3_TRANSFER_DIR}/"))
+        .is_some_and(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn prepare_transfer_directory() -> Result<(), String> {
+    let directory = PathBuf::from(S3_TRANSFER_DIR);
+    std::fs::create_dir_all(&directory).map_err(|_| "پوشهٔ موقت مشترک S3 ساخته نشد.".to_string())?;
+    let metadata = std::fs::symlink_metadata(&directory)
+        .map_err(|_| "بررسی پوشهٔ موقت مشترک S3 ناموفق بود.".to_string())?;
+    if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err("پوشهٔ موقت S3 باید یک پوشهٔ واقعی متعلق به سرویس ARG باشد.".into());
+    }
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        .map_err(|_| "تنظیم دسترسی امن پوشهٔ موقت S3 ناموفق بود.".to_string())
+}
+
+fn validate_transfer_file(path: &str, allow_empty: bool) -> Result<std::fs::Metadata, String> {
+    if !valid_transfer_path(path) {
+        return Err("مسیر فایل موقت S3 معتبر نیست.".into());
+    }
+    let directory = std::fs::symlink_metadata(S3_TRANSFER_DIR)
+        .map_err(|_| "پوشهٔ مشترک انتقال S3 پیدا نشد.".to_string())?;
+    if !directory.file_type().is_dir()
+        || directory.uid() == 0
+        || directory.permissions().mode() & 0o077 != 0
+    {
+        return Err("دسترسی پوشهٔ مشترک انتقال S3 ناامن است.".into());
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "فایل موقت انتقال S3 پیدا نشد؛ پوشهٔ PrivateTmp سرویس‌ها جداست.".to_string())?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != directory.uid()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || (!allow_empty && metadata.len() == 0)
+    {
+        return Err("فایل موقت انتقال S3 ناامن یا خالی است.".into());
+    }
+    Ok(metadata)
 }
 
 #[cfg(test)]
@@ -1175,10 +1275,10 @@ mod tests {
     }
 
     #[test]
-    fn transfer_paths_cannot_escape_the_private_temp_name() {
-        assert!(valid_transfer_path("/tmp/arg-s3-transfer-a1b2-c3d4"));
+    fn transfer_paths_are_shared_and_cannot_escape_the_transfer_directory() {
+        assert!(valid_transfer_path(&format!("{S3_TRANSFER_DIR}/{}", "a1b2".repeat(16))));
         assert!(!valid_transfer_path(
-            "/tmp/arg-s3-transfer-../../etc/passwd"
+            "/var/lib/arg/s3-transfer/../../etc/passwd"
         ));
         assert!(!valid_transfer_path("/etc/arg/s3/1.json"));
     }
@@ -1449,10 +1549,10 @@ pub(super) async fn delete_connection(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?
     };
-    let connection = {
+    {
         let db = state.lock().unwrap();
-        read_connection(&db, id)?
-    };
+        let _ = read_connection(&db, id)?;
+    }
     if input.confirm_name != connection.display_name {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -1490,10 +1590,10 @@ pub(super) async fn test_connection(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?
     };
-    let connection = {
+    {
         let db = state.lock().unwrap();
-        read_connection(&db, id)?
-    };
+        let _ = read_connection(&db, id)?;
+    }
     let bucket = input.bucket_name.or_else(|| {
         let db = state.lock().ok()?;
         db.query_row(
@@ -1503,14 +1603,33 @@ pub(super) async fn test_connection(
         )
         .ok()
     });
-    let response = if let Some(ref bucket) = bucket {
-        if !valid_bucket_name(&bucket) {
-            return Err(error(StatusCode::BAD_REQUEST, "نام Bucket معتبر نیست."));
-        }
-        privileged_request_async(json!({"action":"s3-test","id":id,"bucket":bucket})).await?
-    } else {
-        privileged_request_async(json!({"action":"s3-list-buckets","id":id})).await?
+    let Some(bucket) = bucket else {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "برای آزمایش کامل، ابتدا یک Bucket موجود را به اتصال اضافه یا نام آن را انتخاب کن.",
+        ));
     };
+    if !valid_bucket_name(&bucket) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام Bucket معتبر نیست."));
+    }
+    let mut response = privileged_request_async(json!({"action":"s3-test","id":id,"bucket":bucket})).await?;
+    if response["ok"] == true {
+        let list_buckets = privileged_request_async(json!({"action":"s3-list-buckets","id":id}))
+            .await
+            .map(|result| result["ok"] == true)
+            .unwrap_or(false);
+        if let Some(checks) = response["checks"].as_object_mut() {
+            checks.insert("list_buckets".into(), json!(list_buckets));
+        }
+        if !list_buckets {
+            if response["status"] == "connected" {
+                response["status"] = json!("degraded");
+            }
+            let existing = response["message"].as_str().unwrap_or("بررسی Bucket انجام شد.");
+            response["message"] = json!(format!("{existing} مجوز فهرست‌کردن همهٔ Bucketها در دسترس نیست."));
+        }
+    }
+    response["bucket"] = json!(bucket);
     let success = response["ok"] == true;
     let status = if !success {
         "failed"
@@ -1523,18 +1642,31 @@ pub(super) async fn test_connection(
         .unwrap_or("بررسی اتصال ناموفق بود.");
     {
         let db = state.lock().unwrap();
-        db.execute("UPDATE s3_connections SET status=?1,last_test_at=?2,last_error=?3,updated_at=?2 WHERE id=?4",params![status,now(),if success {None::<String>} else {Some(message.to_string())},id]).map_err(db_error)?;
+        let warning = status != "connected";
+        db.execute("UPDATE s3_connections SET status=?1,last_test_at=?2,last_error=?3,updated_at=?2 WHERE id=?4",params![status,now(),if warning {Some(message.to_string())} else {None::<String>},id]).map_err(db_error)?;
+        if response["marker_persisted"] == true {
+            let _ = db.execute(
+                "UPDATE s3_buckets SET verified_at=?1,updated_at=?1 WHERE connection_id=?2 AND bucket_name=?3",
+                params![now(), id, bucket],
+            );
+        }
         audit(
             &db,
             &actor.username,
             "s3.connection.test",
             &format!(
-                "id={id}; bucket={}",
-                bucket.as_deref().unwrap_or("list-buckets")
+                "id={id}; bucket={}; outcome={status}; marker={}; marker_persisted={}; write_marker={}; list_objects={}; list_buckets={}; head_object={}; read_marker={}",
+                bucket,
+                response["marker_key"].as_str().unwrap_or("none"),
+                response["marker_persisted"].as_bool().unwrap_or(false),
+                response["checks"]["write_marker"].as_bool().unwrap_or(false),
+                response["checks"]["list_objects"].as_bool().unwrap_or(false),
+                response["checks"]["list_buckets"].as_bool().unwrap_or(false),
+                response["checks"]["head_object"].as_bool().unwrap_or(false),
+                response["checks"]["read_marker"].as_bool().unwrap_or(false),
             ),
         );
     }
-    let _ = connection;
     Ok(Json(json!({"result":response})))
 }
 pub(super) async fn list_buckets(
@@ -1865,7 +1997,7 @@ pub(super) struct ObjectTransferQuery {
 }
 
 fn transfer_path() -> String {
-    format!("/tmp/arg-s3-transfer-{}", token())
+    format!("{S3_TRANSFER_DIR}/{}", token())
 }
 
 pub(super) async fn upload_object(
@@ -1888,6 +2020,7 @@ pub(super) async fn upload_object(
             "نام Bucket یا Object Key معتبر نیست.",
         ));
     }
+    prepare_transfer_directory().map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
     let path = transfer_path();
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -1983,6 +2116,7 @@ pub(super) async fn download_object(
             "نام Bucket یا Object Key معتبر نیست.",
         ));
     }
+    prepare_transfer_directory().map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
     let path = transfer_path();
     let file = tokio::fs::OpenOptions::new()
         .write(true)

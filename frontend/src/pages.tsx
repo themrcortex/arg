@@ -741,13 +741,15 @@ function NginxMaintenancePanel({ siteName, notify }: { siteName: string; notify:
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [status, setStatus] = useState<{ enabled: boolean; mode?: string; file?: string }>({ enabled: false })
+  const [status, setStatus] = useState<{ enabled: boolean; mode?: string; file?: string; secret_enabled?: boolean; domains?: string[]; https_enabled?: boolean }>({ enabled: false })
+  const [secretLink, setSecretLink] = useState('')
+  const [secretHost, setSecretHost] = useState('')
   const [mode, setMode] = useState<'project-root' | 'static-file' | 'arg-default'>('arg-default')
   const [file, setFile] = useState('maintenance.html')
   const endpoint = `nginx/sites/${encodeURIComponent(siteName)}/maintenance`
   async function refresh() {
     setLoading(true)
-    try { const result = await api<{ enabled: boolean; mode?: string; file?: string }>(endpoint); setStatus(result); if (result.mode === 'project-root' || result.mode === 'static-file' || result.mode === 'arg-default') setMode(result.mode); if (result.file) setFile(result.file) }
+    try { const result = await api<typeof status>(endpoint); setStatus(result); if (!secretHost && result.domains?.[0]) setSecretHost(result.domains[0]); if (result.mode === 'project-root' || result.mode === 'static-file' || result.mode === 'arg-default') setMode(result.mode); if (result.file) setFile(result.file) }
     catch (error) { notify(error instanceof Error ? error.message : 'وضعیت تعمیرات دریافت نشد.') }
     finally { setLoading(false) }
   }
@@ -757,10 +759,35 @@ function NginxMaintenancePanel({ siteName, notify }: { siteName: string; notify:
     setBusy(true)
     try {
       const result = await api<{ enabled: boolean; mode?: string; file?: string; message: string }>(endpoint, { method: 'PUT', body: JSON.stringify({ enabled, mode, file, force }) })
-      setStatus({ enabled: result.enabled, mode: result.mode, file: result.file })
+      setStatus((current) => ({ ...current, enabled: result.enabled, mode: result.mode, file: result.file, ...(enabled ? {} : { secret_enabled: false }) }))
+      setSecretLink('')
       notify(result.message)
+      await refresh()
     } catch (error) { notify(error instanceof Error ? error.message : 'تغییر حالت تعمیرات ناموفق بود.') }
     finally { setBusy(false) }
+  }
+  async function manageSecret(action: 'create' | 'rotate' | 'revoke') {
+    if (action === 'rotate' && !window.confirm('با بازنشانی، لینک قبلی و تمام مرورگرهای دارای دسترسی فوراً باطل می‌شوند و لینک تازه ساخته می‌شود. ادامه می‌دهی؟')) return
+    if (action === 'revoke' && !window.confirm('کلید مخفی حذف و دسترسی تمام نشست‌های مخفی فوراً قطع می‌شود. ادامه می‌دهی؟')) return
+    setBusy(true)
+    try {
+      const result = await api<{ message: string; token?: string; secret_path?: string; domains?: string[]; https_enabled?: boolean }>(`${endpoint}/secret`, { method: 'POST', body: JSON.stringify({ action }) })
+      if (result.token && result.secret_path) {
+        const host = secretHost.trim() || result.domains?.[0] || ''
+        if (!host) throw new Error('برای ساخت لینک، یک دامنهٔ سایت وارد کن.')
+        const normalizedHost = host.replace(/^https?:\/\//i, '').split('/')[0]
+        if (!/^[a-z0-9.-]+(?::[0-9]{1,5})?$/i.test(normalizedHost) || normalizedHost.startsWith('.') || normalizedHost.endsWith('.') || normalizedHost.includes('..')) throw new Error('دامنه یا نشانی سایت معتبر نیست.')
+        const protocol = result.https_enabled ? 'https' : 'http'
+        setSecretLink(`${protocol}://${normalizedHost}${result.secret_path}`)
+      } else setSecretLink('')
+      notify(result.message)
+      await refresh()
+    } catch (error) { notify(error instanceof Error ? error.message : 'مدیریت لینک مخفی ناموفق بود.') }
+    finally { setBusy(false) }
+  }
+  async function copySecretLink() {
+    try { await navigator.clipboard.writeText(secretLink); notify('لینک مخفی کپی شد؛ آن را فقط با افراد مورداعتماد به اشتراک بگذار.') }
+    catch { notify('کپی خودکار انجام نشد؛ لینک را دستی انتخاب و کپی کن.') }
   }
   return <div className="mt-3 border-t border-white/[.07] pt-3">
     <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)} className="flex min-h-10 w-full items-center justify-between gap-3 rounded-lg px-2 text-right text-xs font-medium text-muted-foreground transition hover:bg-white/[.035] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><span className="flex items-center gap-2"><Activity size={14} className="text-primary"/>حالت تعمیرات سایت <span className={status.enabled ? 'text-amber-300' : 'text-emerald-300'}>{status.enabled ? 'فعال' : 'خاموش'}</span></span><ChevronDown size={15} className={`transition-transform duration-200 ${open ? 'rotate-180' : ''}`}/></button>
@@ -770,6 +797,19 @@ function NginxMaintenancePanel({ siteName, notify }: { siteName: string; notify:
         <div className="grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label="روش نمایش صفحهٔ تعمیرات">{([['arg-default','صفحهٔ پیش‌فرض ARG'],['project-root','فایل داخل ریشهٔ پروژه'],['static-file','فایل استاتیک'] ] as const).map(([value,label]) => <button key={value} type="button" role="radio" aria-checked={mode===value} onClick={() => setMode(value)} className={`rounded-lg border px-3 py-2.5 text-xs transition ${mode===value ? 'border-primary/50 bg-primary/10 text-white' : 'border-white/10 text-muted-foreground hover:text-white'}`}>{label}</button>)}</div>
         {mode !== 'arg-default' && <div className="mt-3 space-y-1.5"><label htmlFor={`maintenance-file-${siteName}`} className="text-xs text-muted-foreground">{mode === 'project-root' ? 'مسیر نسبی داخل ریشهٔ سایت' : 'مسیر مطلق فایل استاتیک'}</label><Input id={`maintenance-file-${siteName}`} dir="ltr" value={file} onChange={(event) => setFile(event.target.value)} placeholder={mode === 'project-root' ? 'maintenance.html' : '/var/www/example/maintenance.html'}/><p className="text-[10px] leading-5 text-muted-foreground">{mode === 'project-root' ? 'فایل HTML باید داخل ریشهٔ تعریف‌شدهٔ سایت و حداکثر 2 MB باشد.' : 'فقط فایل‌های HTML زیر /var/www، /srv/www یا /opt/sites پذیرفته می‌شوند.'}</p></div>}
         {status.enabled && <p className="mt-3 rounded-lg border border-amber-400/20 bg-amber-400/[.05] p-2 text-xs text-amber-100">سایت اکنون در حالت تعمیرات است. {status.mode === 'project-root' ? 'فایل پروژه' : status.mode === 'static-file' ? 'فایل استاتیک' : 'صفحهٔ پیش‌فرض ARG'} نمایش داده می‌شود.</p>}
+        {status.enabled && <section className="mt-3 space-y-3 rounded-lg border border-primary/20 bg-primary/[.035] p-3" aria-label="دسترسی مخفی تعمیرات">
+          <div><h4 className="text-xs font-semibold text-foreground">دسترسی مخفی مدیر</h4><p className="mt-1 text-[10px] leading-5 text-muted-foreground">لینک، یک کوکی HttpOnly با اعتبار 12 ساعته می‌سازد تا همین مرورگر از صفحهٔ تعمیرات عبور کند. لینک مثل رمز است؛ آن را در پیام عمومی نفرست.</p></div>
+          {(!status.domains?.length || !secretHost) && <label className="grid gap-1 text-[10px] text-muted-foreground">دامنهٔ سایت برای ساخت لینک<Input dir="ltr" value={secretHost} onChange={(event) => setSecretHost(event.target.value)} placeholder="example.com" autoComplete="url"/></label>}
+          {status.domains?.length ? <label className="grid gap-1 text-[10px] text-muted-foreground">دامنهٔ مقصد<select className="h-9 rounded-md border border-input bg-background px-2 text-left font-mono text-xs" dir="ltr" value={secretHost || status.domains[0]} onChange={(event) => setSecretHost(event.target.value)}>{status.domains.map((domain) => <option key={domain} value={domain}>{domain}</option>)}</select></label> : null}
+          {!status.https_enabled && <p className="rounded-md border border-amber-400/20 bg-amber-400/[.05] p-2 text-[10px] leading-5 text-amber-100">برای این سایت HTTPS در کانفیگ Nginx تشخیص داده نشد. ساخت لینک مخفی تا فعال‌کردن گواهی TLS غیرفعال است تا کلید در اتصال ناامن ارسال نشود.</p>}
+          {secretLink && <div className="flex gap-2"><Input readOnly dir="ltr" value={secretLink} aria-label="لینک مخفی تعمیرات" className="min-w-0 font-mono text-[10px]"/><Button size="sm" variant="outline" onClick={() => void copySecretLink()} aria-label="کپی لینک مخفی">کپی</Button></div>}
+          <div className="flex flex-wrap gap-2">
+            {!status.secret_enabled ? <Button size="sm" disabled={busy || !status.https_enabled || !secretHost.trim()} onClick={() => void manageSecret('create')}><KeyRound size={14}/>{busy ? 'در حال ساخت…' : 'ساخت لینک مخفی'}</Button> : <>
+              <Button size="sm" variant="outline" disabled={busy || !status.https_enabled || !secretHost.trim()} onClick={() => void manageSecret('rotate')}><RefreshCw size={14} className={busy ? 'animate-spin' : ''}/>بازنشانی همهٔ نشست‌ها و لینک تازه</Button>
+              <Button size="sm" variant="destructive" disabled={busy} onClick={() => void manageSecret('revoke')}><Trash2 size={14}/>حذف کلید و لغو همهٔ نشست‌ها</Button>
+            </>}
+          </div>
+        </section>}
         <div className="mt-3 flex flex-wrap gap-2">{status.enabled ? <Button size="sm" variant="outline" disabled={busy} onClick={() => void change(false)}>{busy ? 'در حال خروج…' : 'پایان تعمیرات'}</Button> : <><Button size="sm" disabled={busy || (mode !== 'arg-default' && !file.trim())} onClick={() => void change(true)}>{busy ? 'در حال اعمال…' : 'ورود نرم به تعمیرات'}</Button><Button size="sm" variant="destructive" disabled={busy || (mode !== 'arg-default' && !file.trim())} onClick={() => void change(true, true)}>{busy ? 'در حال اعمال…' : 'Force mode'}</Button></>}</div>
         {!status.enabled && <p className="mt-2 text-[10px] leading-5 text-muted-foreground">Force فوراً Nginx را راه‌اندازی مجدد می‌کند و ممکن است اتصال‌های جاری را قطع کند.</p>}
       </>}
