@@ -12,6 +12,8 @@
 
 **ساخته‌شده توسط [𝓜𝓻.𝓒𝓸𝓻𝓽𝓮𝔁](https://t.me/mrc0rtex)**
 
+**[📚 مستندات کامل دوزبانه](https://themrcortex.github.io/arg/)** · [فارسی](docs/fa/overview.md) · [English](docs/en/overview.md)
+
 </div>
 
 ---

@@ -4,3 +4,6 @@
 /data/
 /frontend/node_modules/
 /frontend/*.tsbuildinfo
+/docs-site/node_modules/
+/docs-site/dist/
+/docs-site/*.tsbuildinfo
