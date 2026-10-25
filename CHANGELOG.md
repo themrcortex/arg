@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.6.6-dev.3 — 2026-10-25
+
+### Added
+- Add a per-site Nginx workflow to copy the site's local document root into a unique S3 snapshot prefix, with scan limits, progress, sensitive-file exclusions, and no changes to the live site.
+
+### Fixed
+- Keep HTTP (80) and HTTPS (443) editable in UFW, including when ARG or SSH happens to listen on those ports.
+- Import and remove the existing ARG-labeled website UFW rules so toggles work with rules created by the installer.
+
 ## v0.6.6-dev.2 — 2026-10-25
 
 ### Development

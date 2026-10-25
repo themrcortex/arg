@@ -88,10 +88,13 @@ port="$((10#$port))"
 # SSH and the ARG panel stay protected. HTTP/HTTPS are intentionally editable in the panel.
 case "$port" in 22|8282|8443) fail "port $port is reserved for SSH or the ARG panel" 4 ;; esac
 if [[ -f /etc/arg/arg.env ]]; then
-  bind="$(sed -n 's/^ARG_BIND=//p' /etc/arg/arg.env | tail -1)"
-  [[ "$port" != "${bind##*:}" ]] || fail "port $port is the configured ARG panel port" 4
-  tls_bind="$(sed -n 's/^ARG_TLS_BIND=//p' /etc/arg/arg.env | tail -1)"
-  [[ -z "$tls_bind" || "$port" != "${tls_bind##*:}" ]] || fail "port $port is the configured ARG HTTPS port" 4
+  # Website ports are deliberately user-manageable, even if ARG listens there.
+  if [[ "$port" != 80 && "$port" != 443 ]]; then
+    bind="$(sed -n 's/^ARG_BIND=//p' /etc/arg/arg.env | tail -1)"
+    [[ "$port" != "${bind##*:}" ]] || fail "port $port is the configured ARG panel port" 4
+    tls_bind="$(sed -n 's/^ARG_TLS_BIND=//p' /etc/arg/arg.env | tail -1)"
+    [[ -z "$tls_bind" || "$port" != "${tls_bind##*:}" ]] || fail "port $port is the configured ARG HTTPS port" 4
+  fi
 fi
 ufw_bin="$(command -v ufw || true)"
 [[ -n "$ufw_bin" ]] || fail "UFW is not installed; use the Install UFW action first" 3
@@ -100,7 +103,11 @@ if [[ "$action" == add ]]; then
 elif [[ "$action" == remove ]]; then
   found=0
   while IFS= read -r line; do
-    if [[ "$line" == *'# ARG WEB'* || "$line" == *'# DONATELLO WEB'* ]] && [[ "$line" =~ ^[[:space:]]*\[[[:space:]]*([0-9]+)\] ]]; then
+    managed_label=0
+    [[ "$line" == *'# ARG WEB'* || "$line" == *'# DONATELLO WEB'* ]] && managed_label=1
+    [[ "$port" == 80 && "$line" == *'# ARG HTTP websites'* ]] && managed_label=1
+    [[ "$port" == 443 && "$line" == *'# ARG HTTPS websites'* ]] && managed_label=1
+    if (( managed_label )) && [[ "$line" =~ ^[[:space:]]*\[[[:space:]]*([0-9]+)\] ]]; then
       rule_id="${BASH_REMATCH[1]}"
       if [[ "$line" =~ (^|[[:space:]])${port}/${protocol}([[:space:]]|$) && "$line" == *" ${policy^^} "* ]]; then
         "$ufw_bin" --force delete "$rule_id" >/dev/null

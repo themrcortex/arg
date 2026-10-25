@@ -1884,7 +1884,9 @@ fn protected_firewall_ports_from(
     let mut ports = HashSet::from([22, 8282, 8443]);
     for value in [bind, tls_bind].into_iter().flatten() {
         if let Ok(address) = value.parse::<SocketAddr>() {
-            ports.insert(address.port());
+            if !matches!(address.port(), 80 | 443) {
+                ports.insert(address.port());
+            }
         }
     }
     if let Some(output) = sshd_output {
@@ -1897,7 +1899,9 @@ fn protected_firewall_ports_from(
                 })
                 .and_then(|value| value.parse::<u16>().ok());
             if let Some(value) = value {
-                ports.insert(value);
+                if !matches!(value, 80 | 443) {
+                    ports.insert(value);
+                }
             }
         }
     }
@@ -2028,7 +2032,12 @@ async fn managed_firewall_rules(State(state): State<AppState>, headers: HeaderMa
                 .as_str()
                 .unwrap_or_default()
                 .lines()
-                .filter(|line| line.contains("# ARG WEB") || line.contains("# DONATELLO WEB"))
+                .filter(|line| {
+                    line.contains("# ARG WEB")
+                        || line.contains("# DONATELLO WEB")
+                        || line.contains("# ARG HTTP websites")
+                        || line.contains("# ARG HTTPS websites")
+                })
             {
                 let tokens: Vec<_> = line.split_whitespace().collect();
                 let port_protocol = tokens
@@ -4009,6 +4018,19 @@ mod update_progress_tests {
         assert!(ports.contains(&9282));
         assert!(ports.contains(&9443));
         assert!(!ports.contains(&80));
+        assert!(!ports.contains(&443));
+    }
+
+    #[test]
+    fn website_ports_stay_editable_even_when_used_by_arg_or_sshd() {
+        let ports = super::protected_firewall_ports_from(
+            Some("0.0.0.0:80"),
+            Some("0.0.0.0:443"),
+            Some("port 80\nport 443\nport 2207\n"),
+        );
+        assert!(!ports.contains(&80));
+        assert!(!ports.contains(&443));
+        assert!(ports.contains(&2207));
     }
 
     #[test]
