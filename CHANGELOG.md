@@ -1,5 +1,13 @@
 # ARG Change Log
 
+## v0.4.40 — 2026-10-25
+
+### Changed
+- Replace the S3 split-pane view with a connection-only overview and a dedicated workspace for each selected connection.
+- Add in-place S3 connection settings edits; existing credentials stay hidden and are retained unless replacement keys are entered.
+- Repair ownership and restrictive permissions of legacy S3 credential files through the privileged helper instead of failing every operation with an unsafe-permissions error.
+- Bump ARG to v0.4.40.
+
 ## v0.4.39 — 2026-10-25
 
 ### Added

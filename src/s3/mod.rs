@@ -3,6 +3,7 @@ use ::s3::{bucket::Bucket, bucket_ops::BucketConfiguration, creds::Credentials, 
 use axum::{body::Body, http::header, response::Response};
 use std::{
     net::{IpAddr, ToSocketAddrs},
+    os::fd::AsRawFd,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
 };
@@ -309,18 +310,32 @@ fn read_secret_file(id: i64) -> Result<SecretConfig, String> {
         return Err("شناسهٔ اتصال معتبر نیست.".into());
     }
     let path = PathBuf::from(SECRET_DIR).join(format!("{id}.json"));
-    let metadata = fs::symlink_metadata(&path)
-        .map_err(|_| "اطلاعات امن اتصال وجود ندارد؛ کلید را دوباره ذخیره کن.".to_string())?;
-    if !metadata.file_type().is_file()
-        || metadata.uid() != 0
-        || metadata.permissions().mode() & 0o777 != 0o600
-    {
-        return Err("سطح دسترسی فایل کلید S3 ناامن است.".into());
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|_| "اطلاعات اتصال پیدا نشد؛ تنظیمات اتصال را دوباره ذخیره کن.".to_string())?;
+    let metadata = file.metadata().map_err(|_| "بررسی فایل تنظیمات اتصال ناموفق بود.".to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err("فایل تنظیمات اتصال معتبر نیست؛ آن را دوباره ذخیره کن.".into());
     }
-    let secret: SecretConfig = serde_json::from_slice(
-        &fs::read(path).map_err(|_| "خواندن کلید اتصال ناموفق بود.".to_string())?,
-    )
-    .map_err(|_| "فایل کلید اتصال معتبر نیست.".to_string())?;
+    // Repair legacy ownership/mode issues in place instead of making every S3
+    // operation fail. This runs only through the root-owned privileged helper
+    // and uses the already-open, O_NOFOLLOW file descriptor to avoid path races.
+    if metadata.uid() != 0
+        && unsafe { libc::fchown(file.as_raw_fd(), 0, 0) } != 0
+    {
+        return Err("ترمیم مالکیت فایل اتصال انجام نشد؛ تنظیمات اتصال را دوباره ذخیره کن.".into());
+    }
+    if metadata.permissions().mode() & 0o777 != 0o600
+        && unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0
+    {
+        return Err("ترمیم مجوز فایل اتصال انجام نشد؛ تنظیمات اتصال را دوباره ذخیره کن.".into());
+    }
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents).map_err(|_| "خواندن تنظیمات اتصال ناموفق بود.".to_string())?;
+    let secret: SecretConfig = serde_json::from_slice(&contents)
+        .map_err(|_| "فایل تنظیمات اتصال معتبر نیست؛ کلیدها را دوباره ذخیره کن.".to_string())?;
     if !secret.endpoint.is_empty() {
         validate_endpoint(&secret.endpoint, secret.allow_private_endpoint)?;
     }
