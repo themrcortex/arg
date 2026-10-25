@@ -14,6 +14,7 @@ import {
   LifeBuoy,
   Menu,
   RefreshCw,
+  RotateCw,
   Settings,
   UserRound,
   X,
@@ -55,7 +56,7 @@ const notifyUser = (message: string) => {
 
 type AlertThresholds = { cpu: number; memory: number; disk: number }
 type ResourceAlert = { key: string; label: string; value: number; threshold: number; critical: boolean }
-type UpdateProgress = { updating: boolean; started_at: number | null; instance: string; job_id?: string | null; state?: 'idle' | 'running' | 'succeeded' | 'failed'; phase?: string; message?: string }
+type UpdateProgress = { updating: boolean; started_at: number | null; instance: string; job_id?: string | null; state?: 'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled'; phase?: string; message?: string }
 type UpdateStage = 1 | 2 | 3 | 4 | 5
 const updateStageFor = (phase?: string): UpdateStage => {
   switch (phase) {
@@ -388,7 +389,7 @@ function UpdateBranchSelector({ branch, onChange }: { branch: 'main' | 'developm
   return <section className="space-y-2 rounded-xl border border-border bg-background/35 p-3" aria-label="شاخهٔ دریافت به‌روزرسانی"><p className="text-xs font-semibold">شاخهٔ دریافت نسخه</p><div className="grid gap-2 sm:grid-cols-2"><button type="button" aria-pressed={branch === 'main'} onClick={() => onChange('main')} className={`rounded-lg border p-3 text-right transition-colors ${branch === 'main' ? 'border-primary/45 bg-primary/[.07]' : 'border-border hover:bg-secondary/50'}`}><span className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold" dir="ltr">main</span><span className="text-[10px] text-emerald-300">پایدار · پیشنهادی</span></span><span className="mt-1 block text-[10px] leading-5 text-muted-foreground">نسخه‌های بررسی‌شده و مناسب استفادهٔ روزمره.</span></button><button type="button" aria-pressed={branch === 'development'} onClick={() => onChange('development')} className={`rounded-lg border p-3 text-right transition-colors ${branch === 'development' ? 'border-primary/45 bg-primary/[.07]' : 'border-border hover:bg-secondary/50'}`}><span className="flex items-center justify-between gap-2"><span className="font-mono text-xs font-bold" dir="ltr">development</span><span className="text-[10px] text-amber-300">آزمایشی</span></span><span className="mt-1 block text-[10px] leading-5 text-muted-foreground">تغییرات در حال توسعه؛ ممکن است ناپایدار یا منتشرنشده باشند.</span></button></div><p className="text-[10px] leading-5 text-muted-foreground">انتخاب شاخه، بررسی نسخه و منبع build را با هم تغییر می‌دهد. شاخهٔ انتخابی ذخیره می‌شود.</p></section>
 }
 
-function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, refreshing, failure, canInstall, changelog, buildMode, onBuildModeChange, updateBranch, onUpdateBranchChange, onCheck, onInstall, onForceRefresh }: {
+function UpdateDialog({ open, onOpenChange, update, checking, updating, finished, refreshing, failure, canInstall, changelog, buildMode, onBuildModeChange, updateBranch, onUpdateBranchChange, onCheck, onInstall, onRollback, rollingBack, onForceRefresh }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   update: { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string; error?: string }
@@ -405,6 +406,8 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
   onUpdateBranchChange: (branch: 'main' | 'development') => void
   onCheck: () => void
   onInstall: (mode: 'fast' | 'complete') => void
+  onRollback: () => void
+  rollingBack: boolean
   onForceRefresh: () => void
 }) {
   const [refreshingPanel, setRefreshingPanel] = useState(false)
@@ -414,18 +417,18 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
     window.setTimeout(() => setRefreshingPanel(false), 1800)
   }
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[85vh] overflow-y-auto"><DialogHeader><DialogTitle>{failure ? 'به‌روزرسانی ناموفق بود' : finished ? 'به‌روزرسانی کامل شد' : 'به‌روزرسانی ARG'}</DialogTitle><DialogDescription>{failure ? 'نصب نسخه کامل نشد. گزارش زنده یا آخرین گزارش را برای جزئیات باز کن.' : finished ? 'نسخهٔ تازه بارگذاری شده است. تغییرات این نسخه:' : 'نسخهٔ نصب‌شده را با آخرین نسخهٔ GitHub بررسی کن.'}</DialogDescription></DialogHeader>
-    {failure ? <div className="space-y-4">{canInstall && <UpdateBranchSelector branch={updateBranch} onChange={onUpdateBranchChange}/>}<div role="alert" className="rounded-xl border border-rose-400/25 bg-rose-400/[.07] p-4 text-sm text-rose-100"><div className="mb-1 flex items-center gap-2 font-semibold"><X size={17}/>به‌روزرسانی انجام نشد</div><p className="leading-6">{failure}</p></div><UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={() => onInstall(buildMode)}>تلاش دوباره برای نصب</Button>}<Button variant="ghost" onClick={() => onOpenChange(false)}>بستن</Button></div></div> : finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>{refreshing ? 'در حال تازه‌سازی پنل…' : 'به‌روزرسانی کامل شد و نسخهٔ تازه بارگذاری شد.'}</div><p className="text-xs leading-6 text-muted-foreground">تغییرات زیر مربوط به نسخهٔ تازه‌بارگذاری‌شده است. برای بارگذاری دوباره در صورت نیاز از دکمهٔ رفرش استفاده کن.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><UpdateLogDetails/><div className="grid gap-2 sm:grid-cols-2"><Button onClick={refreshPanelManually} aria-busy={refreshingPanel}><RefreshCw size={15} className={refreshingPanel ? 'animate-spin' : ''}/>{refreshingPanel ? 'در حال پاک‌سازی و رفرش…' : 'رفرش کامل صفحه'}</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
+    {failure ? <div className="space-y-4">{canInstall && <UpdateBranchSelector branch={updateBranch} onChange={onUpdateBranchChange}/>}<div role="alert" className="rounded-xl border border-rose-400/25 bg-rose-400/[.07] p-4 text-sm text-rose-100"><div className="mb-1 flex items-center gap-2 font-semibold"><X size={17}/>به‌روزرسانی انجام نشد</div><p className="leading-6">{failure}</p></div><UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating || rollingBack} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && <Button type="button" variant="outline" disabled={updating || rollingBack} onClick={onRollback}><RotateCw size={15} className={rollingBack ? 'animate-spin' : ''}/>{rollingBack ? 'در حال بازگشت…' : 'بازگشت به نسخهٔ قبل'}</Button>}{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={() => onInstall(buildMode)}>تلاش دوباره برای نصب</Button>}<Button variant="ghost" onClick={() => onOpenChange(false)}>بستن</Button></div></div> : finished ? <div className="space-y-4"><div className="flex items-center gap-2 rounded-xl border border-emerald-400/20 bg-emerald-400/[.07] p-3 text-sm text-emerald-200"><CheckCircle2 size={18}/>{refreshing ? 'در حال تازه‌سازی پنل…' : 'به‌روزرسانی کامل شد و نسخهٔ تازه بارگذاری شد.'}</div><p className="text-xs leading-6 text-muted-foreground">تغییرات زیر مربوط به نسخهٔ تازه‌بارگذاری‌شده است. برای بارگذاری دوباره در صورت نیاز از دکمهٔ رفرش استفاده کن.</p><div className="max-h-[42vh] overflow-y-auto rounded-xl border border-border bg-background p-4"><ChangelogView content={changelog}/></div><UpdateLogDetails/><div className="grid gap-2 sm:grid-cols-3"><Button onClick={refreshPanelManually} aria-busy={refreshingPanel}><RefreshCw size={15} className={refreshingPanel ? 'animate-spin' : ''}/>{refreshingPanel ? 'در حال پاک‌سازی و رفرش…' : 'رفرش کامل صفحه'}</Button><Button type="button" variant="outline" disabled={rollingBack} onClick={onRollback}><RotateCw size={15} className={rollingBack ? 'animate-spin' : ''}/>{rollingBack ? 'در حال بازگشت…' : 'بازگشت به نسخهٔ قبل'}</Button><Button variant="outline" onClick={() => onOpenChange(false)}>متوجه شدم</Button></div></div> : <div className="space-y-4">
       {canInstall && <UpdateBranchSelector branch={updateBranch} onChange={onUpdateBranchChange}/>}
       <div className="grid grid-cols-2 gap-3"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.local_version ? `v${update.local_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخه</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.remote_version ? `v${update.remote_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.remote || '—'} · {updateBranch}</div></div></div>
       {checking ? <div role="status" className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground"><RefreshCw size={16} className="animate-spin text-primary"/>در حال بررسی نسخهٔ GitHub…</div> : update.status === 'available' ? <div className="rounded-xl border border-amber-400/25 bg-amber-400/[.06] p-4 text-sm text-amber-100">نسخهٔ جدید {update.remote_version ? `v${update.remote_version}` : update.remote} آمادهٔ نصب است.</div> : update.status === 'current' ? <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[.06] p-4 text-sm text-emerald-200">پنل به‌روز است.</div> : <div className="rounded-xl border border-rose-400/20 bg-rose-400/[.06] p-4 text-sm text-rose-200">{update.error || 'بررسی نسخه انجام نشد. اتصال سرور و دسترسی helper را بررسی کن.'}</div>}
       {update.status === 'available' && canInstall && <section className="space-y-2 rounded-xl border border-border bg-background/35 p-3" aria-label="حالت ساخت نسخهٔ جدید"><p className="text-xs font-semibold">روش کامپایل و مصرف دیسک</p><div className="grid gap-2 sm:grid-cols-2"><button type="button" aria-pressed={buildMode === 'fast'} onClick={() => onBuildModeChange('fast')} className={`rounded-lg border p-3 text-right transition-colors ${buildMode === 'fast' ? 'border-primary/45 bg-primary/[.07]' : 'border-border hover:bg-secondary/50'}`}><span className="block text-xs font-semibold">آپدیت سریع</span><span className="mt-1 block text-[10px] leading-5 text-muted-foreground">Cache کامپایل را نگه می‌دارد تا آپدیت‌های بعدی سریع‌تر شوند. بر اساس اندازهٔ فعلی سرورتان، حدود 1.5 GB از دیسک برای فایل‌های Build اشغال می‌ماند.</span></button><button type="button" aria-pressed={buildMode === 'complete'} onClick={() => onBuildModeChange('complete')} className={`rounded-lg border p-3 text-right transition-colors ${buildMode === 'complete' ? 'border-primary/45 bg-primary/[.07]' : 'border-border hover:bg-secondary/50'}`}><span className="block text-xs font-semibold">آپدیت کامل · آزادسازی Cache</span><span className="mt-1 block text-[10px] leading-5 text-muted-foreground">Cache قبلی پیش از کامپایل و Cache جدید پس از نصب پاک می‌شود؛ هر آپدیت طولانی‌تر است. هنگام خودِ کامپایل موقتاً فضای دیسک لازم است و این مقدار با نسخه تغییر می‌کند.</span></button></div></section>}
-      <UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={checking || updating} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={() => onInstall(buildMode)}>نصب نسخهٔ جدید</Button>}</div>
+      <UpdateLogDetails/><div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" disabled={updating || rollingBack || !canInstall} onClick={onRollback}><RotateCw size={15} className={rollingBack ? 'animate-spin' : ''}/>{rollingBack ? 'در حال بازگشت…' : 'بازگشت به نسخهٔ قبل'}</Button><Button variant="outline" disabled={checking || updating || rollingBack} onClick={onCheck}><RefreshCw size={15} className={checking ? 'animate-spin' : ''}/>بررسی دوباره</Button>{canInstall && update.status === 'available' && <Button disabled={checking || updating} onClick={() => onInstall(buildMode)}>نصب نسخهٔ جدید</Button>}</div>
     </div>}
   </DialogContent></Dialog>
 }
 
-function UpdateOverlay({ active, stage, startedAt, shared, refreshing }: {
-  active: boolean; stage: UpdateStage; startedAt: number | null; shared: boolean; refreshing: boolean
+function UpdateOverlay({ active, stage, startedAt, shared, refreshing, canCancel, canceling, onCancel }: {
+  active: boolean; stage: UpdateStage; startedAt: number | null; shared: boolean; refreshing: boolean; canCancel: boolean; canceling: boolean; onCancel: () => void
 }) {
   const [elapsed, setElapsed] = useState(0)
   const overlayRef = useRef<HTMLDivElement>(null)
@@ -450,7 +453,7 @@ function UpdateOverlay({ active, stage, startedAt, shared, refreshing }: {
         <div className="mt-2 flex gap-1.5" dir="rtl">{labels.map((label, index) => <div key={label} className="relative h-2 flex-1 overflow-hidden rounded-full bg-white/10"><span className={cn('absolute inset-0 rounded-full', index < stage - 1 ? 'bg-emerald-400/80' : index === stage - 1 ? 'arg-update-active-segment' : 'bg-transparent')}/></div>)}</div>
         <p className="mt-3 text-xs leading-6 text-slate-400">مراحل پایان‌یافته تیک می‌خورند؛ مراحل سریع ممکن است بین دو گزارش سرور تکمیل شوند.</p>
       </div>}
-      <div className="mt-5"><UpdateLogDetails active={!refreshing}/></div><p role="status" aria-live="polite" className="mt-3 text-center text-xs text-slate-400">{refreshing ? 'پس از بازشدن نسخهٔ جدید، گزارش تغییرات نمایش داده می‌شود.' : 'در طول نصب، عملیات مدیریتی دیگر موقتاً متوقف می‌شوند.'}</p>
+      <div className="mt-5"><UpdateLogDetails active={!refreshing}/></div><div className="mt-3 flex flex-wrap items-center justify-between gap-3"><p role="status" aria-live="polite" className="text-xs text-slate-400">{refreshing ? 'پس از بازشدن نسخهٔ جدید، گزارش تغییرات نمایش داده می‌شود.' : 'در طول نصب، عملیات مدیریتی دیگر موقتاً متوقف می‌شوند.'}</p>{canCancel && !refreshing && <Button type="button" variant="outline" disabled={canceling} onClick={onCancel} className="border-rose-300/25 bg-rose-300/[.06] text-rose-100 hover:bg-rose-300/10"><X size={15}/>{canceling ? 'در حال لغو امن…' : 'لغو به‌روزرسانی'}</Button>}</div>
     </div>
   </div>
 }
@@ -512,6 +515,8 @@ export default function App() {
   })
   const [updating, setUpdating] = useState(false)
   const [updateFailure, setUpdateFailure] = useState<string | null>(null)
+  const [cancelingUpdate, setCancelingUpdate] = useState(false)
+  const [rollingBack, setRollingBack] = useState(false)
   const [updateStage, setUpdateStage] = useState<UpdateStage>(1)
   const [updateStartedAt, setUpdateStartedAt] = useState<number | null>(null)
   const [sharedUpdate, setSharedUpdate] = useState<UpdateProgress>({ updating: false, started_at: null, instance: '' })
@@ -665,7 +670,10 @@ export default function App() {
               setUpdate(latest)
               const restarted = progress.instance !== previousInstance
               const versionChanged = Boolean(previousVersion && latest.local && latest.local !== previousVersion)
-              if (progress.state === 'failed') {
+              if (progress.state === 'cancelled') {
+                setUpdateFailure(progress.message || 'به‌روزرسانی به درخواست مدیر لغو شد؛ نسخهٔ قبلی حفظ شده است.')
+                setUpdateDialogOpen(true)
+              } else if (progress.state === 'failed') {
                 setUpdateFinished(false)
                 setUpdateFailure(progress.message || 'فرایند به‌روزرسانی شکست خورد. گزارش را برای جزئیات بررسی کن.')
                 setUpdateDialogOpen(true)
@@ -726,6 +734,36 @@ export default function App() {
     setReloadQueued(true)
     window.setTimeout(() => void forceFreshPanelReload(true), 1200)
   }
+  async function cancelUpdate() {
+    if (user?.role !== 'admin' || cancelingUpdate) return
+    if (!window.confirm('به‌روزرسانی متوقف شود؟ اگر نصب نسخه شروع شده باشد، نسخهٔ قبلی دوباره فعال می‌شود.')) return
+    setCancelingUpdate(true)
+    try {
+      const result = await api<{ message?: string }>('update/cancel', { method: 'POST' })
+      setUpdating(false)
+      setUpdateStartedAt(null)
+      localUpdateStarted.current = false
+      sharedUpdateWasActive.current = false
+      setUpdateFailure(result.message || 'به‌روزرسانی لغو شد؛ نسخهٔ قبلی حفظ شده است.')
+      setUpdateDialogOpen(true)
+      notifyUser('به‌روزرسانی لغو شد؛ نسخهٔ قبلی حفظ شده است.')
+    } catch (cause) {
+      notifyUser(cause instanceof Error ? cause.message : 'لغو به‌روزرسانی ناموفق بود.')
+    } finally { setCancelingUpdate(false) }
+  }
+  async function rollbackUpdate() {
+    if (user?.role !== 'admin' || rollingBack) return
+    if (!window.confirm('نسخهٔ قبلی ARG و تصویر پایگاه‌دادهٔ همان زمان بازیابی می‌شود و سرویس دوباره راه‌اندازی خواهد شد. تغییرات پایگاه‌داده بعد از آن تصویر از دست می‌روند. ادامه می‌دهی؟')) return
+    setRollingBack(true)
+    try {
+      await api('update/rollback', { method: 'POST' })
+      setUpdateDialogOpen(false)
+      setReloadQueued(true)
+      window.setTimeout(() => void forceFreshPanelReload(false), 1200)
+    } catch (cause) {
+      notifyUser(cause instanceof Error ? cause.message : 'بازگشت به نسخهٔ قبلی ناموفق بود.')
+    } finally { setRollingBack(false) }
+  }
   function changeUpdateBuildMode(mode: 'fast' | 'complete') {
     setUpdateBuildMode(mode)
     try { window.localStorage.setItem('arg.update-build-mode', mode) } catch { /* The selected mode still applies for this session. */ }
@@ -777,6 +815,14 @@ export default function App() {
         if (cancelled) return
         setUpdateStage((current) => Math.max(current, updateStageFor(progress.phase)) as UpdateStage)
         if (progress.job_id) currentUpdateJobId.current = progress.job_id
+        if (progress.state === 'cancelled') {
+          setUpdating(false)
+          setUpdateStartedAt(null)
+          localUpdateStarted.current = false
+          setUpdateFailure(progress.message || 'به‌روزرسانی به درخواست مدیر لغو شد؛ نسخهٔ قبلی حفظ شده است.')
+          setUpdateDialogOpen(true)
+          return
+        }
         if (progress.state === 'failed') {
           const message = progress.message || 'به‌روزرسانی ناموفق بود. گزارش فرایند را بررسی کن و سپس دوباره تلاش کن.'
           setUpdating(false)
@@ -937,8 +983,8 @@ export default function App() {
           </main>
         </div>
         <Toaster />
-        <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating} refreshing={reloadQueued}/>
-        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} updateBranch={updateBranch} onUpdateBranchChange={changeUpdateBranch} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onForceRefresh={() => void forceFreshPanelReload(false)}/>
+        <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating} refreshing={reloadQueued} canCancel={user.role === 'admin'} canceling={cancelingUpdate} onCancel={() => void cancelUpdate()}/>
+        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} updateBranch={updateBranch} onUpdateBranchChange={changeUpdateBranch} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onRollback={() => void rollbackUpdate()} rollingBack={rollingBack} onForceRefresh={() => void forceFreshPanelReload(false)}/>
       </div>
     </PanelTimeZoneContext.Provider>
   )

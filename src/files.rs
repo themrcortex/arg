@@ -301,6 +301,7 @@ fn path_metadata(path: &std::path::Path, name: String) -> Value {
 }
 
 fn list_directory(path: &str) -> Result<Value, String> {
+    const MAX_DIRECTORY_ENTRIES: usize = 10_000;
     let directory = canonical_existing(path)?;
     if !directory.is_dir() {
         return Err("The selected path is not a directory.".into());
@@ -308,7 +309,7 @@ fn list_directory(path: &str) -> Result<Value, String> {
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(&directory)
         .map_err(|error| error.to_string())?
-        .take(2000)
+        .take(MAX_DIRECTORY_ENTRIES)
     {
         let entry = entry.map_err(|error| error.to_string())?;
         let item = path_metadata(
@@ -327,7 +328,7 @@ fn list_directory(path: &str) -> Result<Value, String> {
             .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
     });
     Ok(
-        json!({"path":directory.to_string_lossy(), "parent":directory.parent().map(|parent| parent.to_string_lossy()), "entries":entries, "truncated":entries.len() >= 2000}),
+        json!({"path":directory.to_string_lossy(), "parent":directory.parent().map(|parent| parent.to_string_lossy()), "entries":entries, "truncated":entries.len() >= MAX_DIRECTORY_ENTRIES}),
     )
 }
 

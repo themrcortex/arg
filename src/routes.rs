@@ -101,6 +101,8 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/update",
             get(panel_update_status).post(schedule_panel_update),
         )
+        .route("/api/update/cancel", post(cancel_panel_update))
+        .route("/api/update/rollback", post(rollback_panel_update))
         .route("/api/update/progress", get(panel_update_progress))
         .route("/api/update/logs", get(panel_update_logs))
         .route("/api/packages", get(list_packages))

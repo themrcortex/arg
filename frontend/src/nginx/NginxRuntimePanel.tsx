@@ -16,9 +16,11 @@ type RuntimeResponse = {
   memory_current_bytes?: number | null
   sampled_at?: number
 }
+type ServiceOption = { unit: string; state: string; description: string }
 
 export function NginxRuntimePanel({ siteName, notify }: { siteName: string; notify: (message: string) => void }) {
   const [runtime, setRuntime] = useState<RuntimeResponse | null>(null)
+  const [services, setServices] = useState<ServiceOption[]>([])
   const [unit, setUnit] = useState('')
   const [cpu, setCpu] = useState('')
   const [memoryMiB, setMemoryMiB] = useState('')
@@ -27,6 +29,7 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
   const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
+    void api<{ services: ServiceOption[] }>('services').then((result) => setServices(result.services || [])).catch(() => setServices([]))
     try {
       const result = await api<RuntimeResponse>(`nginx/sites/${encodeURIComponent(siteName)}/runtime`)
       setRuntime(result)
@@ -73,7 +76,7 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
         <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="text-xs text-muted-foreground">واحد systemd متصل</div><div dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{runtime.unit}</div><p className="mt-1 text-[10px] text-muted-foreground">خوانده‌شده از cgroup سرویس</p></div>
       </div>}
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
-        <div className="space-y-2"><Label htmlFor={`runtime-unit-${siteName}`}>واحد اختصاصی برنامه</Label><Input id={`runtime-unit-${siteName}`} dir="ltr" className="text-left font-mono" value={unit} onChange={(event) => setUnit(event.target.value)} placeholder="customer-app.service"/><p className="text-[10px] text-muted-foreground">سرویس باید از قبل نصب و تحت systemd باشد.</p></div>
+        <div className="space-y-2"><Label htmlFor={`runtime-service-${siteName}`}>انتخاب سرویس برنامه</Label><select id={`runtime-service-${siteName}`} value={unit} onChange={(event) => setUnit(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-left font-mono text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" dir="ltr"><option value="">انتخاب از سرویس‌های systemd</option>{services.map((service) => <option key={service.unit} value={service.unit}>{service.unit} · {service.state}</option>)}</select><Input aria-label="نام واحد systemd سفارشی" dir="ltr" className="text-left font-mono" value={unit} onChange={(event) => setUnit(event.target.value)} placeholder="یا نام دقیق مثل customer-app.service"/><p className="text-[10px] text-muted-foreground">سرویس انتخابی باید برنامهٔ همین سایت را اجرا کند؛ Nginx و PHP-FPM مشترک قابل محدودکردن برای یک سایت نیستند.</p></div>
         <div className="grid grid-cols-2 gap-2"><div className="space-y-2"><Label htmlFor={`runtime-cpu-${siteName}`}>سقف CPU (%)</Label><Input id={`runtime-cpu-${siteName}`} type="number" inputMode="decimal" min="1" max="10000" step="0.1" lang="en" dir="ltr" value={cpu} onChange={(event) => setCpu(event.target.value)} placeholder="بدون سقف"/></div><div className="space-y-2"><Label htmlFor={`runtime-memory-${siteName}`}>سقف RAM (MiB)</Label><Input id={`runtime-memory-${siteName}`} type="number" inputMode="numeric" min="16" max="1048576" lang="en" dir="ltr" value={memoryMiB} onChange={(event) => setMemoryMiB(event.target.value)} placeholder="بدون سقف"/></div></div>
         <Button disabled={busy || !unit.trim()} onClick={() => void save()}><Save size={14}/>{busy ? 'در حال اعمال…' : 'اعمال محدودیت'}</Button>
       </div>

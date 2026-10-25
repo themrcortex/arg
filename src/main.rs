@@ -118,8 +118,44 @@ fn now() -> i64 {
 
 fn update_started_at() -> Option<i64> {
     let value = fs::read_to_string(UPDATE_STATUS_FILE).ok()?;
-    let started = value.split_whitespace().next()?.parse::<i64>().ok()?;
-    (now().saturating_sub(started) <= 21600).then_some(started)
+    let mut fields = value.split_whitespace();
+    let started = fields.next()?.parse::<i64>().ok()?;
+    let owner = fields.next().and_then(|value| value.parse::<u32>().ok());
+    let owner_start = fields.next().and_then(|value| value.parse::<u64>().ok());
+    let owner_active = owner.is_some_and(|pid| {
+        if let Some(expected_start) = owner_start {
+            return fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .is_some_and(|stat| {
+                    let fields: Vec<_> = stat.split_whitespace().collect();
+                    fields.get(2).is_some_and(|state| !matches!(*state, "Z" | "X"))
+                        && fields.get(21).and_then(|value| value.parse::<u64>().ok())
+                            == Some(expected_start)
+                });
+        }
+        let command = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        let command = String::from_utf8_lossy(&command).replace('\0', " ");
+        command.contains("/usr/local/bin/arg")
+            && command.split_whitespace().any(|part| part == "update")
+    });
+    if owner_active {
+        return Some(started);
+    }
+    let unit = fs::read_to_string("/run/arg-update-last-unit").unwrap_or_default();
+    let unit = unit.trim();
+    let scheduled_unit_active = if unit.starts_with("arg-web-update-")
+        && unit["arg-web-update-".len()..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        ["service", "timer"].iter().any(|suffix| {
+            std::process::Command::new("systemctl")
+                .args(["is-active", "--quiet", &format!("{unit}.{suffix}")])
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    } else {
+        false
+    };
+    (owner_active || scheduled_unit_active).then_some(started)
 }
 
 fn update_progress_payload(
@@ -2631,6 +2667,37 @@ async fn schedule_panel_update(
     );
     Ok(Json(json!({"scheduled": true})))
 }
+
+async fn cancel_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let output = privileged_request_async(json!({"action":"update-cancel"})).await?;
+    if output["ok"] != true {
+        let detail = output["error"].as_str().unwrap_or("ARG update could not be cancelled.");
+        return Err(error(StatusCode::CONFLICT, detail));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "panel.update.cancel", "administrator cancelled the active update");
+    Ok(Json(json!({"cancelled":true,"message":output["stdout"].as_str().unwrap_or("ARG update cancelled.")})))
+}
+
+async fn rollback_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let output = privileged_request_async(json!({"action":"update-rollback"})).await?;
+    if output["ok"] != true {
+        return Err(error(StatusCode::BAD_GATEWAY, output["error"].as_str().unwrap_or("ARG rollback failed.")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "panel.update.rollback", "administrator restored the previous ARG binary");
+    Ok(Json(json!({"rolled_back":true,"message":output["stdout"].as_str().unwrap_or("Previous ARG version restored.")})))
+}
 async fn static_file(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let file = if path.is_empty() { "index.html" } else { path };
@@ -2818,6 +2885,8 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("update-run") => "update-run",
         Some("update-logs") => "update-logs",
         Some("update-progress") => "update-progress",
+        Some("update-cancel") => "update-cancel",
+        Some("update-rollback") => "update-rollback",
         Some("nginx-list") => "nginx-list",
         Some("nginx-get") => "nginx-get",
         Some("nginx-save") => "nginx-save",
@@ -3312,6 +3381,33 @@ fn run_terminal_shell() -> Result<(), Box<dyn std::error::Error>> {
     Err(error.into())
 }
 
+fn backup_database(source_path: &std::path::Path, destination_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if source_path == destination_path || !source_path.is_file() {
+        return Err("Database backup paths are invalid".into());
+    }
+    let source = Connection::open_with_flags(source_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut destination = Connection::open(destination_path)?;
+    rusqlite::backup::Backup::new(&source, &mut destination)?
+        .run_to_completion(100, std::time::Duration::from_millis(20), None)?;
+    #[cfg(unix)]
+    fs::set_permissions(destination_path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn backup_database_cli() -> Result<(), Box<dyn std::error::Error>> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("Database backups must be created by root".into());
+    }
+    let arguments: Vec<_> = env::args_os().skip(2).collect();
+    if arguments.len() != 2 {
+        return Err("Usage: arg database-backup <source> <destination>".into());
+    }
+    backup_database(
+        std::path::Path::new(&arguments[0]),
+        std::path::Path::new(&arguments[1]),
+    )
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::args().nth(1).as_deref() == Some("terminal-shell") {
@@ -3319,6 +3415,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if env::args().nth(1).as_deref() == Some("privileged-helper") {
         return run_privileged_helper().await;
+    }
+    if env::args().nth(1).as_deref() == Some("database-backup") {
+        return backup_database_cli();
     }
     if env::args().nth(1).as_deref() == Some("change-password") {
         return change_password_cli();
@@ -3434,8 +3533,8 @@ async fn clear_trusted_transport_marker(
 #[cfg(test)]
 mod update_progress_tests {
     use super::{
-        default_update_build_mode, firewall_rule_validation_error, update_progress_payload,
-        valid_update_build_mode, FirewallRuleInput,
+        backup_database, default_update_build_mode, firewall_rule_validation_error,
+        update_progress_payload, valid_update_build_mode, Connection, FirewallRuleInput,
     };
 
     #[test]
@@ -3664,6 +3763,27 @@ mod update_progress_tests {
             )
             .unwrap();
         assert_eq!(row, ("hash".to_owned(), 9999999999, None));
+    }
+
+    #[test]
+    fn updater_database_backup_preserves_a_consistent_sqlite_snapshot() {
+        let directory = std::env::temp_dir().join(format!(
+            "arg-db-backup-{}-{}",
+            std::process::id(),
+            super::now()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let source_path = directory.join("source.db");
+        let destination_path = directory.join("backup.db");
+        {
+            let source = Connection::open(&source_path).unwrap();
+            source.execute_batch("CREATE TABLE state (value TEXT NOT NULL); INSERT INTO state VALUES ('before-update');").unwrap();
+        }
+        backup_database(&source_path, &destination_path).unwrap();
+        let backup = Connection::open(&destination_path).unwrap();
+        let value: String = backup.query_row("SELECT value FROM state", [], |row| row.get(0)).unwrap();
+        assert_eq!(value, "before-update");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

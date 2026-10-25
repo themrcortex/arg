@@ -1,5 +1,27 @@
 # ARG Change Log
 
+## v0.5.2 — 2026-10-25
+
+### Added
+- Add administrator controls to cancel an active update and manually roll back to the last verified ARG release.
+- Keep a consistent SQLite snapshot alongside the previous binary so rollback restores a compatible application/database pair.
+
+### Fixed
+- Detect abandoned updater locks from live process and systemd state, then clear stale reservations without waiting for the previous six-hour timeout.
+- Verify updates with a local HTTP health check and automatically restore the previous binary and database snapshot if the new release fails to start.
+- Ensure cancellation during installation restores the previous release and releases the updater lock on every exit path.
+
+## v0.5.1 — 2026-10-25
+
+### Changed
+- Raise the VPS-to-S3 directory transfer limit to 10,000 files and 20 GiB, retain the 512 MiB per-file safety limit, and allow directory scans up to 64 levels.
+- Expand directory listings to 10,000 entries so large directories are not silently omitted during transfer scans.
+- Move Nginx service resource controls into an expandable section on each site card and add a systemd service picker alongside manual unit entry.
+
+### Fixed
+- Make directory upload copy behavior explicit, preserve its folder structure, and improve the partial-transfer/resume message.
+- Remove resource management from the site tools modal so it is available directly from each site card.
+
 ## v0.5.0 — 2026-10-25
 
 ### Added

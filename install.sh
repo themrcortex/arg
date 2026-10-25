@@ -27,9 +27,11 @@ readonly SUDOERS_FILE="/etc/sudoers.d/arg-ufw-status"
 readonly UFW_HELPER="/usr/local/lib/arg/ufw-helper"
 readonly PORT_HELPER="/usr/local/lib/arg/port-helper"
 readonly UPDATE_HELPER="/usr/local/lib/arg/update-helper"
+readonly DB_BACKUP_TOOL="/usr/local/lib/arg/arg-db-backup"
 readonly UPDATE_LOCK_DIR="/run/arg-update.lock"
 readonly UPDATE_STATUS_FILE="/run/arg-update-in-progress"
 readonly UPDATE_STATE_FILE="/run/arg-update-state.json"
+readonly UPDATE_CANCEL_FILE="/run/arg-update-cancel-requested"
 readonly ENV_DIR="/etc/arg"
 readonly ENV_FILE="/etc/arg/arg.env"
 readonly DOMAIN_FILE="/etc/arg/https-domain"
@@ -43,6 +45,9 @@ readonly CERT_NAME="arg"
 readonly CERTBOT_TIMER_SERVICE="/etc/systemd/system/arg-certbot-renew.service"
 readonly CERTBOT_TIMER_UNIT="/etc/systemd/system/arg-certbot-renew.timer"
 readonly DATA_DIR="/var/lib/arg"
+readonly ROLLBACK_DIR="/var/lib/arg/rollback"
+readonly PREVIOUS_BINARY="$ROLLBACK_DIR/arg.previous"
+readonly PREVIOUS_DATABASE="$ROLLBACK_DIR/arg.db.previous"
 readonly OLD_INSTALL_DIR="/opt/donatello"
 readonly OLD_SOURCE_DIR="/opt/donatello/source"
 readonly OLD_ENV_DIR="/etc/donatello"
@@ -148,7 +153,7 @@ normalize_menu_digits() {
 
 valid_menu_choice() {
   case "$1" in
-    0|1|2|3|4|5|6|7|8|9|10|11|12|13) return 0 ;;
+    0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1063,28 +1068,36 @@ wait_for_panel() {
 update_app() {
   require_root update
   require_systemd
-  local was_installed=0 build_started=0
+  local was_installed=0 build_started=0 binary_swapped=0 previous staged database_path database_staged
   export ARG_UPDATE_MODE="${ARG_UPDATE_MODE:-complete}"
   case "$ARG_UPDATE_MODE" in fast|complete) ;; *) die "Invalid update build mode." ;; esac
   [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
   (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
   if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" ]]; then
     [[ -d "$UPDATE_LOCK_DIR" && -r "$UPDATE_STATUS_FILE" ]] || die "The scheduled update reservation is missing. Please retry from the panel."
+    local reservation_started
+    reservation_started="$(awk 'NR==1 {print $1}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
+    [[ "$reservation_started" =~ ^[0-9]+$ ]] || reservation_started="$(date +%s)"
+    printf '%s %s %s\n' "$reservation_started" "$$" "$(awk '{print $22}' "/proc/$$/stat")" > "$UPDATE_STATUS_FILE"
   else
     if [[ -d "$UPDATE_LOCK_DIR" ]]; then
-      local reserved_at now_at lock_time stale_after=60
-      reserved_at="$(awk 'NR==1 {print $1}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
-      now_at="$(date +%s)"
-      if [[ "$reserved_at" =~ ^[0-9]+$ ]]; then
-        stale_after=21600
-        lock_time="$reserved_at"
-      else
-        lock_time="$(stat -c %Y "$UPDATE_LOCK_DIR" 2>/dev/null || echo "$now_at")"
+      local owner owner_start owner_actual unit owner_command
+      owner="$(awk 'NR==1 {print $2}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
+      owner_start="$(awk 'NR==1 {print $3}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
+      unit="$(cat /run/arg-update-last-unit 2>/dev/null || true)"
+      if [[ "$unit" =~ ^arg-web-update-[0-9]+$ ]] && { systemctl is-active --quiet "$unit.service" || systemctl is-active --quiet "$unit.timer"; }; then
+        die "Another ARG update is genuinely running. Cancel it with 'sudo arg cancel-update' or wait for it to finish."
       fi
-      if (( now_at - lock_time > stale_after )); then
-        rm -f "$UPDATE_STATUS_FILE"
-        rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
+      owner_command=""
+      [[ "$owner" =~ ^[0-9]+$ && -r "/proc/$owner/cmdline" ]] && owner_command="$(tr '\0' ' ' <"/proc/$owner/cmdline" 2>/dev/null || true)"
+      owner_actual=""
+      [[ "$owner" =~ ^[0-9]+$ && -r "/proc/$owner/stat" ]] && owner_actual="$(awk '{print $22}' "/proc/$owner/stat" 2>/dev/null || true)"
+      if { [[ "$owner_start" =~ ^[0-9]+$ && "$owner_actual" == "$owner_start" ]] || [[ "$owner_command" == *"/usr/local/bin/arg"* && "$owner_command" == *"update"* ]]; } && kill -0 "$owner" 2>/dev/null; then
+        die "Another ARG update is genuinely running. Cancel it with 'sudo arg cancel-update' or wait for it to finish."
       fi
+      rm -f "$UPDATE_STATUS_FILE" "$UPDATE_CANCEL_FILE"
+      rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
+      "$UPDATE_HELPER" state failed failed "A stale update lock was cleared because no updater process or systemd job is active." >/dev/null 2>&1 || true
     fi
     mkdir "$UPDATE_LOCK_DIR" 2>/dev/null || die "Another ARG update is already running. Please wait for it to finish."
     printf '%s %s\n' "$(date +%s)" "$$" > "$UPDATE_STATUS_FILE"
@@ -1092,7 +1105,11 @@ update_app() {
   fi
   chmod 0644 "$UPDATE_STATUS_FILE"
   [[ -n "${ARG_UPDATE_JOB_ID:-}" ]] || export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
-  update_phase() { "$UPDATE_HELPER" state running "$1" "${2:-}" >/dev/null 2>&1 || true; }
+  update_phase() {
+    [[ ! -e "$UPDATE_CANCEL_FILE" ]] || return 1
+    "$UPDATE_HELPER" state running "$1" "${2:-}" >/dev/null 2>&1 || true
+    [[ ! -e "$UPDATE_CANCEL_FILE" ]]
+  }
   cleanup_update_build_cache() {
     (( build_started )) || return 0
     [[ "$ARG_UPDATE_MODE" == "complete" ]] || return 0
@@ -1105,10 +1122,28 @@ update_app() {
   cleanup_update_reservation() {
     local exit_code=$?
     if (( exit_code != 0 )); then
-      "$UPDATE_HELPER" state failed failed "The update stopped before successful verification. Review the update log and retry." >/dev/null 2>&1 || true
+      if [[ -e "$UPDATE_CANCEL_FILE" ]]; then
+        "$UPDATE_HELPER" state cancelled cancelled "The update was cancelled by an administrator." >/dev/null 2>&1 || true
+      else
+        if (( binary_swapped )); then
+          warn "The update stopped unexpectedly after replacing the ARG binary. Restoring the previous release."
+          systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+          restore_previous_database || warn "The previous database snapshot could not be restored."
+          if [[ -x "$PREVIOUS_BINARY" ]]; then
+            install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY" || true
+            systemctl start "$SERVICE_NAME" 2>/dev/null || true
+            wait_for_panel || warn "The previous binary was restored, but the panel health check still fails. Review service logs."
+            binary_swapped=0
+          fi
+        fi
+        "$UPDATE_HELPER" state failed failed "The update stopped before successful verification. Review the update log and retry." >/dev/null 2>&1 || true
+      fi
     fi
     cleanup_update_build_cache
+    [[ -z "${staged:-}" ]] || rm -f "$staged"
+    [[ -z "${database_staged:-}" ]] || rm -f "$database_staged"
     rm -f "$UPDATE_STATUS_FILE"
+    rm -f "$UPDATE_CANCEL_FILE"
     rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
     return "$exit_code"
   }
@@ -1125,21 +1160,36 @@ update_app() {
   update_phase building "Building the new ARG release."
   build_started=1
   build_release
-  update_phase installing "Installing the verified build."
   ensure_service_account
   configure_ufw_status
   take_database_ownership
-  local previous staged
-  previous="$(mktemp /var/tmp/arg.previous.XXXXXX)"
   install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
   staged="$(mktemp /usr/local/lib/arg/.arg.XXXXXX)"
+  install -d -o root -g root -m 0700 "$ROLLBACK_DIR"
+  install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$DB_BACKUP_TOOL"
+  database_path="$(configured_db_path)"
+  rm -f "$PREVIOUS_DATABASE"
+  if [[ -s "$database_path" ]]; then
+    database_staged="$(mktemp "$ROLLBACK_DIR/.arg.db.previous.XXXXXX")"
+    rm -f "$database_staged"
+    if ! "$SOURCE_DIR/target/release/arg" database-backup "$database_path" "$database_staged"; then
+      rm -f "$database_staged"
+      die "Could not create a consistent database snapshot. The running ARG binary was left untouched."
+    fi
+    chown root:root "$database_staged"
+    chmod 0600 "$database_staged"
+    mv -f "$database_staged" "$PREVIOUS_DATABASE"
+  fi
   if [[ -x "$BINARY" ]]; then
+    previous="$(mktemp "$ROLLBACK_DIR/.arg.previous.XXXXXX")"
     cp -p "$BINARY" "$previous"
-  else
-    rm -f "$previous"
+    chmod 0755 "$previous"
+    mv -f "$previous" "$PREVIOUS_BINARY"
   fi
   install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$staged"
+  update_phase installing "Installing the verified build."
   mv -f "$staged" "$BINARY"
+  binary_swapped=1
   write_privileged_service_unit
   systemctl restart arg-privileged.service
   write_service_unit
@@ -1147,12 +1197,12 @@ update_app() {
   update_phase restarting "Restarting the ARG service."
   systemctl restart "$SERVICE_NAME"
   update_phase verifying "Checking that the updated service is active."
-  if wait_until_active; then
-    rm -f "$previous"
+  if wait_for_panel; then
     cleanup_legacy_identity
     say "ARG was updated successfully"
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
     "$UPDATE_HELPER" state succeeded complete "ARG is updated and the service is active." >/dev/null 2>&1 || true
+    binary_swapped=0
     show_setup_code_if_needed
     if (( MENU_ACTIVE )); then
       cleanup_update_reservation
@@ -1161,14 +1211,29 @@ update_app() {
     fi
     return
   fi
-  if [[ -s "$previous" ]]; then
+  if [[ -x "$PREVIOUS_BINARY" ]]; then
     warn "The new release did not start. Restoring the previous binary."
-    install -o root -g root -m 0755 "$previous" "$BINARY"
-    systemctl restart "$SERVICE_NAME" || true
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    restore_previous_database || warn "The previous database snapshot could not be restored; the database was left unchanged."
+    install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY"
+    systemctl start "$SERVICE_NAME" || true
+    wait_for_panel || warn "The previous binary was restored, but the panel health check still fails. Review service logs."
+    binary_swapped=0
   fi
-  rm -f "$previous"
   journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
   die "The update could not be activated."
+}
+
+restore_previous_database() {
+  [[ -s "$PREVIOUS_DATABASE" ]] || return 0
+  local db_path staged
+  db_path="$(configured_db_path)"
+  staged="$(mktemp "${db_path}.rollback.XXXXXX")"
+  cp -p "$PREVIOUS_DATABASE" "$staged"
+  chown "$SERVICE_USER:$SERVICE_GROUP" "$staged"
+  chmod 0600 "$staged"
+  mv -f "$staged" "$db_path"
+  rm -f "$db_path-wal" "$db_path-shm"
 }
 
 show_status() {
@@ -1308,6 +1373,8 @@ draw_control_center() {
   draw_menu_item "$selected" 11 'Uninstall and purge data' 'Remove ARG and all its data'
   draw_menu_item "$selected" 12 'Get one-time setup code' 'Display the first-admin code'
   draw_menu_item "$selected" 13 'Reset account password' 'Root reset; no old password needed'
+  draw_menu_item "$selected" 14 'Cancel running update' 'Stop a stuck build and release its lock'
+  draw_menu_item "$selected" 15 'Rollback previous version' 'Restore the saved binary and restart ARG'
   printf '\n  Type option%s%s%s then %sEnter%s   %s↑%s / %s↓%s move   %sq%s quit' \
     "$([[ -n "$digit_buffer" ]] && printf ' [' || true)" "$digit_buffer" "$([[ -n "$digit_buffer" ]] && printf ']' || true)" \
     "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET"
@@ -1353,7 +1420,16 @@ run_menu_action() {
     11) delete_app "--purge" ;;
     12) get_setup_code ;;
     13) change_account_password ;;
+    14) require_root cancel-update; "$UPDATE_HELPER" cancel ;;
+    15) require_root rollback; confirm_rollback; "$UPDATE_HELPER" rollback ;;
   esac
+}
+
+confirm_rollback() {
+  local answer
+  warn "Rollback restores the previous ARG binary and its database snapshot. Database changes made since that snapshot will be lost."
+  read_answer 'Continue with rollback? [y/N]: ' answer 'n'
+  [[ "${answer,,}" == y || "${answer,,}" == yes ]] || die "Rollback cancelled."
 }
 
 main_menu() {
@@ -1374,13 +1450,13 @@ main_menu() {
       key="$(read_menu_key)" || interactive=0
       if (( interactive )); then
         case "$key" in
-          up|k) (( selected > 1 )) && ((selected--)) || selected=13 ;;
-          down|j) (( selected < 13 )) && ((selected++)) || selected=1 ;;
+          up|k) (( selected > 1 )) && ((selected--)) || selected=15 ;;
+          down|j) (( selected < 15 )) && ((selected++)) || selected=1 ;;
           enter)
             if [[ -n "$digit_buffer" ]]; then
               [[ "$digit_buffer" != "0" ]] || { printf '\033[0m\n'; return 0; }
               selection="$digit_buffer"
-              [[ "$selection" =~ ^([1-9]|1[0-3])$ ]] || { warn 'Choose a menu option from 1 to 13.'; selection=""; digit_buffer=""; continue; }
+              [[ "$selection" =~ ^([1-9]|1[0-5])$ ]] || { warn 'Choose a menu option from 1 to 15.'; selection=""; digit_buffer=""; continue; }
             else
               selection="$selected"
             fi
@@ -1414,11 +1490,12 @@ main_menu() {
       printf '  5 Restart              6 Logs         7 Change port    8 HTTPS / SSL\n'
       printf '  9 Update              10 Uninstall    11 Purge data\n'
       printf ' 12 Get setup code      13 Change password\n'
+      printf ' 14 Cancel update       15 Rollback previous version\n'
       printf '  0 Exit\n\n'
       read -r -p 'Select an option: ' selection || return 0
       selection="$(normalize_menu_digits "${selection//$'\r'/}")"
       [[ "$selection" == "0" ]] && return 0
-      valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 13.'; continue; }
+      valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 15.'; continue; }
       action_ready=1
     fi
 
@@ -1475,7 +1552,7 @@ delete_app() {
   rm -f "$SERVICE_FILE" "$PRIVILEGED_SERVICE_FILE" "$OLD_SERVICE_FILE" "$OLD_PRIVILEGED_SERVICE_FILE" \
     "$BINARY" "$CLI" "$LEGACY_INSTALLER" "$OLD_CLI" "$OLD_LEGACY_INSTALLER" \
     "$SUDOERS_FILE" /etc/sudoers.d/donatello-ufw-status \
-    "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER" /usr/local/lib/donatello/ufw-helper
+    "$UFW_HELPER" "$PORT_HELPER" "$UPDATE_HELPER" "$DB_BACKUP_TOOL" /usr/local/lib/donatello/ufw-helper
   rm -f "$LEGACY_NGINX_SITE_LINK" "$LEGACY_NGINX_SITE" "$OLD_NGINX_SITE_LINK" "$OLD_NGINX_SITE" \
     "$CERT_DEPLOY_HOOK" "$OLD_CERT_DEPLOY_HOOK"
   if [[ -x /snap/bin/certbot ]]; then
@@ -1542,6 +1619,8 @@ Usage:
   sudo arg manage [status|start|stop|restart|logs|port|ssl|update|delete]
   sudo arg ssl
   sudo arg update
+  sudo arg cancel-update
+  sudo arg rollback
   sudo arg password
   sudo arg delete [--purge]
 
@@ -1552,7 +1631,9 @@ Commands:
   start|stop       Start or stop the systemd service
   restart          Restart the systemd service
   logs [count]     Show recent service logs
-  update           Fetch main, build, replace the binary, and roll back on failure
+  update           Fetch the selected branch, build, and install with automatic rollback
+  cancel-update    Cancel an active update or clear a stale update lock
+  rollback         Restore the last saved ARG binary and restart the service
   password         Reset an account password as root
   ssl              Obtain a Let's Encrypt certificate and enable Rust TLS
   delete           Uninstall the service while preserving application data
@@ -1581,6 +1662,8 @@ case "${1:-menu}" in
     view_logs "${2:-100}"
     ;;
   update) update_app ;;
+  cancel-update) require_root cancel-update; "$UPDATE_HELPER" cancel ;;
+  rollback) require_root rollback; confirm_rollback; "$UPDATE_HELPER" rollback ;;
   ssl) configure_https ;;
   password) change_account_password ;;
   delete) delete_app "${2:-}" ;;
