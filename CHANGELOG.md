@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.6.7-dev.5 — 2026-10-25
+
+### Improved
+- Add Windows-style storage volume cards, hierarchical disk scanning, path purpose reports, and safe cleanup navigation.
+
 ## v0.6.7-dev.4 — 2026-10-25
 
 ### Fixed

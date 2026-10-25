@@ -445,6 +445,22 @@ fn scan_disk_usage(path: &str, mode: &str) -> Result<Value, String> {
         };
     state.files.sort_by(|a, b| b.1.cmp(&a.1));
     state.directories.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut directory_children = state
+        .directories
+        .iter()
+        .filter(|(child, _)| {
+            std::path::Path::new(child).parent() == Some(root.as_path())
+                && std::path::Path::new(child) != root.as_path()
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    directory_children.sort_by(|left, right| right.1.cmp(&left.1));
+    let directory_children_truncated = directory_children.len() > 2000;
+    directory_children.truncate(2000);
+    let directory_children = directory_children
+        .into_iter()
+        .map(|(path, bytes)| json!({"path":path,"bytes":bytes}))
+        .collect::<Vec<_>>();
     let largest_files = state
         .files
         .into_iter()
@@ -463,7 +479,7 @@ fn scan_disk_usage(path: &str, mode: &str) -> Result<Value, String> {
         volume_used as f64 * 100.0 / volume_total as f64
     };
     Ok(
-        json!({"root":root,"mode":mode,"limits":{"max_entries":max_entries,"max_duration_seconds":max_duration.as_secs(),"max_depth":max_depth},"total_bytes":total_bytes,"volume_total":volume_total,"volume_used":volume_used,"volume_available":volume_available,"usage_percent":usage_percent,"entries_scanned":state.entries,"truncated":state.truncated,"elapsed_ms":state.started.elapsed().as_millis(),"largest_files":largest_files,"largest_directories":largest_directories,"note":"Symbolic links are skipped; nested filesystems and pseudo-filesystems are excluded. Select a mount path directly to scan it."}),
+        json!({"root":root,"mode":mode,"limits":{"max_entries":max_entries,"max_duration_seconds":max_duration.as_secs(),"max_depth":max_depth},"total_bytes":total_bytes,"volume_total":volume_total,"volume_used":volume_used,"volume_available":volume_available,"usage_percent":usage_percent,"entries_scanned":state.entries,"truncated":state.truncated,"directory_children_truncated":directory_children_truncated,"directory_children":directory_children,"elapsed_ms":state.started.elapsed().as_millis(),"largest_files":largest_files,"largest_directories":largest_directories,"note":"Symbolic links are skipped; nested filesystems and pseudo-filesystems are excluded. Select a mount path directly to scan it."}),
     )
 }
 
@@ -1161,7 +1177,8 @@ fn create_safe_directories(root: &std::path::Path, target: &std::path::Path) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_tree, create_zip_archive, extract_zip_archive, remove_tree, safe_name, valid_mode,
+        copy_tree, create_zip_archive, extract_zip_archive, remove_tree, safe_name,
+        scan_disk_usage, valid_mode,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::{fs, os::unix::fs::symlink, path::PathBuf};
@@ -1189,6 +1206,29 @@ mod tests {
         assert!(valid_mode("755"));
         assert!(!valid_mode("0899"));
         assert!(!valid_mode("77777"));
+    }
+
+    #[test]
+    fn disk_scan_returns_direct_children_for_expandable_folder_navigation() {
+        let root = test_dir();
+        let alpha = root.join("alpha");
+        let nested = alpha.join("nested");
+        let beta = root.join("beta");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(&beta).unwrap();
+        fs::write(nested.join("payload.bin"), vec![7_u8; 16 * 1024]).unwrap();
+        fs::write(beta.join("small.txt"), "small").unwrap();
+
+        let report = scan_disk_usage(root.to_str().unwrap(), "standard").unwrap();
+        let children = report["directory_children"].as_array().unwrap();
+        let paths = children
+            .iter()
+            .filter_map(|item| item["path"].as_str())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&alpha.to_str().unwrap()));
+        assert!(paths.contains(&beta.to_str().unwrap()));
+        assert!(!paths.contains(&nested.to_str().unwrap()));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
