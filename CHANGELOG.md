@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.6.6 — 2026-10-25
+
+### Fixed
+- Format systemd `MemoryMax` limits as byte values without a `B` suffix, which systemd rejects on some supported releases.
+
 ## v0.6.5 — 2026-10-25
 
 ### Improved
