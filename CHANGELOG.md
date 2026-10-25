@@ -7,6 +7,11 @@
 
 ## Unreleased
 
+## v0.6.2 — 2026-10-25
+
+### Fixed
+- Keep `/api/update/cancel` available while update locking blocks other state-changing requests, so administrators can cancel an active panel update.
+
 ## v0.6.1 — 2026-10-25
 
 ### Added
