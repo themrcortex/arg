@@ -1,5 +1,20 @@
 # ARG Change Log
 
+## v0.6.3-dev.7 — 2026-10-25
+
+### Added
+- Add database-scoped MySQL user creation with read-only, read/write and full-per-database privilege profiles, plus direct reset-password actions from the user list.
+- Create ARG’s internal MySQL manager account automatically with global database privileges; keep its random credential in a root-only config file and never return it to the UI or logs.
+- Require one panel-password recheck when entering MySQL management, then retain authorization for the current login session and revoke it on logout/session removal.
+
+### Fixed
+- Keep MySQL option-file arguments in the supported first-argument `--defaults-extra-file=PATH` format and cover the format with a regression test.
+- Prevent duplicate database-user creation from silently changing an existing account’s password, and protect system schemas and ARG’s internal account from the regular reset flow.
+
+### Improved
+- Stream Cargo compiler output into the live update journal so the update modal can show build activity as it happens; automatically open and follow the log during updates.
+- Explain that Cargo does not provide a reliable overall build percentage and show the active update phase and elapsed time instead of a misleading estimate.
+
 ## v0.6.3-dev.6 — 2026-10-25
 
 ### Added
