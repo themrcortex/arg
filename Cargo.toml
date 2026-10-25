@@ -1,6 +1,6 @@
 [package]
 name = "arg"
-version = "0.6.3-dev.8"
+version = "0.6.4-dev.1"
 edition = "2021"
 
 [dependencies]

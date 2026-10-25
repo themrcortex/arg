@@ -1,13 +1,13 @@
 # ARG Change Log
 
-## v0.6.3-dev.8 — 2026-10-25
-
-## v0.6.3 — 2026-10-25
+## v0.6.4-dev.1 — 2026-10-25
 
 ### Fixed
 - Detect the server's public IPv4 address through multiple independent services and reject malformed, private, or non-public addresses.
 - Retry transient Let's Encrypt API network timeouts up to three times, restore any temporarily stopped web service, and explain how to diagnose persistent outbound connectivity failures.
+- Preserve the current panel configuration when certificate issuance fails; show that the failure is in ACME connectivity rather than public-IP detection.
 
+## v0.6.3-dev.8 — 2026-10-25
 
 ### Fixed
 - Read per-service CPU and memory usage from cgroup v2 when systemd accounting counters are unavailable; ignore unset and overflow sentinel values instead of treating them as measurements.
@@ -16,6 +16,12 @@
 ### Improved
 - Enable CPU and memory accounting when an administrator saves a service’s resource settings, including when both limits are left unlimited.
 - Refresh service usage automatically every 5 seconds while the Nginx resource panel is open, without repeatedly reloading the service catalog or site configuration.
+
+## v0.6.3 — 2026-10-25
+
+### Fixed
+- Detect the server's public IPv4 address through multiple independent services and reject malformed, private, or non-public addresses.
+- Retry transient Let's Encrypt API network timeouts up to three times, restore any temporarily stopped web service, and explain how to diagnose persistent outbound connectivity failures.
 
 ## v0.6.3-dev.7 — 2026-10-25
 
