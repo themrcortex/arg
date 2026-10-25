@@ -452,9 +452,14 @@ fn helper_error(err: &::s3::error::S3Error) -> String {
         "ارائه‌دهنده دسترسی این عملیات را رد کرد؛ مجوز Bucket را بررسی کن.".into()
     } else if message.contains("nosuchbucket")
         || message.contains("no such bucket")
-        || message.contains("404")
+        || message.contains("bucket not found")
+        || message.contains("bucket does not exist")
     {
         "Bucket پیدا نشد؛ نام و Endpoint را بررسی کن.".into()
+    } else if message.contains("nosuchkey") || message.contains("no such key") {
+        "Object مقصد هنوز وجود ندارد و می‌توان آن را بارگذاری کرد.".into()
+    } else if message.contains("404") {
+        "Object یا Bucket مقصد پیدا نشد؛ نام Bucket و مسیر Object را بررسی کن.".into()
     } else if message.contains("signaturedoesnotmatch")
         || message.contains("invalidaccesskeyid")
         || message.contains("signature")
@@ -464,6 +469,23 @@ fn helper_error(err: &::s3::error::S3Error) -> String {
         "اعتبارسنجی گواهی TLS ناموفق بود.".into()
     } else {
         "اتصال S3 ناموفق بود؛ DNS، Endpoint، Region و وضعیت سرویس را بررسی کن.".into()
+    }
+}
+
+// Some S3-compatible services return a 404 HEAD response as an error rather
+// than `(headers, 404)`. For a missing object this is the normal preflight
+// result when uploading a new key. A missing bucket remains a hard failure.
+fn head_error_means_object_missing(error: &::s3::error::S3Error) -> bool {
+    match error {
+        ::s3::error::S3Error::HttpFailWithBody(404, body) => {
+            let body = body.to_ascii_lowercase();
+            !(body.contains("nosuchbucket")
+                || body.contains("no such bucket")
+                || body.contains("bucket not found")
+                || body.contains("bucket does not exist")
+                || body.contains("bucketnotfound"))
+        }
+        _ => false,
     }
 }
 
@@ -1108,6 +1130,7 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                 Ok(_) if allow_overwrite => {}
                 Ok(_) => return json!({"ok":false,"error":"وجود Object مقصد قابل بررسی نیست؛ برای ادامه باید بازنویسی را صریحاً تأیید کنی."}),
                 Err(_) if allow_overwrite => {}
+                Err(error) if !allow_overwrite && head_error_means_object_missing(&error) => {}
                 Err(error) => return json!({"ok":false,"error":format!("بررسی Object مقصد ناموفق بود؛ بازنویسی تأیید نشده: {}",helper_error(&error))}),
             }
             let content_type = request["content_type"].as_str().filter(|value| value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_graphic())).unwrap_or("application/octet-stream");
@@ -1233,6 +1256,27 @@ fn validate_transfer_file(path: &str, allow_empty: bool) -> Result<std::fs::Meta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_object_head_errors_allow_new_upload_but_not_missing_bucket() {
+        use ::s3::error::S3Error;
+        assert!(head_error_means_object_missing(&S3Error::HttpFailWithBody(
+            404,
+            "<Error><Code>NoSuchKey</Code></Error>".into(),
+        )));
+        assert!(head_error_means_object_missing(&S3Error::HttpFailWithBody(
+            404,
+            String::new(),
+        )));
+        assert!(!head_error_means_object_missing(&S3Error::HttpFailWithBody(
+            404,
+            "<Error><Code>NoSuchBucket</Code></Error>".into(),
+        )));
+        assert!(!head_error_means_object_missing(&S3Error::HttpFailWithBody(
+            403,
+            "AccessDenied".into(),
+        )));
+    }
 
     #[test]
     fn official_iranian_presets_keep_independent_provider_ids() {
