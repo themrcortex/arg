@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.6.3-dev.8 — 2026-10-25
+
+### Fixed
+- Read per-service CPU and memory usage from cgroup v2 when systemd accounting counters are unavailable; ignore unset and overflow sentinel values instead of treating them as measurements.
+- Use millisecond sampling windows for CPU percentages, discard stale samples from the older seconds-based format, and return a readable measurement status rather than failing the whole Nginx resource panel.
+
+### Improved
+- Enable CPU and memory accounting when an administrator saves a service’s resource settings, including when both limits are left unlimited.
+- Refresh service usage automatically every 5 seconds while the Nginx resource panel is open, without repeatedly reloading the service catalog or site configuration.
+
 ## v0.6.3-dev.7 — 2026-10-25
 
 ### Added
