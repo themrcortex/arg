@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.6.0 — 2026-10-25
+
+### Added
+- Add a version consistency check that compares the checked-out app, frontend manifests, and GitHub `main` and `development` branches.
+- Add a development version bump command that creates ordered `X.Y.(Z+1)-dev.N` prereleases after the current stable version.
+
+### Changed
+- Set the stable ARG release to v0.6.0 and use the Cargo package version as the panel's embedded version.
+- Require development to include main and remain on a higher prerelease version before a stable GitHub release can be published.
+
 ## v0.5.5 — 2026-10-25
 
 ### Fixed

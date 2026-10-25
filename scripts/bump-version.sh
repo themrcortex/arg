@@ -4,6 +4,12 @@ set -Eeuo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+branch="$(git branch --show-current)"
+[[ "$branch" == main ]] || {
+  echo "Stable releases are bumped on main. Use scripts/bump-development-version.sh on development." >&2
+  exit 2
+}
+
 current="$(sed -n '0,/^version = /s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
 [[ "$current" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
   echo "Invalid current version in Cargo.toml: $current" >&2

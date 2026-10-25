@@ -3,7 +3,15 @@ set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+[[ "$(git branch --show-current)" == main ]] || {
+  echo "Stable GitHub releases can only be published from main." >&2
+  exit 2
+}
 version="$(sed -n '0,/^version = /s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+  echo "Release versions on main must be stable SemVer values." >&2
+  exit 1
+}
 tag="v$version"
 
 frontend_version="$(node -p "require('./frontend/package.json').version")"
@@ -12,11 +20,12 @@ lock_version="$(node -p "require('./frontend/package-lock.json').version")"
   echo "Rust and frontend versions do not match." >&2
   exit 1
 }
-[[ -z "$(git status --porcelain)" ]] || {
-  echo "Commit or stash local changes before publishing." >&2
+git diff --quiet && git diff --cached --quiet || {
+  echo "Commit or discard tracked changes before publishing." >&2
   exit 1
 }
-git fetch origin main --quiet
+git fetch origin main development --quiet
+"$root/scripts/check-versioning.sh"
 git merge-base --is-ancestor HEAD origin/main || {
   echo "Push this commit to origin/main before publishing." >&2
   exit 1
