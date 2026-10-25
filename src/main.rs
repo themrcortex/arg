@@ -38,12 +38,15 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader},
     net::{UnixListener, UnixStream},
 };
 
 const PRIVILEGED_SOCKET: &str = "/run/arg-privileged/manager.sock";
 const UPDATE_STATUS_FILE: &str = "/run/arg-update-in-progress";
+const PRIVILEGED_REQUEST_MAX_BYTES: usize = 4 * 1024 * 1024;
+static PRIVILEGED_REQUESTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
 static UPDATE_OPERATION_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
 static APT_OPERATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static ROOT_TERMINAL_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
@@ -306,10 +309,7 @@ async fn setup(
         ));
     }
     if !local_setup
-        && headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            != Some("https")
+        && !secure_transport(&headers, remote.ip())
     {
         return Err(error(
             StatusCode::FORBIDDEN,
@@ -326,10 +326,11 @@ async fn setup(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         || input.password.len() < 12
+        || input.password.len() > 1024
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "Username must be 3-32 characters and password at least 12 characters",
+            "Username must be 3-32 characters and password 12-1024 bytes",
         ));
     }
     let hash = Argon2::default()
@@ -358,15 +359,21 @@ async fn login(
     Json(input): Json<Credentials>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
     check_origin(&headers)?;
-    let secure_transport = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        == Some("https");
+    let secure_transport = secure_transport(&headers, remote.ip());
     if !remote.ip().is_loopback() && !secure_transport {
         return Err(error(
             StatusCode::FORBIDDEN,
             "Use the HTTPS panel URL to sign in. For initial setup, connect through an SSH tunnel.",
         ));
+    }
+    let ip_throttle_key = (!remote.ip().is_loopback())
+        .then(|| format!("login-ip:{}", remote.ip()));
+    if input.username.len() > 32 || input.password.len() > 1024 {
+        let db = state.lock().unwrap();
+        if let Some(key) = ip_throttle_key.as_deref() {
+            record_login_failure(&db, key);
+        }
+        return Err(error(StatusCode::UNAUTHORIZED, "Invalid credentials"));
     }
     let db = state.lock().unwrap();
     let attempts: (i64, i64) = db
@@ -381,6 +388,21 @@ async fn login(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many login attempts. Try again later",
         ));
+    }
+    if let Some(key) = ip_throttle_key.as_deref() {
+        let ip_attempts: (i64, i64) = db
+            .query_row(
+                "SELECT count,window_start FROM auth_failures WHERE username=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+        if ip_attempts.0 >= 20 && now() - ip_attempts.1 < 600 {
+            return Err(error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many login attempts. Try again later",
+            ));
+        }
     }
     let found = db.query_row(
         "SELECT id,password_hash,enabled FROM users WHERE username=?1",
@@ -397,6 +419,9 @@ async fn login(
         Ok(value) => value,
         Err(_) => {
             record_login_failure(&db, &input.username);
+            if let Some(key) = ip_throttle_key.as_deref() {
+                record_login_failure(&db, key);
+            }
             return Err(error(StatusCode::UNAUTHORIZED, "Invalid credentials"));
         }
     };
@@ -412,12 +437,18 @@ async fn login(
             .is_err()
     {
         record_login_failure(&db, &input.username);
+        if let Some(key) = ip_throttle_key.as_deref() {
+            record_login_failure(&db, key);
+        }
         return Err(error(StatusCode::UNAUTHORIZED, "Invalid credentials"));
     }
     let _ = db.execute(
         "DELETE FROM auth_failures WHERE username=?1",
         [&input.username],
     );
+    if let Some(key) = ip_throttle_key.as_deref() {
+        let _ = db.execute("DELETE FROM auth_failures WHERE username=?1", [key]);
+    }
     let raw = token();
     let session_seconds = setting_u64(&db, "session_hours", 24).clamp(1, 72) as i64 * 3600;
     let created_at = now();
@@ -444,11 +475,24 @@ async fn login(
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response())
 }
 fn record_login_failure(db: &Connection, username: &str) {
-    if username.len() > 32 {
+    if username.len() > 64 {
         return;
     }
     let _ = db.execute("INSERT INTO auth_failures(username,count,window_start) VALUES (?1,1,?2) ON CONFLICT(username) DO UPDATE SET count=CASE WHEN ?2-window_start>=600 THEN 1 ELSE count+1 END,window_start=CASE WHEN ?2-window_start>=600 THEN ?2 ELSE window_start END", params![username,now()]);
 }
+
+fn secure_transport(headers: &HeaderMap, peer: std::net::IpAddr) -> bool {
+    headers
+        .get("x-arg-transport")
+        .and_then(|value| value.to_str().ok())
+        == Some("https")
+        || (peer.is_loopback()
+            && headers
+                .get("x-forwarded-proto")
+                .and_then(|value| value.to_str().ok())
+                == Some("https"))
+}
+
 async fn change_password(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -457,10 +501,13 @@ async fn change_password(
     check_origin(&headers)?;
     let db = state.lock().unwrap();
     let user = require_user(&db, &headers)?;
-    if input.new_password.len() < 12 {
+    if input.new_password.len() < 12
+        || input.new_password.len() > 1024
+        || input.current_password.len() > 1024
+    {
         return Err(error(
             StatusCode::BAD_REQUEST,
-            "New password must have at least 12 characters",
+            "Passwords must be at most 1024 bytes and the new password at least 12 characters",
         ));
     }
     let hash: String = db
@@ -672,10 +719,10 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
             value.pop();
         }
     }
-    if new_password.len() < 12 {
+    if new_password.len() < 12 || new_password.len() > 1024 || username.len() > 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "New password must have at least 12 characters",
+            "Username must be valid and password must be 12-1024 bytes",
         )
         .into());
     }
@@ -1202,6 +1249,7 @@ struct RootTerminalAuthorization {
 }
 
 async fn authorize_root_terminal(
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<RootTerminalAuthorization>,
@@ -1271,10 +1319,7 @@ async fn authorize_root_terminal(
         ).map_err(db_error)?;
         (actor, ticket)
     };
-    let secure = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        == Some("https");
+    let secure = secure_transport(&headers, remote.ip());
     let mut cookie = format!(
         "arg_root_ticket={ticket}; HttpOnly; SameSite=Strict; Path=/api/terminal; Max-Age=60"
     );
@@ -2112,6 +2157,7 @@ async fn add_user(
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         || input.password.len() < 12
+        || input.password.len() > 1024
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -3143,14 +3189,21 @@ async fn serve_privileged_connection(mut stream: UnixStream) {
         return;
     }
     let mut line = String::new();
-    let response = match AsyncBufReader::new(&mut stream).read_line(&mut line).await {
-        Ok(size) if size > 0 && size <= 4 * 1024 * 1024 => {
+    let mut limited = (&mut stream).take((PRIVILEGED_REQUEST_MAX_BYTES + 1) as u64);
+    let read_result = AsyncBufReader::new(&mut limited).read_line(&mut line).await;
+    drop(limited);
+    let response = match read_result {
+        Ok(size) if size > 0 && size <= PRIVILEGED_REQUEST_MAX_BYTES => {
             match serde_json::from_str::<Value>(&line) {
-                Ok(request) => {
-                    tokio::task::spawn_blocking(move || execute_privileged_request(&request))
-                        .await
-                        .unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"}))
-                }
+                Ok(request) => match PRIVILEGED_REQUESTS.clone().try_acquire_owned() {
+                    Ok(permit) => tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        execute_privileged_request(&request)
+                    })
+                    .await
+                    .unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"})),
+                    Err(_) => json!({"ok":false,"error":"Privileged helper is busy; retry shortly"}),
+                },
                 Err(_) => json!({"ok":false,"error":"Invalid request"}),
             }
         }
@@ -3276,19 +3329,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         axum::http::header::HeaderName::from_static("x-forwarded-proto"),
                         axum::http::HeaderValue::from_static("https"),
                     );
+                    request.headers_mut().insert(
+                        axum::http::header::HeaderName::from_static("x-arg-transport"),
+                        axum::http::HeaderValue::from_static("https"),
+                    );
                     next.run(request).await
                 },
             ));
             let https_app = https_app.into_make_service_with_connect_info::<SocketAddr>();
             let https_server = axum_server::bind_rustls(tls_bind, tls).serve(https_app);
-            let http_app = app.into_make_service_with_connect_info::<SocketAddr>();
+            let http_app = app
+                .layer(axum::middleware::from_fn(clear_trusted_transport_marker))
+                .into_make_service_with_connect_info::<SocketAddr>();
             tokio::select! {
                 result = axum::serve(listener, http_app) => result?,
                 result = https_server => result?,
             }
         }
         (None, None) => {
-            let http_app = app.into_make_service_with_connect_info::<SocketAddr>();
+            let http_app = app
+                .layer(axum::middleware::from_fn(clear_trusted_transport_marker))
+                .into_make_service_with_connect_info::<SocketAddr>();
             axum::serve(listener, http_app).await?;
         }
         _ => return Err("Both ARG_TLS_CERT and ARG_TLS_KEY must be set".into()),
@@ -3297,6 +3358,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 async fn state_handler(state: State<AppState>, headers: HeaderMap) -> ApiResult {
     self::state(state, headers).await
+}
+
+async fn clear_trusted_transport_marker(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    request.headers_mut().remove("x-arg-transport");
+    next.run(request).await
 }
 
 #[cfg(test)]
@@ -3382,6 +3451,24 @@ mod update_progress_tests {
         );
         assert_eq!(super::http_listener_addr(bind, true).port(), 8282);
         assert_eq!(super::http_listener_addr(bind, false), bind);
+    }
+
+    #[test]
+    fn forwarded_https_is_trusted_only_from_loopback_or_tls_listener() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-proto",
+            axum::http::HeaderValue::from_static("https"),
+        );
+        let public_ip = "203.0.113.10".parse().unwrap();
+        let loopback = "127.0.0.1".parse().unwrap();
+        assert!(!super::secure_transport(&headers, public_ip));
+        assert!(super::secure_transport(&headers, loopback));
+        headers.insert(
+            "x-arg-transport",
+            axum::http::HeaderValue::from_static("https"),
+        );
+        assert!(super::secure_transport(&headers, public_ip));
     }
 
     #[test]

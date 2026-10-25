@@ -832,11 +832,17 @@ fn create_zip_archive(request: &Value) -> Result<Value, String> {
     use std::os::unix::fs::OpenOptionsExt;
     use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
-    let source = canonical_existing(
+    let requested_source = std::path::Path::new(
         request["path"]
             .as_str()
             .ok_or("A source path is required")?,
-    )?;
+    );
+    let requested_metadata = std::fs::symlink_metadata(requested_source)
+        .map_err(|error| error.to_string())?;
+    if requested_metadata.file_type().is_symlink() {
+        return Err("Symbolic links cannot be archived directly.".into());
+    }
+    let source = canonical_existing(requested_source.to_str().ok_or("Invalid source path")?)?;
     if source == std::path::Path::new("/") || is_protected_system_root(&source) {
         return Err("Creating an archive from a protected system root is blocked.".into());
     }
@@ -1227,6 +1233,20 @@ mod tests {
         .is_err());
         assert!(!root.parent().unwrap().join("escaped.txt").exists());
         assert!(!root.join("bad").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_rejects_a_symlink_as_the_selected_source() {
+        let root = test_dir();
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("private.txt"), "private").unwrap();
+        let link = root.join("linked-site");
+        symlink(&target, &link).unwrap();
+        let result = create_zip_archive(&serde_json::json!({"path":link,"name":"archive.zip"}));
+        assert!(result.is_err());
+        assert!(!root.join("archive.zip").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

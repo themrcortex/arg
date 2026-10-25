@@ -1,5 +1,18 @@
 # ARG Change Log
 
+## v0.4.38 — 2026-10-25
+
+### Security
+- Reject oversized account passwords before Argon2 hashing and add per-IP login throttling for remote clients.
+- Trust forwarded HTTPS only from loopback proxies; mark native TLS requests internally and discard client-supplied trust markers on HTTP.
+- Restrict the privileged helper runtime directory so the ARG service account cannot replace the root-owned socket path.
+- Bound privileged helper request reads and concurrent operations to protect root memory and worker capacity.
+- Block additional cloud metadata addresses from S3 endpoints even when private endpoints are enabled.
+- Reject a symlink selected as the root of a ZIP archive.
+
+### Changed
+- Bump ARG to v0.4.38.
+
 ## v0.4.37 — 2026-10-25
 
 ### Added

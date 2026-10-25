@@ -174,14 +174,23 @@ fn validate_endpoint_syntax(endpoint: &str) -> Result<Url, String> {
 fn validate_endpoint(endpoint: &str, allow_private: bool) -> Result<(), String> {
     let url = validate_endpoint_syntax(endpoint)?;
     let host = url.host_str().unwrap();
+    let normalized_host = host
+        .trim_end_matches('.')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
     if matches!(
-        host.to_ascii_lowercase().as_str(),
-        "metadata.google.internal" | "metadata" | "instance-data.ec2.internal"
+        normalized_host.as_str(),
+        "metadata.google.internal"
+            | "metadata.google"
+            | "metadata"
+            | "instance-data.ec2.internal"
+            | "metadata.tencentyun.com"
     ) {
         return Err("Endpointهای metadata سرور قابل استفاده نیستند.".into());
     }
     let port = url.port_or_known_default().unwrap_or(443);
-    let addresses: Vec<IpAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+    let addresses: Vec<IpAddr> = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
     } else {
         (host, port)
@@ -194,8 +203,9 @@ fn validate_endpoint(endpoint: &str, allow_private: bool) -> Result<(), String> 
         return Err("Endpoint به هیچ نشانی IP نگاشت نشد.".into());
     }
     for address in addresses {
-        let metadata_ip = address == IpAddr::V4(std::net::Ipv4Addr::new(169, 254, 169, 254));
-        if metadata_ip || (!allow_private && !metrics::is_public_ip(&address.to_string())) {
+        if is_cloud_metadata_ip(address)
+            || (!allow_private && !metrics::is_public_ip(&address.to_string()))
+        {
             return Err(
                 "Endpoint خصوصی است. فقط پس از بررسی مقصد و تأیید دسترسی خصوصی آن را فعال کن."
                     .into(),
@@ -203,6 +213,16 @@ fn validate_endpoint(endpoint: &str, allow_private: bool) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+fn is_cloud_metadata_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => {
+            ip == std::net::Ipv4Addr::new(169, 254, 169, 254)
+                || ip == std::net::Ipv4Addr::new(100, 100, 100, 200)
+        }
+        IpAddr::V6(ip) => ip == "fd00:ec2::254".parse::<std::net::Ipv6Addr>().unwrap(),
+    }
 }
 
 fn input_error(input: &ConnectionInput, is_create: bool) -> Option<String> {
@@ -771,6 +791,14 @@ mod tests {
         assert!(validate_endpoint_syntax("http://objects.example.net").is_err());
         assert!(validate_endpoint_syntax("https://user:pass@objects.example.net").is_err());
         assert!(validate_endpoint_syntax("https://objects.example.net/path").is_err());
+    }
+
+    #[test]
+    fn cloud_metadata_addresses_remain_blocked_for_private_endpoints() {
+        assert!(is_cloud_metadata_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_cloud_metadata_ip("100.100.100.200".parse().unwrap()));
+        assert!(is_cloud_metadata_ip("fd00:ec2::254".parse().unwrap()));
+        assert!(!is_cloud_metadata_ip("10.0.0.5".parse().unwrap()));
     }
 
     #[test]
