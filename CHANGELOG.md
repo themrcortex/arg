@@ -1,5 +1,13 @@
 # ARG Change Log
 
+## v0.4.36 — 2026-10-25
+
+### Performance
+- Reduce release build time on VPS hardware by disabling costly link-time optimization and using 16 parallel Rust codegen units; keep normal optimized release code generation for runtime performance.
+- Avoid repeating GitHub version checks during an active update; poll the local helper's progress and wait for its successful service health check before refreshing.
+- Bound update-check network timeouts and run update status checks asynchronously so slow GitHub responses do not block a Tokio worker.
+- Reduce background monitoring traffic by polling dashboard alerts every 30 seconds and caching thresholds for 60 seconds.
+
 ## v0.4.35 — 2026-10-25
 
 ### Added

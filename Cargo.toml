@@ -1,6 +1,6 @@
 [package]
 name = "arg"
-version = "0.4.35"
+version = "0.4.36"
 edition = "2021"
 
 [dependencies]
@@ -28,6 +28,6 @@ tokio-util = { version = "0.7", features = ["io"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [profile.release]
-lto = true
-codegen-units = 1
+lto = false
+codegen-units = 16
 strip = true

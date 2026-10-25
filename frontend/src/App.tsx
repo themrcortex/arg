@@ -72,15 +72,17 @@ function ResourceAlertNotice() {
   const [alerts, setAlerts] = useState<ResourceAlert[]>([])
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const previousCpu = useRef<{ total: number; idle: number } | null>(null)
+  const thresholdsCache = useRef<{ value: AlertThresholds; at: number } | null>(null)
   useEffect(() => {
     let cancelled = false
     let timer = 0
     const poll = async () => {
       try {
-        const [dashboard, thresholds] = await Promise.all([
-          api<Dashboard>('dashboard'),
-          api<AlertThresholds>('monitoring/alerts'),
-        ])
+        const cachedThresholds = thresholdsCache.current
+        const thresholdsRequest = cachedThresholds && Date.now() - cachedThresholds.at < 60_000
+          ? Promise.resolve(cachedThresholds.value)
+          : api<AlertThresholds>('monitoring/alerts').then((value) => { thresholdsCache.current = { value, at: Date.now() }; return value })
+        const [dashboard, thresholds] = await Promise.all([api<Dashboard>('dashboard'), thresholdsRequest])
         if (cancelled) return
         const previous = previousCpu.current
         const totalDelta = previous && typeof dashboard.cpu_total === 'number'
@@ -111,7 +113,7 @@ function ResourceAlertNotice() {
         const clearedKeys = new Set(readings.filter((reading) => reading.value !== null && reading.value < Math.min(reading.threshold, 95) - 3).map((reading) => reading.key))
         if (clearedKeys.size) setDismissed((current) => new Set([...current].filter((key) => !clearedKeys.has(key))))
       } catch { /* An unavailable metrics read should not block or interrupt panel navigation. */ }
-      if (!cancelled) timer = window.setTimeout(() => void poll(), 15000)
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 30000)
     }
     void poll()
     return () => { cancelled = true; window.clearTimeout(timer) }
@@ -716,10 +718,9 @@ export default function App() {
     reloadScheduled.current = false
     let baselineInstance = update.instance || null
     try {
-      const fresh = await api<typeof update>('update')
-      setUpdate(fresh)
-      baselineInstance = fresh.instance || baselineInstance
-    } catch { /* The update endpoint may still schedule the helper if status checking is temporarily unavailable. */ }
+      const progress = await api<UpdateProgress>('update/progress')
+      baselineInstance = progress.instance || baselineInstance
+    } catch { /* The updater can still schedule if the progress endpoint is temporarily unavailable. */ }
     updateStartInstance.current = baselineInstance
     localUpdateStarted.current = true
     setUpdateStage(1)
@@ -746,12 +747,8 @@ export default function App() {
     const poll = async () => {
       if (cancelled) return
       try {
-        const [result, progress] = await Promise.all([
-          api<typeof update>('update'),
-          api<UpdateProgress>('update/progress'),
-        ])
+        const progress = await api<UpdateProgress>('update/progress')
         if (cancelled) return
-        setUpdate(result)
         setUpdateStage((current) => Math.max(current, updateStageFor(progress.phase)) as UpdateStage)
         if (progress.job_id) currentUpdateJobId.current = progress.job_id
         if (progress.state === 'failed') {
@@ -766,20 +763,17 @@ export default function App() {
         if (updateStartInstance.current && progress.instance && progress.instance !== updateStartInstance.current) {
           setUpdateStage(5)
         }
-        const processRestarted = Boolean(updateStartInstance.current && progress.instance && progress.instance !== updateStartInstance.current)
-        const updateConfirmed = progress.state === 'succeeded' && (!progress.updating || processRestarted || !updateStartInstance.current)
-        if (result.status === 'current' && updateConfirmed) {
+        if (progress.state === 'succeeded' && !progress.updating) {
           setUpdateStage(5)
           currentSince ??= Date.now()
-          if (Date.now() - currentSince >= 5000) {
+          if (Date.now() - currentSince >= 2000) {
             finishUpdateAndRefresh()
             return
           }
         } else currentSince = null
-        if (!progress.updating && progress.state !== 'succeeded' && result.status !== 'current') {
-          const message = result.error && result.error !== 'ARG_UPDATE_IN_PROGRESS'
-            ? result.error
-            : 'فرایند پایان یافت اما نسخهٔ جدید به‌درستی فعال نشد.'
+        const updaterNeverStarted = progress.state === 'idle' && updateStartedAt !== null && Date.now() - updateStartedAt > 20_000
+        if ((!progress.updating && progress.state !== 'succeeded' && progress.state !== 'idle') || updaterNeverStarted) {
+          const message = 'فرایند پایان یافت اما نسخهٔ جدید به‌درستی فعال نشد.'
           setUpdating(false)
           setUpdateStartedAt(null)
           localUpdateStarted.current = false
@@ -787,9 +781,9 @@ export default function App() {
           setUpdateDialogOpen(true)
           return
         }
-      } catch { /* Wait for the restarted panel API; an unavailable status is not proof the update completed. */ }
+      } catch { /* Keep following the helper during brief API restarts; the helper's succeeded state confirms completion. */ }
       // Follow the helper until it reports completion or failure.
-      timer = window.setTimeout(() => void poll(), 1500)
+      timer = window.setTimeout(() => void poll(), 2500)
     }
     timer = window.setTimeout(() => void poll(), 2500)
     return () => { cancelled = true; window.clearTimeout(timer) }

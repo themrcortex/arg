@@ -2251,8 +2251,8 @@ async fn install_firewall(State(state): State<AppState>, headers: HeaderMap) -> 
     );
     Ok(Json(json!({"installed": true})))
 }
-fn update_status() -> Value {
-    let output = match privileged_request(json!({"action":"update-check"})) {
+async fn update_status() -> Value {
+    let output = match privileged_request_async(json!({"action":"update-check"})).await {
         Ok(output) if output["ok"] == true => {
             output["stdout"].as_str().unwrap_or_default().to_owned()
         }
@@ -2286,17 +2286,18 @@ async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) 
     let mut status = if update_started_at().is_some() {
         json!({"status":"unavailable","error":"ARG_UPDATE_IN_PROGRESS"})
     } else {
-        update_status()
+        update_status().await
     };
     status["instance"] = json!(metrics::process_instance_id());
     Ok(Json(status))
 }
 async fn panel_update_progress(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
-    let db = state.lock().unwrap();
-    require_user(&db, &headers)?;
-    drop(db);
+    {
+        let db = state.lock().unwrap();
+        require_user(&db, &headers)?;
+    }
     let fallback_started = update_started_at();
-    let output = privileged_request(json!({"action":"update-progress"}));
+    let output = privileged_request_async(json!({"action":"update-progress"})).await;
     let raw = output
         .ok()
         .and_then(|value| value["stdout"].as_str().map(str::to_owned));
