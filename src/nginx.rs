@@ -1642,7 +1642,10 @@ fn nginx_list_sites() -> Result<Value, String> {
         let enabled = nginx_site_enabled(&name)?;
         let content = fs::read_to_string(&entry.path()).map_err(|error| error.to_string())?;
         let content_hash = hex::encode(Sha256::digest(content.as_bytes()));
-        sites.push(json!({"name":name,"enabled":enabled,"bytes":metadata.len(),"content_hash":content_hash}));
+        let maintenance_enabled = nginx_maintenance_paths(&name)
+            .map(|(_, _, flag_path)| flag_path.exists())
+            .unwrap_or(false);
+        sites.push(json!({"name":name,"enabled":enabled,"maintenance_enabled":maintenance_enabled,"bytes":metadata.len(),"content_hash":content_hash}));
     }
     sites.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
     Ok(json!(sites))

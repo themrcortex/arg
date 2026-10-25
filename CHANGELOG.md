@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.6.7-dev.2 — 2026-10-25
+
+### Fixed
+- Show each Nginx site's maintenance state as soon as the site list loads; collapsed cards no longer default to “off”.
+
 ## v0.6.7-dev.1 — 2026-10-25
 
 ### Fixed
