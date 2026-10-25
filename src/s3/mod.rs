@@ -63,6 +63,11 @@ pub(super) struct BucketInput {
     description: String,
 }
 #[derive(Deserialize)]
+pub(super) struct ManualBucketUsageInput {
+    used_bytes: u64,
+    quota_bytes: Option<u64>,
+}
+#[derive(Deserialize)]
 pub(super) struct CreateBucketInput {
     bucket_name: String,
     confirm_name: String,
@@ -1488,11 +1493,39 @@ pub(super) async fn list_buckets(
         remote["buckets"].clone()
     };
     let db = state.lock().unwrap();
-    let mut statement=db.prepare("SELECT id,bucket_name,display_name,description,enabled,verified_at,created_at FROM s3_buckets WHERE connection_id=?1 ORDER BY display_name").map_err(db_error)?;
-    let stored:Vec<Value>=statement.query_map([id],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"bucket_name":row.get::<_,String>(1)?,"display_name":row.get::<_,String>(2)?,"description":row.get::<_,String>(3)?,"enabled":row.get::<_,bool>(4)?,"verified_at":row.get::<_,Option<i64>>(5)?,"created_at":row.get::<_,i64>(6)?}))).map_err(db_error)?.filter_map(Result::ok).collect();
+    let mut statement=db.prepare("SELECT b.id,b.bucket_name,b.display_name,b.description,b.enabled,b.verified_at,b.created_at,u.used_bytes,u.quota_bytes,u.usage_source,u.scan_status,u.measured_at FROM s3_buckets b LEFT JOIN s3_usage_snapshots u ON u.id=(SELECT s.id FROM s3_usage_snapshots s WHERE s.bucket_id=b.id ORDER BY s.id DESC LIMIT 1) WHERE b.connection_id=?1 ORDER BY b.display_name").map_err(db_error)?;
+    let stored:Vec<Value>=statement.query_map([id],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"bucket_name":row.get::<_,String>(1)?,"display_name":row.get::<_,String>(2)?,"description":row.get::<_,String>(3)?,"enabled":row.get::<_,bool>(4)?,"verified_at":row.get::<_,Option<i64>>(5)?,"created_at":row.get::<_,i64>(6)?,"used_bytes":row.get::<_,Option<i64>>(7)?,"quota_bytes":row.get::<_,Option<i64>>(8)?,"usage_source":row.get::<_,Option<String>>(9)?,"scan_status":row.get::<_,Option<String>>(10)?,"measured_at":row.get::<_,Option<i64>>(11)?}))).map_err(db_error)?.filter_map(Result::ok).collect();
     Ok(Json(
         json!({"provider_buckets":provider_buckets,"connections":stored}),
     ))
+}
+pub(super) async fn set_manual_bucket_usage(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+    Json(input): Json<ManualBucketUsageInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?
+    };
+    let used_bytes = i64::try_from(input.used_bytes)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "حجم مصرف‌شده خارج از محدوده است."))?;
+    let quota_bytes = input.quota_bytes
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "سقف Bucket خارج از محدوده است."))?;
+    if quota_bytes == Some(0) {
+        return Err(error(StatusCode::BAD_REQUEST, "برای سقف نامشخص، فیلد را خالی بگذار."));
+    }
+    let db = state.lock().unwrap();
+    let bucket: String = db.query_row("SELECT bucket_name FROM s3_buckets WHERE id=?1", [id], |row| row.get(0))
+        .map_err(|_| error(StatusCode::NOT_FOUND, "Bucket در ARG پیدا نشد."))?;
+    let measured_at = now();
+    db.execute("INSERT INTO s3_usage_snapshots(bucket_id,used_bytes,quota_bytes,quota_source,usage_source,scan_status,measured_at) VALUES (?1,?2,?3,?4,'manual','measured',?5)", params![id,used_bytes,quota_bytes,quota_bytes.map(|_| "manual"),measured_at]).map_err(db_error)?;
+    audit(&db, &actor.username, "s3.bucket.usage.manual", &format!("bucket_id={id}; used_bytes={used_bytes}; quota_bytes={}", quota_bytes.map(|value| value.to_string()).unwrap_or_else(|| "unknown".into())));
+    Ok(Json(json!({"ok":true,"usage":{"used_bytes":used_bytes,"quota_bytes":quota_bytes,"usage_source":"manual","scan_status":"measured","measured_at":measured_at},"bucket":bucket})))
 }
 pub(super) async fn attach_bucket(
     State(state): State<AppState>,

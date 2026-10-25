@@ -70,6 +70,7 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/s3/buckets/{id}",
             axum::routing::delete(s3::detach_bucket),
         )
+        .route("/api/s3/buckets/{id}/usage", axum::routing::put(s3::set_manual_bucket_usage))
         .route(
             "/api/s3/buckets/{id}/mount",
             get(s3::get_bucket_mount).put(s3::configure_bucket_mount),

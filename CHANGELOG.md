@@ -1,5 +1,17 @@
 # ARG Change Log
 
+## v0.5.0 — 2026-10-25
+
+### Added
+- Let administrators enter a Bucket's manually measured used size and optional quota when the S3 provider does not report them.
+- Move VPS-to-S3 transfers into the Object page and support selecting and uploading a bounded directory tree with per-file progress.
+- Show the value's source and recorded time; keep unknown capacity clearly unknown and avoid fabricated usage percentages.
+
+### Changed
+- Return the latest Bucket usage snapshot with the saved Bucket list and record manual changes in the audit log.
+- Limit directory transfers to 2000 files, 2 GiB total, and 512 MiB per file; skip symlinks and allow resuming after a partial failure.
+- Bump ARG to v0.5.0.
+
 ## v0.4.42 — 2026-10-25
 
 ### Added
