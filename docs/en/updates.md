@@ -1,0 +1,48 @@
+## Branches
+
+- **`main`:** stable and the default source.
+- **`development`:** prerelease; it may be unstable or contain unpublished changes. Do not use it on a sensitive server without a snapshot and a second access path.
+
+The selected branch determines which GitHub ref is fetched and which version/API is built.
+
+## Build cache modes
+
+- **Fast:** retains Rust `target` and compilation cache. Future updates are often faster, but disk remains occupied.
+- **Complete:** clears the old cache before building and removes the new cache after build completion. Compilation still needs temporary disk space; this reduces persistent cache at the cost of longer updates.
+
+Cache size depends on Rust target, architecture, and dependencies; there is no universal fixed value. Complete mode does not delete source, installed binary, or rollback files.
+
+## SSH updates
+
+Select branch and mode in the SSH menu. Non-interactive examples:
+
+```bash
+sudo arg update main complete
+sudo arg update development fast
+```
+
+Arguments are branch followed by mode. Only `main|development` and `fast|complete` are accepted. Running `sudo arg update` in an interactive TTY prompts for missing choices.
+
+## Update from the panel
+
+The update dialog shows branch/version/commit, mode, progress phase, and available logs. A valid update acquires a server-side lock so concurrent actions from other users do not conflict; other sessions can see the active update state.
+
+The web service may restart during the update. The process builds, installs the binary, restarts the service, and performs a health check. An overlay blocks conflicting UI actions. On completion the UI attempts a cache-busting reload.
+
+## Cancellation and rollback
+
+`cancel-update` or the cancel button requests a safe stop; the process may need to reach a safe phase. If the new binary is installed but health checking fails, the installer restores the previous binary and database snapshot. If the service still cannot start because the host is damaged, use SSH logs and an independent backup.
+
+Rollback also restores the previous database snapshot; database changes made afterward can be lost. Keep an independent backup and provider console access before important updates.
+
+## Update troubleshooting
+
+```bash
+sudo arg status
+sudo arg logs 200
+sudo journalctl -u arg -n 200 --no-pager
+sudo arg cancel-update
+sudo arg rollback
+```
+
+If a lock appears stale, check for a real process or systemd job before clearing it. Never manually remove `/run/arg-update*` during a live build. Separate GitHub network, disk exhaustion, Rust toolchain, and Cargo failures using the logs.
