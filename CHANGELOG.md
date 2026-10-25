@@ -1,5 +1,30 @@
 # ARG Change Log
 
+## v0.4.34 — 2026-10-25
+
+### Added
+- Add the first ARG S3 storage manager with separate AWS S3, Cloudflare R2, ArvanCloud, ParsPack and other S3-compatible presets.
+- Add protected S3 credential storage, connection testing, Bucket listing/association, gated Bucket creation, paginated Object browsing, streaming upload/download and confirmed Object deletion.
+- Add an all-mount storage inventory to the dashboard and System page, separating local, remote, cloud/FUSE and virtual filesystems and avoiding duplicate block-device totals.
+- Add ZIP creation and download for regular files/folders in the server file manager, plus safe extraction into a new folder with path traversal and overwrite protections.
+
+### Security and limits
+- Keep cloud usage/quota unknown until a trustworthy measurement source is implemented; do not display estimated capacity as real data.
+- Bound archive input/expanded data and S3 upload/download sizes; reject symlinks and special archive entries.
+- Document current S3 scope and limitations in `docs/S3_STORAGE.md`. Rclone/S3FS mounts, sync jobs, usage scans, contracts/reminders and MinIO deployment remain future work.
+
+## v0.4.33 — 2026-10-25
+
+### Security
+- When HTTPS is configured, stop opening ARG's plain HTTP backend port in UFW; retain only the HTTP challenge and HTTPS listener rules.
+- Protect the active ARG bind ports and the effective SSH ports reported by `sshd -T` from managed firewall rules.
+- Require the current administrator password before opening Root Terminal. Its short-lived, one-use ticket is tied to the exact login session and rate-limited.
+- Refuse systemd stop, restart, disable, and mask actions for ARG, SSH, and core network services.
+
+### Quality
+- Add GitHub Actions checks for Rust tests/build checks and frontend type/build checks.
+- Make file-manager test directories unique so parallel test execution is reliable.
+
 ## v0.4.32 — 2026-10-25
 
 ### Fixed

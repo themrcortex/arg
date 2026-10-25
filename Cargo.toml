@@ -1,6 +1,6 @@
 [package]
 name = "arg"
-version = "0.4.32"
+version = "0.4.34"
 edition = "2021"
 
 [dependencies]
@@ -22,6 +22,10 @@ rust-embed = "8"
 mime_guess = "2"
 portable-pty = "0.9"
 futures-util = "0.3"
+s3 = { package = "rust-s3", version = "0.38", default-features = false, features = ["tokio-rustls-tls-ring", "fail-on-err"] }
+url = "2"
+tokio-util = { version = "0.7", features = ["io"] }
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = true

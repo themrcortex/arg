@@ -70,6 +70,7 @@ import { Switch } from './components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { formatPanelDate, usePanelTimeZone } from './lib/timezone'
+import { S3OverviewKpi, StorageInventorySection, StorageOverviewKpi } from './components/storage/StorageInventory'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
@@ -300,6 +301,7 @@ export function DashboardPage({ notify }: Common) {
   const { data, history, resourceHistory, cpu, loading, refresh, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, historyEnabled, dashboardError, historyError } = useDashboard(notify)
   const [firewall, setFirewall] = useState<Firewall | null>(null)
   const [ruleCount, setRuleCount] = useState<number | null>(null)
+  const [s3Summary, setS3Summary] = useState<{ connections: number; healthy_connections: number; contracts_due_soon: number; usage_bytes: number | null; quota_bytes: number | null } | null>(null)
   useEffect(() => {
     let active = true
     const readFirewall = async () => {
@@ -307,13 +309,13 @@ export function DashboardPage({ notify }: Common) {
       if (!active) return
       if (status.status === 'fulfilled') setFirewall(status.value)
       if (rules.status === 'fulfilled') setRuleCount(rules.value.rules.length)
+      try { setS3Summary(await api<{ connections: number; healthy_connections: number; contracts_due_soon: number; usage_bytes: number | null; quota_bytes: number | null }>('s3/summary')) } catch { /* The aggregate is not required for the rest of the dashboard. */ }
     }
     void readFirewall()
     const timer = window.setInterval(() => void readFirewall(), 30000)
     return () => { active = false; window.clearInterval(timer) }
   }, [])
   const memory = data?.memory_kib ? (1 - data.available_kib / data.memory_kib) * 100 : null
-  const disk = data?.disk_total_bytes && typeof data.disk_free_bytes === 'number' ? (1 - data.disk_free_bytes / data.disk_total_bytes) * 100 : null
   const load = data?.load?.trim().split(/\s+/) || []
   const percent = (value: number | null) => value === null ? '—' : `${formatNumber(Math.round(value * 10) / 10)}%`
   const firewallActive = firewall?.available && /active/i.test(firewall.status) && !/inactive/i.test(firewall.status)
@@ -327,7 +329,8 @@ export function DashboardPage({ notify }: Common) {
     {loading && !data ? <div className="arg-kpi-grid grid gap-3">{Array.from({ length: 6 }, (_, index) => <Skeleton key={index} className="h-[142px]"/>)}</div> : <section className="arg-kpi-grid grid gap-3" aria-label="شاخص‌های سرور">
       <ArgKpi icon="metric-cpu" label="پردازنده" value={percent(cpu)} detail={cpu === null ? 'نمونهٔ CPU موجود نیست' : 'آخرین نمونهٔ ثبت‌شده'} progress={cpu ?? undefined} tone="green"/>
       <ArgKpi icon="metric-memory" label="حافظهٔ RAM" value={percent(memory)} detail={data?.memory_kib ? `${formatBytes((data.memory_kib - data.available_kib) * 1024)} از ${formatBytes(data.memory_kib * 1024)}` : 'داده‌ای در دسترس نیست'} progress={memory ?? undefined}/>
-      <ArgKpi icon="metric-disk" label="دیسک ریشه /" value={percent(disk)} detail={disk !== null && data?.disk_total_bytes && typeof data.disk_free_bytes === 'number' ? `${formatBytes(data.disk_total_bytes - data.disk_free_bytes)} از ${formatBytes(data.disk_total_bytes)}` : 'داده‌ای در دسترس نیست'} progress={disk ?? undefined} tone="teal"/>
+      <StorageOverviewKpi inventory={data?.storage} rootTotalBytes={data?.disk_total_bytes} rootFreeBytes={data?.disk_free_bytes}/>
+      <S3OverviewKpi summary={s3Summary}/>
       <ArgKpi icon="metric-clock" label="زمان روشن‌بودن" value={data ? data.uptime_seconds >= 86400 ? `${formatNumber(Math.floor(data.uptime_seconds / 86400))} روز` : formatUptime(data.uptime_seconds) : '—'} detail={data ? formatUptime(data.uptime_seconds) : 'از آخرین راه‌اندازی سرور'} ltr={false}/>
       <ArgKpi icon="metric-load" label="میانگین بار" value={load[0] || '—'} detail={load.length >= 3 ? `5 دقیقه: ${load[1]} · 15 دقیقه: ${load[2]}` : 'میانگین بار Linux'}/>
       <ArgKpi icon="metric-app" label="مصرف پنل ARG" value={data ? `${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}%` : '—'} detail={data ? `CPU · RAM ${formatBytes(data.process_rss_bytes)}` : 'داده‌ای در دسترس نیست'} tone="blue"/>
@@ -366,6 +369,7 @@ export function SystemPage({ Heading, notify }: Common) {
     {loading && !data ? <LoadingCards/> : <>
       <div className="grid gap-4 md:grid-cols-3"><Metric icon={Cpu} label="CPU" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={`بار 1/5/15 دقیقه: ${data?.load || '—'}`} progress={cpu || 0}/><Metric icon={Database} label="حافظه" value={`${formatNumber(memoryPercent)}%`} detail={`${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}`} progress={memoryPercent}/><Metric icon={HardDrive} label="دیسک ریشه" value={`${formatNumber(diskPercent)}%`} detail={`${formatBytes(totalDisk - freeDisk)} از ${formatBytes(totalDisk)}`} progress={diskPercent}/></div>
       <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
+      <div className="mt-5"><StorageInventorySection inventory={data?.storage} loading={loading && !data} onRefresh={refresh}/></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: formatNumber(data?.cpu_cores || 0) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: `${formatNumber(Math.floor((data?.uptime_seconds || 0) / 86400))}d ${formatNumber(Math.floor(((data?.uptime_seconds || 0) % 86400) / 3600))}h` }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: formatBytes(totalMemory) }, { label: 'مصرف‌شده', value: formatBytes(totalMemory - availableMemory), detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: formatBytes(availableMemory) }, { label: 'Cache', value: formatBytes((memoryDetail?.cached_kib || 0) * 1024) }, { label: 'Buffer', value: formatBytes((memoryDetail?.buffers_kib || 0) * 1024) }, { label: 'Swap کل', value: formatBytes((data?.swap_total_kib || 0) * 1024) }, { label: 'Swap مصرف‌شده', value: formatBytes(((data?.swap_total_kib || 0) - (data?.swap_free_kib || 0)) * 1024) }]}/></SectionCard></div>
       <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="فضای فایل‌سیستم ریشه"><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk ? formatBytes(totalDisk) : '—' }, { label: 'مصرف‌شده', value: totalDisk ? formatBytes(totalDisk - freeDisk) : '—' }, { label: 'آزاد', value: totalDisk ? formatBytes(freeDisk) : '—' }, { label: 'درصد مصرف', value: totalDisk ? `${formatNumber(diskPercent)}%` : '—' }]}/></SectionCard><SectionCard title="مصرف پنل ARG" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: `${formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%` }, { label: 'RAM پنل', value: formatBytes(data?.process_rss_bytes || 0), detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
     </>}

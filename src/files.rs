@@ -12,7 +12,9 @@ pub(super) struct DiskScanInput {
     path: String,
 }
 
-fn default_scan_root() -> String { "/".into() }
+fn default_scan_root() -> String {
+    "/".into()
+}
 
 #[derive(Deserialize)]
 pub(super) struct FileActionInput {
@@ -69,12 +71,23 @@ pub(super) async fn scan_disk(
         require_admin(&db, &headers)?.username
     };
     let path = input.path.trim().to_owned();
-    if path.is_empty() || path.len() > 4096 || !path.starts_with('/') || path.split('/').any(|part| part == "..") {
-        return Err(error(StatusCode::BAD_REQUEST, "مسیر باید یک آدرس مطلق معتبر باشد."));
+    if path.is_empty()
+        || path.len() > 4096
+        || !path.starts_with('/')
+        || path.split('/').any(|part| part == "..")
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "مسیر باید یک آدرس مطلق معتبر باشد.",
+        ));
     }
-    let response = privileged_request_async(json!({"action":"file-disk-scan", "path":path})).await?;
+    let response =
+        privileged_request_async(json!({"action":"file-disk-scan", "path":path})).await?;
     if response["ok"] != true {
-        return Err(error(StatusCode::BAD_REQUEST, response["error"].as_str().unwrap_or("Disk scan failed")));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            response["error"].as_str().unwrap_or("Disk scan failed"),
+        ));
     }
     let db = state.lock().unwrap();
     audit(&db, &actor, "files.disk.scan", &format!("path={path}"));
@@ -153,7 +166,7 @@ pub(super) async fn file_action(
         require_admin(&db, &headers)?.username
     };
     let allowed = [
-        "mkdir", "create", "save", "rename", "delete", "paste", "upload", "chmod",
+        "mkdir", "create", "save", "rename", "delete", "paste", "upload", "chmod", "zip", "unzip",
     ];
     if !allowed.contains(&input.action.as_str()) {
         return Err(error(StatusCode::BAD_REQUEST, "Unsupported file operation"));
@@ -324,24 +337,37 @@ struct DiskScanState {
 
 fn scan_directory_size(path: &std::path::Path, depth: usize, state: &mut DiskScanState) -> u64 {
     use std::os::unix::fs::MetadataExt;
-    if depth > 64 || state.entries >= state.max_entries || state.started.elapsed() >= state.max_duration {
+    if depth > 64
+        || state.entries >= state.max_entries
+        || state.started.elapsed() >= state.max_duration
+    {
         state.truncated = true;
         return 0;
     }
     state.entries += 1;
-    let Ok(metadata) = std::fs::symlink_metadata(path) else { return 0 };
-    if metadata.dev() != state.device || metadata.file_type().is_symlink() { return 0; }
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.dev() != state.device || metadata.file_type().is_symlink() {
+        return 0;
+    }
     if metadata.is_file() {
         if state.seen_files.insert((metadata.dev(), metadata.ino())) {
             let allocated = metadata.blocks().saturating_mul(512);
-            state.files.push((path.to_string_lossy().into_owned(), allocated));
+            state
+                .files
+                .push((path.to_string_lossy().into_owned(), allocated));
             return allocated;
         }
         return 0;
     }
-    if !metadata.is_dir() { return 0; }
+    if !metadata.is_dir() {
+        return 0;
+    }
     let mut total = 0_u64;
-    let Ok(entries) = std::fs::read_dir(path) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
     for entry in entries {
         if state.entries >= state.max_entries || state.started.elapsed() >= state.max_duration {
             state.truncated = true;
@@ -350,45 +376,79 @@ fn scan_directory_size(path: &std::path::Path, depth: usize, state: &mut DiskSca
         let Ok(entry) = entry else { continue };
         let child = entry.path();
         let child_name = entry.file_name();
-        if depth == 0 && path == std::path::Path::new("/")
-            && ["proc", "sys", "dev", "run"].iter().any(|name| child_name == *name) {
+        if depth == 0
+            && path == std::path::Path::new("/")
+            && ["proc", "sys", "dev", "run"]
+                .iter()
+                .any(|name| child_name == *name)
+        {
             continue;
         }
         let size = scan_directory_size(&child, depth + 1, state);
         total = total.saturating_add(size);
     }
-    state.directories.push((path.to_string_lossy().into_owned(), total));
+    state
+        .directories
+        .push((path.to_string_lossy().into_owned(), total));
     total
 }
 
 fn scan_disk_usage(path: &str) -> Result<Value, String> {
-    use std::os::unix::fs::MetadataExt;
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     let root = canonical_existing(path)?;
-    if !root.is_dir() { return Err("مسیر انتخاب‌شده پوشه نیست.".into()); }
+    if !root.is_dir() {
+        return Err("مسیر انتخاب‌شده پوشه نیست.".into());
+    }
     let metadata = std::fs::metadata(&root).map_err(|error| error.to_string())?;
     let mut state = DiskScanState {
-        device: metadata.dev(), entries: 0, max_entries: 100_000,
-        started: std::time::Instant::now(), max_duration: std::time::Duration::from_secs(12),
-        truncated: false, files: Vec::new(), directories: Vec::new(),
+        device: metadata.dev(),
+        entries: 0,
+        max_entries: 100_000,
+        started: std::time::Instant::now(),
+        max_duration: std::time::Duration::from_secs(12),
+        truncated: false,
+        files: Vec::new(),
+        directories: Vec::new(),
         seen_files: std::collections::HashSet::new(),
     };
     let total_bytes = scan_directory_size(&root, 0, &mut state);
-    let c_root = std::ffi::CString::new(root.as_os_str().as_bytes()).map_err(|_| "مسیر معتبر نیست.")?;
+    let c_root =
+        std::ffi::CString::new(root.as_os_str().as_bytes()).map_err(|_| "مسیر معتبر نیست.")?;
     let mut volume = unsafe { std::mem::zeroed::<libc::statvfs>() };
-    let (volume_total, volume_used, volume_available) = if unsafe { libc::statvfs(c_root.as_ptr(), &mut volume) } == 0 {
-        let block_size = volume.f_frsize as u64;
-        let total = (volume.f_blocks as u64).saturating_mul(block_size);
-        let used = (volume.f_blocks.saturating_sub(volume.f_bfree) as u64).saturating_mul(block_size);
-        let available = (volume.f_bavail as u64).saturating_mul(block_size);
-        (total, used, available)
-    } else { (0, 0, 0) };
+    let (volume_total, volume_used, volume_available) =
+        if unsafe { libc::statvfs(c_root.as_ptr(), &mut volume) } == 0 {
+            let block_size = volume.f_frsize as u64;
+            let total = (volume.f_blocks as u64).saturating_mul(block_size);
+            let used =
+                (volume.f_blocks.saturating_sub(volume.f_bfree) as u64).saturating_mul(block_size);
+            let available = (volume.f_bavail as u64).saturating_mul(block_size);
+            (total, used, available)
+        } else {
+            (0, 0, 0)
+        };
     state.files.sort_by(|a, b| b.1.cmp(&a.1));
     state.directories.sort_by(|a, b| b.1.cmp(&a.1));
-    let largest_files = state.files.into_iter().take(100).map(|(path, bytes)| json!({"path":path,"bytes":bytes})).collect::<Vec<_>>();
-    let largest_directories = state.directories.into_iter().take(100).map(|(path, bytes)| json!({"path":path,"bytes":bytes})).collect::<Vec<_>>();
-    let usage_percent = if volume_total == 0 { 0.0 } else { volume_used as f64 * 100.0 / volume_total as f64 };
-    Ok(json!({"root":root,"total_bytes":total_bytes,"volume_total":volume_total,"volume_used":volume_used,"volume_available":volume_available,"usage_percent":usage_percent,"entries_scanned":state.entries,"truncated":state.truncated,"elapsed_ms":state.started.elapsed().as_millis(),"largest_files":largest_files,"largest_directories":largest_directories,"note":"Symbolic links are skipped; nested filesystems and pseudo-filesystems are excluded. Select a mount path directly to scan it."}))
+    let largest_files = state
+        .files
+        .into_iter()
+        .take(100)
+        .map(|(path, bytes)| json!({"path":path,"bytes":bytes}))
+        .collect::<Vec<_>>();
+    let largest_directories = state
+        .directories
+        .into_iter()
+        .take(100)
+        .map(|(path, bytes)| json!({"path":path,"bytes":bytes}))
+        .collect::<Vec<_>>();
+    let usage_percent = if volume_total == 0 {
+        0.0
+    } else {
+        volume_used as f64 * 100.0 / volume_total as f64
+    };
+    Ok(
+        json!({"root":root,"total_bytes":total_bytes,"volume_total":volume_total,"volume_used":volume_used,"volume_available":volume_available,"usage_percent":usage_percent,"entries_scanned":state.entries,"truncated":state.truncated,"elapsed_ms":state.started.elapsed().as_millis(),"largest_files":largest_files,"largest_directories":largest_directories,"note":"Symbolic links are skipped; nested filesystems and pseudo-filesystems are excluded. Select a mount path directly to scan it."}),
+    )
 }
 
 fn copy_tree(
@@ -481,7 +541,10 @@ fn save_file_atomically(target: &std::path::Path, content: &[u8]) -> Result<(), 
 
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     let result = match action {
-        "file-disk-scan" => request["path"].as_str().ok_or_else(|| "A scan path is required.".to_owned()).and_then(scan_disk_usage),
+        "file-disk-scan" => request["path"]
+            .as_str()
+            .ok_or_else(|| "A scan path is required.".to_owned())
+            .and_then(scan_disk_usage),
         "file-list" => request["path"]
             .as_str()
             .ok_or_else(|| "A path is required.".to_owned())
@@ -535,6 +598,8 @@ fn execute_action(request: &Value) -> Result<Value, String> {
         .as_str()
         .ok_or("Missing file operation")?;
     match operation {
+        "zip" => create_zip_archive(request),
+        "unzip" => extract_zip_archive(request),
         "mkdir" | "create" | "upload" => {
             let directory = canonical_existing(
                 request["path"]
@@ -742,16 +807,344 @@ fn execute_action(request: &Value) -> Result<Value, String> {
     }
 }
 
+fn create_zip_archive(request: &Value) -> Result<Value, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    let source = canonical_existing(
+        request["path"]
+            .as_str()
+            .ok_or("A source path is required")?,
+    )?;
+    if source == std::path::Path::new("/") || is_protected_system_root(&source) {
+        return Err("Creating an archive from a protected system root is blocked.".into());
+    }
+    let metadata = std::fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !(metadata.is_dir() || metadata.is_file()) {
+        return Err("Select a regular file or directory to archive.".into());
+    }
+    let base_name = source
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or("The source name is not UTF-8")?;
+    if !safe_name(base_name) || base_name.contains('\\') {
+        return Err(
+            "Source names with control characters or backslashes cannot be archived.".into(),
+        );
+    }
+    let archive_name = request["name"]
+        .as_str()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&format!("{base_name}.zip"))
+        .to_owned();
+    if !safe_name(&archive_name) || !archive_name.to_ascii_lowercase().ends_with(".zip") {
+        return Err("Enter a safe archive name ending in .zip.".into());
+    }
+    let parent = source.parent().ok_or("Cannot archive a filesystem root")?;
+    let archive_path = parent.join(&archive_name);
+    if archive_path.exists() {
+        return Err("An item with that archive name already exists.".into());
+    }
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&archive_path)
+        .map_err(|error| error.to_string())?;
+    let mut writer = ZipWriter::new(output);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .compression_level(Some(6))
+        .unix_permissions(0o600);
+    let mut count = 0usize;
+    let mut total = 0u64;
+    let result = if metadata.is_dir() {
+        let root_entry = format!("{base_name}/");
+        writer
+            .add_directory(&root_entry, options)
+            .map_err(|error| error.to_string())?;
+        archive_directory(
+            &mut writer,
+            &source,
+            &source,
+            base_name,
+            options,
+            &mut count,
+            &mut total,
+        )
+    } else {
+        archive_file(
+            &mut writer,
+            &source,
+            base_name,
+            options,
+            &mut count,
+            &mut total,
+        )
+    };
+    if let Err(error) = result {
+        let _ = writer.finish();
+        let _ = std::fs::remove_file(&archive_path);
+        return Err(error);
+    }
+    if let Err(error) = writer.finish() {
+        let _ = std::fs::remove_file(&archive_path);
+        return Err(error.to_string());
+    }
+    let display = archive_path.to_string_lossy().into_owned();
+    Ok(
+        json!({"archive":display,"entries":count,"source_bytes":total,"item":path_metadata(&archive_path,archive_name)}),
+    )
+}
+
+fn archive_directory<W: Write + std::io::Seek>(
+    writer: &mut zip::ZipWriter<W>,
+    root: &std::path::Path,
+    directory: &std::path::Path,
+    archive_prefix: &str,
+    options: zip::write::SimpleFileOptions,
+    count: &mut usize,
+    total: &mut u64,
+) -> Result<(), String> {
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("Symbolic links are skipped for archive safety; remove the link or archive its target explicitly.".into());
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| "Archive path escaped its source directory")?;
+        let relative = relative
+            .to_str()
+            .ok_or("Archive paths must be valid UTF-8")?;
+        if relative.contains('\\') || relative.chars().any(char::is_control) {
+            return Err("Archive paths cannot contain control characters or backslashes.".into());
+        }
+        let archive_name = format!("{archive_prefix}/{relative}");
+        if metadata.is_dir() {
+            *count += 1;
+            if *count > 50_000 {
+                return Err("An archive can contain at most 50,000 items.".into());
+            }
+            writer
+                .add_directory(format!("{archive_name}/"), options)
+                .map_err(|error| error.to_string())?;
+            archive_directory(writer, root, &path, archive_prefix, options, count, total)?;
+        } else if metadata.is_file() {
+            archive_file(writer, &path, &archive_name, options, count, total)?;
+        } else {
+            return Err("Special files cannot be included in an archive.".into());
+        }
+    }
+    Ok(())
+}
+
+fn archive_file<W: Write + std::io::Seek>(
+    writer: &mut zip::ZipWriter<W>,
+    path: &std::path::Path,
+    archive_name: &str,
+    options: zip::write::SimpleFileOptions,
+    count: &mut usize,
+    total: &mut u64,
+) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("Only regular files may be archived.".into());
+    }
+    *total = total.saturating_add(metadata.len());
+    if *total > 2 * 1024 * 1024 * 1024 {
+        return Err("Archive input is limited to 2 GiB.".into());
+    }
+    *count += 1;
+    if *count > 50_000 {
+        return Err("An archive can contain at most 50,000 items.".into());
+    }
+    writer
+        .start_file(archive_name, options)
+        .map_err(|error| error.to_string())?;
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    std::io::copy(&mut file, writer).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn extract_zip_archive(request: &Value) -> Result<Value, String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use zip::ZipArchive;
+
+    if request["confirmed"] != true {
+        return Err("Confirm ZIP extraction before continuing.".into());
+    }
+    let archive_path =
+        canonical_existing(request["path"].as_str().ok_or("A ZIP file is required")?)?;
+    let destination = canonical_existing(
+        request["destination"]
+            .as_str()
+            .ok_or("A destination directory is required")?,
+    )?;
+    if !archive_path.is_file()
+        || !archive_path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        || !destination.is_dir()
+    {
+        return Err("Choose a .zip file and an existing destination directory.".into());
+    }
+    if is_protected_system_root(&destination) || destination == std::path::Path::new("/") {
+        return Err("Extracting into a protected system root is blocked.".into());
+    }
+    let folder_name = archive_path
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or("ZIP filename must be UTF-8")?;
+    if !safe_name(folder_name) {
+        return Err("ZIP filename cannot be used as a destination folder name.".into());
+    }
+    let output_root = destination.join(folder_name);
+    std::fs::create_dir(&output_root).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "The extraction folder already exists; choose another destination or rename it first."
+                .into()
+        } else {
+            error.to_string()
+        }
+    })?;
+    let result = (|| -> Result<(usize, u64), String> {
+        let file = std::fs::File::open(&archive_path).map_err(|error| error.to_string())?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|_| "The ZIP archive is invalid or encrypted.".to_owned())?;
+        if archive.len() > 50_000 {
+            return Err("An archive can contain at most 50,000 items.".into());
+        }
+        let mut total = 0u64;
+        let mut extracted = 0usize;
+        for index in 0..archive.len() {
+            let entry = archive
+                .by_index(index)
+                .map_err(|_| "Could not read a ZIP entry.")?;
+            if entry.is_symlink()
+                || entry
+                    .unix_mode()
+                    .is_some_and(|mode| mode & 0o170000 == 0o120000)
+            {
+                return Err("ZIP archives containing symbolic links are not extracted.".into());
+            }
+            if entry.unix_mode().is_some_and(|mode| {
+                let kind = mode & 0o170000;
+                kind != 0 && kind != 0o100000 && kind != 0o040000
+            }) {
+                return Err(
+                    "ZIP archives containing special filesystem objects are not extracted.".into(),
+                );
+            }
+            let enclosed = entry
+                .enclosed_name()
+                .ok_or("The archive contains a path that escapes the destination.")?
+                .to_owned();
+            if enclosed
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err("The archive contains an unsafe path.".into());
+            }
+            total = total.saturating_add(entry.size());
+            if total > 2 * 1024 * 1024 * 1024 {
+                return Err("Expanded ZIP content is limited to 2 GiB.".into());
+            }
+            let target = output_root.join(&enclosed);
+            let parent = target.parent().ok_or("Invalid archive entry path")?;
+            create_safe_directories(&output_root, parent)?;
+            if entry.is_dir() {
+                if target.exists() {
+                    let meta =
+                        std::fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
+                    if meta.file_type().is_symlink() || !meta.is_dir() {
+                        return Err(
+                            "A destination item conflicts with an archive directory.".into()
+                        );
+                    }
+                } else {
+                    std::fs::create_dir(&target).map_err(|error| error.to_string())?;
+                }
+            } else {
+                let expected_size = entry.size();
+                let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&target).map_err(|error| if error.kind()==std::io::ErrorKind::AlreadyExists { "An extracted file already exists; existing files are never overwritten.".into() } else { error.to_string() })?;
+                let copied = match std::io::copy(&mut entry.take(expected_size), &mut output) {
+                    Ok(copied) if copied == expected_size => copied,
+                    Ok(_) => {
+                        let _ = std::fs::remove_file(&target);
+                        return Err("ZIP entry size did not match its directory record.".into());
+                    }
+                    Err(error) => {
+                        let _ = std::fs::remove_file(&target);
+                        return Err(error.to_string());
+                    }
+                };
+                if copied != expected_size {
+                    let _ = std::fs::remove_file(&target);
+                    return Err("ZIP entry size did not match its directory record.".into());
+                }
+                extracted += 1;
+            }
+        }
+        Ok((extracted, total))
+    })();
+    match result {
+        Ok((files, bytes)) => {
+            std::fs::set_permissions(&output_root, std::fs::Permissions::from_mode(0o755))
+                .map_err(|error| error.to_string())?;
+            Ok(
+                json!({"destination":output_root.to_string_lossy(),"files":files,"expanded_bytes":bytes}),
+            )
+        }
+        Err(error) => {
+            let _ = remove_tree(&output_root);
+            Err(error)
+        }
+    }
+}
+
+fn create_safe_directories(root: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| "Archive path escaped its destination")?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err("Archive contains an unsafe directory path.".into());
+        };
+        current.push(name);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err("A destination directory is unsafe or conflicts with a file.".into())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(&current).map_err(|error| error.to_string())?
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{copy_tree, remove_tree, safe_name, valid_mode};
+    use super::{
+        copy_tree, create_zip_archive, extract_zip_archive, remove_tree, safe_name, valid_mode,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::{fs, os::unix::fs::symlink, path::PathBuf};
 
     fn test_dir() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "arg-file-manager-test-{}-{}",
+            "arg-file-manager-test-{}-{}-{}",
             std::process::id(),
-            super::now()
+            super::now(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
         path
@@ -780,6 +1173,39 @@ mod tests {
         remove_tree(&link).unwrap();
         assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
         assert!(fs::symlink_metadata(&link).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn zip_round_trip_works_and_zip_slip_is_rejected() {
+        use zip::{write::SimpleFileOptions, ZipWriter};
+        let root = test_dir();
+        let source = root.join("site");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("index.html"), "hello ARG").unwrap();
+        let created =
+            create_zip_archive(&serde_json::json!({"path":source,"name":"backup.zip"})).unwrap();
+        assert_eq!(created["entries"], 1);
+        extract_zip_archive(&serde_json::json!({"path":root.join("backup.zip"),"destination":root,"confirmed":true})).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("backup/site/index.html")).unwrap(),
+            "hello ARG"
+        );
+
+        let malicious = root.join("bad.zip");
+        let mut writer = ZipWriter::new(fs::File::create(&malicious).unwrap());
+        writer
+            .start_file("../escaped.txt", SimpleFileOptions::default())
+            .unwrap();
+        use std::io::Write;
+        writer.write_all(b"must not escape").unwrap();
+        writer.finish().unwrap();
+        assert!(extract_zip_archive(
+            &serde_json::json!({"path":malicious,"destination":root,"confirmed":true})
+        )
+        .is_err());
+        assert!(!root.parent().unwrap().join("escaped.txt").exists());
+        assert!(!root.join("bad").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

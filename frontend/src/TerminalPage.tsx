@@ -8,6 +8,8 @@ import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
+import { Input } from './components/ui/input'
+import { api } from './lib/api'
 
 type Connection = 'connecting' | 'connected' | 'disconnected' | 'error'
 type TerminalTab = { id: string; name: string; mode: 'user' | 'root' }
@@ -18,6 +20,9 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
   const [renameId, setRenameId] = useState<string | null>(null)
   const [clipboardNote, setClipboardNote] = useState('')
   const [rootPromptOpen, setRootPromptOpen] = useState(false)
+  const [rootPassword, setRootPassword] = useState('')
+  const [rootAuthorizing, setRootAuthorizing] = useState(false)
+  const [rootError, setRootError] = useState('')
 
   const addTab = () => {
     let index = 1
@@ -26,7 +31,16 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
     setTabs((current) => [...current, next])
     setActiveId(next.id)
   }
-  const addRootTab = () => {
+  const addRootTab = async () => {
+    setRootAuthorizing(true)
+    setRootError('')
+    try {
+      await api('terminal/root/authorize', { method: 'POST', body: JSON.stringify({ password: rootPassword }) })
+    } catch (error) {
+      setRootError(error instanceof Error ? error.message : 'تأیید هویت ناموفق بود.')
+      setRootAuthorizing(false)
+      return
+    }
     let index = 1
     let name = 'Terminal Root'
     while (tabs.some((tab) => tab.name === name)) { index += 1; name = `Terminal Root ${index}` }
@@ -34,6 +48,8 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
     setTabs((current) => [...current, next])
     setActiveId(next.id)
     setRootPromptOpen(false)
+    setRootPassword('')
+    setRootAuthorizing(false)
     setClipboardNote('')
   }
   const closeTab = (id: string) => {
@@ -71,7 +87,7 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
         <span dir="ltr" className="font-mono">Ctrl + Shift + C copy · Ctrl + Shift + V paste</span>
       </div>
     </TooltipProvider>
-    <Dialog open={rootPromptOpen} onOpenChange={setRootPromptOpen}>
+    <Dialog open={rootPromptOpen} onOpenChange={(open) => { setRootPromptOpen(open); if (!open) { setRootPassword(''); setRootError('') } }}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-rose-100"><ShieldAlert size={20}/>ورود به Terminal Root</DialogTitle>
@@ -80,7 +96,9 @@ export function TerminalPage({ Heading }: { Heading: (props: { title: string; de
         <div className="rounded-xl border border-rose-300/20 bg-rose-300/[.06] p-4 text-sm leading-7 text-rose-50">
           واقعاً می‌خواهی وارد ترمینال روت شوی؟ این کار خطرناک است؛ یک دستور اشتباه ممکن است داده‌ها را پاک کند، سرویس‌ها را متوقف کند یا دسترسی به سرور را از بین ببرد. فقط دستورهایی را اجرا کن که دقیقاً می‌شناسی.
         </div>
-        <div className="mt-5 flex flex-wrap justify-end gap-2"><Button variant="outline" onClick={() => setRootPromptOpen(false)}>انصراف</Button><Button variant="destructive" onClick={addRootTab}>تأیید و بازکردن ترمینال روت</Button></div>
+        <label className="mt-4 block space-y-2 text-sm"><span>برای تأیید، گذرواژهٔ مدیر را دوباره وارد کن</span><Input type="password" autoComplete="current-password" value={rootPassword} onChange={(event) => setRootPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && rootPassword && !rootAuthorizing) void addRootTab() }} /></label>
+        {rootError && <p role="alert" className="mt-2 text-sm text-rose-300">{rootError}</p>}
+        <div className="mt-5 flex flex-wrap justify-end gap-2"><Button variant="outline" disabled={rootAuthorizing} onClick={() => setRootPromptOpen(false)}>انصراف</Button><Button variant="destructive" disabled={!rootPassword || rootAuthorizing} onClick={() => void addRootTab()}>{rootAuthorizing ? 'در حال تأیید…' : 'تأیید و بازکردن ترمینال روت'}</Button></div>
       </DialogContent>
     </Dialog>
   </>

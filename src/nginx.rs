@@ -92,7 +92,9 @@ async fn nginx_manager_request_async(request: Value) -> Result<Value, (StatusCod
     } else {
         Err(error(
             StatusCode::BAD_REQUEST,
-            response["error"].as_str().unwrap_or("Nginx operation failed"),
+            response["error"]
+                .as_str()
+                .unwrap_or("Nginx operation failed"),
         ))
     }
 }
@@ -143,11 +145,15 @@ pub(super) async fn nginx_sites(State(state): State<AppState>, headers: HeaderMa
                 // The helper already hashes every config during listing. Read
                 // the full file only for a new or changed site.
                 let listed_hash = site["content_hash"].as_str();
-                if snapshot.as_ref().is_some_and(|(hash, _)| Some(hash.as_str()) == listed_hash) {
+                if snapshot
+                    .as_ref()
+                    .is_some_and(|(hash, _)| Some(hash.as_str()) == listed_hash)
+                {
                     site["sync_mismatch"] = json!(false);
                     continue;
                 }
-                let current = nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await?;
+                let current =
+                    nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await?;
                 let content = nginx_site_content(&current)?;
                 let file_hash = nginx_content_hash(content);
                 if let Some((hash, db_content)) = snapshot {
@@ -173,7 +179,9 @@ pub(super) async fn nginx_status(State(state): State<AppState>, headers: HeaderM
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
     }
-    nginx_manager_request_async(json!({"action":"nginx-status"})).await.map(Json)
+    nginx_manager_request_async(json!({"action":"nginx-status"}))
+        .await
+        .map(Json)
 }
 
 pub(super) async fn api_nginx_browse_files(
@@ -376,7 +384,9 @@ pub(super) async fn api_nginx_site_traffic(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    Ok(Json(nginx_manager_request_async(json!({"action":"nginx-site-traffic", "name":name})).await?))
+    Ok(Json(
+        nginx_manager_request_async(json!({"action":"nginx-site-traffic", "name":name})).await?,
+    ))
 }
 
 pub(super) async fn api_nginx_site_repository(
@@ -391,7 +401,9 @@ pub(super) async fn api_nginx_site_repository(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    Ok(Json(nginx_manager_request_async(json!({"action":"nginx-site-repository", "name":name})).await?))
+    Ok(Json(
+        nginx_manager_request_async(json!({"action":"nginx-site-repository", "name":name})).await?,
+    ))
 }
 
 pub(super) async fn check_nginx_domains(
@@ -1320,27 +1332,59 @@ fn nginx_rename_site(name: &str, new_name: &str) -> Result<Value, String> {
 fn nginx_site_repository(name: &str) -> Result<Value, String> {
     let (available, _) = nginx_site_paths(name)?;
     let config = fs::read_to_string(available).map_err(|_| "فایل سایت پیدا نشد.")?;
-    let root = config.lines().filter_map(|line| {
-        let mut words = line.trim().trim_end_matches(';').split_whitespace();
-        (words.next()? == "root").then(|| words.next().unwrap_or("").trim_matches('"').to_owned())
-    }).find(|path| path.starts_with('/')).ok_or("برای این سایت root تعریف نشده است.")?;
+    let root = config
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.trim().trim_end_matches(';').split_whitespace();
+            (words.next()? == "root")
+                .then(|| words.next().unwrap_or("").trim_matches('"').to_owned())
+        })
+        .find(|path| path.starts_with('/'))
+        .ok_or("برای این سایت root تعریف نشده است.")?;
     let root = fs::canonicalize(root).map_err(|_| "ریشهٔ سایت روی دیسک پیدا نشد.")?;
-    let repo = if root.join(".git").exists() { root.clone() }
-        else if root.file_name().is_some_and(|name| name == "public") && root.parent().is_some_and(|parent| parent.join(".git").exists()) {
-            root.parent().unwrap().to_path_buf()
-        } else { return Ok(json!({"available":false,"message":"در ریشهٔ سایت یا پوشهٔ والد public مخزن Git پیدا نشد."})); };
+    let repo = if root.join(".git").exists() {
+        root.clone()
+    } else if root.file_name().is_some_and(|name| name == "public")
+        && root
+            .parent()
+            .is_some_and(|parent| parent.join(".git").exists())
+    {
+        root.parent().unwrap().to_path_buf()
+    } else {
+        return Ok(
+            json!({"available":false,"message":"در ریشهٔ سایت یا پوشهٔ والد public مخزن Git پیدا نشد."}),
+        );
+    };
     if !repo.starts_with("/var/www/") && !repo.starts_with("/srv/") {
         return Err("برای بررسی مخزن، مسیر سایت باید زیر /var/www یا /srv باشد.".into());
     }
     let git = |args: &[&str]| -> Result<String, String> {
-        let output = std::process::Command::new("timeout").arg("8s").arg("git")
-            .args(["-c", &format!("safe.directory={}", repo.display()), "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"])
-            .arg("-C").arg(&repo).args(args)
+        let output = std::process::Command::new("timeout")
+            .arg("8s")
+            .arg("git")
+            .args([
+                "-c",
+                &format!("safe.directory={}", repo.display()),
+                "-c",
+                "protocol.file.allow=never",
+                "-c",
+                "protocol.ext.allow=never",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .output().map_err(|error| error.to_string())?;
-        if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()); }
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     };
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?;
@@ -1349,23 +1393,41 @@ fn nginx_site_repository(name: &str) -> Result<Value, String> {
     let origin = git(&["remote", "get-url", "origin"]).unwrap_or_default();
     // The remote is only queried for GitHub URLs. No credentials are passed.
     let remote_commit = if origin.starts_with("https://github.com/")
-        && origin["https://github.com/".len()..].chars().all(|ch| ch.is_ascii_alphanumeric() || "/._-".contains(ch)) {
-        git(&["ls-remote", &origin, &format!("refs/heads/{branch}")]).ok()
+        && origin["https://github.com/".len()..]
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "/._-".contains(ch))
+    {
+        git(&["ls-remote", &origin, &format!("refs/heads/{branch}")])
+            .ok()
             .and_then(|line| line.split_whitespace().next().map(str::to_owned))
-    } else { None };
-    let displayed_origin = if origin.contains('@') { "Private remote URL hidden" } else { &origin };
-    Ok(json!({"available":true,"path":repo,"branch":branch,"commit":commit,"changes":changes.lines().count(),"origin":displayed_origin,"remote_commit":remote_commit,"differs_from_remote":remote_commit.as_ref().is_some_and(|remote| remote != &commit)}))
+    } else {
+        None
+    };
+    let displayed_origin = if origin.contains('@') {
+        "Private remote URL hidden"
+    } else {
+        &origin
+    };
+    Ok(
+        json!({"available":true,"path":repo,"branch":branch,"commit":commit,"changes":changes.lines().count(),"origin":displayed_origin,"remote_commit":remote_commit,"differs_from_remote":remote_commit.as_ref().is_some_and(|remote| remote != &commit)}),
+    )
 }
 
 fn nginx_site_traffic(name: &str) -> Result<Value, String> {
     let (available, _) = nginx_site_paths(name)?;
     let config = fs::read_to_string(available).map_err(|_| "فایل سایت پیدا نشد.")?;
-    let configured = config.lines().filter_map(|line| {
-        let mut words = line.trim().trim_end_matches(';').split_whitespace();
-        (words.next()? == "access_log").then(|| words.next().unwrap_or("").trim_matches('"').to_owned())
-    }).find(|path| !path.is_empty() && path != "off");
+    let configured = config
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.trim().trim_end_matches(';').split_whitespace();
+            (words.next()? == "access_log")
+                .then(|| words.next().unwrap_or("").trim_matches('"').to_owned())
+        })
+        .find(|path| !path.is_empty() && path != "off");
     let Some(path) = configured else {
-        return Ok(json!({"available":false,"message":"برای آمار مستقل این سایت، مسیر اختصاصی access_log را در تنظیمات Nginx تعیین کن."}));
+        return Ok(
+            json!({"available":false,"message":"برای آمار مستقل این سایت، مسیر اختصاصی access_log را در تنظیمات Nginx تعیین کن."}),
+        );
     };
     if !path.starts_with("/var/log/nginx/") || path.contains('$') {
         return Err("مسیر access_log باید فایل ثابتی در /var/log/nginx باشد.".into());
@@ -1377,8 +1439,11 @@ fn nginx_site_traffic(name: &str) -> Result<Value, String> {
     }
     let output = std::process::Command::new("tail")
         .args(["-n", "5000", "--", resolved.to_string_lossy().as_ref()])
-        .output().map_err(|error| error.to_string())?;
-    if !output.status.success() { return Err("خواندن access_log ناموفق بود.".into()); }
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("خواندن access_log ناموفق بود.".into());
+    }
     let mut requests = 0_u64;
     let mut bytes = 0_u64;
     let mut statuses = [0_u64; 5];
@@ -1387,7 +1452,10 @@ fn nginx_site_traffic(name: &str) -> Result<Value, String> {
         // Combined log format: request is quoted; status and body bytes follow.
         if let Some(after_request) = line.split('"').nth(2) {
             let mut fields = after_request.split_whitespace();
-            if let (Some(status), Some(size)) = (fields.next().and_then(|v| v.parse::<usize>().ok()), fields.next()) {
+            if let (Some(status), Some(size)) = (
+                fields.next().and_then(|v| v.parse::<usize>().ok()),
+                fields.next(),
+            ) {
                 if (100..600).contains(&status) {
                     requests += 1;
                     statuses[status / 100 - 1] += 1;
@@ -1408,7 +1476,9 @@ fn nginx_site_traffic(name: &str) -> Result<Value, String> {
         }
     }
     let hourly = hourly.into_iter().rev().take(24).collect::<Vec<_>>().into_iter().rev().map(|(hour, requests, body_bytes)| json!({"hour":hour,"requests":requests,"body_bytes":body_bytes})).collect::<Vec<_>>();
-    Ok(json!({"available":true,"path":path,"sample_requests":requests,"sample_body_bytes":bytes,"status_groups":statuses,"sample_limit":5000,"hourly":hourly}))
+    Ok(
+        json!({"available":true,"path":path,"sample_requests":requests,"sample_body_bytes":bytes,"status_groups":statuses,"sample_limit":5000,"hourly":hourly}),
+    )
 }
 
 fn nginx_site_logs(name: &str, kind: &str) -> Result<Value, String> {

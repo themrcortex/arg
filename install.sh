@@ -662,18 +662,22 @@ change_account_password() {
 sync_ufw_rules() {
   has ufw || return 0
   ufw status 2>/dev/null | rg -q '^Status: active' || return 0
-  local port tls_bind tls_port rule_id
+  local port tls_bind tls_port tls_cert tls_key rule_id
   port="$(panel_port)"
+  tls_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  tls_cert="$(awk -F= '$1 == "ARG_TLS_CERT" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  tls_key="$(awk -F= '$1 == "ARG_TLS_KEY" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  tls_port="${tls_bind##*:}"
   while IFS= read -r rule_id; do
     [[ -n "$rule_id" ]] || continue
     ufw --force delete "$rule_id" >/dev/null 2>&1 || true
   done < <(ufw status numbered 2>/dev/null | awk '/# ARG panel|# ARG HTTPS challenge|# DONATELLO panel|# DONATELLO HTTPS challenge/ {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
-  ufw allow "$port/tcp" comment 'ARG panel' >/dev/null
-  if [[ -s "$DOMAIN_FILE" ]]; then
-    tls_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
-    tls_port="${tls_bind##*:}"
+  if [[ -s "$DOMAIN_FILE" && -s "$tls_cert" && -s "$tls_key" && -n "$tls_port" ]]; then
+    # HTTPS is the public entry point; leave the HTTP backend port closed in UFW.
     ufw allow 80/tcp comment 'ARG HTTPS challenge' >/dev/null
-    [[ -z "$tls_port" ]] || ufw allow "$tls_port/tcp" comment 'ARG HTTPS panel' >/dev/null
+    ufw allow "$tls_port/tcp" comment 'ARG HTTPS panel' >/dev/null
+  else
+    ufw allow "$port/tcp" comment 'ARG panel' >/dev/null
   fi
 }
 

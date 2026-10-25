@@ -1,6 +1,6 @@
-import { Box, Cpu, Files, Globe, LayoutDashboard, Network, Package, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, type LucideIcon } from 'lucide-react'
+import { Box, Cloud, Cpu, Files, Globe, LayoutDashboard, Network, Package, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, type LucideIcon } from 'lucide-react'
 
-export type PageId = 'dashboard' | 'system' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account'
+export type PageId = 'dashboard' | 'system' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account'
 export type NavigationItem = { id: PageId; label: string; icon: LucideIcon; admin?: boolean }
 
 export const navigation: NavigationItem[] = [
@@ -12,6 +12,7 @@ export const navigation: NavigationItem[] = [
   { id: 'nginx', label: 'سایت‌های Nginx', icon: Globe, admin: true },
   { id: 'docker', label: 'مدیریت Docker', icon: Box, admin: true },
   { id: 'files', label: 'فایل‌های سرور', icon: Files, admin: true },
+  { id: 's3', label: 'فضای ابری S3', icon: Cloud, admin: true },
   { id: 'terminal', label: 'ترمینال سرور', icon: Terminal, admin: true },
   { id: 'packages', label: 'مدیریت APT', icon: Package, admin: true },
   { id: 'services', label: 'سرویس‌های سیستم', icon: ServerCog, admin: true },

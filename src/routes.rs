@@ -18,7 +18,50 @@ pub(super) fn router(state: AppState) -> Router {
             post(revoke_other_account_sessions),
         )
         .route("/api/terminal", get(terminal_socket))
+        .route(
+            "/api/terminal/root/authorize",
+            post(authorize_root_terminal),
+        )
         .route("/api/dashboard", get(dashboard))
+        .route("/api/storage/volumes", get(storage_volumes))
+        .route("/api/s3/providers", get(s3::list_providers))
+        .route("/api/s3/summary", get(s3::summary))
+        .route(
+            "/api/s3/connections",
+            get(s3::list_connections).post(s3::create_connection),
+        )
+        .route(
+            "/api/s3/connections/{id}",
+            get(s3::get_connection)
+                .put(s3::update_connection)
+                .delete(s3::delete_connection),
+        )
+        .route("/api/s3/connections/{id}/test", post(s3::test_connection))
+        .route(
+            "/api/s3/connections/{id}/buckets",
+            get(s3::list_buckets).post(s3::attach_bucket),
+        )
+        .route(
+            "/api/s3/connections/{id}/buckets/create",
+            post(s3::create_bucket),
+        )
+        .route("/api/s3/connections/{id}/objects", get(s3::list_objects))
+        .route(
+            "/api/s3/connections/{id}/objects/delete",
+            post(s3::delete_object),
+        )
+        .route(
+            "/api/s3/connections/{id}/objects/upload",
+            post(s3::upload_object).layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
+        .route(
+            "/api/s3/connections/{id}/objects/download",
+            get(s3::download_object),
+        )
+        .route(
+            "/api/s3/buckets/{id}",
+            axum::routing::delete(s3::detach_bucket),
+        )
         .route("/api/history", get(history))
         .route("/api/network/traffic", get(network_traffic_volume))
         .route(

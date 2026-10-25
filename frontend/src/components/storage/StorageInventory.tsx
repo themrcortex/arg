@@ -1,0 +1,59 @@
+import { useState } from 'react'
+import { Cloud, HardDrive, RefreshCw, Server } from 'lucide-react'
+import { Badge } from '../ui/badge'
+import { Button } from '../ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/card'
+import { formatBytes, formatNumber, type StorageInventory, type StorageVolume } from '../../lib/api'
+
+const kindLabels: Record<StorageVolume['kind'], string> = { local: 'دیسک محلی', cloud: 'فضای ابری', remote: 'فایل‌سیستم شبکه', virtual: 'مجازی / سیستمی' }
+
+function jumpToStorage() {
+  window.location.hash = '/system'
+  window.setTimeout(() => document.getElementById('storage-inventory')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 350)
+}
+
+export function StorageOverviewKpi({ inventory, rootTotalBytes, rootFreeBytes }: { inventory?: StorageInventory; rootTotalBytes?: number; rootFreeBytes?: number }) {
+  const local = inventory?.local
+  const root = inventory?.volumes.find((volume) => volume.mount_point === '/' && volume.kind === 'local')
+  const total = local?.aggregation_reliable && local.total_bytes > 0 ? local.total_bytes : root?.total_bytes || rootTotalBytes
+  const used = local?.aggregation_reliable && local.total_bytes > 0 ? local.used_bytes : root?.used_bytes ?? (typeof rootTotalBytes === 'number' && typeof rootFreeBytes === 'number' ? Math.max(0, rootTotalBytes - rootFreeBytes) : undefined)
+  const percent = typeof total === 'number' && total > 0 && typeof used === 'number' ? Math.min(100, used / total * 100) : null
+  const important = inventory?.volumes.filter((volume) => volume.kind === 'local' && volume.total_bytes && volume.total_bytes > 0).slice(0, 2) || []
+  return <section className="arg-kpi-card min-w-0 rounded-[14px] border border-border p-4" aria-label="فضای ذخیره‌سازی VPS">
+    <div className="flex items-start justify-between gap-2"><div><p className="text-xs text-muted-foreground">فضای ذخیره‌سازی VPS</p><p className="mt-2 font-mono text-2xl font-semibold tabular-nums text-foreground" dir="ltr">{percent === null ? '—' : `${formatNumber(Math.round(percent * 10) / 10)}%`}</p></div><HardDrive size={19} className="text-primary" aria-hidden="true"/></div>
+    <p className="mt-1 text-xs text-muted-foreground">{typeof total === 'number' && typeof used === 'number' ? `${formatBytes(used)} مصرف از ${formatBytes(total)}${local?.aggregation_reliable ? ' در دیسک‌های محلی' : ' در /'}` : 'اندازه‌گیری فضای دیسک در دسترس نیست'}</p>
+    {percent !== null && <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary" role="progressbar" aria-label="درصد مصرف فضای ذخیره‌سازی" aria-valuenow={Math.round(percent)} aria-valuemin={0} aria-valuemax={100}><div className="h-full rounded-full bg-primary transition-[width]" style={{ width: `${percent}%` }}/></div>}
+    <div className="mt-3 space-y-1.5">{important.map((volume) => <div key={volume.id} className="flex min-w-0 items-center justify-between gap-2 text-[10px] text-muted-foreground"><span className="truncate font-mono" dir="ltr">{volume.mount_point}</span><span className="shrink-0 font-mono tabular-nums" dir="ltr">{volume.use_percent === null ? '—' : `${formatNumber(Math.round(volume.use_percent))}%`}</span></div>)}</div>
+    <Button type="button" variant="link" className="mt-1 h-7 px-0 text-xs" onClick={jumpToStorage}>مشاهدهٔ همهٔ فضاها</Button>
+  </section>
+}
+
+export function S3OverviewKpi({ summary }: { summary: { connections: number; healthy_connections: number; contracts_due_soon: number; usage_bytes: number | null; quota_bytes: number | null } | null }) {
+  return <button type="button" onClick={() => { window.location.hash = '/s3' }} className="arg-kpi-card min-w-0 rounded-[14px] border border-border p-4 text-right transition-colors hover:border-primary/35" aria-label="مدیریت فضای ابری S3">
+    <div className="flex items-start justify-between gap-2"><div><p className="text-xs text-muted-foreground">فضای ابری S3</p><p className="mt-2 font-mono text-2xl font-semibold tabular-nums text-foreground" dir="ltr">{summary ? `${formatNumber(summary.healthy_connections)} / ${formatNumber(summary.connections)}` : '—'}</p></div><Cloud size={19} className="text-primary" aria-hidden="true"/></div>
+    <p className="mt-1 text-xs text-muted-foreground">اتصال سالم از کل اتصال‌ها</p>
+    <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted-foreground"><span>مصرف: {summary?.usage_bytes == null ? 'اندازه‌گیری نشده' : formatBytes(summary.usage_bytes)}</span><span>تمدید نزدیک: {summary ? formatNumber(summary.contracts_due_soon) : '—'}</span></div>
+    {summary?.quota_bytes != null && summary.quota_bytes > 0 && summary.usage_bytes != null && <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary" role="progressbar" aria-label="مصرف گزارش‌شدهٔ سهمیهٔ ابری" aria-valuenow={Math.round(Math.min(100, summary.usage_bytes / summary.quota_bytes * 100))} aria-valuemin={0} aria-valuemax={100}><div className="h-full rounded-full bg-primary" style={{ width: `${Math.min(100, summary.usage_bytes / summary.quota_bytes * 100)}%` }}/></div>}
+    <span className="mt-2 block text-xs font-medium text-primary">مدیریت S3</span>
+  </button>
+}
+
+
+export function StorageInventorySection({ inventory, loading = false, onRefresh }: { inventory?: StorageInventory; loading?: boolean; onRefresh?: () => void }) {
+  const [kind, setKind] = useState<'all' | StorageVolume['kind']>('all')
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const volumes = (inventory?.volumes || []).filter((volume) => kind === 'all' || volume.kind === kind)
+  return <Card id="storage-inventory" className="scroll-mt-5 overflow-hidden rounded-[14px] border-border bg-card/80">
+    <CardHeader className="flex-row flex-wrap items-start justify-between gap-3 space-y-0 p-4 sm:p-5">
+      <div className="flex items-start gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-primary/15 bg-primary/[.07] text-primary"><Server size={18}/></span><div><CardTitle className="text-base">دیسک‌ها و Mount Pointها</CardTitle><CardDescription className="mt-1">فضای محلی، شبکه‌ای، ابری و مجازی جدا گزارش می‌شود؛ ظرفیت نامعلوم به‌شکل خط تیره می‌ماند.</CardDescription></div></div>
+      <div className="flex items-center gap-2"><label className="sr-only" htmlFor="storage-kind-filter">نوع فضا</label><select id="storage-kind-filter" className="h-9 rounded-lg border border-border bg-background px-2 text-xs text-foreground" value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="all">همهٔ فضاها</option><option value="local">محلی</option><option value="cloud">ابری</option><option value="remote">شبکه‌ای</option><option value="virtual">مجازی / سیستمی</option></select>{onRefresh && <Button size="icon" variant="outline" aria-label="تازه‌سازی فضاها" onClick={onRefresh}><RefreshCw size={14}/></Button>}</div>
+    </CardHeader>
+    <CardContent className="p-0">
+      {loading ? <div className="space-y-2 p-4" aria-label="در حال بارگذاری Mountها">{[0,1,2].map((item) => <div key={item} className="h-16 animate-pulse rounded-lg bg-secondary/60"/> )}</div> : !inventory ? <p className="p-8 text-center text-sm text-muted-foreground">اطلاعات Mountها در دسترس نیست. برای دریافت دوباره صفحه را تازه‌سازی کن.</p> : volumes.length === 0 ? <p className="p-8 text-center text-sm text-muted-foreground">فضایی در این فیلتر پیدا نشد.</p> : <>
+        <div className="hidden overflow-x-auto md:block"><table className="w-full min-w-[760px] text-right text-xs"><thead className="border-y border-border bg-background/40 text-muted-foreground"><tr><th className="px-4 py-3 font-medium">Mount Point</th><th className="px-4 py-3 font-medium">دستگاه</th><th className="px-4 py-3 font-medium">نوع</th><th className="px-4 py-3 font-medium">مصرف‌شده / کل</th><th className="px-4 py-3 font-medium">آزاد</th><th className="px-4 py-3 font-medium">مصرف</th><th className="px-4 py-3 font-medium">وضعیت</th></tr></thead><tbody>{volumes.map((volume) => <tr key={volume.id} className="border-b border-border/70 last:border-0"><td className="px-4 py-3"><button type="button" className="font-mono text-foreground underline-offset-4 hover:underline" dir="ltr" onClick={() => setExpanded(expanded === volume.id ? null : volume.id)} aria-expanded={expanded === volume.id}>{volume.mount_point}</button></td><td className="px-4 py-3 font-mono text-muted-foreground" dir="ltr">{volume.device}</td><td className="px-4 py-3"><Badge variant="outline">{kindLabels[volume.kind]} · {volume.filesystem}</Badge></td><td className="px-4 py-3 font-mono tabular-nums" dir="ltr">{volume.used_bytes === null || volume.total_bytes === null ? 'نامشخص' : `${formatBytes(volume.used_bytes)} / ${formatBytes(volume.total_bytes)}`}</td><td className="px-4 py-3 font-mono tabular-nums" dir="ltr">{volume.available_bytes === null ? '—' : formatBytes(volume.available_bytes)}</td><td className="px-4 py-3 font-mono tabular-nums" dir="ltr">{volume.use_percent === null ? '—' : `${formatNumber(Math.round(volume.use_percent * 10) / 10)}%`}</td><td className="px-4 py-3"><Badge variant={volume.mount_status === 'mounted' ? 'success' : 'outline'}>{volume.mount_status === 'mounted' ? volume.read_only ? 'Mounted · فقط‌خواندنی' : 'Mounted' : 'نامشخص'}</Badge></td></tr>)}</tbody></table></div>
+        <div className="divide-y divide-border md:hidden">{volumes.map((volume) => <button type="button" key={volume.id} className="block w-full p-4 text-right" onClick={() => setExpanded(expanded === volume.id ? null : volume.id)} aria-expanded={expanded === volume.id}><div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate font-mono text-sm text-foreground" dir="ltr">{volume.mount_point}</span><Badge variant="outline">{kindLabels[volume.kind]}</Badge></div><p className="mt-2 truncate text-[11px] text-muted-foreground" dir="ltr">{volume.device} · {volume.filesystem}</p><div className="mt-3 flex items-center justify-between gap-3 text-xs"><span className="font-mono tabular-nums" dir="ltr">{volume.used_bytes === null || volume.total_bytes === null ? 'نامشخص' : `${formatBytes(volume.used_bytes)} / ${formatBytes(volume.total_bytes)}`}</span><span className="font-mono text-muted-foreground" dir="ltr">{volume.use_percent === null ? '—' : `${formatNumber(Math.round(volume.use_percent))}%`}</span></div></button>)}</div>
+        {expanded && (() => { const volume = volumes.find((item) => item.id === expanded); return volume ? <div className="border-t border-border bg-background/40 p-4 text-xs"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><div><span className="text-muted-foreground">Device ID</span><p className="mt-1 font-mono" dir="ltr">{volume.device_id}</p></div><div><span className="text-muted-foreground">Reserved / unavailable</span><p className="mt-1 font-mono" dir="ltr">{volume.reserved_bytes === null ? '—' : formatBytes(volume.reserved_bytes)}</p></div><div><span className="text-muted-foreground">آخرین اندازه‌گیری</span><p className="mt-1 font-mono" dir="ltr">{volume.measured_at ? new Date(volume.measured_at * 1000).toISOString() : 'اندازه‌گیری نشده'}</p></div><div><span className="text-muted-foreground">وضعیت Mount</span><p className="mt-1">{volume.error || (volume.read_only ? 'فقط‌خواندنی' : 'قابل نوشتن')}</p></div></div>{inventory.local.aggregation_reliable === false && <p className="mt-3 text-amber-200">جمع فضای محلی به‌دلیل ناموفق‌بودن اندازه‌گیری حداقل یک فایل‌سیستم کامل نیست.</p>}</div> : null })()}
+      </>}
+    </CardContent>
+  </Card>
+}

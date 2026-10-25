@@ -18,6 +18,31 @@ export type Interface = {
   addresses?: string[]
 }
 export type Port = { port: number; protocol: string; ipv6: boolean }
+export type StorageVolume = {
+  id: string
+  device: string
+  device_id: string
+  mount_point: string
+  filesystem: string
+  kind: 'local' | 'cloud' | 'remote' | 'virtual'
+  total_bytes: number | null
+  used_bytes: number | null
+  available_bytes: number | null
+  reserved_bytes: number | null
+  use_percent: number | null
+  read_only: boolean
+  mount_status: 'mounted' | 'unknown'
+  is_remote: boolean
+  is_virtual: boolean
+  is_cloud: boolean
+  measured_at: number | null
+  error: string | null
+}
+export type StorageInventory = {
+  volumes: StorageVolume[]
+  local: { total_bytes: number; used_bytes: number; available_bytes: number; reserved_bytes: number; aggregation_reliable: boolean; aggregation_basis: string }
+  measured_at: number
+}
 export type Dashboard = {
   hostname: string
   uptime_seconds: number
@@ -42,6 +67,7 @@ export type Dashboard = {
   process_cpu_percent: number
   disk_total_bytes?: number
   disk_free_bytes?: number
+  storage?: StorageInventory
   interfaces: Interface[]
   ports: Port[]
 }

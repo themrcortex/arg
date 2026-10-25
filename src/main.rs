@@ -3,16 +3,20 @@ use argon2::{
     Argon2,
 };
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, ConnectInfo, Path, Query, State},
+    extract::Request,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        ConnectInfo, Path, Query, State,
+    },
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
-    extract::Request, Json, Router,
+    Json, Router,
 };
-use rand::RngCore;
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -20,7 +24,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::os::unix::{fs::{FileTypeExt, MetadataExt, PermissionsExt}, io::AsRawFd, process::CommandExt};
+use std::os::unix::{
+    fs::{FileTypeExt, MetadataExt, PermissionsExt},
+    io::AsRawFd,
+    process::CommandExt,
+};
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
@@ -48,6 +56,8 @@ mod files;
 mod metrics;
 mod nginx;
 mod routes;
+mod s3;
+mod storage_mounts;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist/"]
@@ -108,7 +118,11 @@ fn update_started_at() -> Option<i64> {
     (now().saturating_sub(started) <= 21600).then_some(started)
 }
 
-fn update_progress_payload(raw: Option<&str>, marker_started: Option<i64>, instance: &str) -> Value {
+fn update_progress_payload(
+    raw: Option<&str>,
+    marker_started: Option<i64>,
+    instance: &str,
+) -> Value {
     let mut job = raw.and_then(|text| serde_json::from_str::<Value>(text).ok())
         .unwrap_or_else(|| json!({"state":if marker_started.is_some() {"running"} else {"idle"},"phase":"unknown","started_at":marker_started,"job_id":null,"message":""}));
     let state_running = job["state"].as_str() == Some("running");
@@ -120,15 +134,19 @@ fn update_progress_payload(raw: Option<&str>, marker_started: Option<i64>, insta
     job["updating"] = json!(marker_started.is_some() && state_running);
     job["instance"] = json!(instance);
     if job["started_at"].is_null() {
-        if let Some(started) = marker_started { job["started_at"] = json!(started); }
+        if let Some(started) = marker_started {
+            job["started_at"] = json!(started);
+        }
     }
     job
 }
 
 fn ensure_sessions_metadata(db: &Connection) -> Result<(), rusqlite::Error> {
     let mut statement = db.prepare("PRAGMA table_info(sessions)")?;
-    let existing: Vec<String> = statement.query_map([], |row| row.get(1))?
-        .filter_map(Result::ok).collect();
+    let existing: Vec<String> = statement
+        .query_map([], |row| row.get(1))?
+        .filter_map(Result::ok)
+        .collect();
     drop(statement);
     for (name, definition) in [
         ("created_at", "INTEGER"),
@@ -137,7 +155,9 @@ fn ensure_sessions_metadata(db: &Connection) -> Result<(), rusqlite::Error> {
         ("user_agent", "TEXT"),
     ] {
         if !existing.iter().any(|column| column == name) {
-            db.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {name} {definition}"))?;
+            db.execute_batch(&format!(
+                "ALTER TABLE sessions ADD COLUMN {name} {definition}"
+            ))?;
         }
     }
     Ok(())
@@ -146,8 +166,14 @@ fn ensure_sessions_metadata(db: &Connection) -> Result<(), rusqlite::Error> {
 async fn update_guard(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path();
-    let exempt = matches!(path, "/api/update" | "/api/update/progress" | "/api/state" | "/api/logout" | "/api/login");
-    let writes_api = method != axum::http::Method::GET && method != axum::http::Method::HEAD && path.starts_with("/api/") && !exempt;
+    let exempt = matches!(
+        path,
+        "/api/update" | "/api/update/progress" | "/api/state" | "/api/logout" | "/api/login"
+    );
+    let writes_api = method != axum::http::Method::GET
+        && method != axum::http::Method::HEAD
+        && path.starts_with("/api/")
+        && !exempt;
     let opens_terminal = path == "/api/terminal";
     if writes_api || opens_terminal {
         let _operation = UPDATE_OPERATION_GATE.read().await;
@@ -167,16 +193,38 @@ fn token() -> String {
     hex::encode(bytes)
 }
 fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    cookie_named(headers, "arg_session")
+}
+fn cookie_named(headers: &HeaderMap, name: &str) -> Option<String> {
     headers
         .get(header::COOKIE)?
         .to_str()
         .ok()?
         .split(';')
         .find_map(|part| {
-            part.trim()
-                .strip_prefix("arg_session=")
-                .map(str::to_owned)
+            let (key, value) = part.trim().split_once('=')?;
+            (key == name).then(|| value.to_owned())
         })
+}
+fn consume_root_terminal_ticket(
+    db: &Connection,
+    ticket: &str,
+    user_id: i64,
+    login_session: &str,
+) -> bool {
+    let hash = session_hash(ticket);
+    let valid = db.query_row(
+        "SELECT 1 FROM root_terminal_tickets WHERE token_hash=?1 AND user_id=?2 AND session_hash=?3 AND expires_at>?4",
+        params![hash, user_id, login_session, now()],
+        |_| Ok(()),
+    ).is_ok();
+    valid
+        && db
+            .execute(
+                "DELETE FROM root_terminal_tickets WHERE token_hash=?1",
+                [hash],
+            )
+            .is_ok()
 }
 fn require_user(db: &Connection, headers: &HeaderMap) -> Result<User, (StatusCode, Json<Value>)> {
     let raw =
@@ -372,8 +420,16 @@ async fn login(
     let raw = token();
     let session_seconds = setting_u64(&db, "session_hours", 24).clamp(1, 72) as i64 * 3600;
     let created_at = now();
-    let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok())
-        .map(|value| value.chars().filter(|ch| !ch.is_control()).take(256).collect::<String>());
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(256)
+                .collect::<String>()
+        });
     db.execute(
         "INSERT INTO sessions (token_hash,user_id,expires_at,created_at,last_seen,remote_ip,user_agent) VALUES (?1,?2,?3,?4,?4,?5,?6)",
         params![session_hash(&raw), id, created_at + session_seconds, created_at, remote.ip().to_string(), user_agent],
@@ -462,21 +518,54 @@ async fn change_username(
     Json(input): Json<UsernameChange>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    if input.username.len() < 3 || input.username.len() > 32
-        || !input.username.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
-        return Err(error(StatusCode::BAD_REQUEST, "Username must be 3-32 ASCII letters, digits, '_' or '-'"));
+    if input.username.len() < 3
+        || input.username.len() > 32
+        || !input
+            .username
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Username must be 3-32 ASCII letters, digits, '_' or '-'",
+        ));
     }
     let db = state.lock().unwrap();
     let user = require_user(&db, &headers)?;
-    let hash: String = db.query_row("SELECT password_hash FROM users WHERE id=?1", [user.id], |row| row.get(0)).map_err(db_error)?;
-    let parsed = PasswordHash::new(&hash).map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Invalid stored password hash"))?;
-    if Argon2::default().verify_password(input.current_password.as_bytes(), &parsed).is_err() {
-        return Err(error(StatusCode::UNAUTHORIZED, "Current password is incorrect"));
+    let hash: String = db
+        .query_row(
+            "SELECT password_hash FROM users WHERE id=?1",
+            [user.id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let parsed = PasswordHash::new(&hash).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Invalid stored password hash",
+        )
+    })?;
+    if Argon2::default()
+        .verify_password(input.current_password.as_bytes(), &parsed)
+        .is_err()
+    {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "Current password is incorrect",
+        ));
     }
-    match db.execute("UPDATE users SET username=?1 WHERE id=?2", params![input.username, user.id]) {
-        Ok(_) => {},
-        Err(rusqlite::Error::SqliteFailure(ref code, _)) if code.code == rusqlite::ErrorCode::ConstraintViolation => {
-            return Err(error(StatusCode::CONFLICT, "That username is already in use"));
+    match db.execute(
+        "UPDATE users SET username=?1 WHERE id=?2",
+        params![input.username, user.id],
+    ) {
+        Ok(_) => {}
+        Err(rusqlite::Error::SqliteFailure(ref code, _))
+            if code.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "That username is already in use",
+            ));
         }
         Err(_) => return Err(db_error(rusqlite::Error::InvalidQuery)),
     }
@@ -487,7 +576,9 @@ async fn change_username(
 async fn list_account_sessions(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     let user = require_user(&db, &headers)?;
-    let current_hash = cookie_token(&headers).map(|raw| session_hash(&raw)).unwrap_or_default();
+    let current_hash = cookie_token(&headers)
+        .map(|raw| session_hash(&raw))
+        .unwrap_or_default();
     let mut statement = db.prepare("SELECT rowid,created_at,last_seen,expires_at,remote_ip,user_agent,token_hash FROM sessions WHERE user_id=?1 AND expires_at>?2 ORDER BY (token_hash=?3) DESC, COALESCE(last_seen,created_at,0) DESC").map_err(db_error)?;
     let rows = statement.query_map(params![user.id, now(), current_hash], |row| Ok(json!({
         "id":row.get::<_,i64>(0)?,"created_at":row.get::<_,Option<i64>>(1)?,"last_seen":row.get::<_,Option<i64>>(2)?,
@@ -498,26 +589,70 @@ async fn list_account_sessions(State(state): State<AppState>, headers: HeaderMap
     Ok(Json(json!({"sessions":sessions})))
 }
 
-async fn revoke_account_session(State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult {
+async fn revoke_account_session(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: HeaderMap,
+) -> ApiResult {
     check_origin(&headers)?;
     let db = state.lock().unwrap();
     let user = require_user(&db, &headers)?;
-    let current_hash = cookie_token(&headers).map(|raw| session_hash(&raw)).unwrap_or_default();
-    let target_hash: Option<String> = db.query_row("SELECT token_hash FROM sessions WHERE rowid=?1 AND user_id=?2", params![id, user.id], |row| row.get(0)).optional().map_err(db_error)?;
-    let Some(target_hash) = target_hash else { return Err(error(StatusCode::NOT_FOUND, "Session not found")); };
-    if target_hash == current_hash { return Err(error(StatusCode::BAD_REQUEST, "Use sign out to close the current session")); }
-    db.execute("DELETE FROM sessions WHERE rowid=?1 AND user_id=?2", params![id, user.id]).map_err(db_error)?;
-    audit(&db, &user.username, "account.session.revoke", "Another account session was revoked");
+    let current_hash = cookie_token(&headers)
+        .map(|raw| session_hash(&raw))
+        .unwrap_or_default();
+    let target_hash: Option<String> = db
+        .query_row(
+            "SELECT token_hash FROM sessions WHERE rowid=?1 AND user_id=?2",
+            params![id, user.id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let Some(target_hash) = target_hash else {
+        return Err(error(StatusCode::NOT_FOUND, "Session not found"));
+    };
+    if target_hash == current_hash {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Use sign out to close the current session",
+        ));
+    }
+    db.execute(
+        "DELETE FROM sessions WHERE rowid=?1 AND user_id=?2",
+        params![id, user.id],
+    )
+    .map_err(db_error)?;
+    audit(
+        &db,
+        &user.username,
+        "account.session.revoke",
+        "Another account session was revoked",
+    );
     Ok(Json(json!({"ok":true})))
 }
 
-async fn revoke_other_account_sessions(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+async fn revoke_other_account_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult {
     check_origin(&headers)?;
     let db = state.lock().unwrap();
     let user = require_user(&db, &headers)?;
-    let current_hash = cookie_token(&headers).map(|raw| session_hash(&raw)).unwrap_or_default();
-    let removed = db.execute("DELETE FROM sessions WHERE user_id=?1 AND token_hash<>?2", params![user.id, current_hash]).map_err(db_error)?;
-    audit(&db, &user.username, "account.sessions.revoke_others", "Other account sessions were revoked");
+    let current_hash = cookie_token(&headers)
+        .map(|raw| session_hash(&raw))
+        .unwrap_or_default();
+    let removed = db
+        .execute(
+            "DELETE FROM sessions WHERE user_id=?1 AND token_hash<>?2",
+            params![user.id, current_hash],
+        )
+        .map_err(db_error)?;
+    audit(
+        &db,
+        &user.username,
+        "account.sessions.revoke_others",
+        "Other account sessions were revoked",
+    );
     Ok(Json(json!({"ok":true,"revoked":removed})))
 }
 
@@ -662,7 +797,11 @@ async fn put_monitoring_config(
         [now() - (input.retention_days * 86400) as i64],
     )
     .map_err(db_error)?;
-    db.execute("DELETE FROM network_traffic_hourly WHERE hour_start<?1", [now() - (input.retention_days * 86400) as i64]).map_err(db_error)?;
+    db.execute(
+        "DELETE FROM network_traffic_hourly WHERE hour_start<?1",
+        [now() - (input.retention_days * 86400) as i64],
+    )
+    .map_err(db_error)?;
     audit(
         &db,
         &actor.username,
@@ -819,14 +958,25 @@ async fn collect_metrics(state: AppState) {
         let current_network = metrics::network_totals();
         let current_traffic = metrics::network_interface_counters();
         let traffic_from = previous_traffic_at;
-        let traffic_gap_is_reliable = at > traffic_from && at - traffic_from <= (interval_seconds as i64 * 2 + 2);
+        let traffic_gap_is_reliable =
+            at > traffic_from && at - traffic_from <= (interval_seconds as i64 * 2 + 2);
         let mut traffic_rows = Vec::new();
         if traffic_gap_is_reliable {
             for (name, (rx, tx, eligible)) in &current_traffic {
                 if let Some((previous_rx, previous_tx, _)) = previous_traffic.get(name) {
-                    let rx_delta = if rx >= previous_rx { rx - previous_rx } else { 0 };
-                    let tx_delta = if tx >= previous_tx { tx - previous_tx } else { 0 };
-                    for (hour, rx_bytes, tx_bytes) in metrics::split_traffic_delta(traffic_from, at, rx_delta, tx_delta) {
+                    let rx_delta = if rx >= previous_rx {
+                        rx - previous_rx
+                    } else {
+                        0
+                    };
+                    let tx_delta = if tx >= previous_tx {
+                        tx - previous_tx
+                    } else {
+                        0
+                    };
+                    for (hour, rx_bytes, tx_bytes) in
+                        metrics::split_traffic_delta(traffic_from, at, rx_delta, tx_delta)
+                    {
                         traffic_rows.push((hour, name.clone(), rx_bytes, tx_bytes, *eligible));
                     }
                 }
@@ -876,7 +1026,10 @@ async fn collect_metrics(state: AppState) {
                         "DELETE FROM metric_samples WHERE at<?1",
                         [at - (retention_days * 86400) as i64],
                     );
-                    let _ = db.execute("DELETE FROM network_traffic_hourly WHERE hour_start<?1", [at - (retention_days * 86400) as i64]);
+                    let _ = db.execute(
+                        "DELETE FROM network_traffic_hourly WHERE hour_start<?1",
+                        [at - (retention_days * 86400) as i64],
+                    );
                 }
             }
         }
@@ -900,7 +1053,10 @@ async fn history(
         (Some(from), Some(to)) => {
             let span = to.saturating_sub(from);
             if from < 0 || to > current || from >= to || span > 366 * 86400 {
-                return Err(error(StatusCode::BAD_REQUEST, "بازهٔ دلخواه تاریخ معتبر نیست یا از 366 روز بیشتر است."));
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "بازهٔ دلخواه تاریخ معتبر نیست یا از 366 روز بیشتر است.",
+                ));
             }
             (from, to, ((span / 5 + 2499) / 2500).max(1) as usize)
         }
@@ -914,7 +1070,12 @@ async fn history(
             };
             (current - seconds, current, step)
         }
-        _ => return Err(error(StatusCode::BAD_REQUEST, "برای بازهٔ دلخواه، زمان شروع و پایان لازم است.")),
+        _ => {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "برای بازهٔ دلخواه، زمان شروع و پایان لازم است.",
+            ))
+        }
     };
     let mut stmt = db.prepare(
         "SELECT at,cpu,memory,disk,rx_rate,tx_rate FROM (SELECT at,cpu,memory,disk,rx_rate,tx_rate,ROW_NUMBER() OVER (ORDER BY at) AS sample_index FROM metric_samples WHERE at>=?1 AND at<=?2) WHERE (sample_index - 1) % ?3 = 0 ORDER BY at",
@@ -931,37 +1092,89 @@ async fn history(
 
 #[derive(Deserialize)]
 struct TrafficVolumeQuery {
-    #[serde(default)] range: Option<String>,
-    #[serde(default)] granularity: Option<String>,
-    #[serde(default)] from: Option<i64>,
-    #[serde(default)] to: Option<i64>,
-    #[serde(default)] interface: Option<String>,
+    #[serde(default)]
+    range: Option<String>,
+    #[serde(default)]
+    granularity: Option<String>,
+    #[serde(default)]
+    from: Option<i64>,
+    #[serde(default)]
+    to: Option<i64>,
+    #[serde(default)]
+    interface: Option<String>,
 }
 
-async fn network_traffic_volume(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<TrafficVolumeQuery>) -> ApiResult {
+async fn network_traffic_volume(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TrafficVolumeQuery>,
+) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
     let current = now();
     let range = query.range.as_deref().unwrap_or("24h");
     let (from, to) = if range == "custom" {
         match (query.from, query.to) {
-            (Some(from), Some(to)) if from >= 0 && from < to && to <= current && to - from <= 366 * 86400 => (from, to),
-            _ => return Err(error(StatusCode::BAD_REQUEST, "بازهٔ دلخواه ترافیک معتبر نیست یا از 366 روز بیشتر است.")),
+            (Some(from), Some(to))
+                if from >= 0 && from < to && to <= current && to - from <= 366 * 86400 =>
+            {
+                (from, to)
+            }
+            _ => {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "بازهٔ دلخواه ترافیک معتبر نیست یا از 366 روز بیشتر است.",
+                ))
+            }
         }
     } else {
-        let seconds = match range { "24h" => 86400, "7d" => 7 * 86400, "30d" => 30 * 86400, _ => return Err(error(StatusCode::BAD_REQUEST, "بازهٔ زمانی پشتیبانی نمی‌شود.")) };
+        let seconds = match range {
+            "24h" => 86400,
+            "7d" => 7 * 86400,
+            "30d" => 30 * 86400,
+            _ => {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "بازهٔ زمانی پشتیبانی نمی‌شود.",
+                ))
+            }
+        };
         (current - seconds, current)
     };
-    let granularity = query.granularity.as_deref().unwrap_or(if to - from <= 2 * 86400 { "hour" } else { "day" });
-    if !["hour", "day"].contains(&granularity) || (granularity == "hour" && to - from > 90 * 86400) {
-        return Err(error(StatusCode::BAD_REQUEST, "برای بازه‌های بیش از 90 روز از گروه‌بندی روزانه استفاده کن."));
+    let granularity = query
+        .granularity
+        .as_deref()
+        .unwrap_or(if to - from <= 2 * 86400 {
+            "hour"
+        } else {
+            "day"
+        });
+    if !["hour", "day"].contains(&granularity) || (granularity == "hour" && to - from > 90 * 86400)
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "برای بازه‌های بیش از 90 روز از گروه‌بندی روزانه استفاده کن.",
+        ));
     }
     let selected_interface = query.interface.clone().unwrap_or_else(|| "all".into());
-    let interface = if selected_interface == "all" { None } else { Some(selected_interface.clone()) };
-    if interface.as_ref().is_some_and(|name| name.len() > 32 || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))) {
+    let interface = if selected_interface == "all" {
+        None
+    } else {
+        Some(selected_interface.clone())
+    };
+    if interface.as_ref().is_some_and(|name| {
+        name.len() > 32
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+    }) {
         return Err(error(StatusCode::BAD_REQUEST, "نام کارت شبکه معتبر نیست."));
     }
-    let bucket_expr = if granularity == "hour" { "hour_start" } else { "(hour_start / 86400) * 86400" };
+    let bucket_expr = if granularity == "hour" {
+        "hour_start"
+    } else {
+        "(hour_start / 86400) * 86400"
+    };
     let sql = format!("SELECT {bucket_expr},SUM(rx_bytes),SUM(tx_bytes),COUNT(DISTINCT interface) FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND (?3 IS NULL OR interface=?3) AND (?4=0 OR eligible_for_total=1) GROUP BY 1 ORDER BY 1");
     let mut statement = db.prepare(&sql).map_err(db_error)?;
     let rows = statement.query_map(params![from, to, interface, if selected_interface == "all" {1} else {0}], |row| Ok(json!({"at":row.get::<_,i64>(0)?,"rx_bytes":row.get::<_,i64>(1)?.max(0),"tx_bytes":row.get::<_,i64>(2)?.max(0),"interfaces":row.get::<_,i64>(3)?}))).map_err(db_error)?;
@@ -973,11 +1186,114 @@ async fn network_traffic_volume(State(state): State<AppState>, headers: HeaderMa
         db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND eligible_for_total=1 ORDER BY interface").and_then(|mut statement| statement.query_map(params![from,to], |row| row.get::<_,String>(0)).map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())).unwrap_or_default()
     };
     let fresh_at = buckets.last().and_then(|bucket| bucket["at"].as_i64());
-    Ok(Json(json!({"from":from,"to":to,"granularity":granularity,"interface":selected_interface,"interfaces":interface_query,"buckets":buckets,"fresh_at":fresh_at,"enabled":setting_u64(&db,"history_enabled",1)==1,"timezone":panel_timezone(&db)})))
+    Ok(Json(
+        json!({"from":from,"to":to,"granularity":granularity,"interface":selected_interface,"interfaces":interface_query,"buckets":buckets,"fresh_at":fresh_at,"enabled":setting_u64(&db,"history_enabled",1)==1,"timezone":panel_timezone(&db)}),
+    ))
 }
 #[derive(Deserialize, Default)]
 struct TerminalQuery {
     mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RootTerminalAuthorization {
+    password: String,
+}
+
+async fn authorize_root_terminal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<RootTerminalAuthorization>,
+) -> Result<Response, (StatusCode, Json<Value>)> {
+    check_origin(&headers)?;
+    if input.password.is_empty() || input.password.len() > 1024 {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "Invalid administrator credentials",
+        ));
+    }
+    let (actor, ticket) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?;
+        let login_session = cookie_token(&headers)
+            .map(|value| session_hash(&value))
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Login required"))?;
+        let throttle_key = format!("root-terminal:{}", actor.id);
+        let attempts: (i64, i64) = db
+            .query_row(
+                "SELECT count,window_start FROM auth_failures WHERE username=?1",
+                [&throttle_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or((0, 0));
+        if attempts.0 >= 8 && now() - attempts.1 < 600 {
+            return Err(error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many Root Terminal password attempts. Try again later.",
+            ));
+        }
+        let password_hash: String = db
+            .query_row(
+                "SELECT password_hash FROM users WHERE id=?1 AND enabled=1",
+                [actor.id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        let parsed = PasswordHash::new(&password_hash).map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid stored password hash",
+            )
+        })?;
+        if Argon2::default()
+            .verify_password(input.password.as_bytes(), &parsed)
+            .is_err()
+        {
+            record_login_failure(&db, &throttle_key);
+            return Err(error(
+                StatusCode::UNAUTHORIZED,
+                "Administrator password is incorrect",
+            ));
+        }
+        let _ = db.execute(
+            "DELETE FROM auth_failures WHERE username=?1",
+            [&throttle_key],
+        );
+        let _ = db.execute(
+            "DELETE FROM root_terminal_tickets WHERE expires_at<=?1",
+            [now()],
+        );
+        let ticket = token();
+        db.execute(
+            "INSERT INTO root_terminal_tickets(token_hash,user_id,session_hash,expires_at) VALUES (?1,?2,?3,?4)",
+            params![session_hash(&ticket), actor.id, login_session, now() + 60],
+        ).map_err(db_error)?;
+        (actor, ticket)
+    };
+    let secure = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        == Some("https");
+    let mut cookie = format!(
+        "arg_root_ticket={ticket}; HttpOnly; SameSite=Strict; Path=/api/terminal; Max-Age=60"
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    let mut response = Json(json!({"authorized":true,"expires_in":60})).into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
+    {
+        let db = state.lock().unwrap();
+        audit(
+            &db,
+            &actor.username,
+            "terminal.root.authorize",
+            "fresh password verification",
+        );
+    }
+    Ok(response)
 }
 
 async fn terminal_socket(
@@ -1017,10 +1333,34 @@ async fn terminal_socket(
         let db = state.lock().unwrap();
         let actor = match require_admin(&db, &headers) {
             Ok(actor) => actor,
-            Err(_) => return (StatusCode::FORBIDDEN, "Administrator access required").into_response(),
+            Err(_) => {
+                return (StatusCode::FORBIDDEN, "Administrator access required").into_response()
+            }
         };
         if root_mode {
-            audit(&db, &actor.username, "terminal.root.open", "web root terminal opened");
+            let Some(ticket) = cookie_named(&headers, "arg_root_ticket") else {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "Re-enter the administrator password to open Root Terminal",
+                )
+                    .into_response();
+            };
+            let login_session = cookie_token(&headers)
+                .map(|value| session_hash(&value))
+                .unwrap_or_default();
+            if !consume_root_terminal_ticket(&db, &ticket, actor.id, &login_session) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "Root Terminal authorization expired; verify your password again",
+                )
+                    .into_response();
+            }
+            audit(
+                &db,
+                &actor.username,
+                "terminal.root.open",
+                "one-time reauthenticated root terminal opened",
+            );
         }
     }
     let Some(raw_token) = cookie_token(&headers) else {
@@ -1034,7 +1374,12 @@ async fn terminal_socket(
         })
 }
 
-async fn run_terminal(mut socket: WebSocket, state: AppState, terminal_session_hash: String, root_mode: bool) {
+async fn run_terminal(
+    mut socket: WebSocket,
+    state: AppState,
+    terminal_session_hash: String,
+    root_mode: bool,
+) {
     let pty = native_pty_system();
     let pair = match pty.openpty(PtySize {
         rows: 28,
@@ -1049,34 +1394,73 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, terminal_session_h
     let mut child = None;
     let mut root_pid = None;
     if root_mode {
-        let Some(tty) = master.lock().unwrap().tty_name().map(|path| path.to_string_lossy().into_owned()) else { return; };
-        let response = tokio::task::spawn_blocking(move || privileged_request(json!({"action":"terminal-root-start","tty":tty}))).await;
+        let Some(tty) = master
+            .lock()
+            .unwrap()
+            .tty_name()
+            .map(|path| path.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let response = tokio::task::spawn_blocking(move || {
+            privileged_request(json!({"action":"terminal-root-start","tty":tty}))
+        })
+        .await;
         let failure = match response {
-            Ok(Ok(value)) if value["ok"] == true => { root_pid = value["pid"].as_u64().map(|pid| pid as u32); None },
-            Ok(Ok(value)) => Some(value["error"].as_str().unwrap_or("Privileged manager rejected the root terminal").to_owned()),
-            Ok(Err((_, body))) => Some(body.0["error"].as_str().unwrap_or("Privileged manager is unavailable").to_owned()),
+            Ok(Ok(value)) if value["ok"] == true => {
+                root_pid = value["pid"].as_u64().map(|pid| pid as u32);
+                None
+            }
+            Ok(Ok(value)) => Some(
+                value["error"]
+                    .as_str()
+                    .unwrap_or("Privileged manager rejected the root terminal")
+                    .to_owned(),
+            ),
+            Ok(Err((_, body))) => Some(
+                body.0["error"]
+                    .as_str()
+                    .unwrap_or("Privileged manager is unavailable")
+                    .to_owned(),
+            ),
             Err(_) => Some("Could not start the root terminal helper".to_owned()),
         };
         if let Some(message) = failure {
-            let _ = socket.send(Message::Text(format!("\r\n\x1b[31mRoot terminal failed: {message}\x1b[0m\r\n").into())).await;
+            let _ = socket
+                .send(Message::Text(
+                    format!("\r\n\x1b[31mRoot terminal failed: {message}\x1b[0m\r\n").into(),
+                ))
+                .await;
             return;
         }
     } else {
-        let executable = match env::current_exe() { Ok(path) => path, Err(_) => return };
+        let executable = match env::current_exe() {
+            Ok(path) => path,
+            Err(_) => return,
+        };
         let mut command = CommandBuilder::new(executable);
         command.arg("terminal-shell");
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
-        command.cwd(env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/arg")));
-        match pair.slave.spawn_command(command) { Ok(process) => child = Some(process), Err(_) => return }
+        command
+            .cwd(env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/var/lib/arg")));
+        match pair.slave.spawn_command(command) {
+            Ok(process) => child = Some(process),
+            Err(_) => return,
+        }
     }
     drop(pair.slave);
     let writer_result = { master.lock().unwrap().take_writer() };
     let writer = match writer_result {
         Ok(writer) => Arc::new(Mutex::new(writer)),
         Err(_) => {
-            if let Some(child) = child.as_mut() { let _ = child.kill(); }
-            if let Some(pid) = root_pid { let _ = privileged_request_async(json!({"action":"terminal-root-stop","pid":pid})).await; }
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill();
+            }
+            if let Some(pid) = root_pid {
+                let _ = privileged_request_async(json!({"action":"terminal-root-stop","pid":pid}))
+                    .await;
+            }
             return;
         }
     };
@@ -1084,8 +1468,13 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, terminal_session_h
     let reader = match reader_result {
         Ok(reader) => reader,
         Err(_) => {
-            if let Some(child) = child.as_mut() { let _ = child.kill(); }
-            if let Some(pid) = root_pid { let _ = privileged_request_async(json!({"action":"terminal-root-stop","pid":pid})).await; }
+            if let Some(child) = child.as_mut() {
+                let _ = child.kill();
+            }
+            if let Some(pid) = root_pid {
+                let _ = privileged_request_async(json!({"action":"terminal-root-stop","pid":pid}))
+                    .await;
+            }
             return;
         }
     };
@@ -1141,7 +1530,9 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, terminal_session_h
     }
     if let Some(mut child) = child {
         if let Some(pid) = child.process_id().filter(|pid| *pid > 1) {
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
         }
         let _ = child.kill();
         let _ = child.wait();
@@ -1259,14 +1650,83 @@ fn valid_firewall_rule(input: &FirewallRuleInput) -> bool {
 fn firewall_rule_validation_error(input: &FirewallRuleInput) -> Option<&'static str> {
     if input.port == 0 {
         Some("شمارهٔ پورت باید بین 1 تا 65535 باشد.")
-    } else if [22, 8282, 8443].contains(&input.port) {
-        Some("این پورت برای دسترسی SSH یا پنل ARG محافظت شده است. پورت‌های HTTP و HTTPS قابل مدیریت هستند.")
+    } else if protected_firewall_ports().contains(&input.port) {
+        Some("این پورت در حال استفاده برای SSH یا پنل ARG است و برای جلوگیری از قطع دسترسی محافظت شده است.")
     } else if !["tcp", "udp"].contains(&input.protocol.as_str()) {
         Some("پروتکل TCP یا UDP را انتخاب کن.")
     } else if !["allow", "deny"].contains(&input.policy.as_str()) {
         Some("مشخص کن این قانون ترافیک را مجاز یا مسدود کند.")
     } else {
         None
+    }
+}
+fn protected_firewall_ports() -> HashSet<u16> {
+    let sshd = std::process::Command::new("sshd")
+        .arg("-T")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    protected_firewall_ports_from(
+        env::var("ARG_BIND").ok().as_deref(),
+        env::var("ARG_TLS_BIND").ok().as_deref(),
+        sshd.as_deref(),
+    )
+}
+fn protected_firewall_ports_from(
+    bind: Option<&str>,
+    tls_bind: Option<&str>,
+    sshd_output: Option<&str>,
+) -> HashSet<u16> {
+    let mut ports = HashSet::from([22, 8282, 8443]);
+    for value in [bind, tls_bind].into_iter().flatten() {
+        if let Ok(address) = value.parse::<SocketAddr>() {
+            ports.insert(address.port());
+        }
+    }
+    if let Some(output) = sshd_output {
+        for line in output.lines() {
+            let value = line
+                .strip_prefix("port ")
+                .or_else(|| {
+                    line.strip_prefix("listenaddress ")
+                        .and_then(|value| value.rsplit_once(':').map(|(_, port)| port))
+                })
+                .and_then(|value| value.parse::<u16>().ok());
+            if let Some(value) = value {
+                ports.insert(value);
+            }
+        }
+    }
+    ports
+}
+fn protected_service_mutation(unit: &str, operation: &str) -> bool {
+    let protected = matches!(
+        unit,
+        "arg.service"
+            | "ssh.service"
+            | "sshd.service"
+            | "systemd-networkd.service"
+            | "NetworkManager.service"
+            | "networking.service"
+            | "systemd-resolved.service"
+    );
+    protected
+        && [
+            "stop",
+            "restart",
+            "try-restart",
+            "disable",
+            "disable-now",
+            "mask",
+        ]
+        .contains(&operation)
+}
+fn http_listener_addr(bind: SocketAddr, tls_enabled: bool) -> SocketAddr {
+    if tls_enabled {
+        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, bind.port()))
+    } else {
+        bind
     }
 }
 fn read_managed_rule(
@@ -1575,6 +2035,7 @@ async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
     let (cpu_total, cpu_idle) = metrics::cpu_ticks();
     let (process_rss_bytes, process_cpu_percent) = metrics::process_usage();
     let (disk_total_bytes, disk_free_bytes) = metrics::disk_usage();
+    let storage_inventory = storage_mounts::inventory();
     Ok(Json(json!({
         "hostname": hostname,
         "uptime_seconds": uptime as u64,
@@ -1599,9 +2060,17 @@ async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
         "process_cpu_percent": process_cpu_percent,
         "disk_total_bytes": disk_total_bytes,
         "disk_free_bytes": disk_free_bytes,
+        "storage": storage_inventory,
         "interfaces": metrics::network(),
         "ports": metrics::listening_ports()
     })))
+}
+async fn storage_volumes(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_user(&db, &headers)?;
+    }
+    Ok(Json(storage_mounts::inventory()))
 }
 async fn users(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
@@ -1798,7 +2267,10 @@ fn update_status() -> Value {
     if local.len() != 40 || remote.len() != 40 {
         return json!({"status":"unavailable", "error":"Could not read the installed or remote ARG revision. Check the server's GitHub connection."});
     }
-    let remote_version = revisions.get(2).copied().filter(|value| *value != "unknown");
+    let remote_version = revisions
+        .get(2)
+        .copied()
+        .filter(|value| *value != "unknown");
     json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7], "local_version": env!("CARGO_PKG_VERSION"), "remote_version": remote_version})
 }
 async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -1820,8 +2292,14 @@ async fn panel_update_progress(State(state): State<AppState>, headers: HeaderMap
     drop(db);
     let fallback_started = update_started_at();
     let output = privileged_request(json!({"action":"update-progress"}));
-    let raw = output.ok().and_then(|value| value["stdout"].as_str().map(str::to_owned));
-    Ok(Json(update_progress_payload(raw.as_deref(), fallback_started, metrics::process_instance_id())))
+    let raw = output
+        .ok()
+        .and_then(|value| value["stdout"].as_str().map(str::to_owned));
+    Ok(Json(update_progress_payload(
+        raw.as_deref(),
+        fallback_started,
+        metrics::process_instance_id(),
+    )))
 }
 async fn panel_update_logs(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
@@ -1832,77 +2310,226 @@ async fn panel_update_logs(State(state): State<AppState>, headers: HeaderMap) ->
     if output["ok"] != true {
         return Err(error(
             StatusCode::SERVICE_UNAVAILABLE,
-            output["error"].as_str().unwrap_or("Update details are temporarily unavailable"),
+            output["error"]
+                .as_str()
+                .unwrap_or("Update details are temporarily unavailable"),
         ));
     }
-    Ok(Json(json!({"logs":output["stdout"].as_str().unwrap_or("")})))
+    Ok(Json(
+        json!({"logs":output["stdout"].as_str().unwrap_or("")}),
+    ))
 }
 
 #[derive(Deserialize)]
-struct AptOperation { action: String, #[serde(default)] packages: Vec<String> }
+struct AptOperation {
+    action: String,
+    #[serde(default)]
+    packages: Vec<String>,
+}
 #[derive(Deserialize)]
-struct ServiceOperation { action: String, unit: String }
+struct ServiceOperation {
+    action: String,
+    unit: String,
+}
 
 async fn list_packages(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
-    { let db = state.lock().unwrap(); require_admin(&db, &headers)?; }
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
     let result = privileged_request_async(json!({"action":"apt-list"})).await?;
-    if result["ok"] != true { return Err(error(StatusCode::SERVICE_UNAVAILABLE, result["error"].as_str().unwrap_or("Package list unavailable"))); }
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            result["error"]
+                .as_str()
+                .unwrap_or("Package list unavailable"),
+        ));
+    }
     Ok(Json(result["data"].clone()))
 }
-async fn run_apt_operation(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<AptOperation>) -> ApiResult {
+async fn run_apt_operation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AptOperation>,
+) -> ApiResult {
     check_origin(&headers)?;
-    let actor = { let db = state.lock().unwrap(); require_admin(&db, &headers)? };
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?
+    };
     let _update_guard = UPDATE_OPERATION_GATE.read().await;
     let _apt_guard = APT_OPERATION_LOCK.lock().await;
-    let allowed = ["update", "upgrade", "full-upgrade", "autoremove", "clean", "autoclean", "install", "remove"];
-    if !allowed.contains(&input.action.as_str()) || input.packages.len() > 25 || input.packages.iter().any(|p| !valid_package_name(p)) {
-        return Err(error(StatusCode::BAD_REQUEST, "Invalid APT action or package name"));
+    let allowed = [
+        "update",
+        "upgrade",
+        "full-upgrade",
+        "autoremove",
+        "clean",
+        "autoclean",
+        "install",
+        "remove",
+    ];
+    if !allowed.contains(&input.action.as_str())
+        || input.packages.len() > 25
+        || input.packages.iter().any(|p| !valid_package_name(p))
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Invalid APT action or package name",
+        ));
     }
-    if ["install", "remove"].contains(&input.action.as_str()) && input.packages.is_empty() { return Err(error(StatusCode::BAD_REQUEST, "Select at least one package")); }
-    let result = privileged_request_async(json!({"action":"apt-run","operation":input.action,"packages":input.packages})).await?;
-    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("APT operation failed"))); }
-    { let db = state.lock().unwrap(); audit(&db, &actor.username, "apt.operation", &input.action); }
-    Ok(Json(json!({"output":result["stdout"].as_str().unwrap_or("")})))
+    if ["install", "remove"].contains(&input.action.as_str()) && input.packages.is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Select at least one package",
+        ));
+    }
+    let result = privileged_request_async(
+        json!({"action":"apt-run","operation":input.action,"packages":input.packages}),
+    )
+    .await?;
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            result["error"].as_str().unwrap_or("APT operation failed"),
+        ));
+    }
+    {
+        let db = state.lock().unwrap();
+        audit(&db, &actor.username, "apt.operation", &input.action);
+    }
+    Ok(Json(
+        json!({"output":result["stdout"].as_str().unwrap_or("")}),
+    ))
 }
 async fn list_system_services(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
-    { let db = state.lock().unwrap(); require_admin(&db, &headers)?; }
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
     let result = privileged_request_async(json!({"action":"service-list"})).await?;
-    if result["ok"] != true { return Err(error(StatusCode::SERVICE_UNAVAILABLE, result["error"].as_str().unwrap_or("Service list unavailable"))); }
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            result["error"]
+                .as_str()
+                .unwrap_or("Service list unavailable"),
+        ));
+    }
     Ok(Json(result["data"].clone()))
 }
-async fn run_service_operation(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<ServiceOperation>) -> ApiResult {
+async fn run_service_operation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ServiceOperation>,
+) -> ApiResult {
     check_origin(&headers)?;
-    let actor = { let db = state.lock().unwrap(); require_admin(&db, &headers)? };
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?
+    };
     let _update_guard = UPDATE_OPERATION_GATE.read().await;
-    let allowed = ["start", "stop", "restart", "try-restart", "reload", "reload-or-restart", "enable", "disable", "enable-now", "disable-now", "reenable", "mask", "unmask", "reset-failed", "status", "logs", "daemon-reload"];
-    if !allowed.contains(&input.action.as_str()) || (input.action != "daemon-reload" && !valid_service_unit(&input.unit)) { return Err(error(StatusCode::BAD_REQUEST, "Invalid service action or unit")); }
-    let result = privileged_request_async(json!({"action":"service-action","operation":input.action,"unit":input.unit})).await?;
-    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("Service operation failed"))); }
-    { let db = state.lock().unwrap(); audit(&db, &actor.username, "systemd.service.action", &format!("{} {}", input.action, input.unit)); }
-    Ok(Json(json!({"output":result["stdout"].as_str().unwrap_or("")})))
+    let allowed = [
+        "start",
+        "stop",
+        "restart",
+        "try-restart",
+        "reload",
+        "reload-or-restart",
+        "enable",
+        "disable",
+        "enable-now",
+        "disable-now",
+        "reenable",
+        "mask",
+        "unmask",
+        "reset-failed",
+        "status",
+        "logs",
+        "daemon-reload",
+    ];
+    if !allowed.contains(&input.action.as_str())
+        || (input.action != "daemon-reload" && !valid_service_unit(&input.unit))
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Invalid service action or unit",
+        ));
+    }
+    let result = privileged_request_async(
+        json!({"action":"service-action","operation":input.action,"unit":input.unit}),
+    )
+    .await?;
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            result["error"]
+                .as_str()
+                .unwrap_or("Service operation failed"),
+        ));
+    }
+    {
+        let db = state.lock().unwrap();
+        audit(
+            &db,
+            &actor.username,
+            "systemd.service.action",
+            &format!("{} {}", input.action, input.unit),
+        );
+    }
+    Ok(Json(
+        json!({"output":result["stdout"].as_str().unwrap_or("")}),
+    ))
 }
 fn valid_package_name(name: &str) -> bool {
     let (base, arch) = name.split_once(':').unwrap_or((name, ""));
-    let valid_base = !base.is_empty() && base.len() <= 128 && base.as_bytes()[0].is_ascii_alphanumeric()
-        && base.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+.-".contains(&b));
-    let valid_arch = !name.contains(':') || (!arch.is_empty() && arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-".contains(&b)));
+    let valid_base = !base.is_empty()
+        && base.len() <= 128
+        && base.as_bytes()[0].is_ascii_alphanumeric()
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+.-".contains(&b));
+    let valid_arch = !name.contains(':')
+        || (!arch.is_empty()
+            && arch
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-".contains(&b)));
     valid_base && valid_arch
 }
 fn valid_service_unit(unit: &str) -> bool {
-    unit.len() <= 255 && unit.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && unit.ends_with(".service") && unit.bytes().all(|b| b.is_ascii_alphanumeric() || b"@_.:-".contains(&b)) && !unit.contains("..")
+    unit.len() <= 255
+        && unit
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && unit.ends_with(".service")
+        && unit
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"@_.:-".contains(&b))
+        && !unit.contains("..")
 }
 async fn schedule_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     check_origin(&headers)?;
     let _exclusive = UPDATE_OPERATION_GATE.write().await;
     if update_started_at().is_some() {
-        return Err(error(StatusCode::CONFLICT, "ARG_UPDATE_IN_PROGRESS: another update is already running."));
+        return Err(error(
+            StatusCode::CONFLICT,
+            "ARG_UPDATE_IN_PROGRESS: another update is already running.",
+        ));
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
     let output = privileged_request(json!({"action":"update-run"}))?;
     if output["ok"] != true {
-        let detail = output["error"].as_str().unwrap_or("Update could not be scheduled; check service logs");
-        let status = if detail.contains("ARG_UPDATE_IN_PROGRESS") { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
+        let detail = output["error"]
+            .as_str()
+            .unwrap_or("Update could not be scheduled; check service logs");
+        let status = if detail.contains("ARG_UPDATE_IN_PROGRESS") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_REQUEST
+        };
         return Err(error(status, detail));
     }
     audit(
@@ -1977,12 +2604,15 @@ fn privileged_peer_allowed(stream: &UnixStream) -> bool {
 }
 
 fn valid_terminal_pty_path(path: &str) -> bool {
-    path.strip_prefix("/dev/pts/")
-        .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+    path.strip_prefix("/dev/pts/").is_some_and(|number| {
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 fn start_root_terminal(request: &Value) -> Result<u32, String> {
-    let tty_path = request["tty"].as_str().ok_or("Terminal device was not provided")?;
+    let tty_path = request["tty"]
+        .as_str()
+        .ok_or("Terminal device was not provided")?;
     if !valid_terminal_pty_path(tty_path) {
         return Err("Invalid terminal device".into());
     }
@@ -1993,7 +2623,9 @@ fn start_root_terminal(request: &Value) -> Result<u32, String> {
     let arg_name = std::ffi::CString::new("arg").unwrap();
     let arg_uid = unsafe {
         let entry = libc::getpwnam(arg_name.as_ptr());
-        if entry.is_null() { return Err("ARG service account was not found".into()); }
+        if entry.is_null() {
+            return Err("ARG service account was not found".into());
+        }
         (*entry).pw_uid
     };
     if metadata.uid() != arg_uid {
@@ -2022,42 +2654,63 @@ fn start_root_terminal(request: &Value) -> Result<u32, String> {
         .env("USER", "root")
         .env("LOGNAME", "root")
         .env("SHELL", "/bin/bash")
-        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
         .current_dir("/")
         .stdin(std::process::Stdio::from(tty))
         .stdout(std::process::Stdio::from(stdin))
         .stderr(std::process::Stdio::from(stdout));
     unsafe {
         command.pre_exec(|| {
-            if libc::setsid() < 0 { return Err(io::Error::last_os_error()); }
+            if libc::setsid() < 0 {
+                return Err(io::Error::last_os_error());
+            }
             if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) < 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         });
     }
-    let mut child = command.spawn().map_err(|error| format!("Could not start root shell: {error}"))?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not start root shell: {error}"))?;
     let pid = child.id();
     let pids = ROOT_TERMINAL_PIDS.get_or_init(|| Mutex::new(HashSet::new()));
-    pids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(pid);
+    pids.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(pid);
     std::thread::spawn(move || {
         let _ = child.wait();
         if let Some(pids) = ROOT_TERMINAL_PIDS.get() {
-            pids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&pid);
+            pids.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&pid);
         }
     });
     Ok(pid)
 }
 
 fn stop_root_terminal(request: &Value) -> Result<(), String> {
-    let pid = request["pid"].as_u64().filter(|pid| *pid > 1 && *pid <= i32::MAX as u64).ok_or("Invalid root terminal process id")? as u32;
+    let pid = request["pid"]
+        .as_u64()
+        .filter(|pid| *pid > 1 && *pid <= i32::MAX as u64)
+        .ok_or("Invalid root terminal process id")? as u32;
     let pids = ROOT_TERMINAL_PIDS.get_or_init(|| Mutex::new(HashSet::new()));
-    let removed = pids.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&pid);
-    if !removed { return Ok(()); }
+    let removed = pids
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&pid);
+    if !removed {
+        return Ok(());
+    }
     let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
     if result != 0 {
         let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) { return Err(error.to_string()); }
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error.to_string());
+        }
     }
     Ok(())
 }
@@ -2109,6 +2762,16 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("file-action") => "file-action",
         Some("terminal-root-start") => "terminal-root-start",
         Some("terminal-root-stop") => "terminal-root-stop",
+        Some("s3-secret-write") => "s3-secret-write",
+        Some("s3-secret-update-config") => "s3-secret-update-config",
+        Some("s3-secret-delete") => "s3-secret-delete",
+        Some("s3-list-buckets") => "s3-list-buckets",
+        Some("s3-test") => "s3-test",
+        Some("s3-create-bucket") => "s3-create-bucket",
+        Some("s3-list-objects") => "s3-list-objects",
+        Some("s3-delete-object") => "s3-delete-object",
+        Some("s3-upload-object") => "s3-upload-object",
+        Some("s3-download-object") => "s3-download-object",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
     if action == "terminal-root-start" {
@@ -2123,13 +2786,26 @@ fn execute_privileged_request(request: &Value) -> Value {
             Err(error) => json!({"ok":false,"error":error}),
         };
     }
-    if action == "docker-status" { return docker::execute_docker_status(); }
-    if action == "docker-operation" { return docker::execute_docker_operation(request); }
-    if action.starts_with("file-") { return files::execute_privileged_request(action, request); }
-    if action.starts_with("apt-") { return execute_apt_request(action, request); }
-    if action.starts_with("service-") { return execute_service_request(action, request); }
+    if action == "docker-status" {
+        return docker::execute_docker_status();
+    }
+    if action == "docker-operation" {
+        return docker::execute_docker_operation(request);
+    }
+    if action.starts_with("file-") {
+        return files::execute_privileged_request(action, request);
+    }
+    if action.starts_with("apt-") {
+        return execute_apt_request(action, request);
+    }
+    if action.starts_with("service-") {
+        return execute_service_request(action, request);
+    }
     if action.starts_with("nginx-") {
         return nginx::execute_privileged_request(action, request);
+    }
+    if action.starts_with("s3-") {
+        return s3::execute_privileged_request(action, request);
     }
     let mut args = vec![action.to_owned()];
     if action == "add" || action == "remove" {
@@ -2190,47 +2866,133 @@ fn command_result(command: &mut std::process::Command) -> Result<(bool, String),
     let output = command.output().map_err(|e| e.to_string())?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let result = if stderr.trim().is_empty() { stdout } else if stdout.trim().is_empty() { stderr } else { format!("{stdout}\n{stderr}") };
+    let result = if stderr.trim().is_empty() {
+        stdout
+    } else if stdout.trim().is_empty() {
+        stderr
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
     Ok((output.status.success(), result))
 }
 fn execute_apt_request(action: &str, request: &Value) -> Value {
     if action == "apt-list" {
         let mut command = std::process::Command::new("dpkg-query");
-        command.args(["-W", "-f=${binary:Package}\t${Version}\t${db:Status-Abbrev}\t${binary:Summary}\n"]);
+        command.args([
+            "-W",
+            "-f=${binary:Package}\t${Version}\t${db:Status-Abbrev}\t${binary:Summary}\n",
+        ]);
         return match command_result(&mut command) {
             Ok((true, output)) => {
-                let packages: Vec<Value> = output.lines().filter_map(|line| {
-                    let mut fields = line.splitn(4, '\t');
-                    let name = fields.next()?; let version = fields.next()?; let status = fields.next()?; let summary = fields.next().unwrap_or("");
-                    status.starts_with("ii").then(|| json!({"name":name,"version":version,"summary":summary}))
-                }).collect();
+                let packages: Vec<Value> = output
+                    .lines()
+                    .filter_map(|line| {
+                        let mut fields = line.splitn(4, '\t');
+                        let name = fields.next()?;
+                        let version = fields.next()?;
+                        let status = fields.next()?;
+                        let summary = fields.next().unwrap_or("");
+                        status
+                            .starts_with("ii")
+                            .then(|| json!({"name":name,"version":version,"summary":summary}))
+                    })
+                    .collect();
                 json!({"ok":true,"data":{"packages":packages}})
             }
             Ok((false, output)) => json!({"ok":false,"error":output}),
             Err(error) => json!({"ok":false,"error":error}),
         };
     }
-    let Some(operation) = request["operation"].as_str() else { return json!({"ok":false,"error":"Missing APT operation"}); };
-    let allowed = ["update", "upgrade", "full-upgrade", "autoremove", "clean", "autoclean", "install", "remove"];
-    if !allowed.contains(&operation) { return json!({"ok":false,"error":"Unsupported APT operation"}); }
-    let packages: Vec<&str> = request["packages"].as_array().map(|items| items.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-    if packages.len() > 25 || packages.iter().any(|name| !valid_package_name(name)) || ["install", "remove"].contains(&operation) && packages.is_empty() { return json!({"ok":false,"error":"Invalid package list"}); }
+    let Some(operation) = request["operation"].as_str() else {
+        return json!({"ok":false,"error":"Missing APT operation"});
+    };
+    let allowed = [
+        "update",
+        "upgrade",
+        "full-upgrade",
+        "autoremove",
+        "clean",
+        "autoclean",
+        "install",
+        "remove",
+    ];
+    if !allowed.contains(&operation) {
+        return json!({"ok":false,"error":"Unsupported APT operation"});
+    }
+    let packages: Vec<&str> = request["packages"]
+        .as_array()
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if packages.len() > 25
+        || packages.iter().any(|name| !valid_package_name(name))
+        || ["install", "remove"].contains(&operation) && packages.is_empty()
+    {
+        return json!({"ok":false,"error":"Invalid package list"});
+    }
     let mut command = std::process::Command::new("apt-get");
-    command.env("DEBIAN_FRONTEND", "noninteractive").env("APT_LISTCHANGES_FRONTEND", "none").arg("-y");
-    match operation { "full-upgrade" => { command.arg("full-upgrade"); }, "autoremove" => { command.arg("autoremove"); }, _ => { command.arg(operation); } }
-    if operation == "install" || operation == "remove" { command.arg("--").args(packages); }
-    match command_result(&mut command) { Ok((true, output)) => json!({"ok":true,"stdout":output}), Ok((false, output)) => json!({"ok":false,"error":output}), Err(error) => json!({"ok":false,"error":error}) }
+    command
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .env("APT_LISTCHANGES_FRONTEND", "none")
+        .arg("-y");
+    match operation {
+        "full-upgrade" => {
+            command.arg("full-upgrade");
+        }
+        "autoremove" => {
+            command.arg("autoremove");
+        }
+        _ => {
+            command.arg(operation);
+        }
+    }
+    if operation == "install" || operation == "remove" {
+        command.arg("--").args(packages);
+    }
+    match command_result(&mut command) {
+        Ok((true, output)) => json!({"ok":true,"stdout":output}),
+        Ok((false, output)) => json!({"ok":false,"error":output}),
+        Err(error) => json!({"ok":false,"error":error}),
+    }
 }
 fn execute_service_request(action: &str, request: &Value) -> Value {
     if action == "service-list" {
-        let mut files = std::process::Command::new("systemctl"); files.args(["list-unit-files", "--type=service", "--no-legend", "--no-pager"]);
-        let mut units = std::process::Command::new("systemctl"); units.args(["list-units", "--all", "--type=service", "--no-legend", "--no-pager"]);
-        let (Ok((true, file_output)), Ok((true, active_output))) = (command_result(&mut files), command_result(&mut units)) else { return json!({"ok":false,"error":"Could not list systemd services"}); };
-        let active: HashMap<String, (String,String,String)> = active_output.lines().filter_map(|line| {
-            let mut f=line.split_whitespace(); let unit=f.next()?; let _load=f.next()?; let state=f.next()?; let sub=f.next()?;
-            let desc=line.splitn(5, char::is_whitespace).nth(4).unwrap_or("").trim().to_owned();
-            Some((unit.to_owned(),(state.to_owned(),sub.to_owned(),desc)))
-        }).collect();
+        let mut files = std::process::Command::new("systemctl");
+        files.args([
+            "list-unit-files",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+        ]);
+        let mut units = std::process::Command::new("systemctl");
+        units.args([
+            "list-units",
+            "--all",
+            "--type=service",
+            "--no-legend",
+            "--no-pager",
+        ]);
+        let (Ok((true, file_output)), Ok((true, active_output))) =
+            (command_result(&mut files), command_result(&mut units))
+        else {
+            return json!({"ok":false,"error":"Could not list systemd services"});
+        };
+        let active: HashMap<String, (String, String, String)> = active_output
+            .lines()
+            .filter_map(|line| {
+                let mut f = line.split_whitespace();
+                let unit = f.next()?;
+                let _load = f.next()?;
+                let state = f.next()?;
+                let sub = f.next()?;
+                let desc = line
+                    .splitn(5, char::is_whitespace)
+                    .nth(4)
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                Some((unit.to_owned(), (state.to_owned(), sub.to_owned(), desc)))
+            })
+            .collect();
         let services: Vec<Value> = file_output.lines().filter_map(|line| {
             let mut f=line.split_whitespace(); let unit=f.next()?; let enabled=f.next()?;
             if !valid_service_unit(unit) { return None; }
@@ -2239,23 +3001,86 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         }).collect();
         return json!({"ok":true,"data":{"services":services}});
     }
-    let Some(operation)=request["operation"].as_str() else { return json!({"ok":false,"error":"Missing systemd action"}); };
-    let allowed=["start","stop","restart","try-restart","reload","reload-or-restart","enable","disable","enable-now","disable-now","reenable","mask","unmask","reset-failed","status","logs","daemon-reload"];
-    if !allowed.contains(&operation) { return json!({"ok":false,"error":"Unsupported systemd action"}); }
+    let Some(operation) = request["operation"].as_str() else {
+        return json!({"ok":false,"error":"Missing systemd action"});
+    };
+    let allowed = [
+        "start",
+        "stop",
+        "restart",
+        "try-restart",
+        "reload",
+        "reload-or-restart",
+        "enable",
+        "disable",
+        "enable-now",
+        "disable-now",
+        "reenable",
+        "mask",
+        "unmask",
+        "reset-failed",
+        "status",
+        "logs",
+        "daemon-reload",
+    ];
+    if !allowed.contains(&operation) {
+        return json!({"ok":false,"error":"Unsupported systemd action"});
+    }
     if operation == "daemon-reload" {
-        let mut command=std::process::Command::new("systemctl"); command.arg("daemon-reload");
-        return match command_result(&mut command) { Ok((true,output))=>json!({"ok":true,"stdout":output}),Ok((false,output))=>json!({"ok":false,"error":output}),Err(error)=>json!({"ok":false,"error":error}) };
+        let mut command = std::process::Command::new("systemctl");
+        command.arg("daemon-reload");
+        return match command_result(&mut command) {
+            Ok((true, output)) => json!({"ok":true,"stdout":output}),
+            Ok((false, output)) => json!({"ok":false,"error":output}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
     }
-    let Some(unit)=request["unit"].as_str().filter(|u|valid_service_unit(u)) else { return json!({"ok":false,"error":"Invalid service unit"}); };
+    let Some(unit) = request["unit"].as_str().filter(|u| valid_service_unit(u)) else {
+        return json!({"ok":false,"error":"Invalid service unit"});
+    };
+    if protected_service_mutation(unit, operation) {
+        return json!({"ok":false,"error":format!("Refusing to {operation} protected service {unit}. This could disconnect administrators or stop ARG itself; use the service's own safe maintenance flow.")});
+    }
     if operation == "logs" {
-        let mut command=std::process::Command::new("journalctl"); command.args(["--no-pager","--output=short-iso","--lines=100","--unit",unit]);
-        return match command_result(&mut command) { Ok((true,output))=>json!({"ok":true,"stdout":output}),Ok((false,output))=>json!({"ok":false,"error":output}),Err(error)=>json!({"ok":false,"error":error}) };
+        let mut command = std::process::Command::new("journalctl");
+        command.args([
+            "--no-pager",
+            "--output=short-iso",
+            "--lines=100",
+            "--unit",
+            unit,
+        ]);
+        return match command_result(&mut command) {
+            Ok((true, output)) => json!({"ok":true,"stdout":output}),
+            Ok((false, output)) => json!({"ok":false,"error":output}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
     }
-    let mut command=std::process::Command::new("systemctl");
-    if operation == "status" { command.args(["--no-pager","--full","status",unit]); return match command_result(&mut command) { Ok((_,output))=>json!({"ok":true,"stdout":output}),Err(error)=>json!({"ok":false,"error":error}) }; }
-    match operation { "enable-now"=>{command.arg("enable").arg("--now");},"disable-now"=>{command.arg("disable").arg("--now");},_=>{command.arg(operation);} }
+    let mut command = std::process::Command::new("systemctl");
+    if operation == "status" {
+        command.args(["--no-pager", "--full", "status", unit]);
+        return match command_result(&mut command) {
+            Ok((_, output)) => json!({"ok":true,"stdout":output}),
+            Err(error) => json!({"ok":false,"error":error}),
+        };
+    }
+    match operation {
+        "enable-now" => {
+            command.arg("enable").arg("--now");
+        }
+        "disable-now" => {
+            command.arg("disable").arg("--now");
+        }
+        _ => {
+            command.arg(operation);
+        }
+    }
     command.arg(unit);
-    match command_result(&mut command) { Ok((true,output))=>json!({"ok":true,"stdout":output}),Ok((false,output))=>json!({"ok":false,"error":output}),Err(error)=>json!({"ok":false,"error":error}) }
+    match command_result(&mut command) {
+        Ok((true, output)) => json!({"ok":true,"stdout":output}),
+        Ok((false, output)) => json!({"ok":false,"error":output}),
+        Err(error) => json!({"ok":false,"error":error}),
+    }
 }
 
 async fn serve_privileged_connection(mut stream: UnixStream) {
@@ -2266,8 +3091,11 @@ async fn serve_privileged_connection(mut stream: UnixStream) {
     let response = match AsyncBufReader::new(&mut stream).read_line(&mut line).await {
         Ok(size) if size > 0 && size <= 4 * 1024 * 1024 => {
             match serde_json::from_str::<Value>(&line) {
-                Ok(request) => tokio::task::spawn_blocking(move || execute_privileged_request(&request))
-                    .await.unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"})),
+                Ok(request) => {
+                    tokio::task::spawn_blocking(move || execute_privileged_request(&request))
+                        .await
+                        .unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"}))
+                }
                 Err(_) => json!({"ok":false,"error":"Invalid request"}),
             }
         }
@@ -2336,7 +3164,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL);")?;
+    db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL);")?;
+    s3::migrate(&db)?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
+    db.execute(
+        "DELETE FROM root_terminal_tickets WHERE expires_at<=?1",
+        [now()],
+    )?;
     ensure_sessions_metadata(&db)?;
     let has_users = initialized(&db);
     let configured_setup_token = env::var("ARG_SETUP_TOKEN")
@@ -2360,11 +3194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tls_key = env::var("ARG_TLS_KEY").ok();
     let bind = env::var("ARG_BIND").unwrap_or_else(|_| "127.0.0.1:8282".into());
     let addr: SocketAddr = bind.parse()?;
-    let http_addr = if tls_cert.is_some() && tls_key.is_some() {
-        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
-    } else {
-        addr
-    };
+    let http_addr = http_listener_addr(addr, tls_cert.is_some() && tls_key.is_some());
     println!("ARG listening at http://{http_addr}");
     let listener = tokio::net::TcpListener::bind(http_addr).await?;
     match (tls_cert, tls_key) {
@@ -2419,11 +3249,90 @@ mod update_progress_tests {
     use super::{firewall_rule_validation_error, update_progress_payload, FirewallRuleInput};
 
     #[test]
+    fn firewall_protects_effective_ssh_and_arg_ports() {
+        let ports = super::protected_firewall_ports_from(
+            Some("0.0.0.0:9282"),
+            Some("[::]:9443"),
+            Some("port 2207\nlistenaddress 0.0.0.0:2208\nport 22\n"),
+        );
+        assert!(ports.contains(&22));
+        assert!(ports.contains(&2207));
+        assert!(ports.contains(&2208));
+        assert!(ports.contains(&9282));
+        assert!(ports.contains(&9443));
+        assert!(!ports.contains(&80));
+    }
+
+    #[test]
+    fn critical_services_cannot_be_stopped_or_disabled_from_panel() {
+        for unit in [
+            "arg.service",
+            "ssh.service",
+            "sshd.service",
+            "NetworkManager.service",
+            "systemd-networkd.service",
+        ] {
+            assert!(super::protected_service_mutation(unit, "stop"));
+            assert!(super::protected_service_mutation(unit, "disable-now"));
+            assert!(!super::protected_service_mutation(unit, "status"));
+        }
+        assert!(!super::protected_service_mutation(
+            "nginx.service",
+            "restart"
+        ));
+    }
+
+    #[test]
+    fn root_terminal_ticket_is_bound_to_user_and_consumed_once() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE root_terminal_tickets(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL);").unwrap();
+        let ticket = "one-time-ticket";
+        db.execute("INSERT INTO root_terminal_tickets(token_hash,user_id,session_hash,expires_at) VALUES (?1,7,'session-a',?2)", rusqlite::params![super::session_hash(ticket), super::now() + 60]).unwrap();
+        assert!(!super::consume_root_terminal_ticket(
+            &db,
+            ticket,
+            8,
+            "session-a"
+        ));
+        assert!(!super::consume_root_terminal_ticket(
+            &db,
+            ticket,
+            7,
+            "session-b"
+        ));
+        assert!(super::consume_root_terminal_ticket(
+            &db,
+            ticket,
+            7,
+            "session-a"
+        ));
+        assert!(!super::consume_root_terminal_ticket(
+            &db,
+            ticket,
+            7,
+            "session-a"
+        ));
+    }
+
+    #[test]
+    fn public_http_listener_becomes_loopback_when_tls_is_configured() {
+        let bind = "0.0.0.0:8282".parse().unwrap();
+        assert_eq!(
+            super::http_listener_addr(bind, true).ip().to_string(),
+            "127.0.0.1"
+        );
+        assert_eq!(super::http_listener_addr(bind, true).port(), 8282);
+        assert_eq!(super::http_listener_addr(bind, false), bind);
+    }
+
+    #[test]
     fn docker_inputs_reject_shell_metacharacters_and_invalid_ports() {
         assert!(super::docker::valid_docker_object("web_app-1"));
         assert!(!super::docker::valid_docker_object("../etc"));
         assert!(!super::docker::valid_docker_object("web;id"));
-        assert!(super::docker::valid_docker_image("registry.example/app:v1.2"));
+        assert!(super::docker::valid_docker_image(
+            "registry.example/app:v1.2"
+        ));
         assert!(!super::docker::valid_docker_image("app; touch /tmp/pwned"));
         assert!(super::docker::valid_docker_port("8080:80/tcp"));
         assert!(super::docker::valid_docker_port("5353:53/udp"));
@@ -2433,10 +3342,17 @@ mod update_progress_tests {
 
     #[test]
     fn nginx_file_content_supports_current_and_legacy_manager_payloads() {
-        let response = serde_json::json!({"site":{"name":"example.conf","content":"server { listen 80; }"}});
-        assert_eq!(super::nginx::nginx_site_content(&response).unwrap(), "server { listen 80; }");
+        let response =
+            serde_json::json!({"site":{"name":"example.conf","content":"server { listen 80; }"}});
+        assert_eq!(
+            super::nginx::nginx_site_content(&response).unwrap(),
+            "server { listen 80; }"
+        );
         let legacy = serde_json::json!({"name":"example.conf","content":"legacy config"});
-        assert_eq!(super::nginx::nginx_site_content(&legacy).unwrap(), "legacy config");
+        assert_eq!(
+            super::nginx::nginx_site_content(&legacy).unwrap(),
+            "legacy config"
+        );
         let malformed = serde_json::json!({"site":{"name":"example.conf"}});
         assert!(super::nginx::nginx_site_content(&malformed).is_err());
     }
@@ -2458,25 +3374,52 @@ mod update_progress_tests {
 
     #[test]
     fn active_job_locks_only_while_authoritative_state_is_running() {
-        let running = update_progress_payload(Some(r#"{"job_id":"job-1","state":"running","phase":"building","started_at":100,"message":""}"#), Some(100), "instance-a");
+        let running = update_progress_payload(
+            Some(
+                r#"{"job_id":"job-1","state":"running","phase":"building","started_at":100,"message":""}"#,
+            ),
+            Some(100),
+            "instance-a",
+        );
         assert_eq!(running["updating"], true);
         assert_eq!(running["phase"], "building");
 
-        let succeeded = update_progress_payload(Some(r#"{"job_id":"job-1","state":"succeeded","phase":"complete","started_at":100,"message":"done"}"#), Some(100), "instance-b");
+        let succeeded = update_progress_payload(
+            Some(
+                r#"{"job_id":"job-1","state":"succeeded","phase":"complete","started_at":100,"message":"done"}"#,
+            ),
+            Some(100),
+            "instance-b",
+        );
         assert_eq!(succeeded["updating"], false);
         assert_eq!(succeeded["state"], "succeeded");
     }
 
     #[test]
     fn failed_and_orphaned_jobs_are_recoverable_not_locked() {
-        let failed = update_progress_payload(Some(r#"{"job_id":"job-2","state":"failed","phase":"failed","started_at":100,"message":"build failed"}"#), None, "instance-a");
+        let failed = update_progress_payload(
+            Some(
+                r#"{"job_id":"job-2","state":"failed","phase":"failed","started_at":100,"message":"build failed"}"#,
+            ),
+            None,
+            "instance-a",
+        );
         assert_eq!(failed["updating"], false);
         assert_eq!(failed["state"], "failed");
 
-        let orphaned = update_progress_payload(Some(r#"{"job_id":"job-3","state":"running","phase":"building","started_at":100,"message":""}"#), None, "instance-a");
+        let orphaned = update_progress_payload(
+            Some(
+                r#"{"job_id":"job-3","state":"running","phase":"building","started_at":100,"message":""}"#,
+            ),
+            None,
+            "instance-a",
+        );
         assert_eq!(orphaned["updating"], false);
         assert_eq!(orphaned["state"], "failed");
-        assert!(orphaned["message"].as_str().unwrap().contains("final result"));
+        assert!(orphaned["message"]
+            .as_str()
+            .unwrap()
+            .contains("final result"));
     }
 
     #[test]
@@ -2492,7 +3435,13 @@ mod update_progress_tests {
         db.execute_batch("CREATE TABLE sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,expires_at INTEGER NOT NULL); INSERT INTO sessions VALUES ('hash',7,9999999999);").unwrap();
         super::ensure_sessions_metadata(&db).unwrap();
         super::ensure_sessions_metadata(&db).unwrap();
-        let row: (String, i64, Option<i64>) = db.query_row("SELECT token_hash,expires_at,created_at FROM sessions", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        let row: (String, i64, Option<i64>) = db
+            .query_row(
+                "SELECT token_hash,expires_at,created_at FROM sessions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(row, ("hash".to_owned(), 9999999999, None));
     }
 
