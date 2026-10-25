@@ -3,6 +3,9 @@ import { AlertTriangle, Archive, CheckCircle2, Clock3, Cpu, Download, HardDrive,
 import { api, formatBytes, formatNumber, type Dashboard } from './lib/api'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
+import { Input } from './components/ui/input'
+import { Label } from './components/ui/label'
 import { Skeleton } from './components/ui/skeleton'
 
 type Common = { Heading: (props: { title: string; description: string; action?: ReactNode }) => ReactNode; notify: (message: string) => void }
@@ -22,6 +25,10 @@ export function MaintenancePage({ Heading, notify }: Common) {
   const [backups, setBackups] = useState<Backup[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
+  const [actionTarget, setActionTarget] = useState<'repair' | 'reboot' | 'uninstall' | null>(null)
+  const [actionPhrase, setActionPhrase] = useState('')
+  const [restoreTarget, setRestoreTarget] = useState<Backup | null>(null)
+  const [restorePhrase, setRestorePhrase] = useState('')
   const backupUploadRef = useRef<HTMLInputElement>(null)
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -35,18 +42,24 @@ export function MaintenancePage({ Heading, notify }: Common) {
   }, [notify])
   useEffect(() => { void refresh() }, [refresh])
 
-  async function action(kind: 'repair' | 'reboot' | 'uninstall') {
+  function action(kind: 'repair' | 'reboot' | 'uninstall') {
+    setActionPhrase('')
+    setActionTarget(kind)
+  }
+
+  async function confirmAction() {
+    const kind = actionTarget
+    if (!kind) return
     const labels = { repair: ['REPAIR ARG', 'بازسازی کامل ARG'], reboot: ['REBOOT SERVER', 'راه‌اندازی مجدد سرور'], uninstall: ['DELETE ARG', 'حذف کامل ARG'] } as const
     const [phrase, title] = labels[kind]
-    if (!window.confirm(`${title}\n\n${kind === 'repair' ? 'فایل‌های ARG با سازوکار آپدیت امن بازسازی می‌شوند و در صورت شکست rollback انجام می‌شود.' : kind === 'reboot' ? 'اتصال پنل قطع می‌شود و سرور دوباره بالا می‌آید.' : 'سرویس، فایل‌ها، تنظیمات و دیتابیس ARG برای همیشه پاک می‌شوند.'}\n\nبرای ادامه عبارت ${phrase} را در مرحله بعد وارد کن.`)) return
-    const typed = window.prompt(`برای تأیید دقیقاً وارد کن: ${phrase}`)
-    if (typed !== phrase) { if (typed !== null) notify('خطا: عبارت تأیید مطابقت نداشت'); return }
+    if (actionPhrase.trim() !== phrase) { notify('عبارت تأیید مطابقت ندارد.'); return }
     setBusy(kind)
     try {
       let branch: 'main' | 'development' = 'main'
       try { branch = window.localStorage.getItem('arg.update-branch') === 'development' ? 'development' : 'main' } catch { /* Stable is the safe default. */ }
       const result = await api<{ message?: string; ok?: boolean }>('maintenance/action', { method: 'POST', body: JSON.stringify({ action: kind, confirmation: phrase, ...(kind === 'repair' ? { branch } : {}) }) })
       notify(result.message || `${title} انجام شد`)
+      setActionTarget(null)
     } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : `${title} ناموفق بود`}`) }
     finally { setBusy('') }
   }
@@ -86,23 +99,33 @@ export function MaintenancePage({ Heading, notify }: Common) {
     setBusy(`download:${id}`)
     try {
       const response = await fetch(`/api/maintenance/backups/${encodeURIComponent(id)}/download`, { credentials: 'same-origin' })
-      const body = await response.json().catch(() => null)
-      if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`)
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { error?: string } | null
+        throw new Error(body?.error || `HTTP ${response.status}`)
+      }
       const blob = await response.blob()
+      if (!blob.size) throw new Error('فایل بکاپ خالی دریافت شد؛ دوباره تلاش کن.')
       const url = URL.createObjectURL(blob)
-      const link = document.createElement('a'); link.href = url; link.download = id; link.click(); URL.revokeObjectURL(url)
+      const link = document.createElement('a'); link.href = url; link.download = id; link.hidden = true; document.body.appendChild(link); link.click(); link.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
       notify('دانلود بکاپ آغاز شد')
     } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : 'دانلود بکاپ ناموفق بود'}`) }
     finally { setBusy('') }
   }
 
-  async function restoreBackup(id: string) {
-    if (!window.confirm(`بازیابی ${id}\n\nدیتابیس فعلی با نسخهٔ داخل بکاپ جایگزین می‌شود. ابتدا یک نسخهٔ محافظتی خودکار از دیتابیس فعلی گرفته خواهد شد.`)) return
-    if (window.prompt('برای تأیید دقیقاً وارد کن: RESTORE ARG') !== 'RESTORE ARG') { notify('خطا: عبارت تأیید مطابقت نداشت'); return }
+  function restoreBackup(backup: Backup) {
+    setRestorePhrase('')
+    setRestoreTarget(backup)
+  }
+
+  async function confirmRestore() {
+    if (!restoreTarget) return
+    if (restorePhrase.trim() !== 'RESTORE ARG') { notify('عبارت تأیید مطابقت ندارد.'); return }
+    const id = restoreTarget.id
     setBusy(`restore:${id}`)
     try {
       const result = await api<{ message: string }>(`maintenance/backups/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({ confirmation: 'RESTORE ARG' }) })
       notify(result.message)
+      setRestoreTarget(null)
       window.setTimeout(() => window.location.reload(), 1800)
     } catch (error) { notify(`خطا: ${error instanceof Error ? error.message : 'بازیابی بکاپ ناموفق بود'}`) }
     finally { setBusy('') }
@@ -118,6 +141,13 @@ export function MaintenancePage({ Heading, notify }: Common) {
     { icon: Cpu, label: 'Architecture', value: system?.architecture || '—', dir: 'ltr' as const },
     { icon: Clock3, label: 'مدت روشن بودن سرور', value: dashboard ? <UptimeValue seconds={dashboard.uptime_seconds}/> : '—' },
   ]
+  const actionTitles = { repair: 'بازسازی کامل ARG', reboot: 'راه‌اندازی مجدد سرور', uninstall: 'حذف کامل ARG' } as const
+  const actionPhrases = { repair: 'REPAIR ARG', reboot: 'REBOOT SERVER', uninstall: 'DELETE ARG' } as const
+  const actionDetails = {
+    repair: 'فایل‌های ARG با سازوکار آپدیت امن بازسازی می‌شوند و در صورت شکست، نسخهٔ قبلی بازمی‌گردد.',
+    reboot: 'اتصال پنل و SSH موقتاً قطع می‌شود و سرور دوباره راه‌اندازی خواهد شد.',
+    uninstall: 'سرویس، فایل‌ها، تنظیمات و دیتابیس ARG برای همیشه پاک می‌شوند.',
+  } as const
 
   return <>
     <Heading title="مدیریت سرور و ARG" description="مشخصات سرور، تعمیر امن پنل، راه‌اندازی مجدد و پشتیبان‌گیری از داده‌های ARG." action={<Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/>تازه‌سازی</Button>}/>
@@ -133,9 +163,21 @@ export function MaintenancePage({ Heading, notify }: Common) {
     <Card className="mt-5 rounded-2xl border-border/80 bg-card/80"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Archive size={18} className="text-primary"/>بکاپ و بازیابی ARG</CardTitle><CardDescription className="mt-1.5">بکاپ دیتابیس ARG شامل حساب‌ها، تنظیمات پنل، تاریخچه و اطلاعات اتصالات است. فایل بکاپ را خارج از سرور هم نگه دار.</CardDescription></div><div className="flex flex-wrap gap-2"><input ref={backupUploadRef} type="file" accept=".db,application/vnd.sqlite3,application/x-sqlite3" className="hidden" aria-label="انتخاب فایل بکاپ ARG برای آپلود" onChange={(event) => void uploadBackup(event.target.files?.[0])}/><Button type="button" variant="outline" onClick={() => backupUploadRef.current?.click()} disabled={!!busy}><Upload size={15}/>{busy === 'upload' ? 'در حال آپلود و بررسی…' : 'آپلود بکاپ'}</Button><Button onClick={() => void createBackup()} disabled={!!busy}><Archive size={15}/>{busy === 'backup' ? 'در حال ساخت…' : 'ساخت بکاپ'}</Button></div></CardHeader><CardContent>
       <div className="mb-3 flex items-start gap-2 rounded-xl border border-sky-400/15 bg-sky-400/[.045] p-3 text-xs leading-6 text-muted-foreground"><CheckCircle2 size={16} className="mt-1 shrink-0 text-sky-300"/>بازیابی قبل از جایگزینی، یک بکاپ محافظتی از دیتابیس فعلی می‌سازد. پس از بازیابی صفحه تازه‌سازی می‌شود تا نشست‌ها و داده‌ها از نسخهٔ بازگردانده‌شده خوانده شوند.</div>
       <p className="mb-3 text-[11px] leading-5 text-muted-foreground">فایل‌های نصب و گواهی TLS در این نسخهٔ بکاپ قرار نمی‌گیرند.</p>
-      {backups.length ? <div className="overflow-x-auto rounded-xl border border-border/70"><table className="w-full min-w-[520px] text-sm"><thead className="bg-secondary/50 text-xs text-muted-foreground"><tr><th className="px-4 py-3 text-right">نسخهٔ پشتیبان</th><th className="px-4 py-3 text-right">حجم</th><th className="px-4 py-3 text-left">عملیات</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id} className="border-t border-border/70"><td className="px-4 py-3 font-mono text-xs" dir="ltr">{backup.id}</td><td className="px-4 py-3 font-mono text-xs" dir="ltr">{formatBytes(backup.size_bytes)}</td><td className="px-4 py-3"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void downloadBackup(backup.id)} disabled={!!busy}><Download size={14}/><span className="hidden sm:inline">دانلود</span></Button><Button size="sm" variant="outline" onClick={() => void restoreBackup(backup.id)} disabled={!!busy}><RotateCcw size={14}/><span className="hidden sm:inline">بازیابی</span></Button></div></td></tr>)}</tbody></table></div> : <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">بکاپی ثبت نشده؛ می‌توانی یک بکاپ تازه بسازی یا فایل `.db` قبلی را آپلود کنی.</div>}
+      {backups.length ? <div className="overflow-x-auto rounded-xl border border-border/70"><table className="w-full min-w-[520px] text-sm"><thead className="bg-secondary/50 text-xs text-muted-foreground"><tr><th className="px-4 py-3 text-right">نسخهٔ پشتیبان</th><th className="px-4 py-3 text-right">حجم</th><th className="px-4 py-3 text-left">عملیات</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id} className="border-t border-border/70"><td className="px-4 py-3 font-mono text-xs" dir="ltr">{backup.id}</td><td className="px-4 py-3 font-mono text-xs" dir="ltr">{formatBytes(backup.size_bytes)}</td><td className="px-4 py-3"><div className="flex justify-end gap-2"><Button size="sm" variant="outline" onClick={() => void downloadBackup(backup.id)} disabled={!!busy}><Download size={14}/><span className="hidden sm:inline">دانلود</span></Button><Button size="sm" variant="outline" onClick={() => restoreBackup(backup)} disabled={!!busy}><RotateCcw size={14}/><span className="hidden sm:inline">بازیابی</span></Button></div></td></tr>)}</tbody></table></div> : <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">بکاپی ثبت نشده؛ می‌توانی یک بکاپ تازه بسازی یا فایل `.db` قبلی را آپلود کنی.</div>}
     </CardContent></Card>
 
     <Card className="mt-5 rounded-2xl border-rose-400/20 bg-rose-400/[.025]"><CardHeader><CardTitle className="flex items-center gap-2 text-base text-rose-100"><Trash2 size={17}/>حذف کامل ARG</CardTitle><CardDescription>سرویس، فایل‌های نصب، تنظیمات و دیتابیس ARG پاک می‌شوند. این کار روی سایت‌ها و سرویس‌های دیگر سرور اثری ندارد.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">پیش از حذف، بکاپ بساز و آن را دانلود کن؛ بکاپ‌های محلی هم با حذف کامل پاک می‌شوند.</p><Button variant="destructive" onClick={() => void action('uninstall')} disabled={!!busy}><Trash2 size={15}/>{busy === 'uninstall' ? 'در حال حذف…' : 'حذف کامل ARG'}</Button></CardContent></Card>
+    <Dialog open={!!restoreTarget} onOpenChange={(open) => { if (!open && !busy) { setRestoreTarget(null); setRestorePhrase('') } }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><AlertTriangle size={18} className="text-amber-300"/>بازیابی بکاپ ARG</DialogTitle><DialogDescription>دیتابیس فعلی با نسخهٔ بکاپ جایگزین می‌شود. ARG پیش از جایگزینی یک بکاپ محافظتی خودکار می‌سازد.</DialogDescription></DialogHeader>
+        {restoreTarget && <div className="space-y-4"><div className="rounded-lg border border-border bg-background/40 p-3 text-xs"><span className="text-muted-foreground">فایل انتخاب‌شده</span><code dir="ltr" className="mt-1 block break-all font-mono">{restoreTarget.id}</code><span className="mt-2 block text-muted-foreground">حجم: {formatBytes(restoreTarget.size_bytes)}</span></div><div className="space-y-2"><Label htmlFor="restore-backup-confirmation">برای تأیید عبارت زیر را وارد کن</Label><code dir="ltr" className="block font-mono text-sm text-amber-200">RESTORE ARG</code><Input id="restore-backup-confirmation" dir="ltr" autoComplete="off" value={restorePhrase} onChange={(event) => setRestorePhrase(event.target.value)} placeholder="RESTORE ARG"/></div><div className="flex justify-end gap-2"><Button variant="outline" disabled={!!busy} onClick={() => setRestoreTarget(null)}>انصراف</Button><Button variant="destructive" disabled={!!busy || restorePhrase.trim() !== 'RESTORE ARG'} onClick={() => void confirmRestore()}>{busy === `restore:${restoreTarget.id}` ? <><RefreshCw size={14} className="animate-spin"/>در حال بازیابی…</> : <><RotateCcw size={14}/>بازیابی و جایگزینی دیتابیس</>}</Button></div></div>}
+      </DialogContent>
+    </Dialog>
+    <Dialog open={!!actionTarget} onOpenChange={(open) => { if (!open && !busy) { setActionTarget(null); setActionPhrase('') } }}>
+      <DialogContent>
+        <DialogHeader><DialogTitle className="flex items-center gap-2"><AlertTriangle size={18} className="text-amber-300"/>{actionTarget ? actionTitles[actionTarget] : 'تأیید عملیات'}</DialogTitle><DialogDescription>{actionTarget ? actionDetails[actionTarget] : ''}</DialogDescription></DialogHeader>
+        {actionTarget && <div className="space-y-4"><div className="space-y-2"><Label htmlFor="server-action-confirmation">برای تأیید عبارت زیر را وارد کن</Label><code dir="ltr" className="block font-mono text-sm text-amber-200">{actionPhrases[actionTarget]}</code><Input id="server-action-confirmation" dir="ltr" autoComplete="off" value={actionPhrase} onChange={(event) => setActionPhrase(event.target.value)} placeholder={actionPhrases[actionTarget]}/></div><div className="flex justify-end gap-2"><Button variant="outline" disabled={!!busy} onClick={() => setActionTarget(null)}>انصراف</Button><Button variant={actionTarget === 'uninstall' ? 'destructive' : 'default'} disabled={!!busy || actionPhrase.trim() !== actionPhrases[actionTarget]} onClick={() => void confirmAction()}>{busy === actionTarget ? <><RefreshCw size={14} className="animate-spin"/>در حال اجرا…</> : 'تأیید و اجرا'}</Button></div></div>}
+      </DialogContent>
+    </Dialog>
   </>
 }

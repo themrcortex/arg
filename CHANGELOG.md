@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.7-dev.4 — 2026-10-25
+
+### Fixed
+- Download ARG backups as binary data without consuming the successful response as JSON first.
+- Confirm backup restoration in a clear modal with the required phrase and show operation feedback through the panel toast.
+
 ## v0.6.7-dev.3 — 2026-10-25
 
 ### Improved
