@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.6.5 — 2026-10-25
+
+### Improved
+- Let the SSH installer update flow choose the stable `main` or prerelease `development` branch before fetching and building.
+- Add `fast` builds that retain Rust compilation cache and `complete` builds that clear it before and after compilation to reduce persistent disk usage.
+- Allow non-interactive updates with `arg update main complete` or `arg update development fast`.
+
+### Fixed
+- Apply complete cache cleanup to both SSH and web-triggered updates without affecting initial installations.
+
 ## v0.6.4 — 2026-10-25
 
 ### Added

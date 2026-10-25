@@ -11,7 +11,7 @@ case "$requested_branch" in
   main|development) ;;
   *) printf 'Invalid ARG update branch. Allowed: main, development.\n' >&2; exit 2 ;;
 esac
-readonly BRANCH="$requested_branch"
+BRANCH="$requested_branch"
 readonly INSTALL_DIR="/opt/arg"
 readonly SOURCE_DIR="/opt/arg/source"
 readonly BINARY="/usr/local/lib/arg/arg"
@@ -227,7 +227,7 @@ prepare_source() {
 
 build_release() {
   [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the selected ARG branch and repository."
-  if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" && "${ARG_UPDATE_MODE:-complete}" == "complete" ]]; then
+  if [[ "${ARG_UPDATE_CONTEXT:-}" == "update" && "${ARG_UPDATE_MODE:-complete}" == "complete" ]]; then
     run_with_progress "Clearing previous Rust build cache" bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR"
   fi
   run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"
@@ -1179,12 +1179,50 @@ wait_for_panel() {
   return 1
 }
 
+select_update_options() {
+  local requested_branch="${1:-}" requested_mode="${2:-}" answer default_mode
+  if [[ -z "$requested_branch" ]]; then
+    if [[ -r /dev/tty && -t 1 && "${ARG_UPDATE_RESERVED:-0}" != "1" ]]; then
+      info "Choose the source branch. main is stable; development contains prerelease changes."
+      read_answer "Update branch [main/development] [$BRANCH]: " answer "$BRANCH"
+      requested_branch="$answer"
+    else
+      requested_branch="$BRANCH"
+    fi
+  fi
+  [[ "$requested_branch" == main || "$requested_branch" == development ]] || die "Invalid update branch. Choose main or development."
+
+  default_mode="${ARG_UPDATE_MODE:-complete}"
+  [[ "$default_mode" == fast || "$default_mode" == complete ]] || default_mode="complete"
+  if [[ -z "$requested_mode" ]]; then
+    if [[ -r /dev/tty && -t 1 && "${ARG_UPDATE_RESERVED:-0}" != "1" ]]; then
+      info "Fast keeps Rust build cache on disk for quicker future updates. Complete clears it before and after compilation; builds take longer."
+      local default_choice=2
+      [[ "$default_mode" == fast ]] && default_choice=1
+      read_answer "Build mode [1=fast / 2=complete] [$default_choice]: " answer "$default_choice"
+      case "${answer,,}" in
+        1|fast) requested_mode="fast" ;;
+        2|complete) requested_mode="complete" ;;
+        *) die "Invalid build mode. Choose 1/fast or 2/complete." ;;
+      esac
+    else
+      requested_mode="$default_mode"
+    fi
+  fi
+  [[ "$requested_mode" == fast || "$requested_mode" == complete ]] || die "Invalid build mode. Choose fast or complete."
+
+  BRANCH="$requested_branch"
+  ARG_UPDATE_MODE="$requested_mode"
+  export ARG_UPDATE_MODE ARG_UPDATE_CONTEXT=update
+  check_update_status
+  info "Update source: $BRANCH ($UPDATE_STATUS) · build mode: $ARG_UPDATE_MODE"
+}
+
 update_app() {
   require_root update
   require_systemd
   local was_installed=0 build_started=0 binary_swapped=0 previous staged database_path database_staged
-  export ARG_UPDATE_MODE="${ARG_UPDATE_MODE:-complete}"
-  case "$ARG_UPDATE_MODE" in fast|complete) ;; *) die "Invalid update build mode." ;; esac
+  select_update_options "${1:-}" "${2:-}"
   [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
   (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
   if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" ]]; then
@@ -1393,7 +1431,7 @@ manage_app() {
       logs) journalctl -u "$SERVICE_NAME" -n "${3:-100}" --no-pager ;;
       port) change_port "${3:-}" ;;
       ssl) configure_https ;;
-      update) update_app ;;
+      update) update_app "${3:-}" "${4:-}" ;;
       delete) delete_app "${3:-}" ;;
       *) die "Unknown management action: $2" ;;
     esac
@@ -1747,7 +1785,8 @@ Commands:
   start|stop       Start or stop the systemd service
   restart          Restart the systemd service
   logs [count]     Show recent service logs
-  update           Fetch the selected branch, build, and install with automatic rollback
+  update [main|development] [fast|complete]
+                   Select the source branch and cache policy, then build/install with automatic rollback
   cancel-update    Cancel an active update or clear a stale update lock
   rollback         Restore the last saved ARG binary and restart the service
   password         Reset an account password as root
@@ -1777,7 +1816,7 @@ case "${1:-menu}" in
   logs)
     view_logs "${2:-100}"
     ;;
-  update) update_app ;;
+  update) update_app "${2:-}" "${3:-}" ;;
   cancel-update) require_root cancel-update; "$UPDATE_HELPER" cancel ;;
   rollback) require_root rollback; confirm_rollback; "$UPDATE_HELPER" rollback ;;
   ssl) configure_https ;;
