@@ -11,7 +11,7 @@ Manage Linux servers, services, websites, storage, and databases from a single w
 [![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu-DEA574?style=flat-square&logo=linux&logoColor=white)](#requirements)
 [![Docs](https://img.shields.io/badge/docs-bilingual-DEA574?style=flat-square)](https://themrcortex.github.io/arg/)
 
-**Stable release:** `v0.6.5`
+**Stable release:** `v0.6.7`
 
 [Documentation](https://themrcortex.github.io/arg/) · [Report an issue](https://github.com/themrcortex/arg/issues) · [Maintainer](https://t.me/mrc0rtex)
 

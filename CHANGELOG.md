@@ -1,5 +1,17 @@
 # ARG Change Log
 
+## v0.6.7 — 2026-10-26
+
+### Fixed
+- Make web updates and rollback recover correctly from cancellation, stale locks and failed activation.
+- Repair Nginx resource readings, site certificate requests, maintenance access and web-worker file permissions.
+- Manage existing UFW web-port rules and numbered rules without risking protected access.
+
+### Improved
+- Apply ARG's copper glass visual system across the panel shell, cards, menus and dialogs.
+- Load the SSH service menu promptly, even while update and public-IP checks run.
+- Extend bilingual documentation and run frontend, backend, documentation and system-script checks on both branches.
+
 ## v0.6.7-dev.11 — 2026-10-26
 
 ### Fixed
