@@ -55,17 +55,18 @@ static ROOT_TERMINAL_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
-mod docker;
 mod apps;
 mod deploy;
-mod files;
-mod federation;
+mod docker;
 mod fast_actions;
-mod metrics;
+mod federation;
+mod files;
 mod maintenance;
+mod metrics;
 mod mysql;
 mod nginx;
 mod routes;
+mod runtimes;
 mod s3;
 mod storage_mounts;
 
@@ -134,7 +135,9 @@ fn update_started_at() -> Option<i64> {
                 .ok()
                 .is_some_and(|stat| {
                     let fields: Vec<_> = stat.split_whitespace().collect();
-                    fields.get(2).is_some_and(|state| !matches!(*state, "Z" | "X"))
+                    fields
+                        .get(2)
+                        .is_some_and(|state| !matches!(*state, "Z" | "X"))
                         && fields.get(21).and_then(|value| value.parse::<u64>().ok())
                             == Some(expected_start)
                 });
@@ -150,7 +153,9 @@ fn update_started_at() -> Option<i64> {
     let unit = fs::read_to_string("/run/arg-update-last-unit").unwrap_or_default();
     let unit = unit.trim();
     let scheduled_unit_active = if unit.starts_with("arg-web-update-")
-        && unit["arg-web-update-".len()..].bytes().all(|byte| byte.is_ascii_digit())
+        && unit["arg-web-update-".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
     {
         ["service", "timer"].iter().any(|suffix| {
             std::process::Command::new("systemctl")
@@ -287,7 +292,12 @@ fn ensure_federation_identity_columns(db: &Connection) -> Result<(), rusqlite::E
 fn update_guard_exempt(path: &str) -> bool {
     matches!(
         path,
-        "/api/update" | "/api/update/progress" | "/api/update/cancel" | "/api/state" | "/api/logout" | "/api/login"
+        "/api/update"
+            | "/api/update/progress"
+            | "/api/update/cancel"
+            | "/api/state"
+            | "/api/logout"
+            | "/api/login"
     )
 }
 
@@ -429,9 +439,7 @@ async fn setup(
             "Enter the one-time setup code shown in the server console.",
         ));
     }
-    if !local_setup
-        && !secure_transport(&headers, remote.ip())
-    {
+    if !local_setup && !secure_transport(&headers, remote.ip()) {
         return Err(error(
             StatusCode::FORBIDDEN,
             "Use the HTTPS panel URL to create the first administrator.",
@@ -487,8 +495,7 @@ async fn login(
             "Use the HTTPS panel URL to sign in. For initial setup, connect through an SSH tunnel.",
         ));
     }
-    let ip_throttle_key = (!remote.ip().is_loopback())
-        .then(|| format!("login-ip:{}", remote.ip()));
+    let ip_throttle_key = (!remote.ip().is_loopback()).then(|| format!("login-ip:{}", remote.ip()));
     if input.username.len() > 32 || input.password.len() > 1024 {
         let db = state.lock().unwrap();
         if let Some(key) = ip_throttle_key.as_deref() {
@@ -1121,9 +1128,17 @@ async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMa
     let configured_key = env::var("ARG_TLS_KEY").unwrap_or_default();
     let mut discovered = None;
     if configured_cert.is_empty() || configured_key.is_empty() {
-        let domain = fs::read_to_string("/etc/arg/https-domain").unwrap_or_default().trim().to_owned();
+        let domain = fs::read_to_string("/etc/arg/https-domain")
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
         let mut names = vec!["arg".to_owned()];
-        if !domain.is_empty() && domain.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte)) && !names.contains(&domain) {
+        if !domain.is_empty()
+            && domain
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte))
+            && !names.contains(&domain)
+        {
             names.push(domain);
         }
         for name in names {
@@ -1136,13 +1151,30 @@ async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMa
         }
     }
     let (certificate_path, private_key_path) = match discovered {
-        Some((cert, key)) if configured_cert.is_empty() || configured_key.is_empty() => (if configured_cert.is_empty() { cert } else { configured_cert }, if configured_key.is_empty() { key } else { configured_key }),
+        Some((cert, key)) if configured_cert.is_empty() || configured_key.is_empty() => (
+            if configured_cert.is_empty() {
+                cert
+            } else {
+                configured_cert
+            },
+            if configured_key.is_empty() {
+                key
+            } else {
+                configured_key
+            },
+        ),
         _ => (configured_cert, configured_key),
     };
     let bind = env::var("ARG_TLS_BIND").unwrap_or_else(|_| "0.0.0.0:443".to_owned());
-    let port = bind.rsplit(':').next().and_then(|part| part.parse::<u16>().ok()).unwrap_or(443);
-    let certificate_present = !certificate_path.is_empty() && PathBuf::from(&certificate_path).is_file();
-    let private_key_present = !private_key_path.is_empty() && PathBuf::from(&private_key_path).is_file();
+    let port = bind
+        .rsplit(':')
+        .next()
+        .and_then(|part| part.parse::<u16>().ok())
+        .unwrap_or(443);
+    let certificate_present =
+        !certificate_path.is_empty() && PathBuf::from(&certificate_path).is_file();
+    let private_key_present =
+        !private_key_path.is_empty() && PathBuf::from(&private_key_path).is_file();
     Ok(Json(json!({
         "enabled": certificate_present && private_key_present,
         "certificate_path": certificate_path,
@@ -1162,7 +1194,10 @@ async fn update_panel_tls_settings(
 ) -> ApiResult {
     check_origin(&headers)?;
     if !(1024..=65535).contains(&input.port) {
-        return Err(error(StatusCode::BAD_REQUEST, "HTTPS port must be between 1024 and 65535"));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "HTTPS port must be between 1024 and 65535",
+        ));
     }
     let actor = {
         let db = state.lock().unwrap();
@@ -1174,14 +1209,24 @@ async fn update_panel_tls_settings(
         "private_key_path": input.private_key_path,
         "server_name": input.server_name,
         "port": input.port
-    })).await?;
+    }))
+    .await?;
     if result["ok"].as_bool() != Some(true) {
-        let message = result["error"].as_str().unwrap_or("Could not configure HTTPS");
+        let message = result["error"]
+            .as_str()
+            .unwrap_or("Could not configure HTTPS");
         return Err(error(StatusCode::BAD_REQUEST, message));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor.username, "panel.tls.configure", &format!("HTTPS certificate paths configured on port {}", input.port));
-    Ok(Json(json!({"scheduled":true,"port":input.port,"message":"HTTPS settings were saved. ARG will restart shortly; reopen the panel using HTTPS."})))
+    audit(
+        &db,
+        &actor.username,
+        "panel.tls.configure",
+        &format!("HTTPS certificate paths configured on port {}", input.port),
+    );
+    Ok(Json(
+        json!({"scheduled":true,"port":input.port,"message":"HTTPS settings were saved. ARG will restart shortly; reopen the panel using HTTPS."}),
+    ))
 }
 
 async fn collect_metrics(state: AppState) {
@@ -2297,15 +2342,33 @@ async fn delete_external_firewall_rule(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
     };
-    if input.number == 0 || input.line.len() > 512 || input.line.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(error(StatusCode::BAD_REQUEST, "شناسه یا مشخصات قانون UFW معتبر نیست."));
+    if input.number == 0
+        || input.line.len() > 512
+        || input.line.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "شناسه یا مشخصات قانون UFW معتبر نیست.",
+        ));
     }
-    let response = privileged_request(json!({"action":"delete-line","number":input.number,"line":input.line}))?;
+    let response = privileged_request(
+        json!({"action":"delete-line","number":input.number,"line":input.line}),
+    )?;
     if response["ok"] != true {
-        return Err(error(StatusCode::BAD_GATEWAY, response["error"].as_str().unwrap_or("حذف قانون UFW ناموفق بود.")));
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            response["error"]
+                .as_str()
+                .unwrap_or("حذف قانون UFW ناموفق بود."),
+        ));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor, "firewall.external.delete", &format!("number={}; line={}", input.number, input.line));
+    audit(
+        &db,
+        &actor,
+        "firewall.external.delete",
+        &format!("number={}; line={}", input.number, input.line),
+    );
     Ok(Json(json!({"ok":true,"message":"قانون UFW حذف شد."})))
 }
 async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -2559,8 +2622,14 @@ async fn install_firewall(State(state): State<AppState>, headers: HeaderMap) -> 
     Ok(Json(json!({"installed": true})))
 }
 async fn update_status(branch: &str) -> Value {
-    let branch = if valid_update_branch(branch) { branch } else { "main" };
-    let output = match privileged_request_async(json!({"action":"update-check","branch":branch})).await {
+    let branch = if valid_update_branch(branch) {
+        branch
+    } else {
+        "main"
+    };
+    let output = match privileged_request_async(json!({"action":"update-check","branch":branch}))
+        .await
+    {
         Ok(output) if output["ok"] == true => {
             output["stdout"].as_str().unwrap_or_default().to_owned()
         }
@@ -2586,7 +2655,11 @@ async fn update_status(branch: &str) -> Value {
         .filter(|value| *value != "unknown");
     json!({"status": if local == remote { "current" } else { "available" }, "local": &local[..7], "remote": &remote[..7], "local_version": env!("CARGO_PKG_VERSION"), "remote_version": remote_version, "branch": branch})
 }
-async fn panel_update_status(State(state): State<AppState>, headers: HeaderMap, Query(query): Query<PanelUpdateQuery>) -> ApiResult {
+async fn panel_update_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PanelUpdateQuery>,
+) -> ApiResult {
     {
         let db = state.lock().unwrap();
         require_user(&db, &headers)?;
@@ -2641,6 +2714,11 @@ struct AptOperation {
     packages: Vec<String>,
 }
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AptPreviewRequest {
+    packages: Vec<String>,
+}
+#[derive(Deserialize)]
 struct ServiceOperation {
     action: String,
     unit: String,
@@ -2671,10 +2749,46 @@ async fn list_runtime_packs(State(state): State<AppState>, headers: HeaderMap) -
     if result["ok"] != true {
         return Err(error(
             StatusCode::SERVICE_UNAVAILABLE,
-            result["error"].as_str().unwrap_or("Runtime package catalog unavailable"),
+            result["error"]
+                .as_str()
+                .unwrap_or("Runtime package catalog unavailable"),
         ));
     }
     Ok(Json(result["data"].clone()))
+}
+async fn preview_package_install(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<AptPreviewRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    if input.packages.is_empty()
+        || input.packages.len() > 100
+        || input
+            .packages
+            .iter()
+            .any(|package| !valid_apt_install_spec(package))
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "فهرست بسته برای پیش‌نمایش معتبر نیست.",
+        ));
+    }
+    let result =
+        privileged_request_async(json!({"action":"apt-preview","packages":input.packages})).await?;
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            result["error"].as_str().unwrap_or("APT preview failed"),
+        ));
+    }
+    Ok(Json(
+        json!({"output":result["stdout"].as_str().unwrap_or("")}),
+    ))
 }
 async fn run_apt_operation(
     State(state): State<AppState>,
@@ -2701,7 +2815,11 @@ async fn run_apt_operation(
     if !allowed.contains(&input.action.as_str())
         || input.packages.len() > (if input.action == "install" { 100 } else { 25 })
         || input.packages.iter().any(|p| {
-            if input.action == "install" { !valid_apt_install_spec(p) } else { !valid_package_name(p) }
+            if input.action == "install" {
+                !valid_apt_install_spec(p)
+            } else {
+                !valid_package_name(p)
+            }
         })
     {
         return Err(error(
@@ -2834,9 +2952,9 @@ fn valid_apt_install_spec(spec: &str) -> bool {
     !version.is_empty()
         && version.len() <= 128
         && valid_package_name(package)
-        && version.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || b".+:~_-".contains(&byte)
-        })
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".+:~_-".contains(&byte))
 }
 fn valid_service_unit(unit: &str) -> bool {
     unit.len() <= 255
@@ -2885,7 +3003,10 @@ async fn schedule_panel_update(
 ) -> ApiResult {
     check_origin(&headers)?;
     if !valid_update_build_mode(&input.mode) {
-        return Err(error(StatusCode::BAD_REQUEST, "Update build mode is invalid."));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "Update build mode is invalid.",
+        ));
     }
     if !valid_update_branch(&input.branch) {
         return Err(error(StatusCode::BAD_REQUEST, "Update branch is invalid."));
@@ -2899,7 +3020,8 @@ async fn schedule_panel_update(
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
-    let output = privileged_request(json!({"action":"update-run","mode":input.mode,"branch":input.branch}))?;
+    let output =
+        privileged_request(json!({"action":"update-run","mode":input.mode,"branch":input.branch}))?;
     if output["ok"] != true {
         let detail = output["error"]
             .as_str()
@@ -2928,12 +3050,21 @@ async fn cancel_panel_update(State(state): State<AppState>, headers: HeaderMap) 
     };
     let output = privileged_request_async(json!({"action":"update-cancel"})).await?;
     if output["ok"] != true {
-        let detail = output["error"].as_str().unwrap_or("ARG update could not be cancelled.");
+        let detail = output["error"]
+            .as_str()
+            .unwrap_or("ARG update could not be cancelled.");
         return Err(error(StatusCode::CONFLICT, detail));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor, "panel.update.cancel", "administrator cancelled the active update");
-    Ok(Json(json!({"cancelled":true,"message":output["stdout"].as_str().unwrap_or("ARG update cancelled.")})))
+    audit(
+        &db,
+        &actor,
+        "panel.update.cancel",
+        "administrator cancelled the active update",
+    );
+    Ok(Json(
+        json!({"cancelled":true,"message":output["stdout"].as_str().unwrap_or("ARG update cancelled.")}),
+    ))
 }
 
 async fn rollback_panel_update(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -2953,8 +3084,15 @@ async fn rollback_panel_update(State(state): State<AppState>, headers: HeaderMap
         return Err(error(status, detail));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor, "panel.update.rollback", "administrator restored the previous ARG binary");
-    Ok(Json(json!({"rolled_back":true,"message":output["stdout"].as_str().unwrap_or("Previous ARG version restored.")})))
+    audit(
+        &db,
+        &actor,
+        "panel.update.rollback",
+        "administrator restored the previous ARG binary",
+    );
+    Ok(Json(
+        json!({"rolled_back":true,"message":output["stdout"].as_str().unwrap_or("Previous ARG version restored.")}),
+    ))
 }
 async fn static_file(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
@@ -3132,7 +3270,11 @@ fn stop_root_terminal(request: &Value) -> Result<(), String> {
 }
 
 fn valid_tls_source_path(value: &str, private_key: bool) -> bool {
-    let expected = if private_key { "privkey.pem" } else { "fullchain.pem" };
+    let expected = if private_key {
+        "privkey.pem"
+    } else {
+        "fullchain.pem"
+    };
     if value == format!("/etc/arg/tls/{expected}") {
         return true;
     }
@@ -3144,7 +3286,9 @@ fn valid_tls_source_path(value: &str, private_key: bool) -> bool {
     };
     !name.is_empty()
         && name.len() <= 128
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
         && !name.starts_with('.')
         && file == expected
 }
@@ -3169,20 +3313,33 @@ fn configure_panel_tls(request: &Value) -> Value {
         return failure("Private key path is required.".into());
     };
     let Some(server_name) = request["server_name"].as_str().filter(|name| {
-        !name.is_empty() && name.len() <= 253 && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte))
+        !name.is_empty()
+            && name.len() <= 253
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte))
     }) else {
-        return failure("Enter the panel domain name or IP address covered by the certificate.".into());
+        return failure(
+            "Enter the panel domain name or IP address covered by the certificate.".into(),
+        );
     };
-    let Some(port) = request["port"].as_u64().filter(|port| (1024..=65535).contains(port)) else {
+    let Some(port) = request["port"]
+        .as_u64()
+        .filter(|port| (1024..=65535).contains(port))
+    else {
         return failure("HTTPS port must be between 1024 and 65535.".into());
     };
-    let current_bind = fs::read_to_string("/etc/arg/arg.env").unwrap_or_default().lines()
+    let current_bind = fs::read_to_string("/etc/arg/arg.env")
+        .unwrap_or_default()
+        .lines()
         .find_map(|line| line.strip_prefix("ARG_TLS_BIND="))
         .and_then(|bind| bind.rsplit(':').next()?.parse::<u16>().ok());
     if current_bind != Some(port as u16)
         && std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port as u16)).is_err()
     {
-        return failure(format!("HTTPS port {port} is already in use. Choose another free port, for example 8443."));
+        return failure(format!(
+            "HTTPS port {port} is already in use. Choose another free port, for example 8443."
+        ));
     }
     if !valid_tls_source_path(certificate_source, false)
         || !valid_tls_source_path(private_key_source, true)
@@ -3191,35 +3348,90 @@ fn configure_panel_tls(request: &Value) -> Value {
     }
     let certificate_source = match PathBuf::from(certificate_source).canonicalize() {
         Ok(path) => path,
-        Err(_) => return failure("Certificate file was not found. Upload or copy it to the server first.".into()),
+        Err(_) => {
+            return failure(
+                "Certificate file was not found. Upload or copy it to the server first.".into(),
+            )
+        }
     };
     let private_key_source = match PathBuf::from(private_key_source).canonicalize() {
         Ok(path) => path,
-        Err(_) => return failure("Private key file was not found. Copy it to the server first.".into()),
+        Err(_) => {
+            return failure("Private key file was not found. Copy it to the server first.".into())
+        }
     };
-    if !certificate_source.starts_with("/etc/arg/tls") && !certificate_source.starts_with("/etc/letsencrypt/archive") {
-        return failure("Certificate symlink resolves outside the allowed certificate directories.".into());
+    if !certificate_source.starts_with("/etc/arg/tls")
+        && !certificate_source.starts_with("/etc/letsencrypt/archive")
+    {
+        return failure(
+            "Certificate symlink resolves outside the allowed certificate directories.".into(),
+        );
     }
-    if !private_key_source.starts_with("/etc/arg/tls") && !private_key_source.starts_with("/etc/letsencrypt/archive") {
-        return failure("Private-key symlink resolves outside the allowed certificate directories.".into());
+    if !private_key_source.starts_with("/etc/arg/tls")
+        && !private_key_source.starts_with("/etc/letsencrypt/archive")
+    {
+        return failure(
+            "Private-key symlink resolves outside the allowed certificate directories.".into(),
+        );
     }
-    let cert_meta = match fs::metadata(&certificate_source) { Ok(meta) => meta, Err(_) => return failure("Could not read the certificate file.".into()) };
-    let key_meta = match fs::metadata(&private_key_source) { Ok(meta) => meta, Err(_) => return failure("Could not read the private-key file.".into()) };
-    if !cert_meta.is_file() || !key_meta.is_file() || cert_meta.len() > 1024 * 1024 || key_meta.len() > 128 * 1024 {
-        return failure("Certificate or private key is not a regular file or exceeds the allowed size.".into());
+    let cert_meta = match fs::metadata(&certificate_source) {
+        Ok(meta) => meta,
+        Err(_) => return failure("Could not read the certificate file.".into()),
+    };
+    let key_meta = match fs::metadata(&private_key_source) {
+        Ok(meta) => meta,
+        Err(_) => return failure("Could not read the private-key file.".into()),
+    };
+    if !cert_meta.is_file()
+        || !key_meta.is_file()
+        || cert_meta.len() > 1024 * 1024
+        || key_meta.len() > 128 * 1024
+    {
+        return failure(
+            "Certificate or private key is not a regular file or exceeds the allowed size.".into(),
+        );
     }
-    if let Err(message) = tls_openssl_output(&["x509", "-in", certificate_source.to_string_lossy().as_ref(), "-checkend", "0", "-noout"]) {
+    if let Err(message) = tls_openssl_output(&[
+        "x509",
+        "-in",
+        certificate_source.to_string_lossy().as_ref(),
+        "-checkend",
+        "0",
+        "-noout",
+    ]) {
         return failure(message);
     }
-    let hostname_check = if server_name.parse::<std::net::IpAddr>().is_ok() { "-checkip" } else { "-checkhost" };
-    if let Err(_) = tls_openssl_output(&["x509", "-in", certificate_source.to_string_lossy().as_ref(), hostname_check, server_name, "-noout"]) {
+    let hostname_check = if server_name.parse::<std::net::IpAddr>().is_ok() {
+        "-checkip"
+    } else {
+        "-checkhost"
+    };
+    if let Err(_) = tls_openssl_output(&[
+        "x509",
+        "-in",
+        certificate_source.to_string_lossy().as_ref(),
+        hostname_check,
+        server_name,
+        "-noout",
+    ]) {
         return failure("The certificate is not valid for the panel's domain/IP. Use a certificate whose SAN includes this address.".into());
     }
-    let cert_public_key = match tls_openssl_output(&["x509", "-in", certificate_source.to_string_lossy().as_ref(), "-pubkey", "-noout"]) {
+    let cert_public_key = match tls_openssl_output(&[
+        "x509",
+        "-in",
+        certificate_source.to_string_lossy().as_ref(),
+        "-pubkey",
+        "-noout",
+    ]) {
         Ok(value) => value,
         Err(message) => return failure(message),
     };
-    let key_public_key = match tls_openssl_output(&["pkey", "-in", private_key_source.to_string_lossy().as_ref(), "-pubout"]) {
+    let key_public_key = match tls_openssl_output(&[
+        "pkey",
+        "-in",
+        private_key_source.to_string_lossy().as_ref(),
+        "-pubout",
+    ]) {
         Ok(value) => value,
         Err(message) => return failure(message),
     };
@@ -3228,68 +3440,160 @@ fn configure_panel_tls(request: &Value) -> Value {
     }
 
     let tls_dir = PathBuf::from("/etc/arg/tls");
-    if let Err(error) = fs::create_dir_all(&tls_dir) { return failure(format!("Could not prepare ARG certificate storage: {error}")); }
-    if let Err(error) = fs::set_permissions(&tls_dir, fs::Permissions::from_mode(0o750)) { return failure(format!("Could not secure ARG certificate directory: {error}")); }
-    let directory_owner = std::process::Command::new("chown").args(["root:arg", tls_dir.to_string_lossy().as_ref()]).status();
-    if !directory_owner.map(|status| status.success()).unwrap_or(false) { return failure("Could not set ARG certificate directory ownership.".into()); }
+    if let Err(error) = fs::create_dir_all(&tls_dir) {
+        return failure(format!(
+            "Could not prepare ARG certificate storage: {error}"
+        ));
+    }
+    if let Err(error) = fs::set_permissions(&tls_dir, fs::Permissions::from_mode(0o750)) {
+        return failure(format!(
+            "Could not secure ARG certificate directory: {error}"
+        ));
+    }
+    let directory_owner = std::process::Command::new("chown")
+        .args(["root:arg", tls_dir.to_string_lossy().as_ref()])
+        .status();
+    if !directory_owner
+        .map(|status| status.success())
+        .unwrap_or(false)
+    {
+        return failure("Could not set ARG certificate directory ownership.".into());
+    }
     let staged_nonce = token();
-    let staged_cert = tls_dir.join(format!(".fullchain.{}.{}.tmp", std::process::id(), staged_nonce));
+    let staged_cert = tls_dir.join(format!(
+        ".fullchain.{}.{}.tmp",
+        std::process::id(),
+        staged_nonce
+    ));
     let staged_key = tls_dir.join(format!(".privkey.{}.{}.tmp", std::process::id(), token()));
-    if let Err(error) = fs::copy(&certificate_source, &staged_cert) { return failure(format!("Could not stage certificate: {error}")); }
+    if let Err(error) = fs::copy(&certificate_source, &staged_cert) {
+        return failure(format!("Could not stage certificate: {error}"));
+    }
     if let Err(error) = fs::copy(&private_key_source, &staged_key) {
         let _ = fs::remove_file(&staged_cert);
         return failure(format!("Could not stage private key: {error}"));
     }
     for path in [&staged_cert, &staged_key] {
         if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o640)) {
-            let _ = fs::remove_file(&staged_cert); let _ = fs::remove_file(&staged_key);
+            let _ = fs::remove_file(&staged_cert);
+            let _ = fs::remove_file(&staged_key);
             return failure(format!("Could not secure certificate permissions: {error}"));
         }
-        let owner = std::process::Command::new("chown").args(["root:arg", path.to_string_lossy().as_ref()]).status();
+        let owner = std::process::Command::new("chown")
+            .args(["root:arg", path.to_string_lossy().as_ref()])
+            .status();
         if !owner.map(|status| status.success()).unwrap_or(false) {
-            let _ = fs::remove_file(&staged_cert); let _ = fs::remove_file(&staged_key);
+            let _ = fs::remove_file(&staged_cert);
+            let _ = fs::remove_file(&staged_key);
             return failure("Could not set certificate ownership to root:arg.".into());
         }
     }
     let cert_target = tls_dir.join("fullchain.pem");
     let key_target = tls_dir.join("privkey.pem");
-    if let Err(error) = fs::rename(&staged_cert, &cert_target) { let _ = fs::remove_file(&staged_key); return failure(format!("Could not install certificate: {error}")); }
-    if let Err(error) = fs::rename(&staged_key, &key_target) { return failure(format!("Could not install private key: {error}")); }
+    if let Err(error) = fs::rename(&staged_cert, &cert_target) {
+        let _ = fs::remove_file(&staged_key);
+        return failure(format!("Could not install certificate: {error}"));
+    }
+    if let Err(error) = fs::rename(&staged_key, &key_target) {
+        return failure(format!("Could not install private key: {error}"));
+    }
 
     let env_file = PathBuf::from("/etc/arg/arg.env");
     let existing = match fs::read_to_string(&env_file) {
         Ok(contents) => contents,
-        Err(error) => return failure(format!("Could not read ARG environment configuration: {error}")),
+        Err(error) => {
+            return failure(format!(
+                "Could not read ARG environment configuration: {error}"
+            ))
+        }
     };
-    let mut lines: Vec<&str> = existing.lines().filter(|line| {
-        !["ARG_TLS_CERT", "ARG_TLS_KEY", "ARG_TLS_BIND"].iter().any(|key| line.starts_with(&format!("{key}=")))
-    }).collect();
-    lines.extend(["ARG_TLS_CERT=/etc/arg/tls/fullchain.pem", "ARG_TLS_KEY=/etc/arg/tls/privkey.pem"]);
+    let mut lines: Vec<&str> = existing
+        .lines()
+        .filter(|line| {
+            !["ARG_TLS_CERT", "ARG_TLS_KEY", "ARG_TLS_BIND"]
+                .iter()
+                .any(|key| line.starts_with(&format!("{key}=")))
+        })
+        .collect();
+    lines.extend([
+        "ARG_TLS_CERT=/etc/arg/tls/fullchain.pem",
+        "ARG_TLS_KEY=/etc/arg/tls/privkey.pem",
+    ]);
     let tls_bind = format!("ARG_TLS_BIND=0.0.0.0:{port}");
     let mut env_contents = lines.join("\n");
     env_contents.push('\n');
     env_contents.push_str(&tls_bind);
     env_contents.push('\n');
-    let env_tmp = PathBuf::from(format!("/etc/arg/.arg.env.tls.{}.{}.tmp", std::process::id(), token()));
-    let write_result = fs::OpenOptions::new().write(true).create_new(true).mode(0o640).open(&env_tmp)
+    let env_tmp = PathBuf::from(format!(
+        "/etc/arg/.arg.env.tls.{}.{}.tmp",
+        std::process::id(),
+        token()
+    ));
+    let write_result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o640)
+        .open(&env_tmp)
         .and_then(|mut file| file.write_all(env_contents.as_bytes()));
-    if let Err(error) = write_result { return failure(format!("Could not stage ARG configuration: {error}")); }
-    let owner = std::process::Command::new("chown").args(["root:arg", env_tmp.to_string_lossy().as_ref()]).status();
-    if !owner.map(|status| status.success()).unwrap_or(false) { let _ = fs::remove_file(&env_tmp); return failure("Could not set ARG configuration ownership.".into()); }
-    if let Err(error) = fs::rename(&env_tmp, &env_file) { return failure(format!("Could not activate ARG HTTPS settings: {error}")); }
-
-    if std::process::Command::new("ufw").args(["status"]).output().ok().map(|output| output.status.success() && String::from_utf8_lossy(&output.stdout).contains("Status: active")).unwrap_or(false) {
-        let _ = std::process::Command::new("ufw").args(["allow", "80/tcp", "comment", "ARG HTTPS challenge"]).status();
-        let _ = std::process::Command::new("ufw").args(["allow", &format!("{port}/tcp"), "comment", "ARG HTTPS panel"]).status();
+    if let Err(error) = write_result {
+        return failure(format!("Could not stage ARG configuration: {error}"));
     }
-    let restart = std::process::Command::new("systemd-run").args([
-        "--quiet", "--collect", "--unit=arg-tls-restart", "--on-active=2s",
-        "--property=Type=oneshot", "/usr/bin/systemctl", "restart", "arg.service",
-    ]).output();
+    let owner = std::process::Command::new("chown")
+        .args(["root:arg", env_tmp.to_string_lossy().as_ref()])
+        .status();
+    if !owner.map(|status| status.success()).unwrap_or(false) {
+        let _ = fs::remove_file(&env_tmp);
+        return failure("Could not set ARG configuration ownership.".into());
+    }
+    if let Err(error) = fs::rename(&env_tmp, &env_file) {
+        return failure(format!("Could not activate ARG HTTPS settings: {error}"));
+    }
+
+    if std::process::Command::new("ufw")
+        .args(["status"])
+        .output()
+        .ok()
+        .map(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("Status: active")
+        })
+        .unwrap_or(false)
+    {
+        let _ = std::process::Command::new("ufw")
+            .args(["allow", "80/tcp", "comment", "ARG HTTPS challenge"])
+            .status();
+        let _ = std::process::Command::new("ufw")
+            .args([
+                "allow",
+                &format!("{port}/tcp"),
+                "comment",
+                "ARG HTTPS panel",
+            ])
+            .status();
+    }
+    let restart = std::process::Command::new("systemd-run")
+        .args([
+            "--quiet",
+            "--collect",
+            "--unit=arg-tls-restart",
+            "--on-active=2s",
+            "--property=Type=oneshot",
+            "/usr/bin/systemctl",
+            "restart",
+            "arg.service",
+        ])
+        .output();
     match restart {
-        Ok(output) if output.status.success() => json!({"ok":true,"port":port,"message":"TLS settings saved; ARG restart scheduled."}),
-        Ok(output) => failure(format!("TLS settings were saved, but restart scheduling failed: {}", String::from_utf8_lossy(&output.stderr).trim())),
-        Err(error) => failure(format!("TLS settings were saved, but systemd-run is unavailable: {error}")),
+        Ok(output) if output.status.success() => {
+            json!({"ok":true,"port":port,"message":"TLS settings saved; ARG restart scheduled."})
+        }
+        Ok(output) => failure(format!(
+            "TLS settings were saved, but restart scheduling failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) => failure(format!(
+            "TLS settings were saved, but systemd-run is unavailable: {error}"
+        )),
     }
 }
 
@@ -3336,7 +3640,9 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-browse") => "nginx-browse",
         Some("apt-list") => "apt-list",
         Some("apt-runtime-catalog") => "apt-runtime-catalog",
+        Some("apt-preview") => "apt-preview",
         Some("apt-run") => "apt-run",
+        Some("runtime-inventory") => "runtime-inventory",
         Some("service-list") => "service-list",
         Some("service-action") => "service-action",
         Some("service-resources") => "service-resources",
@@ -3411,8 +3717,12 @@ fn execute_privileged_request(request: &Value) -> Value {
             .args(["run", "complete", &branch])
             .output()
         {
-            Ok(output) if output.status.success() => json!({"ok":true,"scheduled":true,"message":"ARG repair was scheduled with the protected complete-build updater. Follow its progress in the update overlay.","output":String::from_utf8_lossy(&output.stdout)}),
-            Ok(output) => json!({"ok":false,"error":String::from_utf8_lossy(&output.stderr).trim(),"output":String::from_utf8_lossy(&output.stdout)}),
+            Ok(output) if output.status.success() => {
+                json!({"ok":true,"scheduled":true,"message":"ARG repair was scheduled with the protected complete-build updater. Follow its progress in the update overlay.","output":String::from_utf8_lossy(&output.stdout)})
+            }
+            Ok(output) => {
+                json!({"ok":false,"error":String::from_utf8_lossy(&output.stderr).trim(),"output":String::from_utf8_lossy(&output.stdout)})
+            }
             Err(error) => json!({"ok":false,"error":error.to_string()}),
         };
     }
@@ -3426,20 +3736,34 @@ fn execute_privileged_request(request: &Value) -> Value {
         };
     }
     if action == "maintenance-uninstall" {
-        return match std::process::Command::new("systemd-run").args([
-            "--quiet",
-            "--collect",
-            "--unit=arg-web-uninstall",
-            "--property=Type=oneshot",
-            "/usr/local/bin/arg", "delete", "--purge-confirmed",
-        ]).output() {
-            Ok(output) if output.status.success() => json!({"ok":true,"message":"Full ARG removal was queued. The panel will shut down when removal begins."}),
-            Ok(output) => json!({"ok":false,"error":String::from_utf8_lossy(&output.stderr).trim()}),
-            Err(error) => json!({"ok":false,"error":format!("Could not schedule ARG removal: {error}")}),
+        return match std::process::Command::new("systemd-run")
+            .args([
+                "--quiet",
+                "--collect",
+                "--unit=arg-web-uninstall",
+                "--property=Type=oneshot",
+                "/usr/local/bin/arg",
+                "delete",
+                "--purge-confirmed",
+            ])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                json!({"ok":true,"message":"Full ARG removal was queued. The panel will shut down when removal begins."})
+            }
+            Ok(output) => {
+                json!({"ok":false,"error":String::from_utf8_lossy(&output.stderr).trim()})
+            }
+            Err(error) => {
+                json!({"ok":false,"error":format!("Could not schedule ARG removal: {error}")})
+            }
         };
     }
     if action == "docker-status" {
         return docker::execute_docker_status();
+    }
+    if action == "runtime-inventory" {
+        return runtimes::execute_inventory();
     }
     if action == "docker-operation" {
         return docker::execute_docker_operation(request);
@@ -3484,10 +3808,17 @@ fn execute_privileged_request(request: &Value) -> Value {
         };
         args.extend([port.to_string(), protocol.to_owned(), policy.to_owned()]);
     } else if action == "delete-line" {
-        let Some(number) = request["number"].as_u64().filter(|number| (1..=10000).contains(number)) else {
+        let Some(number) = request["number"]
+            .as_u64()
+            .filter(|number| (1..=10000).contains(number))
+        else {
             return json!({"ok":false,"error":"Invalid UFW rule number"});
         };
-        let Some(line) = request["line"].as_str().filter(|line| !line.is_empty() && line.len() <= 512 && !line.bytes().any(|byte| byte.is_ascii_control())) else {
+        let Some(line) = request["line"].as_str().filter(|line| {
+            !line.is_empty()
+                && line.len() <= 512
+                && !line.bytes().any(|byte| byte.is_ascii_control())
+        }) else {
             return json!({"ok":false,"error":"Invalid UFW rule fingerprint"});
         };
         args.push(number.to_string());
@@ -3502,10 +3833,7 @@ fn execute_privileged_request(request: &Value) -> Value {
             }
             update_args.push(branch);
         }
-        (
-            "/usr/local/lib/arg/update-helper",
-            update_args,
-        )
+        ("/usr/local/lib/arg/update-helper", update_args)
     } else {
         (
             "/usr/local/lib/arg/ufw-helper",
@@ -3564,13 +3892,45 @@ fn command_result(command: &mut std::process::Command) -> Result<(bool, String),
     Ok((output.status.success(), result))
 }
 fn execute_apt_request(action: &str, request: &Value) -> Value {
+    if action == "apt-preview" {
+        let packages: Vec<&str> = request["packages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if packages.is_empty()
+            || packages.len() > 100
+            || packages
+                .iter()
+                .any(|package| !valid_apt_install_spec(package))
+        {
+            return json!({"ok":false,"error":"Invalid package list"});
+        }
+        let mut command = std::process::Command::new("apt-get");
+        command
+            .args(["--simulate", "--no-install-recommends", "install", "--"])
+            .args(packages);
+        return match command_result(&mut command) {
+            Ok((true, output)) => json!({"ok":true,"stdout":output}),
+            Ok((false, output)) => json!({"ok":false,"error":output}),
+            Err(error) => {
+                json!({"ok":false,"error":format!("Could not preview package installation: {error}")})
+            }
+        };
+    }
     if action == "apt-runtime-catalog" {
         let mut command = std::process::Command::new("apt-cache");
         command.arg("pkgnames");
         let Ok((true, output)) = command_result(&mut command) else {
             return json!({"ok":false,"error":"Could not read package names from configured APT repositories"});
         };
-        let available: std::collections::HashSet<String> = output.lines().map(str::trim).filter(|name| valid_package_name(name)).map(str::to_owned).collect();
+        let available: std::collections::HashSet<String> = output
+            .lines()
+            .map(str::trim)
+            .filter(|name| valid_package_name(name))
+            .map(str::to_owned)
+            .collect();
         let mut runtimes = Vec::<Value>::new();
 
         let mut php_versions = std::collections::BTreeSet::new();
@@ -3593,56 +3953,116 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
             }
             if let Some(rest) = name.strip_prefix("openjdk-") {
                 if let Some((version, component)) = rest.split_once('-') {
-                    if version.bytes().all(|byte| byte.is_ascii_digit()) && matches!(component, "jdk" | "jre" | "jdk-headless" | "jre-headless") {
+                    if version.bytes().all(|byte| byte.is_ascii_digit())
+                        && matches!(component, "jdk" | "jre" | "jdk-headless" | "jre-headless")
+                    {
                         java_versions.insert(version.to_owned());
                     }
                 }
             }
             if let Some(rest) = name.strip_prefix("ruby") {
-                let version: String = rest.chars().take_while(|character| character.is_ascii_digit() || *character == '.').collect();
-                if version.contains('.') && version.chars().last().is_some_and(|character| character.is_ascii_digit()) {
+                let version: String = rest
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit() || *character == '.')
+                    .collect();
+                if version.contains('.')
+                    && version
+                        .chars()
+                        .last()
+                        .is_some_and(|character| character.is_ascii_digit())
+                {
                     ruby_versions.insert(version);
                 }
             }
         }
         for version in php_versions {
             let base = format!("php{version}");
-            let mut packages: Vec<String> = ["cli", "fpm", "common", "curl", "mysql", "xml", "mbstring", "zip", "gd", "intl", "opcache", "sqlite3", "bcmath"].iter().map(|part| format!("{base}-{part}")).filter(|name| available.contains(name)).collect();
-            packages.sort(); packages.dedup();
-            if !packages.is_empty() { runtimes.push(json!({"id":format!("php-{version}"),"family":"php","version":version.clone(),"label":format!("PHP {version}"),"packages":packages})); }
+            let mut packages: Vec<String> = [
+                "cli", "fpm", "common", "curl", "mysql", "xml", "mbstring", "zip", "gd", "intl",
+                "opcache", "sqlite3", "bcmath",
+            ]
+            .iter()
+            .map(|part| format!("{base}-{part}"))
+            .filter(|name| available.contains(name))
+            .collect();
+            packages.sort();
+            packages.dedup();
+            if !packages.is_empty() {
+                runtimes.push(json!({"id":format!("php-{version}"),"family":"php","version":version.clone(),"label":format!("PHP {version}"),"packages":packages}));
+            }
         }
         for version in python_versions {
             let base = format!("python{version}");
-            let mut packages: Vec<String> = ["", "-venv", "-dev"].iter().map(|suffix| format!("{base}{suffix}")).filter(|name| available.contains(name)).collect();
-            if available.contains("python3-pip") { packages.push("python3-pip".into()); }
-            packages.sort(); packages.dedup();
-            if !packages.is_empty() { runtimes.push(json!({"id":format!("python-{version}"),"family":"python","version":version.clone(),"label":format!("Python {version}"),"packages":packages})); }
+            let mut packages: Vec<String> = ["", "-venv", "-dev"]
+                .iter()
+                .map(|suffix| format!("{base}{suffix}"))
+                .filter(|name| available.contains(name))
+                .collect();
+            if available.contains("python3-pip") {
+                packages.push("python3-pip".into());
+            }
+            packages.sort();
+            packages.dedup();
+            if !packages.is_empty() {
+                runtimes.push(json!({"id":format!("python-{version}"),"family":"python","version":version.clone(),"label":format!("Python {version}"),"packages":packages}));
+            }
         }
         for version in java_versions {
             let jdk = format!("openjdk-{version}-jdk");
             let jre = format!("openjdk-{version}-jre");
-            let packages: Vec<String> = if available.contains(&jdk) { vec![jdk] } else if available.contains(&jre) { vec![jre] } else { Vec::new() };
-            if !packages.is_empty() { runtimes.push(json!({"id":format!("java-{version}"),"family":"java","version":version.clone(),"label":format!("OpenJDK {version}"),"packages":packages})); }
+            let packages: Vec<String> = if available.contains(&jdk) {
+                vec![jdk]
+            } else if available.contains(&jre) {
+                vec![jre]
+            } else {
+                Vec::new()
+            };
+            if !packages.is_empty() {
+                runtimes.push(json!({"id":format!("java-{version}"),"family":"java","version":version.clone(),"label":format!("OpenJDK {version}"),"packages":packages}));
+            }
         }
         for version in ruby_versions {
             let base = format!("ruby{version}");
-            let packages: Vec<String> = [base.clone(), format!("{base}-dev")].into_iter().filter(|name| available.contains(name)).collect();
-            if !packages.is_empty() { runtimes.push(json!({"id":format!("ruby-{version}"),"family":"ruby","version":version.clone(),"label":format!("Ruby {version}"),"packages":packages})); }
+            let packages: Vec<String> = [base.clone(), format!("{base}-dev")]
+                .into_iter()
+                .filter(|name| available.contains(name))
+                .collect();
+            if !packages.is_empty() {
+                runtimes.push(json!({"id":format!("ruby-{version}"),"family":"ruby","version":version.clone(),"label":format!("Ruby {version}"),"packages":packages}));
+            }
         }
 
         let mut node_versions = std::process::Command::new("apt-cache");
         node_versions.args(["madison", "nodejs"]);
         if let Ok((true, output)) = command_result(&mut node_versions) {
             let mut seen = std::collections::HashSet::new();
-            for version in output.lines().filter_map(|line| line.split('|').nth(1)).map(str::trim).filter(|value| !value.is_empty()) {
-                if !seen.insert(version.to_owned()) || !valid_apt_install_spec(&format!("nodejs={version}")) { continue; }
+            for version in output
+                .lines()
+                .filter_map(|line| line.split('|').nth(1))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !seen.insert(version.to_owned())
+                    || !valid_apt_install_spec(&format!("nodejs={version}"))
+                {
+                    continue;
+                }
                 let mut packages = vec![format!("nodejs={version}")];
-                if available.contains("npm") { packages.push("npm".into()); }
+                if available.contains("npm") {
+                    packages.push("npm".into());
+                }
                 runtimes.push(json!({"id":format!("node-{version}"),"family":"node","version":version.to_owned(),"label":format!("Node.js {version}"),"packages":packages}));
-                if seen.len() >= 20 { break; }
+                if seen.len() >= 20 {
+                    break;
+                }
             }
         }
-        runtimes.sort_by(|a, b| a["family"].as_str().cmp(&b["family"].as_str()).then_with(|| a["version"].as_str().cmp(&b["version"].as_str())));
+        runtimes.sort_by(|a, b| {
+            a["family"]
+                .as_str()
+                .cmp(&b["family"].as_str())
+                .then_with(|| a["version"].as_str().cmp(&b["version"].as_str()))
+        });
         return json!({"ok":true,"data":{"runtimes":runtimes,"source":"configured APT repositories"}});
     }
     if action == "apt-list" {
@@ -3693,7 +4113,13 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
         .map(|items| items.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     if packages.len() > (if operation == "install" { 100 } else { 25 })
-        || packages.iter().any(|name| if operation == "install" { !valid_apt_install_spec(name) } else { !valid_package_name(name) })
+        || packages.iter().any(|name| {
+            if operation == "install" {
+                !valid_apt_install_spec(name)
+            } else {
+                !valid_package_name(name)
+            }
+        })
         || ["install", "remove"].contains(&operation) && packages.is_empty()
     {
         return json!({"ok":false,"error":"Invalid package list"});
@@ -3777,21 +4203,45 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         let mut command = std::process::Command::new("systemctl");
         // Query only the counters used by the UI. Some systemd releases reject
         // the quota property over D-Bus even though the cgroup counters work.
-        command.args(["show", "--no-pager", "--property=CPUUsageNSec", "--property=MemoryCurrent", "--property=ControlGroup", "--property=LoadState", unit]);
+        command.args([
+            "show",
+            "--no-pager",
+            "--property=CPUUsageNSec",
+            "--property=MemoryCurrent",
+            "--property=ControlGroup",
+            "--property=LoadState",
+            unit,
+        ]);
         let (show_ok, output) = command_result(&mut command).unwrap_or_else(|error| (false, error));
         let values: HashMap<String, String> = if show_ok {
-            output.lines().filter_map(|line| line.split_once('=')).map(|(key,value)|(key.trim().to_owned(),value.trim().to_owned())).collect()
-        } else { HashMap::new() };
-        if values.get("LoadState").is_some_and(|value| value == "not-found") {
+            output
+                .lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        if values
+            .get("LoadState")
+            .is_some_and(|value| value == "not-found")
+        {
             return json!({"ok":false,"error":"سرویس انتخاب‌شده در systemd پیدا نشد. نام سرویس برنامهٔ همین سایت را بررسی کن."});
         }
         let mut diagnostics = Vec::new();
-        let mut cpu_usage_ns = values.get("CPUUsageNSec").and_then(|v| parse_systemd_u64_field("CPUUsageNSec", v, &mut diagnostics));
-        let mut memory_current_bytes = values.get("MemoryCurrent").and_then(|v| parse_systemd_u64_field("MemoryCurrent", v, &mut diagnostics));
+        let mut cpu_usage_ns = values
+            .get("CPUUsageNSec")
+            .and_then(|v| parse_systemd_u64_field("CPUUsageNSec", v, &mut diagnostics));
+        let mut memory_current_bytes = values
+            .get("MemoryCurrent")
+            .and_then(|v| parse_systemd_u64_field("MemoryCurrent", v, &mut diagnostics));
         let mut measurement_error = None;
         if cpu_usage_ns.is_none() || memory_current_bytes.is_none() {
-            let cgroup = values.get("ControlGroup").filter(|path| valid_control_group_path(path))
-                .cloned().or_else(|| fallback_service_control_group(unit))
+            let cgroup = values
+                .get("ControlGroup")
+                .filter(|path| valid_control_group_path(path))
+                .cloned()
+                .or_else(|| fallback_service_control_group(unit))
                 .or_else(|| show_ok.then(|| read_systemd_control_group(unit)).flatten());
             if let Some(cgroup) = cgroup {
                 let (cgroup_cpu, cgroup_memory) = read_cgroup_resource_usage(&cgroup);
@@ -3831,7 +4281,14 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         }
         let [cpu_property, memory_property] = service_resource_properties(cpu, memory);
         let mut command = std::process::Command::new("systemctl");
-        command.args(["set-property", unit, "CPUAccounting=yes", "MemoryAccounting=yes", &cpu_property, &memory_property]);
+        command.args([
+            "set-property",
+            unit,
+            "CPUAccounting=yes",
+            "MemoryAccounting=yes",
+            &cpu_property,
+            &memory_property,
+        ]);
         return match command_result(&mut command) {
             Ok((true, output)) => json!({"ok":true,"stdout":output}),
             Ok((false, output)) => {
@@ -3842,8 +4299,10 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
                     "error":format!("systemd محدودیت منابع را نپذیرفت. واحد: {unit}؛ مقدار CPU: {cpu_property}؛ مقدار RAM: {memory_property}؛ پاسخ خام: {raw}"),
                     "diagnostic":{"code":if parse_error {"SYSTEMD_PROPERTY_PARSE_FAILED"} else {"SYSTEMD_SET_PROPERTY_FAILED"},"source":"systemctl set-property","operation":"service-limits","unit":unit,"fields":[{"name":"CPUQuota","value":cpu_property,"expected":"درصد CPU مانند 75%"},{"name":"MemoryMax","value":memory_property,"expected":"عدد بایت یا infinity"}],"raw":raw}
                 })
-            },
-            Err(error) => json!({"ok":false,"error":format!("اجرای systemctl set-property برای {unit} ناموفق بود: {error}"),"diagnostic":{"code":"SYSTEMD_COMMAND_FAILED","source":"systemctl set-property","operation":"service-limits","unit":unit,"raw":truncate_diagnostic(&error, 1200)}}),
+            }
+            Err(error) => {
+                json!({"ok":false,"error":format!("اجرای systemctl set-property برای {unit} ناموفق بود: {error}"),"diagnostic":{"code":"SYSTEMD_COMMAND_FAILED","source":"systemctl set-property","operation":"service-limits","unit":unit,"raw":truncate_diagnostic(&error, 1200)}})
+            }
         };
     }
     let Some(operation) = request["operation"].as_str() else {
@@ -3929,7 +4388,11 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
 }
 
 fn parse_systemd_u64(value: &str) -> Option<u64> {
-    value.trim().parse::<u64>().ok().filter(|value| *value != u64::MAX)
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value != u64::MAX)
 }
 
 fn parse_systemd_u64_field(field: &str, raw: &str, diagnostics: &mut Vec<Value>) -> Option<u64> {
@@ -3949,47 +4412,76 @@ fn parse_systemd_u64_field(field: &str, raw: &str, diagnostics: &mut Vec<Value>)
 
 fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
     let mut result: String = value.chars().take(max_chars).collect();
-    if value.chars().count() > max_chars { result.push_str("… [بقیهٔ متن حذف شد]"); }
+    if value.chars().count() > max_chars {
+        result.push_str("… [بقیهٔ متن حذف شد]");
+    }
     result
 }
 
 fn valid_control_group_path(path: &str) -> bool {
-    path.starts_with('/') && path.len() <= 4096 && path != "/" && path.split('/').skip(1).all(|part| {
-        !part.is_empty() && part != "." && part != ".." && part.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || b"-_.@:+\\".contains(&byte)
+    path.starts_with('/')
+        && path.len() <= 4096
+        && path != "/"
+        && path.split('/').skip(1).all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.@:+\\".contains(&byte))
         })
-    })
 }
 
 fn read_systemd_control_group(unit: &str) -> Option<String> {
     let output = std::process::Command::new("systemctl")
-        .args(["show", "--no-pager", "--property=ControlGroup", "--value", unit])
-        .output().ok()?;
-    if !output.status.success() { return None; }
+        .args([
+            "show",
+            "--no-pager",
+            "--property=ControlGroup",
+            "--value",
+            unit,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     valid_control_group_path(&path).then_some(path)
 }
 
 fn fallback_service_control_group(unit: &str) -> Option<String> {
-    if !valid_service_unit(unit) { return None; }
+    if !valid_service_unit(unit) {
+        return None;
+    }
     let path = format!("/system.slice/{unit}");
     (valid_control_group_path(&path)
-        && PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/')).is_dir())
-        .then_some(path)
+        && PathBuf::from("/sys/fs/cgroup")
+            .join(path.trim_start_matches('/'))
+            .is_dir())
+    .then_some(path)
 }
 
 fn read_cgroup_resource_usage(control_group: &str) -> (Option<u64>, Option<u64>) {
-    if !valid_control_group_path(control_group) { return (None, None); }
+    if !valid_control_group_path(control_group) {
+        return (None, None);
+    }
     let directory = PathBuf::from("/sys/fs/cgroup").join(control_group.trim_start_matches('/'));
-    let cpu_ns = fs::read_to_string(directory.join("cpu.stat")).ok().and_then(|contents| parse_cpu_stat_usage_ns(&contents));
-    let memory_bytes = fs::read_to_string(directory.join("memory.current")).ok().and_then(|value| parse_systemd_u64(&value));
+    let cpu_ns = fs::read_to_string(directory.join("cpu.stat"))
+        .ok()
+        .and_then(|contents| parse_cpu_stat_usage_ns(&contents));
+    let memory_bytes = fs::read_to_string(directory.join("memory.current"))
+        .ok()
+        .and_then(|value| parse_systemd_u64(&value));
     (cpu_ns, memory_bytes)
 }
 
 fn parse_cpu_stat_usage_ns(contents: &str) -> Option<u64> {
     contents.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
-        if fields.next()? != "usage_usec" { return None; }
+        if fields.next()? != "usage_usec" {
+            return None;
+        }
         fields.next()?.parse::<u64>().ok()?.checked_mul(1000)
     })
 }
@@ -4025,7 +4517,9 @@ async fn serve_privileged_connection(mut stream: UnixStream) {
                     })
                     .await
                     .unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"})),
-                    Err(_) => json!({"ok":false,"error":"Privileged helper is busy; retry shortly"}),
+                    Err(_) => {
+                        json!({"ok":false,"error":"Privileged helper is busy; retry shortly"})
+                    }
                 },
                 Err(_) => json!({"ok":false,"error":"Invalid request"}),
             }
@@ -4072,14 +4566,21 @@ fn run_terminal_shell() -> Result<(), Box<dyn std::error::Error>> {
     Err(error.into())
 }
 
-fn backup_database(source_path: &std::path::Path, destination_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn backup_database(
+    source_path: &std::path::Path,
+    destination_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     if source_path == destination_path || !source_path.is_file() {
         return Err("Database backup paths are invalid".into());
     }
-    let source = Connection::open_with_flags(source_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let source =
+        Connection::open_with_flags(source_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut destination = Connection::open(destination_path)?;
-    rusqlite::backup::Backup::new(&source, &mut destination)?
-        .run_to_completion(100, std::time::Duration::from_millis(20), None)?;
+    rusqlite::backup::Backup::new(&source, &mut destination)?.run_to_completion(
+        100,
+        std::time::Duration::from_millis(20),
+        None,
+    )?;
     #[cfg(unix)]
     fs::set_permissions(destination_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
@@ -4232,9 +4733,10 @@ async fn clear_trusted_transport_marker(
 #[cfg(test)]
 mod update_progress_tests {
     use super::{
-        backup_database, default_update_build_mode, ensure_federation_identity_columns, ensure_metric_storage_columns,
-        firewall_rule_validation_error, update_progress_payload, valid_apt_install_spec, valid_update_build_mode,
-        valid_tls_source_path, Connection, FirewallRuleInput,
+        backup_database, default_update_build_mode, ensure_federation_identity_columns,
+        ensure_metric_storage_columns, firewall_rule_validation_error, update_progress_payload,
+        valid_apt_install_spec, valid_tls_source_path, valid_update_build_mode, Connection,
+        FirewallRuleInput,
     };
 
     #[test]
@@ -4272,11 +4774,25 @@ mod update_progress_tests {
 
         let columns = {
             let mut statement = db.prepare("PRAGMA table_info(metric_samples)").unwrap();
-            statement.query_map([], |row| row.get::<_, String>(1)).unwrap()
-                .filter_map(Result::ok).collect::<Vec<_>>()
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
         };
-        for column in ["disk_read_rate", "disk_write_rate", "disk_used_bytes", "disk_total_bytes"] {
-            assert_eq!(columns.iter().filter(|existing| existing.as_str() == column).count(), 1);
+        for column in [
+            "disk_read_rate",
+            "disk_write_rate",
+            "disk_used_bytes",
+            "disk_total_bytes",
+        ] {
+            assert_eq!(
+                columns
+                    .iter()
+                    .filter(|existing| existing.as_str() == column)
+                    .count(),
+                1
+            );
         }
     }
 
@@ -4286,8 +4802,20 @@ mod update_progress_tests {
         db.execute_batch("CREATE TABLE federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE TABLE federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE federation_pairing_codes(code_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,created_by TEXT NOT NULL); CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,expires_at INTEGER); CREATE TABLE federation_proxy_sessions(controller_id TEXT NOT NULL,token_hash TEXT NOT NULL,user_id INTEGER NOT NULL); INSERT INTO federated_nodes VALUES(1,'Europe VPS','https://node.example.test','legacy-node-id','controller',2,10,20); INSERT INTO federation_controllers VALUES(1,'controller','Public Controller Name','hash',10,20,1); INSERT INTO sessions VALUES('legacy-session',9999999999); INSERT INTO federation_proxy_sessions VALUES('controller','legacy-session',1);").unwrap();
         ensure_federation_identity_columns(&db).unwrap();
         ensure_federation_identity_columns(&db).unwrap();
-        let (local_label, public_name): (String, String) = db.query_row("SELECT local_label,controller_name FROM federation_controllers WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-        let (node_label, node_id): (String, String) = db.query_row("SELECT name,node_id FROM federated_nodes WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (local_label, public_name): (String, String) = db
+            .query_row(
+                "SELECT local_label,controller_name FROM federation_controllers WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let (node_label, node_id): (String, String) = db
+            .query_row(
+                "SELECT name,node_id FROM federated_nodes WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         let (legacy_scope, expires_at, actor_name): (String, i64, String) = db.query_row("SELECT scopes_json,expires_at,actor_name FROM federation_proxy_sessions WHERE token_hash='legacy-session'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
         assert_eq!(local_label, "Public Controller Name");
         assert_eq!(public_name, "Public Controller Name");
@@ -4366,9 +4894,17 @@ mod update_progress_tests {
         assert_eq!(super::parse_systemd_u64("536870912"), Some(536_870_912));
         assert_eq!(super::parse_systemd_u64("18446744073709551615"), None);
         assert_eq!(super::parse_systemd_u64("[not set]"), None);
-        assert_eq!(super::parse_cpu_stat_usage_ns("usage_usec 1250\nuser_usec 900\nsystem_usec 350\n"), Some(1_250_000));
-        assert_eq!(super::parse_cpu_stat_usage_ns("user_usec 900\nsystem_usec 350\n"), None);
-        assert!(super::valid_control_group_path("/system.slice/customer-app.service"));
+        assert_eq!(
+            super::parse_cpu_stat_usage_ns("usage_usec 1250\nuser_usec 900\nsystem_usec 350\n"),
+            Some(1_250_000)
+        );
+        assert_eq!(
+            super::parse_cpu_stat_usage_ns("user_usec 900\nsystem_usec 350\n"),
+            None
+        );
+        assert!(super::valid_control_group_path(
+            "/system.slice/customer-app.service"
+        ));
         assert!(!super::valid_control_group_path("/system.slice/../../etc"));
         assert!(!super::valid_control_group_path("relative/path"));
     }
@@ -4376,11 +4912,20 @@ mod update_progress_tests {
     #[test]
     fn systemd_parse_failure_keeps_the_raw_value_and_expected_type() {
         let mut diagnostics = Vec::new();
-        assert_eq!(super::parse_systemd_u64_field("MemoryCurrent", "not-a-number", &mut diagnostics), None);
+        assert_eq!(
+            super::parse_systemd_u64_field("MemoryCurrent", "not-a-number", &mut diagnostics),
+            None
+        );
         assert_eq!(diagnostics[0]["field"], "MemoryCurrent");
         assert_eq!(diagnostics[0]["raw"], "not-a-number");
-        assert!(diagnostics[0]["expected"].as_str().unwrap().contains("عدد صحیح"));
-        assert_eq!(super::truncate_diagnostic("abcdef", 3), "abc… [بقیهٔ متن حذف شد]");
+        assert!(diagnostics[0]["expected"]
+            .as_str()
+            .unwrap()
+            .contains("عدد صحیح"));
+        assert_eq!(
+            super::truncate_diagnostic("abcdef", 3),
+            "abc… [بقیهٔ متن حذف شد]"
+        );
     }
 
     #[test]
@@ -4580,7 +5125,9 @@ mod update_progress_tests {
         }
         backup_database(&source_path, &destination_path).unwrap();
         let backup = Connection::open(&destination_path).unwrap();
-        let value: String = backup.query_row("SELECT value FROM state", [], |row| row.get(0)).unwrap();
+        let value: String = backup
+            .query_row("SELECT value FROM state", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(value, "before-update");
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -4640,10 +5187,22 @@ mod update_progress_tests {
     fn tls_certificate_paths_are_restricted_to_supported_system_locations() {
         assert!(valid_tls_source_path("/etc/arg/tls/fullchain.pem", false));
         assert!(valid_tls_source_path("/etc/arg/tls/privkey.pem", true));
-        assert!(valid_tls_source_path("/etc/letsencrypt/live/example.com/fullchain.pem", false));
-        assert!(valid_tls_source_path("/etc/letsencrypt/live/arg/privkey.pem", true));
-        assert!(!valid_tls_source_path("/etc/letsencrypt/live/example.com/privkey.pem", false));
-        assert!(!valid_tls_source_path("/etc/letsencrypt/live/../arg/privkey.pem", true));
+        assert!(valid_tls_source_path(
+            "/etc/letsencrypt/live/example.com/fullchain.pem",
+            false
+        ));
+        assert!(valid_tls_source_path(
+            "/etc/letsencrypt/live/arg/privkey.pem",
+            true
+        ));
+        assert!(!valid_tls_source_path(
+            "/etc/letsencrypt/live/example.com/privkey.pem",
+            false
+        ));
+        assert!(!valid_tls_source_path(
+            "/etc/letsencrypt/live/../arg/privkey.pem",
+            true
+        ));
         assert!(!valid_tls_source_path("/home/admin/cert.pem", false));
         assert!(!valid_tls_source_path("/etc/arg/tls/privkey.pem", false));
     }

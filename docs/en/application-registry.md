@@ -39,7 +39,7 @@ Edits use an optimistic version. If another administrator has changed the record
 
 ## Deployment status
 
-Durable source jobs are now available from a local application card. They record state, steps, actor, idempotency key, and server target; they support cancellation, retry, SSE, and release rollback. They stage files and atomically move a `current` pointer. See [Source deployments & durable jobs](./deployment-jobs.md) for limits and operations. Framework builds, runtime start/stop, environment secrets, health-check HTTP, Nginx activation, resource controls, storage plans, and automatic reconciliation are still disabled; the registry does not claim a site is running.
+Durable source jobs are now available from a local application card. They record state, steps, actor, idempotency key, and server target; they support cancellation, retry, SSE, and release rollback. They stage files and atomically move a `current` pointer. See [Source deployments & durable jobs](./deployment-jobs.md) for limits and operations. Application records can also save a requested PHP/Node/Python runtime version and a separate Node build version from the installed inventory; see [Runtime manager](./runtime-manager.md). These preferences do not execute a framework build or start a process. Environment secrets, health-check HTTP, Nginx activation, resource controls, storage plans, and automatic reconciliation remain disabled; the registry does not claim a site is running.
 
 ## API and schema
 
@@ -50,5 +50,6 @@ Durable source jobs are now available from a local application card. They record
 - `DELETE /api/apps/{id}` soft-deletes; `POST /api/apps/{id}/restore` restores.
 - `POST /api/apps/{id}/deploy` enqueues Git/directory source; `/deploy/archive` accepts a bounded ZIP.
 - `GET /api/apps/{id}/deploy/jobs` reads persisted job history.
+- `GET /api/runtimes` returns the administrator-only installed runtime and tool inventory.
 
-The additive, idempotent migration creates `applications` and `application_services`. Records are scoped by `owner_server_uuid`; `observed_state` defaults to `unknown`, `reconcile_policy` to `manual`, and concurrent edits are guarded by `version`.
+The additive, idempotent migration creates `applications` and `application_services`, and adds `runtime_version` and `build_runtime_version` to older application tables. Both version fields default to `system`. Records are scoped by `owner_server_uuid`; `observed_state` defaults to `unknown`, `reconcile_policy` to `manual`, and concurrent edits are guarded by `version`.

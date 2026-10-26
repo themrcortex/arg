@@ -25,6 +25,10 @@ pub(super) struct AppInput {
     description: String,
     #[serde(default = "default_framework")]
     framework: String,
+    #[serde(default = "default_runtime_version")]
+    runtime_version: String,
+    #[serde(default = "default_runtime_version")]
+    build_runtime_version: String,
     #[serde(default = "default_source")]
     source_type: String,
     #[serde(default)]
@@ -54,6 +58,9 @@ fn default_framework() -> String {
 }
 fn default_source() -> String {
     "manual".to_owned()
+}
+fn default_runtime_version() -> String {
+    "system".to_owned()
 }
 fn default_desired_state() -> String {
     "none".to_owned()
@@ -123,6 +130,18 @@ fn validate_input(input: &AppInput) -> Result<(String, Option<String>), (StatusC
             "نوع منبع اپلیکیشن پشتیبانی نمی‌شود.",
         ));
     }
+    if !valid_runtime_version(&input.runtime_version) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "نسخهٔ Runtime باید system یا شماره نسخهٔ عددی باشد.",
+        ));
+    }
+    if !valid_runtime_version(&input.build_runtime_version) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "نسخهٔ Runtime زمان ساخت باید system یا شماره نسخهٔ عددی باشد.",
+        ));
+    }
     if !["none", "running", "stopped"].contains(&input.desired_state.as_str()) {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -165,6 +184,17 @@ fn validate_input(input: &AppInput) -> Result<(String, Option<String>), (StatusC
     Ok((name.to_owned(), domain))
 }
 
+fn valid_runtime_version(value: &str) -> bool {
+    value == "system"
+        || (!value.is_empty()
+            && value.len() <= 32
+            && value.contains('.')
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'.')
+            && value.split('.').all(|part| !part.is_empty()))
+}
+
 fn domain_patterns_overlap(left: &str, right: &str) -> bool {
     fn matches(pattern: &str, domain: &str) -> bool {
         if let Some(suffix) = pattern.strip_prefix("*.") {
@@ -202,24 +232,26 @@ fn read_apps(
     include_deleted: bool,
 ) -> Result<Vec<Value>, rusqlite::Error> {
     let sql = if include_deleted {
-        "SELECT id,name,description,framework,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at FROM applications WHERE owner_server_uuid=?1 ORDER BY deleted_at IS NOT NULL,name COLLATE NOCASE"
+        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at FROM applications WHERE owner_server_uuid=?1 ORDER BY deleted_at IS NOT NULL,name COLLATE NOCASE"
     } else {
-        "SELECT id,name,description,framework,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at FROM applications WHERE owner_server_uuid=?1 AND deleted_at IS NULL ORDER BY name COLLATE NOCASE"
+        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at FROM applications WHERE owner_server_uuid=?1 AND deleted_at IS NULL ORDER BY name COLLATE NOCASE"
     };
     let mut statement = db.prepare(sql)?;
     let rows = statement.query_map([owner], |row| {
-        let labels_json: String = row.get(7)?;
+        let labels_json: String = row.get(9)?;
         let labels = serde_json::from_str::<Vec<String>>(&labels_json).unwrap_or_default();
         Ok(json!({
             "id": row.get::<_,String>(0)?, "owner_server_uuid": owner, "name": row.get::<_,String>(1)?,
             "description": row.get::<_,String>(2)?, "framework": row.get::<_,String>(3)?,
-            "source_type": row.get::<_,String>(4)?, "domain": row.get::<_,Option<String>>(5)?,
-            "listen_port": row.get::<_,Option<i64>>(6)?, "labels": labels,
-            "desired_state": row.get::<_,String>(8)?, "observed_state": row.get::<_,String>(9)?,
-            "observed_at": row.get::<_,Option<i64>>(10)?, "lifecycle_state": row.get::<_,String>(11)?,
-            "reconcile_policy": row.get::<_,String>(12)?, "version": row.get::<_,i64>(13)?,
-            "created_by": row.get::<_,String>(14)?, "created_at": row.get::<_,i64>(15)?,
-            "updated_at": row.get::<_,i64>(16)?, "deleted_at": row.get::<_,Option<i64>>(17)?,
+            "runtime_version": row.get::<_,String>(4)?,
+            "build_runtime_version": row.get::<_,String>(5)?,
+            "source_type": row.get::<_,String>(6)?, "domain": row.get::<_,Option<String>>(7)?,
+            "listen_port": row.get::<_,Option<i64>>(8)?, "labels": labels,
+            "desired_state": row.get::<_,String>(10)?, "observed_state": row.get::<_,String>(11)?,
+            "observed_at": row.get::<_,Option<i64>>(12)?, "lifecycle_state": row.get::<_,String>(13)?,
+            "reconcile_policy": row.get::<_,String>(14)?, "version": row.get::<_,i64>(15)?,
+            "created_by": row.get::<_,String>(16)?, "created_at": row.get::<_,i64>(17)?,
+            "updated_at": row.get::<_,i64>(18)?, "deleted_at": row.get::<_,Option<i64>>(19)?,
         }))
     })?;
     rows.collect()
@@ -307,7 +339,35 @@ fn check_domain_conflicts(
 }
 
 pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',framework TEXT NOT NULL DEFAULT 'custom',source_type TEXT NOT NULL DEFAULT 'manual',domain TEXT,listen_port INTEGER,labels_json TEXT NOT NULL DEFAULT '[]',desired_state TEXT NOT NULL DEFAULT 'none',observed_state TEXT NOT NULL DEFAULT 'unknown',observed_at INTEGER,lifecycle_state TEXT NOT NULL DEFAULT 'active',reconcile_policy TEXT NOT NULL DEFAULT 'manual',origin_kind TEXT NOT NULL DEFAULT 'manual',origin_ref TEXT,version INTEGER NOT NULL DEFAULT 1,created_by TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,deleted_at INTEGER); CREATE UNIQUE INDEX IF NOT EXISTS applications_active_name ON applications(owner_server_uuid,name COLLATE NOCASE) WHERE deleted_at IS NULL; CREATE UNIQUE INDEX IF NOT EXISTS applications_active_domain ON applications(owner_server_uuid,domain COLLATE NOCASE) WHERE domain IS NOT NULL AND deleted_at IS NULL; CREATE INDEX IF NOT EXISTS applications_owner_updated ON applications(owner_server_uuid,updated_at DESC); CREATE TABLE IF NOT EXISTS application_services (id TEXT PRIMARY KEY,application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,service_key TEXT NOT NULL,runtime_type TEXT NOT NULL DEFAULT 'unknown',systemd_unit TEXT,desired_state TEXT NOT NULL DEFAULT 'none',observed_state TEXT NOT NULL DEFAULT 'unknown',listen_port INTEGER,last_observed_at INTEGER,metadata_json TEXT NOT NULL DEFAULT '{}',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(application_id,service_key)); CREATE INDEX IF NOT EXISTS application_services_app ON application_services(application_id);")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',framework TEXT NOT NULL DEFAULT 'custom',runtime_version TEXT NOT NULL DEFAULT 'system',build_runtime_version TEXT NOT NULL DEFAULT 'system',source_type TEXT NOT NULL DEFAULT 'manual',domain TEXT,listen_port INTEGER,labels_json TEXT NOT NULL DEFAULT '[]',desired_state TEXT NOT NULL DEFAULT 'none',observed_state TEXT NOT NULL DEFAULT 'unknown',observed_at INTEGER,lifecycle_state TEXT NOT NULL DEFAULT 'active',reconcile_policy TEXT NOT NULL DEFAULT 'manual',origin_kind TEXT NOT NULL DEFAULT 'manual',origin_ref TEXT,version INTEGER NOT NULL DEFAULT 1,created_by TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,deleted_at INTEGER); CREATE UNIQUE INDEX IF NOT EXISTS applications_active_name ON applications(owner_server_uuid,name COLLATE NOCASE) WHERE deleted_at IS NULL; CREATE UNIQUE INDEX IF NOT EXISTS applications_active_domain ON applications(owner_server_uuid,domain COLLATE NOCASE) WHERE domain IS NOT NULL AND deleted_at IS NULL; CREATE INDEX IF NOT EXISTS applications_owner_updated ON applications(owner_server_uuid,updated_at DESC); CREATE TABLE IF NOT EXISTS application_services (id TEXT PRIMARY KEY,application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,service_key TEXT NOT NULL,runtime_type TEXT NOT NULL DEFAULT 'unknown',systemd_unit TEXT,desired_state TEXT NOT NULL DEFAULT 'none',observed_state TEXT NOT NULL DEFAULT 'unknown',listen_port INTEGER,last_observed_at INTEGER,metadata_json TEXT NOT NULL DEFAULT '{}',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(application_id,service_key)); CREATE INDEX IF NOT EXISTS application_services_app ON application_services(application_id);")?;
+    let has_runtime_version = {
+        let mut statement = db.prepare("PRAGMA table_info(applications)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        columns.iter().any(|column| column == "runtime_version")
+    };
+    if !has_runtime_version {
+        db.execute(
+            "ALTER TABLE applications ADD COLUMN runtime_version TEXT NOT NULL DEFAULT 'system'",
+            [],
+        )?;
+    }
+    let has_build_runtime_version = {
+        let mut statement = db.prepare("PRAGMA table_info(applications)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        columns
+            .iter()
+            .any(|column| column == "build_runtime_version")
+    };
+    if !has_build_runtime_version {
+        db.execute(
+            "ALTER TABLE applications ADD COLUMN build_runtime_version TEXT NOT NULL DEFAULT 'system'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -395,7 +455,7 @@ pub(super) async fn create(
         .map(|label| label.trim())
         .collect::<Vec<_>>();
     let db = state.lock().unwrap();
-    db.execute("INSERT INTO applications(id,owner_server_uuid,name,description,framework,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'unknown','active','manual','manual',?11,?12,?12)", params![id,owner,name,input.description.trim(),input.framework,input.source_type,domain,input.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),input.desired_state,actor,at]).map_err(|error_value| if error_value.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.") } else { db_error(error_value) })?;
+    db.execute("INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown','active','manual','manual',?13,?14,?14)", params![id,owner,name,input.description.trim(),input.framework,input.runtime_version,input.build_runtime_version,input.source_type,domain,input.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),input.desired_state,actor,at]).map_err(|error_value| if error_value.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.") } else { db_error(error_value) })?;
     audit(
         &db,
         &actor,
@@ -524,7 +584,7 @@ pub(super) async fn update(
         .map(|label| label.trim())
         .collect::<Vec<_>>();
     let db = state.lock().unwrap();
-    let changed = db.execute("UPDATE applications SET name=?1,description=?2,framework=?3,source_type=?4,domain=?5,listen_port=?6,labels_json=?7,desired_state=?8,version=version+1,updated_at=?9 WHERE id=?10 AND owner_server_uuid=?11 AND version=?12 AND deleted_at IS NULL", params![name,input.app.description.trim(),input.app.framework,input.app.source_type,domain,input.app.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_|"[]".to_owned()),input.app.desired_state,at,id,owner,input.expected_version]).map_err(db_error)?;
+    let changed = db.execute("UPDATE applications SET name=?1,description=?2,framework=?3,runtime_version=?4,build_runtime_version=?5,source_type=?6,domain=?7,listen_port=?8,labels_json=?9,desired_state=?10,version=version+1,updated_at=?11 WHERE id=?12 AND owner_server_uuid=?13 AND version=?14 AND deleted_at IS NULL", params![name,input.app.description.trim(),input.app.framework,input.app.runtime_version,input.app.build_runtime_version,input.app.source_type,domain,input.app.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_|"[]".to_owned()),input.app.desired_state,at,id,owner,input.expected_version]).map_err(db_error)?;
     if changed == 0 {
         return Err(error(
             StatusCode::CONFLICT,
@@ -610,7 +670,7 @@ pub(super) async fn restore(
 mod tests {
     use super::{
         domain_patterns_overlap, listening_tcp_ports, migrate, normalized_domain, valid_domain,
-        AppInput, AppUpdate,
+        valid_runtime_version, AppInput, AppUpdate,
     };
 
     #[test]
@@ -633,6 +693,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(create.framework, "custom");
+        assert_eq!(create.runtime_version, "system");
         assert_eq!(create.source_type, "manual");
         assert_eq!(create.desired_state, "none");
         let update: AppUpdate = serde_json::from_value(serde_json::json!({
@@ -673,6 +734,32 @@ mod tests {
             .unwrap();
         assert_eq!(preserved, "server_name old.example.com;");
         assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_services')", [], |row| row.get::<_,bool>(0)).unwrap());
+        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('applications') WHERE name='runtime_version')", [], |row| row.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn old_application_schema_gets_runtime_defaults_without_losing_rows() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',framework TEXT NOT NULL DEFAULT 'custom',source_type TEXT NOT NULL DEFAULT 'manual',domain TEXT,listen_port INTEGER,labels_json TEXT NOT NULL DEFAULT '[]',desired_state TEXT NOT NULL DEFAULT 'none',observed_state TEXT NOT NULL DEFAULT 'unknown',observed_at INTEGER,lifecycle_state TEXT NOT NULL DEFAULT 'active',reconcile_policy TEXT NOT NULL DEFAULT 'manual',origin_kind TEXT NOT NULL DEFAULT 'manual',origin_ref TEXT,version INTEGER NOT NULL DEFAULT 1,created_by TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,deleted_at INTEGER); INSERT INTO applications(id,owner_server_uuid,name,created_by,created_at,updated_at) VALUES('old','server','Existing','admin',1,1);").unwrap();
+        migrate(&db).unwrap();
+        let values: (String, String) = db
+            .query_row(
+                "SELECT runtime_version,build_runtime_version FROM applications WHERE id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(values, ("system".into(), "system".into()));
+    }
+
+    #[test]
+    fn application_runtime_versions_reject_command_syntax() {
+        assert!(valid_runtime_version("system"));
+        assert!(valid_runtime_version("8.5"));
+        assert!(valid_runtime_version("22.14.1"));
+        assert!(!valid_runtime_version("8..5"));
+        assert!(!valid_runtime_version("$(id)"));
+        assert!(!valid_runtime_version("8.5; touch /tmp/x"));
     }
 
     #[test]

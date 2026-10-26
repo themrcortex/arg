@@ -15,6 +15,9 @@
 - Support public allowlisted HTTPS Git, bounded ZIP uploads, and allowlisted existing directories; reject traversal, symlinks, special files, suspicious ZIP ratios, and oversized releases, and exclude environment files.
 - Stream ZIP uploads to disk, verify their SHA-256 before extraction, pin fetched Git revisions for retries, and retain five recent releases plus the active/previous versions with audited cleanup.
 - Keep framework build scripts, runtime activation, HTTP health checks, and Nginx cutover disabled until their isolated runtime phases.
+- Add a live runtime inventory for PHP CLI/FPM, Python, Node.js, Composer, npm/pnpm/yarn/Corepack, Nginx, and Docker with OS, memory, APT source, and deployment-disk preflight data.
+- Add explicit APT simulation previews before installing runtime packs, and store safe per-application runtime and Node build-version preferences through additive migrations.
+- Refresh runtime inventory after package changes and keep package installation on configured Debian/Ubuntu APT sources; ARG does not add an external repository or run a remote install script.
 
 ## v0.6.8 — 2026-10-26
 
