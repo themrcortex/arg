@@ -1,0 +1,103 @@
+# Application Platform Architecture
+
+This document records the Phase 00 baseline and architecture decisions for extending ARG from host administration to application lifecycle management. It describes the current repository, the intended ownership model, and constraints that later phases must preserve. Planned capabilities are not claims about features already shipped.
+
+## Current baseline
+
+ARG is a single installable Rust/Axum service with a React/TypeScript/Vite interface embedded in its release binary. SQLite stores panel accounts, sessions, settings, audit records, metrics, and feature-specific metadata. Host operations that need elevated privileges cross a restricted Unix-socket helper boundary.
+
+Existing modules include `src/federation.rs`, `src/nginx.rs`, `src/docker.rs`, `src/s3/`, `src/files.rs`, `src/metrics.rs`, and `src/maintenance.rs`. Federation can pair ARG instances, read remote status and services, and proxy an authenticated workspace to a selected remote node. Nginx sites, Docker resources, and S3 buckets remain resources of their hosting server. They are not yet represented by a unified Application record. The current route table has no `/api/apps` lifecycle API or persistent application deployment job engine.
+
+The frontend build is embedded from `frontend/dist`. SQLite schema creation and incremental compatibility work currently live in `src/main.rs`; new application schemas must use additive, idempotent migrations and must preserve existing user, session, node, S3, Nginx, and Docker data. The current Node protocol is `arg-node/2`; protocol compatibility must be explicitly reviewed before changing it.
+
+The panel remains useful on one VPS with no paired node and no Docker daemon. Optional dependencies must remain optional. Missing Docker, PHP, Node.js, S3, or network capabilities must produce an accurate unavailable state, not a fabricated healthy state.
+
+## Architecture decision record: local control plane and remote servers
+
+### Decision
+
+Each ARG installation remains a complete standalone control plane for its own host. A paired ARG server may be managed remotely through authenticated, explicitly scoped Federation operations. The initial architecture does not require a separate agent package when ARG is already installed on the managed VPS.
+
+The controller provides navigation and request routing; the host that owns a resource remains the source of truth for that resource. A controller stores pairing metadata and only the remote state needed for routing or a clearly marked last-known summary. It must not silently mirror a remote database or present stale cached values as live.
+
+### Identity and display names
+
+Every installation has an immutable `server_uuid`. The operating-system hostname is observed metadata, not a network identity and not something ARG changes as a side effect. A `public_name` is the administrator-selected name shared with paired controllers. A `local_label` is a controller-local alias and is never sent to peers. The UI must identify which name is being edited and show the target server before any write operation.
+
+Existing pairings must migrate without changing their node IDs or revoking valid credentials. Until a versioned metadata exchange is implemented, a local label may be edited locally, but it must not be described as a synchronized public name.
+
+### Vocabulary and ownership
+
+| Term | Meaning |
+| --- | --- |
+| Server | One ARG installation and the Linux host it administers; identified by `server_uuid`. |
+| Controller | An ARG installation sending an authenticated request to a paired server. |
+| Managed server | The paired ARG installation that authenticates and executes a scoped request locally. |
+| Workspace | The current UI/request context: local server or one explicitly selected remote server. |
+| Application | A deployable project owned by exactly one server. |
+| Service | A process or container belonging to an application, such as a web process, worker, or database. |
+| Environment | An application configuration scope such as development, staging, or production. |
+| Resource adapter | A controlled integration with an existing host resource, such as an Nginx site, Docker container, systemd unit, database, or S3 bucket. |
+
+An Nginx site or Docker container can be linked to an Application, but must not be duplicated or silently adopted. Importing an existing resource requires an explicit ownership/adoption flow and conflict checks.
+
+### Routing and authorization
+
+- Every remote read or write has an explicit target `server_uuid`; the UI's selected workspace is not by itself authorization.
+- “All servers” is an aggregation/read view. A mutation from that view must require an explicit destination.
+- The controller authenticates the user locally, but the destination independently validates the controller credential, actor, capability, scope, and requested operation.
+- Browser code must never receive or persist a raw Federation node token or remote workspace credential.
+- Remote tokens require bounded lifetime or rotation, immediate revocation, replay resistance, endpoint validation, and audit correlation. Long-lived workspace sessions are a migration risk and must be addressed before broad remote mutation APIs are added.
+- Protocol negotiation advertises supported capabilities and version ranges. If a capability or safe compatibility cannot be established, the operation is unavailable; do not silently downgrade to a broader operation.
+- Remote requests use bounded payloads/timeouts, idempotency keys for retryable writes, and structured error responses. Streaming must have backpressure and cancellation behavior.
+
+### Privilege boundary
+
+Browser → authenticated Axum API → validated domain operation → restricted helper over Unix socket when root is needed. Application build commands and project code are untrusted input. They must run under an application-specific unprivileged identity and bounded execution context; they must never be passed as user-constructed shell strings to the privileged helper. Helpers accept structured allowlisted operations and validate them independently.
+
+### Application and job ownership
+
+Application identity and deployment state are owned by the server where the app runs. The controller may route to that server but must not create a second authoritative copy. Long-running operations are represented as durable jobs with a target server, actor, state transitions, bounded logs, cancellation semantics, idempotency, and recovery after service restart. UI state is derived from the job record and host observations, not from the lifetime of an HTTP request.
+
+### Storage and migration rules
+
+- All persistent data is explicitly server-scoped. Selecting another workspace does not move or copy files, volumes, databases, or secrets.
+- S3 is object storage. A mount is an optional compatibility layer, not a POSIX guarantee; database files and workloads requiring reliable POSIX locks must not be placed on S3 mounts.
+- A cross-server application move is a migration workflow, not an ID update: preflight, snapshot, transfer, restore, verify, cutover, and cleanup are separate steps.
+- Rollback guarantees end at a documented cutover boundary. Once the destination accepts writes, returning to the source may lose writes unless reverse synchronization or a maintenance window is used.
+- SQLite migrations are additive, idempotent, backed up before risky transformations, tested against both fresh and existing databases, and preserve unrelated ARG records.
+
+## Phase gates and test matrix
+
+Before adding application execution, record an executable baseline for frontend checks/build, Rust tests/build, shell syntax, docs validation, and version consistency. Current environment note: `cargo` is not installed in the inspected workspace, so Rust tests cannot be claimed as run here.
+
+| Environment | Required coverage |
+| --- | --- |
+| One VPS, no Docker | Install/upgrade compatibility, local management, no accidental remote dependency. |
+| One VPS with Docker and runtimes | Resource ownership, service state, storage, logs, and optional dependency behavior. |
+| Two paired VPSs | Pair, switch workspace, route read/write, revoke, identity sync, and audit on both sides. |
+| Remote VPS offline | Stale-state labeling, timeout, retry, no ambiguous writes, and recovery after reconnect. |
+| Interrupted/low-disk operation | Durable job recovery, cancellation, rollback boundary, and preservation of user data. |
+| Mixed protocol versions | Capability negotiation, explicit unsupported state, and no unsafe fallback. |
+
+Every phase must add the tests for the behavior it changes. The final release matrix is not a substitute for phase-level tests. Security-sensitive operations require authorization tests at the API boundary, not only UI tests.
+
+## Phase 00 repository inventory
+
+- **Backend:** Rust/Axum. Route registration is in `src/routes.rs`; major domain modules include Federation, Nginx, Docker, S3, files, MySQL, metrics, and maintenance.
+- **Frontend:** React, TypeScript, Vite, Tailwind, and Radix/shadcn-style components. Navigation is defined in `frontend/src/navigation.ts` and shell behavior in `frontend/src/App.tsx`.
+- **Persistence:** SQLite, with schema/bootstrap code currently centralized in `src/main.rs`; new domain work should reduce coupling rather than expand that file.
+- **Privileged operations:** ARG service communicates with `arg-privileged.service` over a private Unix socket. No feature may turn this into a generic root command runner.
+- **Federation:** protocol v2 and remote workspace API/terminal proxy exist. The current handshake requires exact protocol equality and exposes a fixed capability list; negotiation and scoped authorization remain future work.
+- **Application platform:** no unified Application entity, app runner, or durable deployment job engine is present in this baseline.
+- **CI:** GitHub Actions workflows exist for CI and documentation publishing. Local required checks are documented in `docs/en/development.md`.
+- **Versioning:** Rust and frontend versions are synchronized; stable and prerelease updates use `scripts/bump-version.sh`, `scripts/bump-development-version.sh`, and `scripts/check-versioning.sh`.
+
+## Decisions that must be revisited before implementation
+
+1. Whether the first application runner is native systemd, container-only, or a per-app adapter supporting both. Do not promise isolation stronger than the selected execution boundary provides.
+2. How existing Nginx sites and Docker containers are discovered, imported, and protected from duplicate ownership.
+3. How session and credential rotation will migrate existing Federation pairings without breaking access or leaving stale long-lived sessions.
+4. Which first release target is supported (Ubuntu/Debian versions, architectures, and minimum disk/RAM); package availability varies by release.
+5. Which data types can be moved with a tested rollback guarantee and which require maintenance downtime or explicit best-effort semantics.
+
