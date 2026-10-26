@@ -355,16 +355,18 @@
 .arg-main-canvas :is(article, button)[class*="bg-card"]:hover {
   background: linear-gradient(145deg, rgba(221,164,111,.065), rgba(255,255,255,.025) 55%), rgba(20,30,40,.77);
 }
-.arg-glass-inset {
-  border: 1px solid rgba(222,232,239,.09);
-  background: linear-gradient(145deg, rgba(255,255,255,.03), transparent 55%), rgba(12,20,29,.48);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+@layer components {
+  .arg-glass-inset {
+    border: 1px solid rgba(222,232,239,.09);
+    background: linear-gradient(145deg, rgba(255,255,255,.03), transparent 55%), rgba(12,20,29,.48);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+  }
+  button.arg-glass-inset:hover:not(:disabled) {
+    border-color: rgba(221,164,111,.3);
+    background: linear-gradient(145deg, rgba(221,164,111,.075), rgba(255,255,255,.025)), rgba(20,30,40,.65);
+  }
+  .arg-glass-inset:focus-visible { border-color: rgba(221,164,111,.48); }
 }
-button.arg-glass-inset:hover:not(:disabled) {
-  border-color: rgba(221,164,111,.3);
-  background: linear-gradient(145deg, rgba(221,164,111,.075), rgba(255,255,255,.025)), rgba(20,30,40,.65);
-}
-.arg-glass-inset:focus-visible { border-color: rgba(221,164,111,.48); }
 .arg-terminal-frame {
   border-color: var(--arg-glass-edge);
   background: var(--arg-glass);

@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.8-dev.2 — 2026-10-26
+
+### Improved
+- Complete the glass treatment across S3 connection tiles, operations and package cards, form controls, tooltips, terminal chrome and the update overlay.
+- Keep status colors, code output and PTY contrast legible, and honor reduced-transparency preferences.
+
 ## v0.6.8-dev.1 — 2026-10-26
 
 ### Development
