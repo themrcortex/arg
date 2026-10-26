@@ -44,7 +44,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/maintenance/action", post(maintenance::run_action))
         .route("/api/nodes", get(federation::list_nodes).post(federation::add_node))
         .route("/api/nodes/pairing-code", post(federation::create_pairing_code))
-        .route("/api/nodes/controllers/{id}", axum::routing::delete(federation::revoke_controller_admin))
+        .route("/api/nodes/controllers/{id}", axum::routing::delete(federation::revoke_controller_admin).put(federation::rename_controller_admin))
         .route("/api/nodes/{id}/status", get(federation::node_status))
         .route("/api/nodes/{id}/services", get(federation::node_services))
         .route("/api/nodes/{id}/services/action", post(federation::node_service_action))

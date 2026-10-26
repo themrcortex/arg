@@ -47,6 +47,9 @@ pub(super) struct ServiceActionRequest {
     confirmed: bool,
 }
 
+#[derive(Deserialize)]
+pub(super) struct ControllerNameRequest { name: String }
+
 fn token_hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
@@ -1149,6 +1152,22 @@ pub(super) async fn revoke_controller_admin(
         &format!("controller={name}"),
     );
     Ok(Json(json!({"revoked":true,"name":name})))
+}
+
+pub(super) async fn rename_controller_admin(
+    State(state): State<AppState>, headers: HeaderMap, Path(id): Path<i64>, Json(input): Json<ControllerNameRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    let name = input.name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام عمومی باید بین ۱ تا ۸۰ نویسه باشد."));
+    }
+    let changed = db.execute("UPDATE federation_controllers SET controller_name=?1 WHERE id=?2 AND enabled=1", params![name, id]).map_err(db_error)?;
+    if changed == 0 { return Err(error(StatusCode::NOT_FOUND, "پنل متصل پیدا نشد.")); }
+    audit(&db, &actor.username, "federation.controller.rename", &format!("controller_id={id}; name={name}"));
+    Ok(Json(json!({"name":name,"message":"نام عمومی پنل ذخیره شد."})))
 }
 
 #[cfg(test)]
