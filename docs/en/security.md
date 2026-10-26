@@ -28,3 +28,17 @@ Systemd logs and API errors can include endpoint, username, or paths. Before sha
 ## Assurance limits
 
 ARG is an administration tool; it does not guarantee custom configuration correctness, application compatibility, website-code security, or backup quality. A security review document is a risk assessment, not independent certification or a penetration-test certificate.
+
+## Users and roles
+
+Review username, role, and enabled state in the user list. Admin can perform sensitive management operations; Viewer has only permitted read capabilities. Keep at least one reachable administrator before changing roles. Disabling or removing a user may invalidate that user's session.
+
+## Audit log and its limits
+
+Audit records actor, action type, time, result, and safe details. Use a time filter and expand an event. Audit is not a substitute for Nginx access/error logs, APT output, or `journalctl`; each answers a different question. Credentials must never be placed in events. Before sharing output, check for IPs, filenames, usernames, and accidental tokens.
+
+Example firewall investigation: filter around the change time, inspect the actor and rule event, then compare the current UFW rule in Firewall. A successful event means the request ran; validate actual external access with a probe and real connection.
+
+## TLS and root access
+
+If the panel is served over public HTTP, passwords and session cookies are not encrypted between browser and VPS. After obtaining a certificate, enable panel TLS and close or securely redirect the panel's HTTP port according to configuration. A certificate on an Nginx website does not imply the ARG panel itself uses HTTPS. Restrict Root Terminal and helper actions to administrators; session authorization is not the same as root authorization. Hide TLS private keys, S3 secrets, DB passwords, and tokens in logs/screenshots.

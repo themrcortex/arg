@@ -46,3 +46,24 @@ sudo arg rollback
 ```
 
 If a lock appears stale, check for a real process or systemd job before clearing it. Never manually remove `/run/arg-update*` during a live build. Separate GitHub network, disk exhaustion, Rust toolchain, and Cargo failures using the logs.
+
+## Branch and build mode
+
+The **main** branch tracks the stable line; **development** receives earlier changes and has higher regression risk. Use main in production. The selected branch is the updater's source for the next revision; inspect the fetched branch/commit and release notes after switching. Choose development only to test a specific fix and keep rollback available.
+
+**Fast update** keeps Rust build artifacts on the server to shorten future builds, at the cost of disk space. **Full update** clears/rebuilds build/cache files; it uses less retained disk but compiles longer. Retained `target` output can consume several GiB. Choose Full on low-disk hosts and Fast for frequent deployments with sufficient free space.
+
+## Progress, cancel, and rollback
+
+Distinguish Fetch, Compile, helper/file install, restart, and health check. Build percentage is an estimate because Cargo does not provide reliable percentages for all phases; stage text and last activity are more meaningful. Closing the modal does not stop the process.
+
+**Cancel update** requests cancellation and releases the reservation/lock. If the binary is being swapped, wait for rollback/cleanup; do not manually delete the lock. **Rollback previous version** restores the saved binary and restarts ARG, but does not necessarily roll back database migrations or data files. Make a separate DB/config backup before important updates.
+
+### Safe release workflow
+
+1. Record current version and commit in Settings/About.
+2. Choose the branch and Fast/Full mode; check free disk and maintenance time.
+3. Enable Maintenance and create a backup if users are doing sensitive work.
+4. Start Update and follow Fetch/Build/Install/Health stages.
+5. Treat only success plus health check as completion; after the new UI loads, perform a cache-busting refresh.
+6. Verify version, login, main pages, and service logs. Save failure details and rollback when appropriate.

@@ -46,7 +46,16 @@ pub(super) struct CreateUserRequest {
 }
 
 const MANAGER_CONFIG: &str = "/etc/arg/mysql-manager.cnf";
+const MYSQL_USER_CATALOG_QUERY: &str =
+    "SELECT user,host,plugin,account_locked FROM mysql.user ORDER BY user,host";
+const MYSQL_USER_CATALOG_FALLBACK_QUERY: &str =
+    "SELECT user,host,plugin FROM mysql.user ORDER BY user,host";
 static MYSQL_MANAGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lacks_account_locked_column(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("unknown column") && error.contains("account_locked")
+}
 
 fn session_hash_for(headers: &HeaderMap) -> Result<String, (StatusCode, Json<Value>)> {
     cookie_token(headers)
@@ -675,7 +684,7 @@ pub(super) async fn catalog(
     let query = if input.kind == "databases" {
         "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME"
     } else {
-        "SELECT user,host,plugin,account_locked FROM mysql.user ORDER BY user,host"
+        MYSQL_USER_CATALOG_QUERY
     };
     let result =
         privileged_request_async(json!({"action":"mysql-catalog","kind":input.kind,"sql":query}))
@@ -988,12 +997,24 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
             let expected = if kind == "databases" {
                 "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME"
             } else {
-                "SELECT user,host,plugin,account_locked FROM mysql.user ORDER BY user,host"
+                MYSQL_USER_CATALOG_QUERY
             };
             if request["sql"].as_str() != Some(expected) {
                 return json!({"ok":false,"error":"Catalog query does not match the safe allowlist"});
             }
-            match run_mysql_with_config(expected, None, true, MANAGER_CONFIG) {
+            let result = run_mysql_with_config(expected, None, true, MANAGER_CONFIG);
+            let result = match result {
+                Err(error) if kind == "users" && lacks_account_locked_column(&error) => {
+                    run_mysql_with_config(
+                        MYSQL_USER_CATALOG_FALLBACK_QUERY,
+                        None,
+                        true,
+                        MANAGER_CONFIG,
+                    )
+                }
+                other => other,
+            };
+            match result {
                 Ok(output) => json!({"ok":true,"output":output}),
                 Err(error) => json!({"ok":false,"error":error}),
             }
@@ -1045,7 +1066,7 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 mod tests {
     use super::{
         mysql_password_literal, safe_mysql_config_value, valid_identifier, valid_mysql_credentials,
-        validate_sql,
+        validate_sql, MYSQL_USER_CATALOG_FALLBACK_QUERY, MYSQL_USER_CATALOG_QUERY,
     };
     #[test]
     fn mysql_inputs_are_bounded_and_quoted() {
@@ -1073,6 +1094,24 @@ mod tests {
     fn defaults_extra_file_option_uses_required_equals_form() {
         let argument = super::defaults_extra_file_arg("/run/arg-mysql-test.cnf");
         assert_eq!(argument, "--defaults-extra-file=/run/arg-mysql-test.cnf");
+    }
+
+    #[test]
+    fn user_catalog_falls_back_when_account_locked_is_not_supported() {
+        assert_eq!(
+            MYSQL_USER_CATALOG_QUERY,
+            "SELECT user,host,plugin,account_locked FROM mysql.user ORDER BY user,host"
+        );
+        assert_eq!(
+            MYSQL_USER_CATALOG_FALLBACK_QUERY,
+            "SELECT user,host,plugin FROM mysql.user ORDER BY user,host"
+        );
+        assert!(super::lacks_account_locked_column(
+            "ERROR 1054 (42S22): Unknown column 'account_locked' in 'SELECT'"
+        ));
+        assert!(!super::lacks_account_locked_column(
+            "Access denied for table mysql.user"
+        ));
     }
 
     #[test]

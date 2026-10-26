@@ -1,5 +1,35 @@
 # ARG Change Log
 
+## v0.6.7-dev.10 — 2026-10-26
+
+### Improved
+- Expand the bilingual panel reference with detailed dashboard controls, operational examples, safety notes, and verified S3 provider setup steps.
+
+## v0.6.7-dev.9 — 2026-10-26
+
+### Improved
+- Add smooth article transitions, route loading feedback, and reliable scroll-to-top behavior in the documentation portal.
+
+
+## v0.6.7-dev.8 — 2026-10-26
+
+### Fixed
+- Retry the MySQL user catalog without `account_locked` on server versions that do not expose that column, retaining lock status where available.
+
+
+## v0.6.7-dev.7 — 2026-10-26
+
+### Improved
+- Simplify the documentation sidebar with collapsible sections, active-page visibility, responsive search, and accessible mobile navigation.
+
+
+## v0.6.7-dev.6 — 2026-10-25
+
+### Added
+- Expand bilingual documentation to 178 navigable guides with task-by-task instructions and examples.
+- Add a Documentation shortcut to the panel utility bar.
+
+
 ## v0.6.7-dev.5 — 2026-10-25
 
 ### Improved

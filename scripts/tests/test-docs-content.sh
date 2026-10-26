@@ -8,8 +8,11 @@ from pathlib import Path
 root = Path(sys.argv[1])
 catalog = (root / 'docs-site/src/catalog.ts').read_text()
 entries = re.findall(r"id: '([^']+)'.*?file: '([^']+)'", catalog)
-if len(entries) < 15:
-    raise SystemExit(f'Expected at least 15 navigable pages, found {len(entries)}')
+if len(entries) < 150:
+    raise SystemExit(f'Expected at least 150 navigable documentation pages, found {len(entries)}')
+page_ids = [page_id for page_id, _ in entries]
+if len(page_ids) != len(set(page_ids)):
+    raise SystemExit('Documentation page IDs must be unique')
 for page_id, file_name in entries:
     for lang in ('fa', 'en'):
         path = root / 'docs' / lang / f'{file_name}.md'
@@ -18,5 +21,12 @@ for page_id, file_name in entries:
         content = path.read_text().strip()
         if len(content) < 500 or not re.search(r'^## ', content, re.M):
             raise SystemExit(f'Article is unexpectedly short or has no section headings: {path}')
-print(f'Bilingual documentation content checks passed ({len(entries)} pages).')
+        for target in re.findall(r'\]\(\?page=([\w-]+)\)', content):
+            if target not in page_ids:
+                raise SystemExit(f'Broken documentation page link in {path}: {target}')
+for lang in ('fa', 'en'):
+    guide_files = list((root / 'docs' / lang).glob('guide-*.md'))
+    if len(guide_files) < 150:
+        raise SystemExit(f'Expected at least 150 focused {lang} guides, found {len(guide_files)}')
+print(f'Bilingual documentation content checks passed ({len(entries)} pages, {len(entries) * 2} localized articles).')
 PY
