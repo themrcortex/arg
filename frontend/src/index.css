@@ -40,7 +40,7 @@
 
 @layer base {
   :root {
-    --arg-glass: rgba(20, 30, 40, .76);
+    --arg-glass: rgba(20, 30, 40, .68);
     --arg-glass-strong: rgba(19, 29, 39, .92);
     --arg-glass-edge: rgba(222, 232, 239, .13);
     --arg-bg: #0c1219;
@@ -221,7 +221,7 @@
   pointer-events: none;
   content: '';
 }
-.arg-card-surface { position: relative; isolation: isolate; border-color: var(--arg-glass-edge); background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.012) 42%), var(--arg-glass); box-shadow: inset 0 1px 0 rgba(255,255,255,.065), 0 12px 32px rgba(0,0,0,.12); backdrop-filter: blur(12px) saturate(118%); -webkit-backdrop-filter: blur(12px) saturate(118%); transition: border-color 240ms cubic-bezier(.22,1,.36,1), box-shadow 240ms cubic-bezier(.22,1,.36,1); }
+.arg-card-surface { position: relative; isolation: isolate; background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.012) 42%), var(--arg-glass); box-shadow: inset 0 1px 0 rgba(255,255,255,.065), 0 12px 32px rgba(0,0,0,.12); backdrop-filter: blur(12px) saturate(118%); -webkit-backdrop-filter: blur(12px) saturate(118%); transition: border-color 240ms cubic-bezier(.22,1,.36,1), box-shadow 240ms cubic-bezier(.22,1,.36,1); }
 .arg-card-surface::before {
   position: absolute;
   z-index: -1;
@@ -340,13 +340,39 @@
 .arg-kpi[data-tone="teal"] .arg-kpi-fill { background: var(--arg-viz-disk); }
 .arg-kpi[data-tone="blue"] .arg-kpi-fill { background: var(--arg-viz-rx); }
 /* Shared glass treatment for page surfaces. Keep dense data cells and the PTY opaque. */
-.arg-main-canvas :is(section, article, div)[class~="bg-card"],
-.arg-main-canvas :is(section, article)[class*="bg-card/"],
-.arg-main-canvas :is(section, article)[class*="bg-background/"] {
-  border-color: var(--arg-glass-edge);
+.arg-main-canvas :is(section, article, div, button)[class~="bg-card"],
+.arg-main-canvas :is(section, article, div, button)[class*="bg-card/"],
+.arg-main-canvas :is(section, article, button)[class*="bg-background/"],
+.arg-main-canvas :is(section, article)[class*="bg-secondary/"],
+.arg-main-canvas div[class*="bg-background/"][class*="rounded"] {
   background: linear-gradient(145deg, rgba(255,255,255,.045), transparent 52%), var(--arg-glass);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 10px 28px rgba(0,0,0,.1);
 }
+.arg-main-canvas :is(section, article, button)[class*="bg-card"] {
+  backdrop-filter: blur(12px) saturate(118%);
+  -webkit-backdrop-filter: blur(12px) saturate(118%);
+}
+.arg-main-canvas :is(article, button)[class*="bg-card"]:hover {
+  background: linear-gradient(145deg, rgba(221,164,111,.065), rgba(255,255,255,.025) 55%), rgba(20,30,40,.77);
+}
+.arg-glass-inset {
+  border: 1px solid rgba(222,232,239,.09);
+  background: linear-gradient(145deg, rgba(255,255,255,.03), transparent 55%), rgba(12,20,29,.48);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.035);
+}
+button.arg-glass-inset:hover:not(:disabled) {
+  border-color: rgba(221,164,111,.3);
+  background: linear-gradient(145deg, rgba(221,164,111,.075), rgba(255,255,255,.025)), rgba(20,30,40,.65);
+}
+.arg-glass-inset:focus-visible { border-color: rgba(221,164,111,.48); }
+.arg-terminal-frame {
+  border-color: var(--arg-glass-edge);
+  background: var(--arg-glass);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 24px 48px rgba(0,0,0,.18);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+.arg-terminal-toolbar { background: rgba(19,29,39,.75); }
 .arg-glass-popover {
   border-color: var(--arg-glass-edge);
   background: linear-gradient(150deg, rgba(255,255,255,.055), transparent 55%), var(--arg-glass-strong);
@@ -359,7 +385,8 @@
   .arg-sidebar, .utility-bar, .arg-card-surface, .arg-glass-popover { backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px); }
 }
 @media (prefers-reduced-transparency: reduce) {
-  .arg-sidebar, .utility-bar, .arg-card-surface, .arg-glass-popover { backdrop-filter: none; -webkit-backdrop-filter: none; background-color: #17212b; }
+  .arg-sidebar, .utility-bar, .arg-card-surface, .arg-glass-popover, .arg-terminal-frame { backdrop-filter: none; -webkit-backdrop-filter: none; background: #17212b; }
+  .arg-main-canvas :is(section, article, div, button)[class*="bg-card"], .arg-main-canvas :is(section, article, button)[class*="bg-background/"] { backdrop-filter: none; -webkit-backdrop-filter: none; background: #17212b; }
 }
 .arg-range [aria-pressed="true"] { color: var(--arg-accent); background: rgba(221,164,111,.13); }
 .arg-range [aria-pressed="false"] { color: var(--arg-muted); }
