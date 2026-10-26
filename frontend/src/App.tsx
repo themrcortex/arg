@@ -46,6 +46,7 @@ import { FileManagerPage } from './FileManagerPage'
 import { MaintenancePage } from './MaintenancePage'
 import { MysqlPage } from './MysqlPage'
 import { NodesPage } from './NodesPage'
+import { AllServersPage } from './AllServersPage'
 import { BugReportPage } from './BugReportPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
@@ -73,6 +74,8 @@ const updateStageFor = (phase?: string): UpdateStage => {
     default: return 1
   }
 }
+const WORKSPACE_MODE_KEY = 'arg.workspace-mode'
+type WorkspaceMode = 'single' | 'multi'
 
 function ResourceAlertNotice() {
   const [alerts, setAlerts] = useState<ResourceAlert[]>([])
@@ -536,8 +539,11 @@ export default function App() {
   const [boot, setBoot] = useState(true)
   const [installed, setInstalled] = useState(false)
   const [user, setUser] = useState<User | null>(null)
-  const [workspaceNodes, setWorkspaceNodes] = useState<Array<{ id: number; name: string; workspace_ready?: boolean }>>([])
+  const [workspaceNodes, setWorkspaceNodes] = useState<Array<{ id: number; workspace_key: string; name: string; public_name?: string; server_uuid?: string | null; workspace_ready?: boolean }>>([])
   const [workspaceNodeId, setWorkspaceNodeId] = useState(() => getActiveWorkspaceNode())
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(() => {
+    try { return window.localStorage.getItem(WORKSPACE_MODE_KEY) === 'single' ? 'single' : 'multi' } catch { return 'multi' }
+  })
   const [panelTimeZone, setPanelTimeZone] = useState('UTC')
   const [page, setPage] = useState<PageId>(() => pageFromHash(window.location.hash))
   const [terminalMounted, setTerminalMounted] = useState(() => pageFromHash(window.location.hash) === 'terminal')
@@ -609,13 +615,13 @@ export default function App() {
   useEffect(() => {
     if (user?.role !== 'admin') { setWorkspaceNodes([]); return }
     let active = true
-    const loadNodes = () => { void api<{ nodes: Array<{ id: number; name: string; workspace_ready?: boolean }> }>('nodes')
-      .then((result) => { if (active) { const available = result.nodes || []; setWorkspaceNodes(available); const selected = getActiveWorkspaceNode(); if (selected && !available.some((node) => String(node.id) === selected && node.workspace_ready)) { setActiveWorkspaceNode(''); setWorkspaceNodeId(''); window.location.reload() } } })
+    const loadNodes = () => { void api<{ nodes: Array<{ id: number; workspace_key: string; name: string; public_name?: string; server_uuid?: string | null; workspace_ready?: boolean }> }>('nodes')
+      .then((result) => { if (active) { const available = result.nodes || []; setWorkspaceNodes(available); const selected = getActiveWorkspaceNode(); if (!selected || (selected === 'all' && workspaceMode === 'multi')) return; if (workspaceMode === 'single') { setActiveWorkspaceNode(''); setWorkspaceNodeId(''); window.location.reload(); return } const exact = available.find((node) => node.workspace_key === selected); const legacySelection = selected.match(/^(?:legacy:)?(\d+)$/)?.[1]; const migrated = legacySelection ? available.find((node) => String(node.id) === legacySelection) : undefined; const target = exact || migrated; if (!target?.workspace_ready) { setActiveWorkspaceNode(''); setWorkspaceNodeId(''); window.location.reload() } else if (target.workspace_key !== selected) { setActiveWorkspaceNode(target.workspace_key); setWorkspaceNodeId(target.workspace_key); clearHeavyCache(); window.location.reload() } } })
       .catch(() => { if (active) setWorkspaceNodes([]) }) }
     loadNodes()
     window.addEventListener('arg-nodes-changed', loadNodes)
     return () => { active = false; window.removeEventListener('arg-nodes-changed', loadNodes) }
-  }, [user?.id, user?.role])
+  }, [user?.id, user?.role, workspaceMode])
   useEffect(() => {
     if (!updateReloadNotice || boot || !installed || !user || postReloadShown.current) return
     postReloadShown.current = true
@@ -947,6 +953,7 @@ export default function App() {
     try {
       await api('logout', { method: 'POST' })
       clearHeavyCache()
+      setActiveWorkspaceNode('')
       setUser(null)
       setPage('dashboard')
       window.location.hash = '/dashboard'
@@ -987,6 +994,25 @@ export default function App() {
     if (next === 'terminal') setTerminalMounted(true)
     window.location.hash = `/${next}`
     setMobileOpen(false)
+  }
+  function changeWorkspaceMode(mode: WorkspaceMode) {
+    setWorkspaceMode(mode)
+    try { window.localStorage.setItem(WORKSPACE_MODE_KEY, mode) } catch { /* The current UI session can still use this preference. */ }
+    if (mode === 'single' && workspaceNodeId) {
+      setActiveWorkspaceNode('')
+      setWorkspaceNodeId('')
+      setTerminalMounted(false)
+      clearHeavyCache()
+      window.location.reload()
+    }
+  }
+  function openWorkspace(key: string) {
+    setActiveWorkspaceNode(key)
+    setWorkspaceNodeId(key)
+    setTerminalMounted(false)
+    clearHeavyCache()
+    selectPage('dashboard')
+    window.location.reload()
   }
   return (
     <PanelTimeZoneContext.Provider value={panelTimeZone}>
@@ -1031,37 +1057,36 @@ export default function App() {
         <div className="min-w-0" inert={updateLocked} aria-hidden={updateLocked}>
           <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
             <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-[10px] font-semibold tracking-[.18em] text-primary sm:inline" dir="ltr">VPS CONTROL CENTER</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
-            <div className="flex items-center gap-1.5">{user.role === 'admin' && workspaceNodes.length > 0 && <label className="mr-1 flex h-9 max-w-[150px] items-center rounded-lg border border-white/10 bg-background/60 px-2"><span className="sr-only">فضای کار</span><select aria-label="انتخاب فضای کار VPS" value={workspaceNodeId} onChange={(event) => { const id = event.target.value; const selected = workspaceNodes.find((node) => String(node.id) === id); if (id && !selected?.workspace_ready) { notifyUser('این Node برای فضای کار کامل آماده نیست؛ آن را حذف و دوباره جفت‌سازی کن.'); return } setActiveWorkspaceNode(id); setWorkspaceNodeId(id); clearHeavyCache(); window.location.reload() }} className="min-w-0 max-w-full bg-transparent text-xs text-foreground outline-none"><option value="">این VPS</option>{workspaceNodes.map((node) => <option key={node.id} value={String(node.id)} disabled={!node.workspace_ready}>{node.name}{node.workspace_ready ? '' : ' · نیاز به جفت‌سازی'}</option>)}</select></label>}<Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه" title="GitHub پروژه"><Github size={18}/></a><a href="https://themrcortex.github.io/arg/" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="مستندات ARG" title="مستندات ARG"><BookOpen size={17}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end" sideOffset={8} collisionPadding={16}><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+            <div className="flex items-center gap-1.5">{user.role === 'admin' && workspaceMode === 'multi' && <label className="mr-1 flex h-9 max-w-[170px] items-center rounded-lg border border-white/10 bg-background/60 px-2"><span className="sr-only">فضای کار</span><select aria-label="انتخاب فضای کار VPS" value={workspaceNodeId} onChange={(event) => { const key = event.target.value; if (key === 'all') { openWorkspace('all'); return } const selected = workspaceNodes.find((node) => node.workspace_key === key); if (key && !selected?.workspace_ready) { notifyUser('این Node برای فضای کار کامل آماده نیست؛ آن را حذف و دوباره جفت‌سازی کن.'); return } openWorkspace(key) }} className="min-w-0 max-w-full bg-transparent text-xs text-foreground outline-none"><option value="">این VPS</option><option value="all">همهٔ سرورها · فقط خواندنی</option>{workspaceNodes.map((node) => <option key={node.workspace_key} value={node.workspace_key} disabled={!node.workspace_ready}>{node.public_name && node.public_name !== node.name ? `${node.public_name} · ${node.name}` : node.public_name || node.name}{node.workspace_ready ? '' : ' · نیاز به جفت‌سازی'}</option>)}</select></label>}<Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه" title="GitHub پروژه"><Github size={18}/></a><a href="https://themrcortex.github.io/arg/" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="مستندات ARG" title="مستندات ARG"><BookOpen size={17}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end" sideOffset={8} collisionPadding={16}><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
           </header>
           <main className="arg-main-canvas relative mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             {location.protocol !== 'https:' && <Alert className="mb-6 border-amber-400/30 bg-amber-400/[.07] text-amber-100"><AlertTriangle size={17}/><div className="min-w-0 flex-1"><AlertTitle>اتصال این پنل امن نیست</AlertTitle><AlertDescription className="text-amber-100/75">این صفحه با HTTP باز شده است؛ رمز عبور و نشست می‌توانند در مسیر شبکه افشا شوند. برای راه‌اندازی HTTPS، گواهی SSL را در تنظیمات ثبت کن.</AlertDescription></div><Button size="sm" variant="outline" className="shrink-0 border-amber-300/30" onClick={() => selectPage('settings')}>تنظیم گواهی SSL</Button></Alert>}
-            <ResourceAlertNotice />
-            {terminalMounted && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
+            {workspaceNodeId !== 'all' && <ResourceAlertNotice />}
+            {terminalMounted && workspaceNodeId !== 'all' && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
             <div key={currentPage}>
             {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <div className="arg-page-enter">
-            {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
-            {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'nodes' && user.role === 'admin' && <NodesPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'maintenance' && user.role === 'admin' && <MaintenancePage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
-            {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'docker' && user.role === 'admin' && <DockerPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'files' && user.role === 'admin' && <FileManagerPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 's3' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="فضای ابری S3"/>}><S3StoragePage Heading={PageHeading} notify={notifyUser}/></Suspense>}
-            {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'mysql' && user.role === 'admin' && <MysqlPage Heading={PageHeading} notify={notifyUser} />}
-            {currentPage === 'users' && user.role === 'admin' && (
-              <UsersPage current={user} Heading={PageHeading} notify={notifyUser} />
-            )}
-            {currentPage === 'audit' && user.role === 'admin' && (
-              <AuditPage Heading={PageHeading} notify={notifyUser} />
-            )}
-            {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} panelTimeZone={panelTimeZone} onTimeZoneChange={setPanelTimeZone} />}
-            {currentPage === 'account' && <AccountPage Heading={PageHeading} user={user} setUser={(next) => setUser(next)} logout={logout} notify={notifyUser} />}
-            {currentPage === 'bug-report' && <BugReportPage Heading={PageHeading} notify={notifyUser} version={update.local_version} commit={update.local} page={currentPage} />}
+            {workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
+              {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
+              {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'nodes' && user.role === 'admin' && <NodesPage Heading={PageHeading} notify={notifyUser} workspaceMode={workspaceMode} onWorkspaceModeChange={changeWorkspaceMode} />}
+              {currentPage === 'maintenance' && user.role === 'admin' && <MaintenancePage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
+              {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'docker' && user.role === 'admin' && <DockerPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'files' && user.role === 'admin' && <FileManagerPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 's3' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="فضای ابری S3"/>}><S3StoragePage Heading={PageHeading} notify={notifyUser}/></Suspense>}
+              {currentPage === 'terminal' && null}
+              {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'mysql' && user.role === 'admin' && <MysqlPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'users' && user.role === 'admin' && <UsersPage current={user} Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'audit' && user.role === 'admin' && <AuditPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} panelTimeZone={panelTimeZone} onTimeZoneChange={setPanelTimeZone} />}
+              {currentPage === 'account' && <AccountPage Heading={PageHeading} user={user} setUser={(next) => setUser(next)} logout={logout} notify={notifyUser} />}
+              {currentPage === 'bug-report' && <BugReportPage Heading={PageHeading} notify={notifyUser} version={update.local_version} commit={update.local} page={currentPage} />}
+            </>}
             <footer className="arg-page-footer mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>

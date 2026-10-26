@@ -22,9 +22,12 @@ pub(super) struct AddNodeRequest {
 #[derive(Serialize)]
 struct NodeRecord {
     id: i64,
+    workspace_key: String,
     name: String,
     endpoint: String,
     node_id: String,
+    server_uuid: Option<String>,
+    public_name: String,
     protocol_version: u32,
     last_seen: Option<i64>,
     created_at: i64,
@@ -36,6 +39,8 @@ pub(super) struct PairAcceptRequest {
     protocol_version: u32,
     controller_id: String,
     controller_name: String,
+    #[serde(default)]
+    server_uuid: Option<String>,
     pairing_code: String,
 }
 
@@ -49,6 +54,90 @@ pub(super) struct ServiceActionRequest {
 
 #[derive(Deserialize)]
 pub(super) struct ControllerNameRequest { name: String }
+
+#[derive(Deserialize)]
+pub(super) struct PublicNameRequest { name: String }
+
+fn local_server_uuid(db: &Connection) -> Result<String, rusqlite::Error> {
+    if let Some(value) = db.query_row("SELECT value FROM settings WHERE key='federation_server_uuid'", [], |row| row.get::<_, String>(0)).optional()? {
+        return Ok(value);
+    }
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex::encode(bytes);
+    let value = format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32]);
+    db.execute("INSERT INTO settings(key,value) VALUES('federation_server_uuid',?1) ON CONFLICT(key) DO NOTHING", [&value])?;
+    db.query_row("SELECT value FROM settings WHERE key='federation_server_uuid'", [], |row| row.get(0))
+}
+
+fn local_public_name(db: &Connection) -> Result<String, rusqlite::Error> {
+    if let Some(value) = db.query_row("SELECT value FROM settings WHERE key='federation_public_name'", [], |row| row.get::<_, String>(0)).optional()? {
+        return Ok(value);
+    }
+    let hostname = fs::read_to_string("/etc/hostname").unwrap_or_default();
+    let name = hostname.trim().chars().take(80).collect::<String>();
+    let name = if name.is_empty() { "ARG Server".to_owned() } else { name };
+    db.execute("INSERT INTO settings(key,value) VALUES('federation_public_name',?1) ON CONFLICT(key) DO NOTHING", [&name])?;
+    db.query_row("SELECT value FROM settings WHERE key='federation_public_name'", [], |row| row.get(0))
+}
+
+fn validate_public_name(value: &str) -> Result<&str, (StatusCode, Json<Value>)> {
+    let name = value.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام عمومی باید بین ۱ تا ۸۰ نویسه باشد."));
+    }
+    Ok(name)
+}
+
+fn valid_server_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|index| bytes[*index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit()
+        })
+}
+
+fn workspace_key(server_uuid: Option<&str>, local_id: i64) -> String {
+    server_uuid
+        .filter(|value| valid_server_uuid(value))
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_else(|| format!("legacy:{local_id}"))
+}
+
+fn resolve_workspace_node_id(
+    db: &Connection,
+    key: &str,
+) -> Result<i64, (StatusCode, Json<Value>)> {
+    let id = if let Some(uuid) = key.strip_prefix("legacy:") {
+        let Ok(id) = uuid.parse::<i64>() else {
+            return Err(error(StatusCode::NOT_FOUND, "Node فضای کار پیدا نشد."));
+        };
+        if id <= 0 {
+            return Err(error(StatusCode::NOT_FOUND, "Node فضای کار پیدا نشد."));
+        }
+        db.query_row(
+            "SELECT id FROM federated_nodes WHERE id=?1 AND (server_uuid IS NULL OR server_uuid='')",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "خواندن Node فضای کار ناموفق بود."))?
+    } else if valid_server_uuid(key) {
+        db.query_row(
+            "SELECT id FROM federated_nodes WHERE server_uuid=?1",
+            [key.to_ascii_lowercase()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "خواندن Node فضای کار ناموفق بود."))?
+    } else {
+        return Err(error(StatusCode::NOT_FOUND, "Node فضای کار پیدا نشد."));
+    };
+    id.ok_or_else(|| error(StatusCode::NOT_FOUND, "Node فضای کار پیدا نشد."))
+}
 
 fn token_hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
@@ -248,17 +337,22 @@ fn read_node_token(path: &FsPath) -> Result<String, (StatusCode, Json<Value>)> {
 pub(super) async fn list_nodes(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
-    let mut statement = db.prepare("SELECT id,name,endpoint,node_id,protocol_version,last_seen,created_at FROM federated_nodes ORDER BY name COLLATE NOCASE").map_err(db_error)?;
+    let server_uuid = local_server_uuid(&db).map_err(db_error)?;
+    let public_name = local_public_name(&db).map_err(db_error)?;
+    let mut statement = db.prepare("SELECT id,name,endpoint,node_id,server_uuid,public_name,protocol_version,last_seen,created_at FROM federated_nodes ORDER BY name COLLATE NOCASE").map_err(db_error)?;
     let nodes = statement
         .query_map([], |row| {
             Ok(NodeRecord {
                 id: row.get(0)?,
+                workspace_key: workspace_key(row.get::<_, Option<String>>(4)?.as_deref(), row.get(0)?),
                 name: row.get(1)?,
                 endpoint: row.get(2)?,
                 node_id: row.get(3)?,
-                protocol_version: row.get::<_, i64>(4)? as u32,
-                last_seen: row.get(5)?,
-                created_at: row.get(6)?,
+                server_uuid: row.get(4)?,
+                public_name: row.get(5)?,
+                protocol_version: row.get::<_, i64>(6)? as u32,
+                last_seen: row.get(7)?,
+                created_at: row.get(8)?,
                 workspace_ready: workspace_token_path(&db, row.get(0)?)
                     .ok()
                     .and_then(|path| fs::symlink_metadata(path).ok())
@@ -271,12 +365,12 @@ pub(super) async fn list_nodes(State(state): State<AppState>, headers: HeaderMap
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error)?;
     let controllers: Vec<Value> = {
-        let mut query = db.prepare("SELECT id,controller_name,created_at,last_seen FROM federation_controllers WHERE enabled=1 ORDER BY created_at DESC LIMIT 100").map_err(db_error)?;
-        let rows = query.query_map([], |row| Ok(json!({"id":row.get::<_,i64>(0)?,"name":row.get::<_,String>(1)?,"created_at":row.get::<_,i64>(2)?,"last_seen":row.get::<_,Option<i64>>(3)?}))).map_err(db_error)?;
+        let mut query = db.prepare("SELECT id,controller_name,local_label,created_at,last_seen,server_uuid FROM federation_controllers WHERE enabled=1 ORDER BY created_at DESC LIMIT 100").map_err(db_error)?;
+        let rows = query.query_map([], |row| Ok(json!({"id":row.get::<_,i64>(0)?,"name":row.get::<_,String>(2)?,"public_name":row.get::<_,String>(1)?,"created_at":row.get::<_,i64>(3)?,"last_seen":row.get::<_,Option<i64>>(4)?,"server_uuid":row.get::<_,Option<String>>(5)?}))).map_err(db_error)?;
         rows.filter_map(Result::ok).collect()
     };
     Ok(Json(
-        json!({"protocol":"arg-node/2","nodes":nodes,"controllers":controllers}),
+        json!({"protocol":"arg-node/2","server_uuid":server_uuid,"public_name":public_name,"nodes":nodes,"controllers":controllers}),
     ))
 }
 
@@ -327,9 +421,12 @@ pub(super) async fn add_node(
     Json(input): Json<AddNodeRequest>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    let actor = {
+    let (actor, controller_public_name, controller_server_uuid) = {
         let db = state.lock().unwrap();
-        require_admin(&db, &headers)?
+        let actor = require_admin(&db, &headers)?;
+        let name = local_public_name(&db).map_err(db_error)?;
+        let server_uuid = local_server_uuid(&db).map_err(db_error)?;
+        (actor, name, server_uuid)
     };
     if input.name.trim().is_empty()
         || input.name.trim().chars().count() > 80
@@ -351,7 +448,7 @@ pub(super) async fn add_node(
     let response = client.post(endpoint.join("api/federation/pair").map_err(|_| error(StatusCode::BAD_REQUEST, "آدرس اتصال معتبر نیست."))?)
         .header("X-ARG-Transport", "https")
         .header("X-ARG-Protocol", PROTOCOL_VERSION.to_string())
-        .json(&json!({"protocol_version":PROTOCOL_VERSION,"controller_id":controller_id,"controller_name":input.name.trim(),"pairing_code":input.pairing_code}))
+        .json(&json!({"protocol_version":PROTOCOL_VERSION,"controller_id":controller_id,"controller_name":controller_public_name,"server_uuid":controller_server_uuid,"pairing_code":input.pairing_code}))
         .send().await.map_err(|_| error(StatusCode::BAD_GATEWAY, "ارتباط HTTPS با Node برقرار نشد؛ URL، گواهی TLS و دسترسی شبکه را بررسی کن."))?;
     if !response.status().is_success() {
         return Err(error(
@@ -388,7 +485,9 @@ pub(super) async fn add_node(
     }
     let db = state.lock().unwrap();
     let endpoint_text = endpoint.as_str().trim_end_matches('/').to_owned();
-    db.execute("INSERT INTO federated_nodes(name,endpoint,node_id,controller_id,protocol_version,created_at,last_seen) VALUES (?1,?2,?3,?4,?5,?6,?6)", params![input.name.trim(), endpoint_text, payload["node_id"].as_str().unwrap_or_default(), controller_id, PROTOCOL_VERSION, now()]).map_err(db_error)?;
+    let remote_uuid = payload["server_uuid"].as_str().filter(|value| valid_server_uuid(value)).map(str::to_ascii_lowercase);
+    let remote_public_name = payload["public_name"].as_str().and_then(|value| validate_public_name(value).ok()).unwrap_or("ARG Server");
+    db.execute("INSERT INTO federated_nodes(name,endpoint,node_id,controller_id,protocol_version,created_at,last_seen,server_uuid,public_name) VALUES (?1,?2,?3,?4,?5,?6,?6,?7,?8)", params![input.name.trim(), endpoint_text, payload["node_id"].as_str().unwrap_or_default(), controller_id, PROTOCOL_VERSION, now(), remote_uuid, remote_public_name]).map_err(db_error)?;
     let id = db.last_insert_rowid();
     let secret_path = token_path(&db, id)?;
     if let Err(err) = write_node_token(&secret_path, remote_token) {
@@ -412,7 +511,7 @@ pub(super) async fn add_node(
         ),
     );
     Ok(Json(
-        json!({"id":id,"name":input.name.trim(),"node_id":payload["node_id"],"protocol":"arg-node/2","capabilities":payload["capabilities"],"message":"Node با دسترسی امن فضای کار جفت شد."}),
+        json!({"id":id,"name":input.name.trim(),"public_name":remote_public_name,"server_uuid":remote_uuid,"node_id":payload["node_id"],"protocol":"arg-node/2","capabilities":payload["capabilities"],"message":"Node با دسترسی امن فضای کار جفت شد."}),
     ))
 }
 
@@ -456,6 +555,7 @@ pub(super) async fn accept_pair(
             .all(|byte| byte.is_ascii_hexdigit())
         || input.controller_name.trim().is_empty()
         || input.controller_name.chars().count() > 80
+        || input.server_uuid.as_deref().is_some_and(|uuid| !valid_server_uuid(uuid))
         || input.pairing_code.len() != 64
         || !input
             .pairing_code
@@ -468,6 +568,8 @@ pub(super) async fn accept_pair(
         ));
     }
     let db = state.lock().unwrap();
+    let server_uuid = local_server_uuid(&db).map_err(db_error)?;
+    let public_name = local_public_name(&db).map_err(db_error)?;
     let hash = token_hash(&input.pairing_code);
     let user_id: Option<i64> = db.query_row("SELECT u.id FROM federation_pairing_codes p JOIN users u ON u.username=p.created_by AND u.enabled=1 AND u.role='admin' WHERE p.code_hash=?1 AND p.expires_at>?2", params![hash, now()], |row| row.get(0)).optional().map_err(db_error)?;
     let Some(user_id) = user_id else {
@@ -494,7 +596,7 @@ pub(super) async fn accept_pair(
     let raw = token();
     let workspace_token = token();
     let name = input.controller_name.trim();
-    db.execute("INSERT INTO federation_controllers(controller_id,controller_name,token_hash,created_at,last_seen,enabled) VALUES (?1,?2,?3,?4,?4,1)", params![input.controller_id, name, token_hash(&raw), now()]).map_err(db_error)?;
+    db.execute("INSERT INTO federation_controllers(controller_id,controller_name,token_hash,created_at,last_seen,enabled,local_label,server_uuid) VALUES (?1,?2,?3,?4,?4,1,?2,?5)", params![input.controller_id, name, token_hash(&raw), now(), input.server_uuid]).map_err(db_error)?;
     let workspace_hash = session_hash(&workspace_token);
     let at = now();
     db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,created_at,last_seen,remote_ip,user_agent) VALUES (?1,?2,?3,?4,?4,'federation','ARG remote workspace')", params![workspace_hash, user_id, at + 10 * 365 * 24 * 60 * 60, at]).map_err(db_error)?;
@@ -510,13 +612,15 @@ pub(super) async fn accept_pair(
         "protocol=arg-node/2; scope=authenticated ARG workspace",
     );
     Ok(Json(
-        json!({"protocol_version":PROTOCOL_VERSION,"node_id":node_id,"controller_id":input.controller_id,"node_token":raw,"workspace_token":workspace_token,"capabilities":["node.status.read","node.services.read","node.services.manage","workspace.api.proxy"]}),
+        json!({"protocol_version":PROTOCOL_VERSION,"node_id":node_id,"server_uuid":server_uuid,"public_name":public_name,"controller_id":input.controller_id,"node_token":raw,"workspace_token":workspace_token,"capabilities":["node.status.read","node.services.read","node.services.manage","workspace.api.proxy","server.identity.read","server.public_name.sync"]}),
     ))
 }
 
 pub(super) async fn status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     let _ = authorize_controller(&db, &headers)?;
+    let server_uuid = local_server_uuid(&db).map_err(db_error)?;
+    let public_name = local_public_name(&db).map_err(db_error)?;
     let node_id: String = db
         .query_row(
             "SELECT value FROM settings WHERE key='federation_node_id'",
@@ -553,7 +657,7 @@ pub(super) async fn status(State(state): State<AppState>, headers: HeaderMap) ->
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
     Ok(Json(
-        json!({"protocol":"arg-node/2","node_id":node_id,"hostname":hostname,"os":fs::read_to_string("/etc/os-release").unwrap_or_default().lines().find(|line| line.starts_with("PRETTY_NAME=")).map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"')).unwrap_or("Linux"),"architecture":std::env::consts::ARCH,"arg_version":env!("CARGO_PKG_VERSION"),"uptime_seconds":uptime as u64,"load":load,"memory_total_kib":total_kib,"memory_available_kib":available_kib,"capabilities":["node.status.read","node.services.read","node.services.manage","workspace.api.proxy"]}),
+        json!({"protocol":"arg-node/2","node_id":node_id,"server_uuid":server_uuid,"public_name":public_name,"hostname":hostname,"os":fs::read_to_string("/etc/os-release").unwrap_or_default().lines().find(|line| line.starts_with("PRETTY_NAME=")).map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"')).unwrap_or("Linux"),"architecture":std::env::consts::ARCH,"arg_version":env!("CARGO_PKG_VERSION"),"uptime_seconds":uptime as u64,"load":load,"memory_total_kib":total_kib,"memory_available_kib":available_kib,"capabilities":["node.status.read","node.services.read","node.services.manage","workspace.api.proxy","server.identity.read","server.public_name.sync"]}),
     ))
 }
 
@@ -725,15 +829,24 @@ pub(super) async fn node_status(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
     }
-    remote_node_request(
+    let value = remote_node_request(
         &state,
         id,
         reqwest::Method::GET,
         "api/federation/status",
         None,
     )
-    .await
-    .map(Json)
+    .await?;
+    if let Some(uuid) = value["server_uuid"].as_str().filter(|uuid| valid_server_uuid(uuid)) {
+        let db = state.lock().unwrap();
+        let public_name = value["public_name"].as_str().and_then(|name| validate_public_name(name).ok());
+        if let Some(public_name) = public_name {
+            db.execute("UPDATE federated_nodes SET server_uuid=?1,public_name=?2 WHERE id=?3", params![uuid.to_ascii_lowercase(), public_name, id]).map_err(db_error)?;
+        } else {
+            db.execute("UPDATE federated_nodes SET server_uuid=?1 WHERE id=?2", params![uuid.to_ascii_lowercase(), id]).map_err(db_error)?;
+        }
+    }
+    Ok(Json(value))
 }
 
 pub(super) async fn node_services(
@@ -789,7 +902,7 @@ pub(super) async fn node_service_action(
 /// The remote admin session stays in a root-only file and is never sent to the browser.
 pub(super) async fn proxy_workspace_api(
     State(state): State<AppState>,
-    Path((id, remote_path)): Path<(i64, String)>,
+    Path((workspace_key, remote_path)): Path<(String, String)>,
     OriginalUri(uri): OriginalUri,
     request: Request,
 ) -> Response {
@@ -825,8 +938,12 @@ pub(super) async fn proxy_workspace_api(
         )
         .into_response();
     }
-    let (endpoint, token) = {
+    let (id, endpoint, token) = {
         let db = state.lock().unwrap();
+        let id = match resolve_workspace_node_id(&db, &workspace_key) {
+            Ok(value) => value,
+            Err(failure) => return failure.into_response(),
+        };
         let endpoint: String = match db.query_row(
             "SELECT endpoint FROM federated_nodes WHERE id=?1",
             [id],
@@ -849,7 +966,7 @@ pub(super) async fn proxy_workspace_api(
                 .into_response()
             }
         };
-        (endpoint, token)
+        (id, endpoint, token)
     };
     let Ok(endpoint) = validate_endpoint(&endpoint) else {
         return error(StatusCode::BAD_GATEWAY, "آدرس Node ذخیره‌شده معتبر نیست.").into_response();
@@ -968,7 +1085,7 @@ pub(super) async fn proxy_workspace_api(
 
 pub(super) async fn proxy_workspace_terminal(
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    Path(workspace_key): Path<String>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     ws: axum::extract::ws::WebSocketUpgrade,
@@ -1007,6 +1124,10 @@ pub(super) async fn proxy_workspace_terminal(
     }
     let (endpoint, session) = {
         let db = state.lock().unwrap();
+        let id = match resolve_workspace_node_id(&db, &workspace_key) {
+            Ok(value) => value,
+            Err(_) => return (StatusCode::NOT_FOUND, "Node not found").into_response(),
+        };
         let endpoint = match db.query_row(
             "SELECT endpoint FROM federated_nodes WHERE id=?1",
             [id],
@@ -1160,19 +1281,94 @@ pub(super) async fn rename_controller_admin(
     check_origin(&headers)?;
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
-    let name = input.name.trim();
-    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
-        return Err(error(StatusCode::BAD_REQUEST, "نام عمومی باید بین ۱ تا ۸۰ نویسه باشد."));
-    }
-    let changed = db.execute("UPDATE federation_controllers SET controller_name=?1 WHERE id=?2 AND enabled=1", params![name, id]).map_err(db_error)?;
+    let name = validate_public_name(&input.name)?;
+    let changed = db.execute("UPDATE federation_controllers SET local_label=?1 WHERE id=?2 AND enabled=1", params![name, id]).map_err(db_error)?;
     if changed == 0 { return Err(error(StatusCode::NOT_FOUND, "پنل متصل پیدا نشد.")); }
-    audit(&db, &actor.username, "federation.controller.rename", &format!("controller_id={id}; name={name}"));
-    Ok(Json(json!({"name":name,"message":"نام عمومی پنل ذخیره شد."})))
+    audit(&db, &actor.username, "federation.controller.label", &format!("controller_id={id}; label={name}"));
+    Ok(Json(json!({"name":name,"message":"برچسب محلی پنل ذخیره شد."})))
+}
+
+pub(super) async fn update_public_name(
+    State(state): State<AppState>, headers: HeaderMap, Json(input): Json<PublicNameRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let name = validate_public_name(&input.name)?.to_owned();
+    let (actor, peers) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?;
+        db.execute("INSERT INTO settings(key,value) VALUES('federation_public_name',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&name]).map_err(db_error)?;
+        audit(&db, &actor.username, "federation.server.public_name", &name);
+        let mut statement = db.prepare("SELECT id,endpoint FROM federated_nodes ORDER BY id LIMIT 100").map_err(db_error)?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).map_err(db_error)?;
+        let mut peers = Vec::new();
+        for row in rows {
+            let (id, endpoint) = row.map_err(db_error)?;
+            if let Ok(path) = token_path(&db, id) {
+                if let Ok(token) = read_node_token(&path) { peers.push((id, endpoint, token)); }
+            }
+        }
+        (actor, peers)
+    };
+    let client = http_client()?;
+    let total = peers.len();
+    let peers = peers.into_iter().take(32).collect::<Vec<_>>();
+    use futures_util::StreamExt as _;
+    let results = futures_util::stream::iter(peers.into_iter().map(|(id, endpoint, token)| {
+        let client = client.clone();
+        let name = name.clone();
+        async move {
+            let Ok(base) = validate_endpoint(&endpoint) else { return false };
+            let Ok(url) = base.join("api/federation/controller/name") else { return false };
+            client.put(url).header("X-ARG-Transport", "https").bearer_auth(token)
+                .json(&json!({"name":name,"request_id":format!("public-name-{id}-{}", now())}))
+                .send().await.is_ok_and(|response| response.status().is_success())
+        }
+    })).buffer_unordered(16).collect::<Vec<_>>().await;
+    let synced = results.into_iter().filter(|success| *success).count();
+    let pending = total.saturating_sub(synced);
+    let message = if pending == 0 { "نام عمومی ذخیره و با پنل‌های متصل همگام شد.".to_owned() }
+        else { format!("نام عمومی ذخیره شد؛ همگام‌سازی با {pending} پنل برقرار نشد. پس از برقراری ارتباط، دوباره ذخیره کن.") };
+    audit(&state.lock().unwrap(), &actor.username, "federation.server.public_name.sync", &format!("synced={synced}; pending={pending}"));
+    Ok(Json(json!({"name":name,"synced":synced,"pending":pending,"message":message})))
+}
+
+pub(super) async fn sync_controller_public_name(
+    State(state): State<AppState>, headers: HeaderMap, Json(input): Json<PublicNameRequest>,
+) -> ApiResult {
+    let name = validate_public_name(&input.name)?;
+    let db = state.lock().unwrap();
+    let (controller_id, controller_name) = authorize_controller(&db, &headers)?;
+    db.execute("UPDATE federation_controllers SET controller_name=?1 WHERE id=?2", params![name, controller_id]).map_err(db_error)?;
+    audit(&db, &controller_name, "federation.controller.public_name.sync", name);
+    Ok(Json(json!({"name":name,"updated":true})))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_workspace_api_path, validate_endpoint};
+    use super::{resolve_workspace_node_id, valid_server_uuid, valid_workspace_api_path, validate_endpoint, validate_public_name, workspace_key};
+    use rusqlite::Connection;
+    #[test]
+    fn server_identity_and_public_names_are_validated() {
+        assert!(valid_server_uuid("123e4567-e89b-42d3-a456-426614174000"));
+        assert!(!valid_server_uuid("legacy-node-id"));
+        assert!(validate_public_name(" VPS West ").is_ok());
+        assert!(validate_public_name("  ").is_err());
+        assert!(validate_public_name(&"x".repeat(81)).is_err());
+        assert!(validate_public_name("name\nforged").is_err());
+    }
+
+    #[test]
+    fn workspace_keys_resolve_stable_identity_and_legacy_pairings() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE federated_nodes(id INTEGER PRIMARY KEY,server_uuid TEXT); INSERT INTO federated_nodes VALUES(7,NULL); INSERT INTO federated_nodes VALUES(8,'123e4567-e89b-42d3-a456-426614174000');").unwrap();
+
+        assert_eq!(workspace_key(None, 7), "legacy:7");
+        assert_eq!(workspace_key(Some("123e4567-e89b-42d3-a456-426614174000"), 8), "123e4567-e89b-42d3-a456-426614174000");
+        assert_eq!(resolve_workspace_node_id(&db, "legacy:7").unwrap(), 7);
+        assert_eq!(resolve_workspace_node_id(&db, "123e4567-e89b-42d3-a456-426614174000").unwrap(), 8);
+        assert!(resolve_workspace_node_id(&db, "legacy:8").is_err());
+        assert!(resolve_workspace_node_id(&db, "not-a-server-id").is_err());
+    }
     #[test]
     fn node_endpoint_requires_a_clean_https_origin() {
         assert!(validate_endpoint("https://node.example.test/").is_ok());

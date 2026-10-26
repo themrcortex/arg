@@ -24,7 +24,18 @@ The controller provides navigation and request routing; the host that owns a res
 
 Every installation has an immutable `server_uuid`. The operating-system hostname is observed metadata, not a network identity and not something ARG changes as a side effect. A `public_name` is the administrator-selected name shared with paired controllers. A `local_label` is a controller-local alias and is never sent to peers. The UI must identify which name is being edited and show the target server before any write operation.
 
-Existing pairings must migrate without changing their node IDs or revoking valid credentials. Until a versioned metadata exchange is implemented, a local label may be edited locally, but it must not be described as a synchronized public name.
+Existing pairings migrate additively without changing their node IDs or revoking valid credentials. Protocol-v2 pairing metadata now carries an optional stable server UUID and public name, and an authenticated endpoint synchronizes public-name changes to paired controllers. Older peers remain usable through a `legacy:<local-id>` workspace key until they report a stable UUID. Controller-local labels remain local and are never pushed to peers.
+
+### Phase 01 implementation status
+
+- New installations lazily persist a UUID in SQLite settings; existing pairings gain nullable identity fields without being recreated.
+- A server's public name is configured independently of its OS hostname. The receiving controller keeps its own local label separately.
+- Single-server and multi-server modes are UI preferences; changing modes does not delete pairings. Multi-server mode adds Local, a read-only All Servers overview, and selectable remote workspaces.
+- Remote workspace selection is stored in `sessionStorage` and routed by stable server UUID. Existing numeric selections are migrated when the Node list is loaded; older peers use an explicit legacy key. Logout clears the active workspace, and switching contexts clears heavy cached data.
+- Workspace proxy and terminal routes resolve only a valid UUID or an explicit legacy key. Admin Node-management routes continue using local numeric database IDs.
+- A public-name change is pushed to paired servers over the existing authenticated HTTPS Federation channel; partial connectivity is reported to the administrator.
+- The All Servers overview checks each remote on demand, labels failed checks unavailable, and opens an explicit server workspace before management. No operation is rerouted to a different server on failure.
+- The Phase 01 Rust migration and route tests are present. Run them with `cargo test --locked` in an environment with the Rust toolchain.
 
 ### Vocabulary and ownership
 

@@ -229,6 +229,30 @@ fn ensure_metric_storage_columns(db: &Connection) -> Result<(), rusqlite::Error>
     Ok(())
 }
 
+fn ensure_federation_identity_columns(db: &Connection) -> Result<(), rusqlite::Error> {
+    for (table, name, definition) in [
+        ("federated_nodes", "server_uuid", "TEXT"),
+        ("federated_nodes", "public_name", "TEXT NOT NULL DEFAULT ''"),
+        ("federation_controllers", "local_label", "TEXT NOT NULL DEFAULT ''"),
+        ("federation_controllers", "server_uuid", "TEXT"),
+    ] {
+        let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
+        let existing: Vec<String> = statement
+            .query_map([], |row| row.get(1))?
+            .filter_map(Result::ok)
+            .collect();
+        drop(statement);
+        if !existing.iter().any(|column| column == name) {
+            db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"))?;
+        }
+    }
+    db.execute(
+        "UPDATE federation_controllers SET local_label=controller_name WHERE local_label=''",
+        [],
+    )?;
+    Ok(())
+}
+
 fn update_guard_exempt(path: &str) -> bool {
     matches!(
         path,
@@ -4073,6 +4097,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_runtime (site_name TEXT PRIMARY KEY,unit TEXT NOT NULL,cpu_quota_percent REAL,memory_max_bytes INTEGER,last_cpu_usage_ns INTEGER,last_sampled_at INTEGER,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS fast_actions (id INTEGER PRIMARY KEY,title TEXT NOT NULL,operation TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',site_name TEXT,include_access_log INTEGER NOT NULL DEFAULT 0,include_error_log INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_actions (id INTEGER PRIMARY KEY,site_name TEXT NOT NULL,title TEXT NOT NULL,icon TEXT NOT NULL,operation TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(site_name,title));")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_sql_presets (id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,title TEXT NOT NULL,database_name TEXT,statement TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(user_id,title));")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS federation_pairing_codes(code_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,created_by TEXT NOT NULL); CREATE TABLE IF NOT EXISTS federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS federation_proxy_sessions(controller_id TEXT NOT NULL REFERENCES federation_controllers(controller_id) ON DELETE CASCADE,token_hash TEXT NOT NULL UNIQUE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(controller_id,token_hash)); CREATE TRIGGER IF NOT EXISTS federation_proxy_session_cleanup AFTER DELETE ON federation_proxy_sessions BEGIN DELETE FROM sessions WHERE token_hash=OLD.token_hash; END; CREATE TABLE IF NOT EXISTS federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE INDEX IF NOT EXISTS idx_federated_nodes_last_seen ON federated_nodes(last_seen);")?;
+    ensure_federation_identity_columns(&db)?;
     ensure_metric_storage_columns(&db)?;
     s3::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
@@ -4173,7 +4198,7 @@ async fn clear_trusted_transport_marker(
 #[cfg(test)]
 mod update_progress_tests {
     use super::{
-        backup_database, default_update_build_mode, ensure_metric_storage_columns,
+        backup_database, default_update_build_mode, ensure_federation_identity_columns, ensure_metric_storage_columns,
         firewall_rule_validation_error, update_progress_payload, valid_apt_install_spec, valid_update_build_mode,
         valid_tls_source_path, Connection, FirewallRuleInput,
     };
@@ -4219,6 +4244,20 @@ mod update_progress_tests {
         for column in ["disk_read_rate", "disk_write_rate", "disk_used_bytes", "disk_total_bytes"] {
             assert_eq!(columns.iter().filter(|existing| existing.as_str() == column).count(), 1);
         }
+    }
+
+    #[test]
+    fn federation_identity_migration_preserves_existing_pairings_and_is_idempotent() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE TABLE federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO federated_nodes VALUES(1,'Europe VPS','https://node.example.test','legacy-node-id','controller',2,10,20); INSERT INTO federation_controllers VALUES(1,'controller','Public Controller Name','hash',10,20,1);").unwrap();
+        ensure_federation_identity_columns(&db).unwrap();
+        ensure_federation_identity_columns(&db).unwrap();
+        let (local_label, public_name): (String, String) = db.query_row("SELECT local_label,controller_name FROM federation_controllers WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (node_label, node_id): (String, String) = db.query_row("SELECT name,node_id FROM federated_nodes WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(local_label, "Public Controller Name");
+        assert_eq!(public_name, "Public Controller Name");
+        assert_eq!(node_label, "Europe VPS");
+        assert_eq!(node_id, "legacy-node-id");
     }
 
     #[test]

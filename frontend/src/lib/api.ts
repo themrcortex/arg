@@ -109,10 +109,18 @@ function recordApiFailure(report: ApiFailureReport) { latestApiFailure = report 
 
 const ACTIVE_NODE_KEY = 'arg.active-workspace-node'
 export function getActiveWorkspaceNode() {
-  try { return window.localStorage.getItem(ACTIVE_NODE_KEY) || '' } catch { return '' }
+  try {
+    const current = window.sessionStorage.getItem(ACTIVE_NODE_KEY)
+    if (current) return current
+    const previous = window.localStorage.getItem(ACTIVE_NODE_KEY)
+    if (!previous) return ''
+    window.sessionStorage.setItem(ACTIVE_NODE_KEY, previous)
+    window.localStorage.removeItem(ACTIVE_NODE_KEY)
+    return previous
+  } catch { return '' }
 }
 export function setActiveWorkspaceNode(id: string) {
-  try { if (id) window.localStorage.setItem(ACTIVE_NODE_KEY, id); else window.localStorage.removeItem(ACTIVE_NODE_KEY) } catch { /* Workspace selection can be unavailable under strict storage policies. */ }
+  try { if (id) window.sessionStorage.setItem(ACTIVE_NODE_KEY, id); else window.sessionStorage.removeItem(ACTIVE_NODE_KEY) } catch { /* Workspace selection can be unavailable under strict storage policies. */ }
 }
 function isLocalOnlyApiPath(path: string) {
   const route = path.split('?', 1)[0].replace(/^\/+/, '')
@@ -121,7 +129,7 @@ function isLocalOnlyApiPath(path: string) {
 export function apiUrl(path: string) {
   const node = getActiveWorkspaceNode()
   const route = path.replace(/^\/+/, '')
-  if (!node || isLocalOnlyApiPath(route)) return `/api/${route}`
+  if (!node || node === 'all' || isLocalOnlyApiPath(route)) return `/api/${route}`
   const slash = route.indexOf('?')
   const endpoint = slash < 0 ? route : route.slice(0, slash)
   const query = slash < 0 ? '' : route.slice(slash)

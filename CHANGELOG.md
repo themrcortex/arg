@@ -4,6 +4,9 @@
 
 ### Development
 - Development prerelease based on the next patch after main.
+- Give each ARG installation a stable server UUID and synchronize its configurable public name across paired controllers while retaining controller-local labels.
+- Add single/multi-server view preferences and a read-only all-servers overview; route selected workspaces by server identity, keep selections per browser session, and migrate existing numeric selections and legacy pairings safely.
+- Preserve old pairings through additive SQLite migrations and add focused tests for identity migration and workspace-key resolution.
 
 ## v0.6.8 — 2026-10-26
 
