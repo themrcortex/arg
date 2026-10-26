@@ -40,6 +40,9 @@
 
 @layer base {
   :root {
+    --arg-glass: rgba(20, 30, 40, .76);
+    --arg-glass-strong: rgba(19, 29, 39, .92);
+    --arg-glass-edge: rgba(222, 232, 239, .13);
     --arg-bg: #0c1219;
     --arg-sidebar-bg: #0e141b;
     --arg-surface: #141c25;
@@ -83,6 +86,9 @@
     @apply bg-background text-foreground antialiased;
     font-family: 'Peyda', ui-sans-serif, system-ui, sans-serif;
     min-width: 320px;
+    background-image: radial-gradient(ellipse 58% 48% at 88% -8%, rgba(221,164,111,.105), transparent 72%), radial-gradient(ellipse 48% 55% at -12% 82%, rgba(73,184,168,.07), transparent 75%), radial-gradient(rgba(221,164,111,.033) .7px, transparent .7px);
+    background-size: auto, auto, 24px 24px;
+    background-attachment: fixed;
   }
   h1,
   h2,
@@ -108,10 +114,10 @@
   letter-spacing: .18em;
 }
 .soft-panel {
-  background: hsl(var(--card));
+  background: var(--arg-glass);
 }
 .metric-card {
-  background: hsl(var(--card));
+  background: var(--arg-glass);
 }
 .hero-glow {
   background: linear-gradient(120deg, #19242d, #141c25);
@@ -125,7 +131,9 @@
   isolation: isolate;
   color: var(--arg-text);
   border-color: var(--arg-border);
-  background: linear-gradient(155deg, #10171e 0%, var(--arg-sidebar-bg) 62%, #11171e 100%);
+  background: linear-gradient(155deg, rgba(21,31,41,.94), rgba(13,21,29,.91) 62%, rgba(20,28,37,.94));
+  backdrop-filter: blur(18px) saturate(125%);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
   transition: width var(--arg-transition), transform var(--arg-transition), padding var(--arg-transition);
 }
 .arg-sidebar-pattern, .arg-sidebar-corner { position: absolute; z-index: 0; max-width: 100%; overflow: hidden; pointer-events: none; }
@@ -183,10 +191,13 @@
   .arg-sidebar { --arg-transition: 0ms; }
 }
 .utility-bar {
-  background: #101820;
+  background: rgba(17, 26, 35, .82);
+  border-bottom: 1px solid var(--arg-glass-edge);
+  backdrop-filter: blur(16px) saturate(125%);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
 }
 .app-shell {
-  background-color: hsl(var(--background));
+  background-color: transparent;
 }
 .arg-skeleton {
   border: 1px solid rgba(255,255,255,.035);
@@ -210,7 +221,7 @@
   pointer-events: none;
   content: '';
 }
-.arg-card-surface { position: relative; isolation: isolate; transition: border-color 240ms cubic-bezier(.22,1,.36,1), box-shadow 240ms cubic-bezier(.22,1,.36,1); }
+.arg-card-surface { position: relative; isolation: isolate; border-color: var(--arg-glass-edge); background: linear-gradient(145deg, rgba(255,255,255,.055), rgba(255,255,255,.012) 42%), var(--arg-glass); box-shadow: inset 0 1px 0 rgba(255,255,255,.065), 0 12px 32px rgba(0,0,0,.12); backdrop-filter: blur(12px) saturate(118%); -webkit-backdrop-filter: blur(12px) saturate(118%); transition: border-color 240ms cubic-bezier(.22,1,.36,1), box-shadow 240ms cubic-bezier(.22,1,.36,1); }
 .arg-card-surface::before {
   position: absolute;
   z-index: -1;
@@ -269,8 +280,8 @@
 }
 
 /* ARG overview and chart surfaces */
-.arg-dashboard-hero { border-color: hsl(var(--border)); background: linear-gradient(110deg, #19232b, #141d26); }
-.arg-kpi, .arg-dashboard-panel { border-color: hsl(var(--border)); background: hsl(var(--card)); }
+.arg-dashboard-hero { border-color: var(--arg-glass-edge); background: linear-gradient(115deg, rgba(221,164,111,.10), rgba(255,255,255,.035) 38%, rgba(20,30,40,.72)), var(--arg-glass); backdrop-filter: blur(12px); }
+.arg-kpi, .arg-dashboard-panel { border-color: var(--arg-glass-edge); background: linear-gradient(145deg, rgba(255,255,255,.05), transparent 48%), var(--arg-glass); box-shadow: inset 0 1px 0 rgba(255,255,255,.055), 0 12px 28px rgba(0,0,0,.1); }
 .arg-dashboard-hero { isolation: isolate; }
 .arg-dashboard-hero::before,
 .arg-dashboard-hero::after {
@@ -328,6 +339,28 @@
 .arg-kpi[data-tone="green"] .arg-kpi-fill { background: var(--arg-viz-cpu); }
 .arg-kpi[data-tone="teal"] .arg-kpi-fill { background: var(--arg-viz-disk); }
 .arg-kpi[data-tone="blue"] .arg-kpi-fill { background: var(--arg-viz-rx); }
+/* Shared glass treatment for page surfaces. Keep dense data cells and the PTY opaque. */
+.arg-main-canvas :is(section, article, div)[class~="bg-card"],
+.arg-main-canvas :is(section, article)[class*="bg-card/"],
+.arg-main-canvas :is(section, article)[class*="bg-background/"] {
+  border-color: var(--arg-glass-edge);
+  background: linear-gradient(145deg, rgba(255,255,255,.045), transparent 52%), var(--arg-glass);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 10px 28px rgba(0,0,0,.1);
+}
+.arg-glass-popover {
+  border-color: var(--arg-glass-edge);
+  background: linear-gradient(150deg, rgba(255,255,255,.055), transparent 55%), var(--arg-glass-strong);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 24px 64px rgba(0,0,0,.34);
+  backdrop-filter: blur(22px) saturate(125%);
+  -webkit-backdrop-filter: blur(22px) saturate(125%);
+}
+@media (max-width: 639px) {
+  body { background-attachment: scroll; }
+  .arg-sidebar, .utility-bar, .arg-card-surface, .arg-glass-popover { backdrop-filter: blur(9px); -webkit-backdrop-filter: blur(9px); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .arg-sidebar, .utility-bar, .arg-card-surface, .arg-glass-popover { backdrop-filter: none; -webkit-backdrop-filter: none; background-color: #17212b; }
+}
 .arg-range [aria-pressed="true"] { color: var(--arg-accent); background: rgba(221,164,111,.13); }
 .arg-range [aria-pressed="false"] { color: var(--arg-muted); }
 .arg-range [aria-pressed="false"]:hover { color: #f2f0eb; }

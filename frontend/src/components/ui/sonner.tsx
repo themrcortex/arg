@@ -8,7 +8,7 @@ const Toaster = ({ ...props }: ToasterProps) => (
     richColors
     toastOptions={{
       classNames: {
-        toast: '!rounded-2xl !border-border !bg-card !text-card-foreground !shadow-2xl',
+        toast: 'arg-glass-popover !rounded-2xl !text-card-foreground',
         title: '!text-sm !font-semibold',
         description: '!text-xs !leading-6 !text-muted-foreground',
         actionButton: '!bg-primary !text-primary-foreground',

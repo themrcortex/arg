@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
   pull_request:
   workflow_dispatch:
 
@@ -54,3 +54,12 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: bash ../scripts/tests/test-docs-content.sh
+
+  system-scripts:
+    name: Installer and helper checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n install.sh scripts/update-helper.sh scripts/ufw-helper.sh scripts/bump-version.sh
+      - run: bash scripts/tests/test-update-helper.sh
+      - run: bash scripts/tests/test-ufw-helper.sh

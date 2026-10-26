@@ -221,6 +221,7 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/nginx/sites/{name}/maintenance/secret",
             post(nginx::nginx_site_maintenance_secret),
         )
+        .route("/api/nginx/sites/{name}/permissions/fix", post(nginx::fix_nginx_site_permissions))
         .route("/api/firewall", get(firewall).put(update_firewall_state))
         .route("/api/firewall/install", post(install_firewall))
         .route(
@@ -231,6 +232,7 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/firewall/rules/{id}",
             put(update_firewall_rule).delete(delete_firewall_rule),
         )
+        .route("/api/firewall/rules/external", post(delete_external_firewall_rule))
         .fallback(get(static_file))
         .layer(middleware::from_fn(update_guard))
         .with_state(state)

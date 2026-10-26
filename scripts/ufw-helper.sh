@@ -76,6 +76,33 @@ if [[ $# -eq 1 ]]; then
   esac
   exit
 fi
+if [[ "${1:-}" == delete-line ]]; then
+  [[ $# -eq 3 ]] || fail "invalid UFW rule deletion arguments" 2
+  number="$2"
+  expected_line="$3"
+  [[ "$number" =~ ^[0-9]{1,5}$ ]] && (( 10#$number >= 1 && 10#$number <= 10000 )) || fail "invalid UFW rule number" 2
+  [[ -n "$expected_line" && ${#expected_line} -le 512 && "$expected_line" != *$'\n'* && "$expected_line" != *$'\r'* ]] || fail "invalid UFW rule fingerprint" 2
+  ufw_bin="$(command -v ufw || true)"
+  [[ -n "$ufw_bin" ]] || fail "UFW is not installed" 3
+  exec 9>/run/arg-ufw.lock
+  flock -x 9 || fail "could not lock UFW rules" 4
+  status="$("$ufw_bin" status numbered)" || fail "could not inspect UFW rules" 4
+  matched=0
+  while IFS= read -r line; do
+    rule_id="$(sed -n 's/^[[:space:]]*\[[[:space:]]*\([0-9][0-9]*\)\].*/\1/p' <<<"$line")"
+    if [[ "$rule_id" == "$number" && "$line" == "$expected_line" ]]; then matched=1; break; fi
+  done <<< "$status"
+  (( matched )) || fail "UFW rules changed; refresh the list and retry" 5
+  protected_ports="$( { sshd -T 2>/dev/null | awk '$1 == "port" {print $2}'; sed -n 's/^ARG_BIND=//p;s/^ARG_TLS_BIND=//p' /etc/arg/arg.env 2>/dev/null | sed 's/.*://'; } | sort -u )"
+  for port in $protected_ports; do
+    [[ "$port" =~ ^[0-9]+$ ]] || continue
+    [[ "$expected_line" != *"${port}/tcp"* && "$expected_line" != *"${port} (v6)"* ]] || fail "this rule protects SSH or ARG panel access and cannot be deleted" 4
+  done
+  [[ "$expected_line" != *OpenSSH* && "$expected_line" != *ARG\ panel* ]] || fail "this rule protects SSH or ARG panel access and cannot be deleted" 4
+  "$ufw_bin" --force delete "$number" >/dev/null || fail "could not delete UFW rule $number" 4
+  printf 'UFW rule deleted.\n'
+  exit 0
+fi
 [[ $# -eq 4 ]] || fail "invalid helper arguments" 2
 action="$1"
 port="$2"
@@ -102,19 +129,25 @@ if [[ "$action" == add ]]; then
   "$ufw_bin" insert 1 "$policy" "$port/$protocol" comment 'ARG WEB'
 elif [[ "$action" == remove ]]; then
   found=0
+  status="$("$ufw_bin" status numbered)" || fail "could not inspect UFW rules before removing $port/$protocol" 4
   while IFS= read -r line; do
     managed_label=0
     [[ "$line" == *'# ARG WEB'* || "$line" == *'# DONATELLO WEB'* ]] && managed_label=1
     [[ "$port" == 80 && "$line" == *'# ARG HTTP websites'* ]] && managed_label=1
     [[ "$port" == 443 && "$line" == *'# ARG HTTPS websites'* ]] && managed_label=1
-    if (( managed_label )) && [[ "$line" =~ ^[[:space:]]*\[[[:space:]]*([0-9]+)\] ]]; then
-      rule_id="${BASH_REMATCH[1]}"
-      if [[ "$line" =~ (^|[[:space:]])${port}/${protocol}([[:space:]]|$) && "$line" == *" ${policy^^} "* ]]; then
-        "$ufw_bin" --force delete "$rule_id" >/dev/null
+    rule_id="$(sed -n 's/^[[:space:]]*\[[[:space:]]*\([0-9][0-9]*\)\].*/\1/p' <<<"$line")"
+    if [[ "$rule_id" =~ ^[0-9]+$ ]]; then
+      web_port=0
+      [[ "$port" == 80 || "$port" == 443 ]] && web_port=1
+      if [[ "$line" =~ (^|[[:space:]])${port}/${protocol}([[:space:]]|$) && "$line" == *" ${policy^^} "* ]] && { (( managed_label )) || (( web_port )); }; then
+        "$ufw_bin" --force delete "$rule_id" >/dev/null || fail "could not delete UFW rule $port/$protocol" 4
         found=1
       fi
     fi
-  done < <("$ufw_bin" status numbered | tac)
+  done < <(printf '%s\n' "$status" | tac)
+  # HTTP/HTTPS are managed explicitly in ARG. Removing an already-absent web
+  # rule is idempotent, which also repairs stale database state transparently.
+  if [[ "$found" -eq 0 && ( "$port" == 80 || "$port" == 443 ) ]]; then exit 0; fi
   [[ "$found" -eq 1 ]] || fail "no matching ARG-managed UFW rule was found" 5
 else
   fail "unsupported action '$action'" 2

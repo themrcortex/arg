@@ -59,7 +59,9 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
 
   useEffect(() => {
     if (!runtime?.configured) return
-    const timer = window.setInterval(() => void refreshRuntime(), 5000)
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void refreshRuntime()
+    }, 15000)
     return () => window.clearInterval(timer)
   }, [runtime?.configured, refreshRuntime])
 
@@ -87,9 +89,9 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
     </div>
     {loading ? <Skeleton className="h-20"/> : <>
       {error && <p role="status" className="rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-xs text-amber-100">{error}</p>}
-      {runtime?.configured && runtime.measurement_error && <p role="status" className="rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-xs leading-5 text-amber-100">{runtime.measurement_error}<br/>برای فعال‌شدن ثبت CPU و RAM، همین سرویس را یک‌بار با دکمهٔ «اعمال محدودیت» ذخیره کن؛ می‌توانی هر دو سقف را خالی بگذاری. مقدار CPU پس از نمونه‌گیری بعدی، خودکار تا 5 ثانیهٔ دیگر به‌روز می‌شود.</p>}
+      {runtime?.configured && runtime.measurement_error && <p role="status" className="rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-xs leading-5 text-amber-100">{runtime.measurement_error}</p>}
       {runtime?.configured && <div className="grid gap-2 sm:grid-cols-3">
-        <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Cpu size={14}/>CPU فعلی سرویس</div><div className="mt-2 font-mono text-lg text-white" dir="ltr">{runtime.cpu_percent == null ? 'در حال نمونه‌گیری…' : `${formatNumber(Math.round(runtime.cpu_percent * 10) / 10)}%`}</div><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{runtime.cpu_percent == null ? 'نمونه‌گیری خودکار هر 5 ثانیه انجام می‌شود.' : `سقف ثبت‌شده: ${runtime.cpu_quota_percent == null ? 'بدون سقف' : `${formatNumber(runtime.cpu_quota_percent)}%`}`}</p></div>
+        <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Cpu size={14}/>CPU فعلی سرویس</div><div className="mt-2 font-mono text-lg text-white" dir="ltr">{runtime.cpu_percent == null ? 'در حال نمونه‌گیری…' : `${formatNumber(Math.round(runtime.cpu_percent * 10) / 10)}%`}</div><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{runtime.cpu_percent == null ? 'نمونه‌گیری خودکار هر 15 ثانیه انجام می‌شود.' : `سقف ثبت‌شده: ${runtime.cpu_quota_percent == null ? 'بدون سقف' : `${formatNumber(runtime.cpu_quota_percent)}%`}`}</p></div>
         <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><MemoryStick size={14}/>RAM فعلی سرویس</div><div className="mt-2 font-mono text-lg text-white" dir="ltr">{runtime.memory_current_bytes == null ? '—' : formatBytes(runtime.memory_current_bytes)}</div><p className="mt-1 text-[10px] text-muted-foreground">سقف: {runtime.memory_max_bytes == null ? 'بدون سقف' : formatBytes(runtime.memory_max_bytes)}</p></div>
         <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="text-xs text-muted-foreground">واحد systemd متصل</div><div dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{runtime.unit}</div><p className="mt-1 text-[10px] text-muted-foreground">خوانده‌شده از cgroup سرویس</p></div>
       </div>}

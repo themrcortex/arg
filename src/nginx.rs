@@ -524,6 +524,28 @@ pub(super) async fn api_nginx_site_logs(
     Ok(Json(result))
 }
 
+pub(super) async fn fix_nginx_site_permissions(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if !valid_nginx_site_name(&name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
+    }
+    let result = nginx_manager_request_async(json!({"action":"nginx-site-permissions-fix","name":name})).await?;
+    if result["ok"] != true {
+        return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("اصلاح دسترسی فایل‌های سایت ناموفق بود.")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "nginx.site.permissions.fix", &format!("site={name}"));
+    Ok(Json(result))
+}
+
 pub(super) async fn api_nginx_site_traffic(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -838,9 +860,10 @@ pub(super) async fn issue_nginx_site_ssl(
             "دامنه تکراری در فهرست وجود دارد.",
         ));
     }
-    let result = nginx_manager_request(
+    let result = nginx_manager_request_async(
         json!({"action":"nginx-ssl-issue","name":name,"email":input.email,"domains":domains,"redirect":input.redirect}),
-    )?;
+    )
+    .await?;
     if result["ok"] == false {
         return Err(error(
             StatusCode::BAD_GATEWAY,
@@ -850,7 +873,7 @@ pub(super) async fn issue_nginx_site_ssl(
         ));
     }
     let data = result.get("data").cloned().unwrap_or(result);
-    let current = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+    let current = nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await?;
     let content = nginx_site_content(&current)?;
     let db = state.lock().unwrap();
     let settings: Option<Option<String>> = db
@@ -1162,7 +1185,7 @@ fn nginx_maintenance_secret_config(name: &str, token: &str) -> Result<String, St
     let cookie = nginx_maintenance_cookie_name(name);
     let suffix = cookie.strip_prefix("arg_maint_").unwrap_or(&cookie);
     Ok(format!(
-        "# ARG secret maintenance access; root-readable only\nlocation = /__arg_maintenance_{suffix}/{token} {{\n    access_log off;\n    add_header Set-Cookie \"{cookie}={token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Lax\" always;\n    add_header Cache-Control \"no-store\" always;\n    add_header Referrer-Policy \"no-referrer\" always;\n    return 302 /;\n}}\nset $arg_maintenance_bypass_{suffix} 0;\nif ($cookie_{cookie} = {token}) {{ set $arg_maintenance_bypass_{suffix} 1; }}\n"
+        "# ARG secret maintenance access; root-readable only\nset $arg_maintenance_bypass_{suffix} 0;\nif ($uri = /__arg_maintenance_{suffix}/{token}) {{ set $arg_maintenance_bypass_{suffix} 1; }}\nif ($cookie_{cookie} = {token}) {{ set $arg_maintenance_bypass_{suffix} 1; }}\nlocation = /__arg_maintenance_{suffix}/{token} {{\n    access_log off;\n    add_header Set-Cookie \"{cookie}={token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Lax\" always;\n    add_header Cache-Control \"no-store\" always;\n    add_header Referrer-Policy \"no-referrer\" always;\n    return 302 /;\n}}\n"
     ))
 }
 
@@ -2328,6 +2351,47 @@ fn nginx_site_traffic(name: &str) -> Result<Value, String> {
     )
 }
 
+fn nginx_fix_site_web_permissions(name: &str) -> Result<Value, String> {
+    if !valid_nginx_site_name(name) {
+        return Err("نام سایت معتبر نیست.".into());
+    }
+    let (available, _) = nginx_site_paths(name)?;
+    let config = fs::read_to_string(&available).map_err(|_| "فایل کانفیگ سایت پیدا نشد.")?;
+    let root = config.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with('#') { return None; }
+        let mut parts = line.trim_end_matches(';').split_whitespace();
+        (parts.next()? == "root").then(|| parts.next().unwrap_or("").to_owned())
+    }).filter(|path| path.starts_with('/') && !path.contains('$'))
+        .ok_or("در کانفیگ سایت مسیر root مطلق و ثابت پیدا نشد؛ ابتدا مسیر را در ویرایشگر سایت مشخص کن.")?;
+    let requested = std::path::PathBuf::from(&root);
+    let canonical = fs::canonicalize(&requested).map_err(|_| "پوشهٔ root پیدا نشد یا قابل دسترسی نیست.")?;
+    let web_root = fs::canonicalize("/var/www").map_err(|_| "پوشهٔ /var/www در این سرور وجود ندارد.")?;
+    if !canonical.starts_with(&web_root) || !canonical.is_dir() {
+        return Err("برای ایمنی، اصلاح خودکار فقط برای پوشه‌های واقعی زیر /var/www انجام می‌شود.".into());
+    }
+    let user = std::process::Command::new("id").args(["-un", "www-data"]).output()
+        .map_err(|_| "کاربر www-data پیدا نشد؛ سرویس وب این کاربر را ندارد.")?;
+    if !user.status.success() {
+        return Err("کاربر www-data پیدا نشد؛ این عملیات برای Nginx/PHP-FPM روی Debian/Ubuntu طراحی شده است.".into());
+    }
+    let setfacl = std::process::Command::new("setfacl").arg("--version").output();
+    if setfacl.is_err() {
+        let install = std::process::Command::new("apt-get").args(["-y", "install", "acl"]).output()
+            .map_err(|error| format!("نصب خودکار ابزار مجوزها ناموفق بود: {error}"))?;
+        if !install.status.success() {
+            return Err(format!("ARG نتوانست بستهٔ acl را خودکار نصب کند: {}", String::from_utf8_lossy(&install.stderr).trim()));
+        }
+    }
+    let output = std::process::Command::new("setfacl")
+        .args(["-R", "-m", "u:www-data:rX", "--"])
+        .arg(&canonical).output().map_err(|error| format!("اعمال دسترسی وب ناموفق بود: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("اصلاح دسترسی‌ها کامل نشد: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    Ok(json!({"ok":true,"path":canonical,"user":"www-data","message":"دسترسی خواندن فایل‌ها و عبور از پوشه‌های سایت برای www-data تنظیم شد؛ مالکیت و مجوز سایر کاربران تغییر نکرد."}))
+}
+
 fn nginx_site_logs(name: &str, kind: &str) -> Result<Value, String> {
     if !valid_nginx_site_name(name) || !["access", "error"].contains(&kind) {
         return Err("نام سایت یا نوع لاگ معتبر نیست.".into());
@@ -2512,6 +2576,10 @@ fn execute_nginx_request(action: &str, request: &Value) -> Value {
                     .ok_or_else(|| "نوع لاگ ارسال نشده است.".to_owned())
                     .and_then(|kind| nginx_site_logs(name, kind))
             }),
+        "nginx-site-permissions-fix" => request["name"]
+            .as_str()
+            .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .and_then(nginx_fix_site_web_permissions),
         "nginx-site-traffic" => request["name"]
             .as_str()
             .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
@@ -2607,6 +2675,8 @@ mod maintenance_tests {
         assert!(block.contains("site-name.secret.conf"));
         assert!(!block.contains(&token));
         assert!(secret_config.contains(&format!("/{token} {{")));
+        assert!(secret_config.contains("if ($uri = /__arg_maintenance_"));
+        assert!(secret_config.contains("set $arg_maintenance_bypass_"));
         assert!(secret_config.contains("access_log off;"));
         assert!(secret_config.contains("HttpOnly; Secure; SameSite=Lax"));
         assert!(secret_config.contains(&format!("$cookie_{} = {token}", nginx_maintenance_cookie_name("site-name"))));

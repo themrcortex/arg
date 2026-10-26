@@ -9,7 +9,10 @@ cat > "$tmp/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$ARG_TEST_SYSTEMCTL_LOG"
 case "${1:-}" in
-  is-active) [[ "${ARG_TEST_SYSTEMCTL_ACTIVE:-0}" == 1 ]] && exit 0 || exit 1 ;;
+  is-active)
+    for item in "$@"; do [[ "$item" == arg.service ]] && { [[ "${ARG_TEST_SYSTEMCTL_ACTIVE:-0}" == 1 ]] && exit 0 || exit 1; }; done
+    exit 1
+    ;;
   stop) exit 0 ;;
   *) exit 0 ;;
 esac
@@ -17,6 +20,14 @@ MOCK
 chmod +x "$tmp/bin/systemctl"
 cat > "$tmp/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
+if [[ "${ARG_TEST_NESTED_UPDATE:-0}" == 1 ]]; then
+  if "$ARG_TEST_UPDATE_HELPER" run fast main > "$ARG_TEST_NESTED_UPDATE_LOG" 2>&1; then
+    echo "update unexpectedly entered while rollback held the reservation" >&2
+    exit 31
+  fi
+  grep -q 'ARG_UPDATE_IN_PROGRESS' "$ARG_TEST_NESTED_UPDATE_LOG" || { cat "$ARG_TEST_NESTED_UPDATE_LOG" >&2; exit 32; }
+fi
+[[ "${ARG_TEST_CURL_FAIL:-0}" != 1 ]] || exit 22
 exit 0
 MOCK
 chmod +x "$tmp/bin/curl"
@@ -46,6 +57,8 @@ MOCK
 chmod +x "$tmp/bin/chown"
 export PATH="$tmp/bin:$PATH"
 export ARG_TEST_SYSTEMCTL_LOG="$tmp/systemctl.log"
+export ARG_TEST_UPDATE_HELPER="$helper"
+export ARG_TEST_NESTED_UPDATE_LOG="$tmp/nested-update.log"
 export ARG_UPDATE_LOCK_DIR="$tmp/run/arg-update.lock"
 export ARG_UPDATE_STATUS_FILE="$tmp/run/arg-update-in-progress"
 export ARG_UPDATE_STATE_FILE="$tmp/run/arg-update-state.json"
@@ -65,6 +78,15 @@ cp "$2" "$3"
 chmod 0600 "$3"
 MOCK
 chmod +x "$ARG_DATABASE_BACKUP_TOOL"
+
+# The live update state retains branch and build mode so the UI can describe the
+# exact source and compile policy while the job is running.
+export ARG_UPDATE_JOB_ID=metadata-test ARG_UPDATE_OPERATION=update ARG_UPDATE_BRANCH=development ARG_UPDATE_MODE=fast
+"$helper" state running building "Compiling development branch."
+grep -q '"operation":"update"' "$ARG_UPDATE_STATE_FILE"
+grep -q '"branch":"development"' "$ARG_UPDATE_STATE_FILE"
+grep -q '"build_mode":"fast"' "$ARG_UPDATE_STATE_FILE"
+unset ARG_UPDATE_JOB_ID ARG_UPDATE_OPERATION ARG_UPDATE_BRANCH ARG_UPDATE_MODE
 
 # A dead owner and inactive transient unit must clear immediately, without the six-hour wait.
 mkdir "$ARG_UPDATE_LOCK_DIR"
@@ -93,12 +115,66 @@ printf 'previous-build\n' > "$ARG_ROLLBACK_DIR/arg.previous"
 printf 'current-db\n' > "$tmp/data.db"
 printf 'previous-db\n' > "$ARG_ROLLBACK_DIR/arg.db.previous"
 chmod +x "$ARG_UPDATE_BINARY" "$ARG_ROLLBACK_DIR/arg.previous"
+
 export ARG_TEST_SYSTEMCTL_ACTIVE=1
+export ARG_TEST_NESTED_UPDATE=1
 "$helper" rollback >/dev/null
+unset ARG_TEST_NESTED_UPDATE
 grep -q 'previous-build' "$ARG_UPDATE_BINARY"
 grep -q 'current-build' "$ARG_ROLLBACK_DIR/arg.previous"
 grep -q 'previous-db' "$tmp/data.db"
 grep -q 'current-db' "$ARG_ROLLBACK_DIR/arg.db.previous"
+test ! -e "$ARG_UPDATE_STATUS_FILE"
+test ! -d "$ARG_UPDATE_LOCK_DIR"
+grep -q '"state":"succeeded"' "$ARG_UPDATE_STATE_FILE"
+grep -q '"phase":"rolled_back"' "$ARG_UPDATE_STATE_FILE"
+
+# Rollback is a protected binary/database transaction and cannot be interrupted
+# through the generic update cancellation action.
+mkdir "$ARG_UPDATE_LOCK_DIR"
+printf '%s 99999999 1\n' "$(date +%s)" > "$ARG_UPDATE_STATUS_FILE"
+printf '%s\n' '{"job_id":"rollback-active","state":"running","phase":"installing","operation":"rollback","started_at":1,"updated_at":1,"message":""}' > "$ARG_UPDATE_STATE_FILE"
+if "$helper" cancel >/dev/null 2>&1; then
+  echo "rollback cancellation unexpectedly succeeded" >&2
+  exit 1
+fi
+test -d "$ARG_UPDATE_LOCK_DIR"
+test -s "$ARG_UPDATE_STATUS_FILE"
+test ! -e "$ARG_UPDATE_CANCEL_FILE"
+rm -f "$ARG_UPDATE_STATUS_FILE"
+rmdir "$ARG_UPDATE_LOCK_DIR"
+
+# A rollback that fails its health check restores the currently running binary
+# and matching database snapshot, and leaves a clear terminal error state.
+printf 'current-good-build\n' > "$ARG_UPDATE_BINARY"
+printf 'previous-build\n' > "$ARG_ROLLBACK_DIR/arg.previous"
+printf 'current-good-db\n' > "$tmp/data.db"
+printf 'previous-db\n' > "$ARG_ROLLBACK_DIR/arg.db.previous"
+chmod +x "$ARG_UPDATE_BINARY" "$ARG_ROLLBACK_DIR/arg.previous"
+export ARG_TEST_CURL_FAIL=1 ARG_ROLLBACK_HEALTH_ATTEMPTS=1
+if "$helper" rollback >/dev/null 2>&1; then
+  echo "rollback unexpectedly passed a failed health check" >&2
+  exit 1
+fi
+unset ARG_TEST_CURL_FAIL ARG_ROLLBACK_HEALTH_ATTEMPTS
+grep -q 'current-good-build' "$ARG_UPDATE_BINARY"
+grep -q 'current-good-db' "$tmp/data.db"
+test ! -e "$ARG_UPDATE_STATUS_FILE"
+test ! -d "$ARG_UPDATE_LOCK_DIR"
+grep -q '"state":"failed"' "$ARG_UPDATE_STATE_FILE"
+
+# A failed rollback also releases its reservation and reports a terminal failure.
+rm -f "$ARG_ROLLBACK_DIR/arg.previous"
+if "$helper" rollback >/dev/null 2>&1; then
+  echo "rollback without a saved binary unexpectedly succeeded" >&2
+  exit 1
+fi
+test ! -e "$ARG_UPDATE_STATUS_FILE"
+test ! -d "$ARG_UPDATE_LOCK_DIR"
+grep -q '"state":"failed"' "$ARG_UPDATE_STATE_FILE"
+printf 'current-build\n' > "$ARG_UPDATE_BINARY"
+printf 'previous-build\n' > "$ARG_ROLLBACK_DIR/arg.previous"
+chmod +x "$ARG_UPDATE_BINARY" "$ARG_ROLLBACK_DIR/arg.previous"
 
 # Cancelling after the binary swap restores both the last binary and its matching database.
 printf 'broken-build\n' > "$ARG_UPDATE_BINARY"

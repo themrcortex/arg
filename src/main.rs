@@ -1844,6 +1844,11 @@ struct FirewallRuleInput {
     policy: String,
     enabled: bool,
 }
+#[derive(Deserialize)]
+struct ExternalFirewallRuleDeleteInput {
+    number: u16,
+    line: String,
+}
 fn valid_firewall_rule(input: &FirewallRuleInput) -> bool {
     input.port > 0
         && ![22, 8282, 8443].contains(&input.port)
@@ -2225,6 +2230,27 @@ async fn delete_firewall_rule(
         &format!("id={id} {}/{}", rule.port, rule.protocol),
     );
     Ok(Json(json!({"ok": true})))
+}
+async fn delete_external_firewall_rule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ExternalFirewallRuleDeleteInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if input.number == 0 || input.line.len() > 512 || input.line.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(error(StatusCode::BAD_REQUEST, "شناسه یا مشخصات قانون UFW معتبر نیست."));
+    }
+    let response = privileged_request(json!({"action":"delete-line","number":input.number,"line":input.line}))?;
+    if response["ok"] != true {
+        return Err(error(StatusCode::BAD_GATEWAY, response["error"].as_str().unwrap_or("حذف قانون UFW ناموفق بود.")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "firewall.external.delete", &format!("number={}; line={}", input.number, input.line));
+    Ok(Json(json!({"ok":true,"message":"قانون UFW حذف شد."})))
 }
 async fn dashboard(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
@@ -2835,7 +2861,13 @@ async fn rollback_panel_update(State(state): State<AppState>, headers: HeaderMap
     };
     let output = privileged_request_async(json!({"action":"update-rollback"})).await?;
     if output["ok"] != true {
-        return Err(error(StatusCode::BAD_GATEWAY, output["error"].as_str().unwrap_or("ARG rollback failed.")));
+        let detail = output["error"].as_str().unwrap_or("ARG rollback failed.");
+        let status = if detail.contains("ARG_UPDATE_IN_PROGRESS") {
+            StatusCode::CONFLICT
+        } else {
+            StatusCode::BAD_GATEWAY
+        };
+        return Err(error(status, detail));
     }
     let db = state.lock().unwrap();
     audit(&db, &actor, "panel.update.rollback", "administrator restored the previous ARG binary");
@@ -3181,6 +3213,7 @@ fn configure_panel_tls(request: &Value) -> Value {
 fn execute_privileged_request(request: &Value) -> Value {
     let action = match request["action"].as_str() {
         Some("status") => "status",
+        Some("delete-line") => "delete-line",
         Some("install") => "install",
         Some("enable") => "enable",
         Some("disable") => "disable",
@@ -3214,6 +3247,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-delete") => "nginx-delete",
         Some("nginx-rename") => "nginx-rename",
         Some("nginx-site-logs") => "nginx-site-logs",
+        Some("nginx-site-permissions-fix") => "nginx-site-permissions-fix",
         Some("nginx-site-traffic") => "nginx-site-traffic",
         Some("nginx-site-repository") => "nginx-site-repository",
         Some("nginx-browse") => "nginx-browse",
@@ -3365,6 +3399,15 @@ fn execute_privileged_request(request: &Value) -> Value {
             return json!({"ok":false,"error":"Invalid policy"});
         };
         args.extend([port.to_string(), protocol.to_owned(), policy.to_owned()]);
+    } else if action == "delete-line" {
+        let Some(number) = request["number"].as_u64().filter(|number| (1..=10000).contains(number)) else {
+            return json!({"ok":false,"error":"Invalid UFW rule number"});
+        };
+        let Some(line) = request["line"].as_str().filter(|line| !line.is_empty() && line.len() <= 512 && !line.bytes().any(|byte| byte.is_ascii_control())) else {
+            return json!({"ok":false,"error":"Invalid UFW rule fingerprint"});
+        };
+        args.push(number.to_string());
+        args.push(line.to_owned());
     }
     let (helper, helper_args) = if action.starts_with("update-") {
         let mut update_args = vec![action.trim_start_matches("update-")];
@@ -3567,25 +3610,37 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
             return json!({"ok":false,"error":"Invalid service unit"});
         };
         let mut command = std::process::Command::new("systemctl");
-        command.args(["show", "--no-pager", "--property=CPUUsageNSec,MemoryCurrent,CPUQuotaPerSecUSec,MemoryMax", unit]);
-        let (show_ok, output) = match command_result(&mut command) {
-            Ok(result) => result,
-            Err(error) => return json!({"ok":false,"error":error}),
-        };
-        let values: HashMap<String, String> = output.lines().filter_map(|line| line.split_once('=')).map(|(key,value)|(key.trim().to_owned(),value.trim().to_owned())).collect();
+        // Query only the counters used by the UI. Some systemd releases reject
+        // the quota property over D-Bus even though the cgroup counters work.
+        command.args(["show", "--no-pager", "--property=CPUUsageNSec", "--property=MemoryCurrent", "--property=ControlGroup", "--property=LoadState", unit]);
+        let (show_ok, output) = command_result(&mut command).unwrap_or((false, String::new()));
+        let values: HashMap<String, String> = if show_ok {
+            output.lines().filter_map(|line| line.split_once('=')).map(|(key,value)|(key.trim().to_owned(),value.trim().to_owned())).collect()
+        } else { HashMap::new() };
+        if values.get("LoadState").is_some_and(|value| value == "not-found") {
+            return json!({"ok":false,"error":"سرویس انتخاب‌شده در systemd پیدا نشد. نام سرویس برنامهٔ همین سایت را بررسی کن."});
+        }
         let mut cpu_usage_ns = values.get("CPUUsageNSec").and_then(|v| parse_systemd_u64(v));
         let mut memory_current_bytes = values.get("MemoryCurrent").and_then(|v| parse_systemd_u64(v));
-        let mut measurement_error = (!show_ok).then(|| output.trim().to_owned()).filter(|text| !text.is_empty());
+        let mut measurement_error = None;
         if cpu_usage_ns.is_none() || memory_current_bytes.is_none() {
-            if let Some(cgroup) = read_systemd_control_group(unit) {
+            let cgroup = values.get("ControlGroup").filter(|path| valid_control_group_path(path))
+                .cloned().or_else(|| fallback_service_control_group(unit))
+                .or_else(|| show_ok.then(|| read_systemd_control_group(unit)).flatten());
+            if let Some(cgroup) = cgroup {
                 let (cgroup_cpu, cgroup_memory) = read_cgroup_resource_usage(&cgroup);
                 cpu_usage_ns = cpu_usage_ns.or(cgroup_cpu);
                 memory_current_bytes = memory_current_bytes.or(cgroup_memory);
             }
         }
-        if cpu_usage_ns.is_some() || memory_current_bytes.is_some() { measurement_error = None; }
-        else if measurement_error.is_none() { measurement_error = Some("systemd accounting is not enabled for this service. Save its settings once to enable CPU and memory accounting.".into()); }
-        return json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":cpu_usage_ns,"memory_current_bytes":memory_current_bytes,"cpu_quota_per_second_usec":values.get("CPUQuotaPerSecUSec").and_then(|v|parse_systemd_u64(v)),"memory_max_bytes":values.get("MemoryMax").and_then(|v|parse_systemd_u64(v)),"measurement_error":measurement_error}});
+        if cpu_usage_ns.is_none() && memory_current_bytes.is_none() {
+            measurement_error = Some(if show_ok {
+                "مصرف این سرویس هنوز قابل اندازه‌گیری نیست. فعال‌بودن سرویس را بررسی کن؛ سپس تنظیمات منابع را یک بار ذخیره کن."
+            } else {
+                "ارتباط با systemd برای خواندن مصرف برقرار نشد و cgroup فعالی هم برای این سرویس پیدا نشد. فعال‌بودن سرویس را بررسی کن."
+            });
+        }
+        return json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":cpu_usage_ns,"memory_current_bytes":memory_current_bytes,"measurement_error":measurement_error}});
     }
     if action == "service-limits" {
         let Some(unit) = request["unit"].as_str().filter(|u| valid_service_unit(u)) else {
@@ -3715,6 +3770,14 @@ fn read_systemd_control_group(unit: &str) -> Option<String> {
     if !output.status.success() { return None; }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     valid_control_group_path(&path).then_some(path)
+}
+
+fn fallback_service_control_group(unit: &str) -> Option<String> {
+    if !valid_service_unit(unit) { return None; }
+    let path = format!("/system.slice/{unit}");
+    (valid_control_group_path(&path)
+        && PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/')).is_dir())
+        .then_some(path)
 }
 
 fn read_cgroup_resource_usage(control_group: &str) -> (Option<u64>, Option<u64>) {

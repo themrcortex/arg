@@ -29,6 +29,7 @@ readonly PORT_HELPER="/usr/local/lib/arg/port-helper"
 readonly UPDATE_HELPER="/usr/local/lib/arg/update-helper"
 readonly DB_BACKUP_TOOL="/usr/local/lib/arg/arg-db-backup"
 readonly UPDATE_LOCK_DIR="/run/arg-update.lock"
+readonly UPDATE_MUTEX_FILE="/run/arg-update.lock.mutex"
 readonly UPDATE_STATUS_FILE="/run/arg-update-in-progress"
 readonly UPDATE_STATE_FILE="/run/arg-update-state.json"
 readonly UPDATE_CANCEL_FILE="/run/arg-update-cancel-requested"
@@ -68,6 +69,8 @@ MENU_ACTIVE=0
 UPDATE_STATUS="NOT CHECKED"
 UPDATE_LOCAL_REV=""
 UPDATE_REMOTE_REV=""
+MENU_STATUS_DIR=""
+MENU_STATUS_PID=""
 
 readonly RUST_HOME="${RUSTUP_HOME:-/root/.rustup}"
 readonly CARGO_HOME_DIR="${CARGO_HOME:-/root/.cargo}"
@@ -501,6 +504,37 @@ check_update_status() {
   else
     UPDATE_STATUS="AVAILABLE"
   fi
+}
+
+start_menu_status_refresh() {
+  [[ -f "$SERVICE_FILE" ]] || return 0
+  MENU_STATUS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/arg-menu-status.XXXXXX")"
+  chmod 0700 "$MENU_STATUS_DIR"
+  (
+    check_update_status
+    local public_ip="$SERVER_PUBLIC_IP"
+    [[ -n "$public_ip" ]] || public_ip="$(detect_public_ipv4 || true)"
+    printf '%s|%s|%s|%s\n' "$UPDATE_STATUS" "$UPDATE_LOCAL_REV" "$UPDATE_REMOTE_REV" "$public_ip" > "$MENU_STATUS_DIR/result.tmp"
+    mv -f "$MENU_STATUS_DIR/result.tmp" "$MENU_STATUS_DIR/result"
+  ) >/dev/null 2>&1 </dev/null &
+  MENU_STATUS_PID=$!
+}
+
+read_menu_status_refresh() {
+  [[ -n "$MENU_STATUS_DIR" && -s "$MENU_STATUS_DIR/result" ]] || return 1
+  IFS='|' read -r UPDATE_STATUS UPDATE_LOCAL_REV UPDATE_REMOTE_REV SERVER_PUBLIC_IP < "$MENU_STATUS_DIR/result"
+  rm -f "$MENU_STATUS_DIR/result"
+  rmdir "$MENU_STATUS_DIR" 2>/dev/null || true
+  MENU_STATUS_DIR=""
+  MENU_STATUS_PID=""
+  return 0
+}
+
+stop_menu_status_refresh() {
+  [[ -n "$MENU_STATUS_PID" ]] && kill "$MENU_STATUS_PID" 2>/dev/null || true
+  [[ -n "$MENU_STATUS_DIR" ]] && rm -rf "$MENU_STATUS_DIR"
+  MENU_STATUS_PID=""
+  MENU_STATUS_DIR=""
 }
 
 write_bind_config() {
@@ -1217,7 +1251,7 @@ select_update_options() {
 
   BRANCH="$requested_branch"
   ARG_UPDATE_MODE="$requested_mode"
-  export ARG_UPDATE_MODE ARG_UPDATE_CONTEXT=update
+  export ARG_UPDATE_MODE ARG_UPDATE_BRANCH="$BRANCH" ARG_UPDATE_OPERATION=update ARG_UPDATE_CONTEXT=update
   check_update_status
   info "Update source: $BRANCH ($UPDATE_STATUS) · build mode: $ARG_UPDATE_MODE"
 }
@@ -1225,7 +1259,7 @@ select_update_options() {
 update_app() {
   require_root update
   require_systemd
-  local was_installed=0 build_started=0 binary_swapped=0 previous staged database_path database_staged
+  local was_installed=0 build_started=0 binary_swapped=0 previous staged database_path database_staged update_mutex_fd
   select_update_options "${1:-}" "${2:-}"
   [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
   (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
@@ -1236,6 +1270,9 @@ update_app() {
     [[ "$reservation_started" =~ ^[0-9]+$ ]] || reservation_started="$(date +%s)"
     printf '%s %s %s\n' "$reservation_started" "$$" "$(awk '{print $22}' "/proc/$$/stat")" > "$UPDATE_STATUS_FILE"
   else
+    exec {update_mutex_fd}>"$UPDATE_MUTEX_FILE"
+    chmod 0600 "$UPDATE_MUTEX_FILE"
+    flock -x "$update_mutex_fd" || die "Could not lock ARG update state."
     if [[ -d "$UPDATE_LOCK_DIR" ]]; then
       local owner owner_start owner_actual unit owner_command
       owner="$(awk 'NR==1 {print $2}' "$UPDATE_STATUS_FILE" 2>/dev/null || true)"
@@ -1251,13 +1288,15 @@ update_app() {
       if { [[ "$owner_start" =~ ^[0-9]+$ && "$owner_actual" == "$owner_start" ]] || [[ "$owner_command" == *"/usr/local/bin/arg"* && "$owner_command" == *"update"* ]]; } && kill -0 "$owner" 2>/dev/null; then
         die "Another ARG update is genuinely running. Cancel it with 'sudo arg cancel-update' or wait for it to finish."
       fi
+      "$UPDATE_HELPER" state failed failed "A stale update lock was cleared because no updater process or systemd job is active." >/dev/null 2>&1 || true
       rm -f "$UPDATE_STATUS_FILE" "$UPDATE_CANCEL_FILE"
       rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
-      "$UPDATE_HELPER" state failed failed "A stale update lock was cleared because no updater process or systemd job is active." >/dev/null 2>&1 || true
     fi
     mkdir "$UPDATE_LOCK_DIR" 2>/dev/null || die "Another ARG update is already running. Please wait for it to finish."
     printf '%s %s\n' "$(date +%s)" "$$" > "$UPDATE_STATUS_FILE"
     export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
+    flock -u "$update_mutex_fd" || true
+    exec {update_mutex_fd}>&-
   fi
   chmod 0644 "$UPDATE_STATUS_FILE"
   [[ -n "${ARG_UPDATE_JOB_ID:-}" ]] || export ARG_UPDATE_JOB_ID="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$$"
@@ -1279,9 +1318,27 @@ update_app() {
     local exit_code="${1:-$?}"
     if (( exit_code != 0 )); then
       if [[ -e "$UPDATE_CANCEL_FILE" ]]; then
-        "$UPDATE_HELPER" state cancelled cancelled "The update was cancelled by an administrator." >/dev/null 2>&1 || true
+        local cancellation_recovered=1
+        if (( binary_swapped )) && [[ -x "$PREVIOUS_BINARY" ]] && ! cmp -s "$BINARY" "$PREVIOUS_BINARY"; then
+          warn "Cancellation arrived during activation. Restoring the previous release before finishing cancellation."
+          systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+          restore_previous_database || { warn "The previous database snapshot could not be restored."; cancellation_recovered=0; }
+          if [[ -x "$PREVIOUS_BINARY" ]]; then
+            install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY" || cancellation_recovered=0
+            systemctl start "$SERVICE_NAME" 2>/dev/null || cancellation_recovered=0
+            wait_for_panel || cancellation_recovered=0
+            binary_swapped=0
+          else
+            cancellation_recovered=0
+          fi
+        fi
+        if (( cancellation_recovered )); then
+          "$UPDATE_HELPER" state cancelled cancelled "The update was cancelled; the previous release was restored and checked." >/dev/null 2>&1 || true
+        else
+          "$UPDATE_HELPER" state failed failed "Cancellation recovery needs attention. Check ARG service logs and the saved rollback files." >/dev/null 2>&1 || true
+        fi
       else
-        if (( binary_swapped )); then
+        if (( binary_swapped )) && [[ -x "$PREVIOUS_BINARY" ]] && ! cmp -s "$BINARY" "$PREVIOUS_BINARY"; then
           warn "The update stopped unexpectedly after replacing the ARG binary. Restoring the previous release."
           systemctl stop "$SERVICE_NAME" 2>/dev/null || true
           restore_previous_database || warn "The previous database snapshot could not be restored."
@@ -1344,8 +1401,10 @@ update_app() {
   fi
   install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$staged"
   update_phase installing "Installing the verified build."
-  mv -f "$staged" "$BINARY"
+  # Arm the EXIT recovery before the atomic rename. If a signal arrives between
+  # rename and the next shell instruction, cleanup still knows a swap may have happened.
   binary_swapped=1
+  mv -f "$staged" "$BINARY"
   write_privileged_service_unit
   systemctl restart arg-privileged.service
   write_service_unit
@@ -1509,6 +1568,7 @@ draw_control_center() {
     AVAILABLE) update_color="$C_YELLOW"; printf '  Update   %s● AVAILABLE  %s → %s  (9 to update)%s\n' "$update_color" "$UPDATE_LOCAL_REV" "$UPDATE_REMOTE_REV" "$C_RESET" ;;
     'UP TO DATE') update_color="$C_GREEN"; printf '  Update   %s● UP TO DATE  %s%s\n' "$update_color" "$UPDATE_LOCAL_REV" "$C_RESET" ;;
     'NOT INSTALLED') printf '  Update   %s● NOT INSTALLED%s\n' "$C_DIM" "$C_RESET" ;;
+    CHECKING) printf '  Update   %s◌ CHECKING IN BACKGROUND%s\n' "$C_DIM" "$C_RESET" ;;
     *) printf '  Update   %s● CHECK FAILED%s\n' "$C_YELLOW" "$C_RESET" ;;
   esac
   printf '  %s────────────────────────────────────────────────────────────────────%s\n\n' "$C_COPPER" "$C_RESET"
@@ -1542,10 +1602,10 @@ read_menu_key() {
   local saved key sequence
   saved="$(stty -g </dev/tty 2>/dev/null)" || return 1
   stty -echo -icanon min 1 time 0 </dev/tty 2>/dev/null || return 1
-  if IFS= read -r -s -n 1 key </dev/tty; then
+  if IFS= read -r -s -n 1 -t 1 key </dev/tty; then
     [[ -n "$key" ]] || key='enter'
   else
-    key=""
+    key='tick'
   fi
   if [[ "$key" == $'\033' ]]; then
     IFS= read -r -s -n 2 -t 1 sequence </dev/tty || sequence=""
@@ -1589,28 +1649,39 @@ confirm_rollback() {
 }
 
 main_menu() {
-  local selection="" key interactive=0 action_ready=0
+  local selection="" key interactive=0 action_ready=0 draw_needed=1
   local digit_buffer=""
   local selected=1
   MENU_ACTIVE=1
-  check_update_status
-  [[ -f "$SERVICE_FILE" ]] && selected=2
-  if [[ -z "$SERVER_PUBLIC_IP" && -f "$SERVICE_FILE" ]]; then SERVER_PUBLIC_IP="$(detect_public_ipv4 || true)"; fi
+  UPDATE_STATUS="NOT INSTALLED"
+  UPDATE_LOCAL_REV=""
+  UPDATE_REMOTE_REV=""
+  if [[ -f "$SERVICE_FILE" ]]; then
+    UPDATE_STATUS="CHECKING"
+    start_menu_status_refresh
+    selected=2
+  fi
   if [[ -r /dev/tty && -t 1 && -t 0 && "${TERM:-dumb}" != "dumb" ]] && has stty; then
     interactive=1
   fi
 
   while true; do
+    read_menu_status_refresh && draw_needed=1
     if (( interactive )); then
-      draw_control_center "$selected" "$digit_buffer"
+      if (( draw_needed )); then
+        draw_control_center "$selected" "$digit_buffer"
+        draw_needed=0
+      fi
       key="$(read_menu_key)" || interactive=0
       if (( interactive )); then
+        [[ "$key" == tick ]] && continue
+        draw_needed=1
         case "$key" in
           up|k) (( selected > 1 )) && ((selected--)) || selected=15 ;;
           down|j) (( selected < 15 )) && ((selected++)) || selected=1 ;;
           enter)
             if [[ -n "$digit_buffer" ]]; then
-              [[ "$digit_buffer" != "0" ]] || { printf '\033[0m\n'; return 0; }
+              [[ "$digit_buffer" != "0" ]] || { stop_menu_status_refresh; printf '\033[0m\n'; return 0; }
               selection="$digit_buffer"
               [[ "$selection" =~ ^([1-9]|1[0-5])$ ]] || { warn 'Choose a menu option from 1 to 15.'; selection=""; digit_buffer=""; continue; }
             else
@@ -1619,7 +1690,7 @@ main_menu() {
             digit_buffer=""
             action_ready=1
             ;;
-          q|Q|escape) printf '\033[0m\n'; return 0 ;;
+          q|Q|escape) stop_menu_status_refresh; printf '\033[0m\n'; return 0 ;;
           h|H) usage; pause_menu; continue ;;
           [0-9۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩])
             digit_buffer="$(normalize_menu_digits "$digit_buffer$key")"
@@ -1630,7 +1701,6 @@ main_menu() {
         esac
       fi
     else
-      SERVER_PUBLIC_IP="${SERVER_PUBLIC_IP:-$(detect_public_ipv4 || true)}"
       show_wordmark
       printf '  %sVPS CONTROL CENTER%s\n' "$C_DIM" "$C_RESET"
       printf '  Service: %s\n  Panel: %s\n\n' \
@@ -1640,6 +1710,7 @@ main_menu() {
         AVAILABLE) printf '  Update: AVAILABLE  %s -> %s (option 9)\n\n' "$UPDATE_LOCAL_REV" "$UPDATE_REMOTE_REV" ;;
         'UP TO DATE') printf '  Update: UP TO DATE  %s\n\n' "$UPDATE_LOCAL_REV" ;;
         'NOT INSTALLED') printf '  Update: NOT INSTALLED\n\n' ;;
+        CHECKING) printf '  Update: CHECKING IN BACKGROUND\n\n' ;;
         *) printf '  Update: CHECK FAILED\n\n' ;;
       esac
       printf '  1 Install / repair     2 Status       3 Start          4 Stop\n'
@@ -1648,9 +1719,9 @@ main_menu() {
       printf ' 12 Get setup code      13 Change password\n'
       printf ' 14 Cancel update       15 Rollback previous version\n'
       printf '  0 Exit\n\n'
-      read -r -p 'Select an option: ' selection || return 0
+      read -r -p 'Select an option: ' selection || { stop_menu_status_refresh; return 0; }
       selection="$(normalize_menu_digits "${selection//$'\r'/}")"
-      [[ "$selection" == "0" ]] && return 0
+      [[ "$selection" == "0" ]] && { stop_menu_status_refresh; return 0; }
       valid_menu_choice "$selection" || { warn 'Choose a menu option from 1 to 15.'; continue; }
       action_ready=1
     fi

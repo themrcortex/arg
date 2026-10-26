@@ -1,5 +1,23 @@
 # ARG Change Log
 
+## v0.6.7-dev.11 — 2026-10-26
+
+### Fixed
+- Read Nginx application-service CPU and memory usage from cgroups when systemd counters are unavailable; show actionable errors instead of raw systemd output.
+- Make update cancellation wait for the updater recovery trap and restore the prior binary and database before releasing the update lock.
+- Serialize rollback with updates, retain the current release for recovery, and keep ARG stopped if recovery would leave a binary/database mismatch; generic cancellation cannot interrupt this transaction.
+- Report rollback and cancellation terminal states accurately, and show branch/build mode with explicit confirmation steps in the update UI.
+- Load the SSH management menu before network update/IP checks finish; refresh status asynchronously.
+- Run Nginx site certificate issuance and post-issuance refresh outside the async runtime worker, so long Certbot requests do not stall panel request handling.
+- Let the secret maintenance-entry URL pass the Nginx maintenance gate so it can set the administrator's bypass cookie before redirecting back to the site.
+- Add an ARG Nginx site action to grant the web worker read/traverse ACLs on a site's `/var/www` document root without changing file ownership or asking for SSH commands.
+- Reconcile HTTP/HTTPS UFW toggles with existing manually-created rules, and show/delete numbered UFW rules from ARG with stale-rule and protected-access checks.
+
+### Improved
+- Apply ARG's copper-toned glass surfaces to the shell, cards, menus, dialogs and notifications while retaining readable dense data and terminal output.
+- Reduce hidden-page Nginx resource polling and support promoting a tested development build to a stable version with the release script.
+
+
 ## v0.6.7-dev.10 — 2026-10-26
 
 ### Improved

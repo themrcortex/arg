@@ -11,13 +11,20 @@ branch="$(git branch --show-current)"
 }
 
 current="$(sed -n '0,/^version = /s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
-[[ "$current" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+stable='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+prerelease='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-dev\.(0|[1-9][0-9]*)$'
+if [[ "$current" =~ $prerelease ]]; then
+  major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+  promoting=1
+elif [[ "$current" =~ $stable ]]; then
+  major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+  promoting=0
+else
   echo "Invalid current version in Cargo.toml: $current" >&2
   exit 1
-}
-IFS=. read -r major minor patch <<< "$current"
+fi
 case "${1:-patch}" in
-  patch) next="$major.$minor.$((patch + 1))" ;;
+  patch) next="$major.$minor.$((patch + 1 - promoting))" ;;
   minor) next="$major.$((minor + 1)).0" ;;
   major) next="$((major + 1)).0.0" ;;
   *)
@@ -30,8 +37,9 @@ case "${1:-patch}" in
     ;;
 esac
 [[ $# -le 1 ]] || { echo "Pass only one version or bump type." >&2; exit 2; }
-if [[ "$next" != "$major.$minor.$((patch + 1))" && "$next" != "$major.$((minor + 1)).0" && "$next" != "$((major + 1)).0.0" ]]; then
-  echo "Next version must be the immediate patch, minor, or major release after $current (got $next)." >&2
+if (( promoting )) && [[ "$next" != "$major.$minor.$patch" ]] ||
+   (( !promoting )) && [[ "$next" != "$major.$minor.$((patch + 1))" && "$next" != "$major.$((minor + 1)).0" && "$next" != "$((major + 1)).0.0" ]]; then
+  echo "Next version must promote this prerelease or be the immediate patch, minor, or major release after $current (got $next)." >&2
   exit 2
 fi
 
