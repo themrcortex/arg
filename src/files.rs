@@ -43,6 +43,8 @@ pub(super) struct FileActionInput {
     confirmed: bool,
     #[serde(default)]
     permissions: String,
+    #[serde(default)]
+    link_target: String,
 }
 
 pub(super) async fn list_files(
@@ -174,7 +176,7 @@ pub(super) async fn file_action(
         require_admin(&db, &headers)?.username
     };
     let allowed = [
-        "mkdir", "create", "save", "rename", "delete", "paste", "upload", "chmod", "zip", "unzip",
+        "mkdir", "create", "save", "rename", "delete", "paste", "upload", "chmod", "zip", "unzip", "symlink-update",
     ];
     if !allowed.contains(&input.action.as_str()) {
         return Err(error(StatusCode::BAD_REQUEST, "Unsupported file operation"));
@@ -188,7 +190,7 @@ pub(super) async fn file_action(
     let response = privileged_request_async(json!({
         "action":"file-action", "operation":input.action, "path":input.path,
         "name":input.name, "new_name":input.new_name, "source":input.source,
-        "destination":input.destination, "mode":input.mode, "content":input.content, "confirmed":input.confirmed, "permissions":input.permissions
+        "destination":input.destination, "mode":input.mode, "content":input.content, "confirmed":input.confirmed, "permissions":input.permissions, "link_target":input.link_target
     })).await?;
     if response["ok"] != true {
         return Err(error(
@@ -289,6 +291,11 @@ fn path_metadata(path: &std::path::Path, name: String) -> Value {
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs());
+    let link_target = if metadata.file_type().is_symlink() {
+        std::fs::read_link(path).ok().map(|target| target.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     json!({
         "name":name,
         "path":path.to_string_lossy(),
@@ -296,7 +303,8 @@ fn path_metadata(path: &std::path::Path, name: String) -> Value {
         "size":if metadata.is_file() { metadata.len() } else { 0 },
         "modified":modified,
         "permissions":format!("{:04o}", metadata.permissions().mode() & 0o7777),
-        "read_only":metadata.permissions().readonly()
+        "read_only":metadata.permissions().readonly(),
+        "link_target":link_target
     })
 }
 
@@ -730,6 +738,40 @@ fn execute_action(request: &Value) -> Result<Value, String> {
             }
             std::fs::rename(&source, &destination).map_err(|error| error.to_string())?;
             Ok(path_metadata(&destination, new_name.into()))
+        }
+        "symlink-update" => {
+            use std::os::unix::fs::symlink;
+            let source = lexical_existing(
+                request["path"].as_str().ok_or("A symbolic link path is required")?,
+            )?;
+            if is_protected_system_root(&source) {
+                return Err("Editing a symbolic link in a protected system location is blocked.".into());
+            }
+            let metadata = std::fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
+            if !metadata.file_type().is_symlink() {
+                return Err("The selected entry is no longer a symbolic link.".into());
+            }
+            let target = request["link_target"].as_str().ok_or("A link target is required")?;
+            if target.is_empty() || target.len() > 4096 || target.chars().any(char::is_control) {
+                return Err("The link target must be between 1 and 4096 bytes and contain no control characters.".into());
+            }
+            let parent = source.parent().ok_or("Invalid symbolic link path")?;
+            let file_name = source.file_name().ok_or("Invalid symbolic link name")?.to_string_lossy();
+            let mut temporary = None;
+            for _ in 0..100 {
+                let candidate = parent.join(format!(".arg-link-{:016x}", rand::random::<u64>()));
+                match symlink(target, &candidate) {
+                    Ok(()) => { temporary = Some(candidate); break; }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => return Err(format!("Could not prepare the new symbolic link: {error}")),
+                }
+            }
+            let temporary = temporary.ok_or("Could not allocate a temporary symbolic link name")?;
+            if let Err(error) = std::fs::rename(&temporary, &source) {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(format!("Could not replace the symbolic link: {error}"));
+            }
+            Ok(path_metadata(&source, file_name.into_owned()))
         }
         "chmod" => {
             use std::os::unix::fs::PermissionsExt;
@@ -1206,6 +1248,28 @@ mod tests {
         assert!(valid_mode("755"));
         assert!(!valid_mode("0899"));
         assert!(!valid_mode("77777"));
+    }
+
+    #[test]
+    fn symbolic_link_target_edit_replaces_the_link_without_touching_target_files() {
+        let root = test_dir();
+        let target_a = root.join("target-a");
+        let target_b = root.join("target-b");
+        let link = root.join("current");
+        fs::write(&target_a, "A").unwrap();
+        fs::write(&target_b, "B").unwrap();
+        symlink("target-a", &link).unwrap();
+
+        super::execute_action(&serde_json::json!({
+            "operation": "symlink-update",
+            "path": link,
+            "link_target": "target-b"
+        })).unwrap();
+
+        assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("target-b"));
+        assert_eq!(fs::read_to_string(target_a).unwrap(), "A");
+        assert_eq!(fs::read_to_string(target_b).unwrap(), "B");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

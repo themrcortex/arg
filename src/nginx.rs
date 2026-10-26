@@ -899,9 +899,19 @@ pub(super) async fn issue_nginx_site_ssl(
         )
         .optional()
         .map_err(db_error)?;
-    let parsed = settings
+    let mut parsed = settings
         .flatten()
         .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    if let (Some(settings), Some(certificate)) = (parsed.as_mut(), data["certificate"].as_str()) {
+        if let Some(builder) = settings.get_mut("builder").and_then(Value::as_object_mut) {
+            builder.insert("ssl".into(), Value::Bool(true));
+            builder.insert("certificate".into(), Value::String(certificate.into()));
+            builder.insert(
+                "certificateKey".into(),
+                Value::String(certificate.replace("fullchain.pem", "privkey.pem")),
+            );
+        }
+    }
     store_nginx_snapshot(&db, &name, content, parsed.as_ref()).map_err(db_error)?;
     audit(
         &db,

@@ -1,11 +1,12 @@
-import { Cloud, Container, Cpu, Files, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, type LucideIcon } from 'lucide-react'
+import { Cloud, Container, Cpu, Files, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, type LucideIcon } from 'lucide-react'
 
-export type PageId = 'dashboard' | 'system' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account'
+export type PageId = 'dashboard' | 'system' | 'nodes' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account'
 export type NavigationItem = { id: PageId; label: string; icon: LucideIcon; admin?: boolean }
 
 export const navigation: NavigationItem[] = [
   { id: 'dashboard', label: 'نمای کلی', icon: LayoutDashboard },
   { id: 'system', label: 'سیستم و منابع', icon: Cpu },
+  { id: 'nodes', label: 'Nodeهای ARG', icon: Server, admin: true },
   { id: 'network', label: 'شبکه', icon: Network },
   { id: 'ports', label: 'پورت‌ها', icon: Radio },
   { id: 'firewall', label: 'فایروال UFW', icon: Shield },

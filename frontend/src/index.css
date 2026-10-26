@@ -434,7 +434,22 @@
 @media (min-width: 768px) { .arg-kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (min-width: 1280px) { .arg-chart-grid, .arg-operation-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (min-width: 1536px) { .arg-kpi-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+.arg-dashboard .arg-kpi-grid { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.arg-dashboard .arg-dashboard-server-strip { border-color: var(--arg-glass-edge); background: linear-gradient(110deg, rgba(221,164,111,.055), rgba(255,255,255,.025) 42%, transparent), var(--arg-glass); box-shadow: inset 0 1px 0 rgba(255,255,255,.045); }
+.arg-dashboard .arg-dashboard-mini-stat { border-color: var(--arg-glass-edge); background: linear-gradient(135deg, rgba(255,255,255,.035), transparent 60%), var(--arg-glass); }
+@media (min-width: 480px) { .arg-dashboard .arg-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1024px) { .arg-dashboard .arg-kpi-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 1024px) { .arg-dashboard .arg-chart-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (min-width: 1280px) { .arg-dashboard .arg-chart-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 479px) { .arg-hero-art { width: 100%; opacity: .14; } }
+.arg-dialog-scroll { -webkit-overflow-scrolling: touch; scrollbar-gutter: stable; }
+.arg-dialog-scroll > * { min-width: 0; }
+@media (max-width: 479px) {
+  .arg-dialog-scroll { padding-inline: 1rem; }
+  .arg-dialog-scroll .grid.grid-cols-2 { grid-template-columns: minmax(0, 1fr); }
+  .arg-dialog-scroll .flex.justify-end { flex-wrap: wrap; }
+  .arg-dialog-scroll .flex.justify-end > button { max-width: 100%; }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
   .arg-button:hover:not(:disabled), .arg-button:active:not(:disabled) { transform: none; }

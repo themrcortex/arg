@@ -42,6 +42,18 @@ pub(super) fn router(state: AppState) -> Router {
             get(maintenance::download_backup),
         )
         .route("/api/maintenance/action", post(maintenance::run_action))
+        .route("/api/nodes", get(federation::list_nodes).post(federation::add_node))
+        .route("/api/nodes/pairing-code", post(federation::create_pairing_code))
+        .route("/api/nodes/controllers/{id}", axum::routing::delete(federation::revoke_controller_admin))
+        .route("/api/nodes/{id}/status", get(federation::node_status))
+        .route("/api/nodes/{id}/services", get(federation::node_services))
+        .route("/api/nodes/{id}/services/action", post(federation::node_service_action))
+        .route("/api/nodes/{id}", axum::routing::delete(federation::remove_node))
+        .route("/api/federation/pair", post(federation::accept_pair))
+        .route("/api/federation/status", get(federation::status))
+        .route("/api/federation/services", get(federation::services))
+        .route("/api/federation/services/action", post(federation::service_action))
+        .route("/api/federation/controller", axum::routing::delete(federation::revoke_controller))
         .route("/api/s3/providers", get(s3::list_providers))
         .route("/api/s3/summary", get(s3::summary))
         .route(

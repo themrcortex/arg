@@ -59,6 +59,7 @@ dependencies = [
  "mime_guess",
  "portable-pty",
  "rand 0.8.8",
+ "reqwest",
  "rusqlite",
  "rust-embed",
  "rust-s3",

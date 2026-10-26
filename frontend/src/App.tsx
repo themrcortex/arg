@@ -45,6 +45,7 @@ import { DockerPage } from './DockerPage'
 import { FileManagerPage } from './FileManagerPage'
 import { MaintenancePage } from './MaintenancePage'
 import { MysqlPage } from './MysqlPage'
+import { NodesPage } from './NodesPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
@@ -252,9 +253,13 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
             {installer && (
               <Alert className="mb-5 border-primary/30 bg-primary/10 text-foreground">
                 <AlertDescription className="leading-7">
-                  برای ساخت حساب از این نشانی عمومی، کد یک‌بارمصرف نمایش‌داده‌شده در کنسول سرور را
-                  وارد کنید و مطمئن شوید صفحه با HTTPS باز شده است. ساخت حساب از اتصال SSH محلی هم
-                  بدون کد امکان‌پذیر است.
+                  <strong className="mb-2 block">برای ساخت مدیر، کد را از SSH همان سرور بگیر:</strong>
+                  <ol className="list-inside list-decimal space-y-1.5">
+                    <li>یک پنجرهٔ ترمینال باز کن و با SSH وارد همین VPS شو.</li>
+                    <li>این دستور را اجرا کن: <code dir="ltr" className="rounded bg-background/70 px-1.5 py-0.5 font-mono text-xs">sudo arg setup-code</code></li>
+                    <li>کد یک‌بارمصرف خروجی را در کادر پایین وارد کن و ساخت حساب را بزن.</li>
+                  </ol>
+                  <p className="mt-2">این صفحه باید با HTTPS باز شده باشد. کد را برای کسی نفرست؛ پس از ساخت حساب دیگر قابل استفاده نیست.</p>
                 </AlertDescription>
               </Alert>
             )}
@@ -306,8 +311,9 @@ function Auth({ installer, onSuccess }: { installer: boolean; onSuccess: () => v
                     autoComplete="one-time-code"
                     value={setupToken}
                     onChange={(e) => setSetupToken(e.target.value)}
-                    placeholder="برای ورود عمومی، کد کنسول سرور را وارد کنید"
+                    placeholder="کد خروجی sudo arg setup-code"
                   />
+                  <p className="text-xs leading-5 text-muted-foreground">به SSH سرور برگرد و دستور <code dir="ltr" className="font-mono">sudo arg setup-code</code> را اجرا کن؛ کدی که ترمینال چاپ می‌کند را اینجا بچسبان.</p>
                 </div>
               )}
               {error && (
@@ -1022,6 +1028,7 @@ export default function App() {
             {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <div className="arg-page-enter">
             {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
             {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
+            {currentPage === 'nodes' && user.role === 'admin' && <NodesPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'maintenance' && user.role === 'admin' && <MaintenancePage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'ports' && <PortsPage Heading={PageHeading} notify={notifyUser} />}
             {currentPage === 'network' && <NetworkPage Heading={PageHeading} notify={notifyUser} />}
