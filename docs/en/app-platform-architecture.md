@@ -48,6 +48,15 @@ Existing pairings migrate additively without changing their node IDs or revoking
 - The controller records `healthy`, `degraded`, `offline`, `untrusted`, and `incompatible` status plus the last check and a sanitized error. Remote writes are audited at the destination under the paired controller identity.
 - The `development` branch passed Rust tests for role/scope checks, session permission routing, private-address classification, endpoint validation, and additive migrations. A real two-VPS TLS integration run is still required before claiming end-to-end coverage.
 
+### Phase 03 implementation status
+
+- Added a server-owned Application registry with UUID identity, framework/source metadata, labels, domain and port reservations, desired versus observed state, soft deletion, restore, and optimistic version checks.
+- Added a separate `application_services` schema for future process/resource adapters. It is not an execution API yet.
+- The Applications page supports local management and read-only aggregation across ready remote workspaces. Offline nodes are reported individually; mutations happen in the owner's workspace.
+- Domain validation checks application records and live Nginx `server_name` values through the privileged manager. If Nginx is present but cannot be inspected, a domain write fails closed. TCP port reservations are checked against application records and current kernel listener tables.
+- Registry records do not fetch source, build code, install runtimes, create secrets, or claim a process is running. `observed_state` remains `unknown` until a real adapter is implemented.
+- Additive migration and validation tests pass with `cargo test --locked`; frontend type checking/build and documentation checks pass. A real multi-VPS integration test remains outstanding.
+
 ### Vocabulary and ownership
 
 | Term | Meaning |
@@ -91,7 +100,7 @@ Application identity and deployment state are owned by the server where the app 
 
 ## Phase gates and test matrix
 
-Before adding application execution, record an executable baseline for frontend checks/build, Rust tests/build, shell syntax, docs validation, and version consistency. Current environment note: `cargo` is not installed in the inspected workspace, so Rust tests cannot be claimed as run here.
+Before adding application execution, keep an executable baseline for frontend checks/build, Rust tests/build, shell syntax, docs validation, and version consistency. In the 2026-10-26 workspace, `cargo test --locked`, frontend type checking/build, documentation type checking/build, and bilingual documentation validation were run successfully. These results do not replace a real two-VPS integration test.
 
 | Environment | Required coverage |
 | --- | --- |
@@ -108,10 +117,10 @@ Every phase must add the tests for the behavior it changes. The final release ma
 
 - **Backend:** Rust/Axum. Route registration is in `src/routes.rs`; major domain modules include Federation, Nginx, Docker, S3, files, MySQL, metrics, and maintenance.
 - **Frontend:** React, TypeScript, Vite, Tailwind, and Radix/shadcn-style components. Navigation is defined in `frontend/src/navigation.ts` and shell behavior in `frontend/src/App.tsx`.
-- **Persistence:** SQLite, with schema/bootstrap code currently centralized in `src/main.rs`; new domain work should reduce coupling rather than expand that file.
+- **Persistence:** SQLite bootstrap is in `src/main.rs`; the Application schema migration is isolated in `src/apps.rs` and invoked at startup.
 - **Privileged operations:** ARG service communicates with `arg-privileged.service` over a private Unix socket. No feature may turn this into a generic root command runner.
 - **Federation:** protocol v2 and remote workspace API/terminal proxy are implemented. Phase 02 adds server roles, destination-checked scopes, capability negotiation v1, workspace renewal, credential rotation, and health states; a real two-VPS integration test is still required.
-- **Application platform:** no unified Application entity, app runner, or durable deployment job engine is present in this baseline.
+- **Application platform:** Phase 03 adds a metadata registry and ownership-aware UI. A runtime adapter, app runner, and durable deployment job engine remain future phases.
 - **CI:** GitHub Actions workflows exist for CI and documentation publishing. Local required checks are documented in `docs/en/development.md`.
 - **Versioning:** Rust and frontend versions are synchronized; stable and prerelease updates use `scripts/bump-version.sh`, `scripts/bump-development-version.sh`, and `scripts/check-versioning.sh`.
 

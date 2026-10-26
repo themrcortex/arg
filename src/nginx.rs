@@ -1458,7 +1458,7 @@ fn nginx_maintenance_secret_config(name: &str, token: &str) -> Result<String, St
     ))
 }
 
-fn nginx_site_domains(content: &str) -> Vec<String> {
+pub(super) fn nginx_site_domains(content: &str) -> Vec<String> {
     let mut domains = Vec::new();
     for line in content.lines() {
         let line = line.trim();
@@ -1489,6 +1489,60 @@ fn nginx_site_domains(content: &str) -> Vec<String> {
         }
     }
     domains
+}
+
+pub(super) fn nginx_server_names(content: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let without_comments = content
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for statement in without_comments.split(';') {
+        let tokens = statement.split_whitespace().collect::<Vec<_>>();
+        for (index, token) in tokens.iter().enumerate() {
+            if *token != "server_name" {
+                continue;
+            }
+            for value in tokens[index + 1..]
+                .iter()
+                .copied()
+                .take_while(|value| !value.contains(['{', '}']))
+            {
+                let name = value
+                    .trim_matches(|character| character == '\'' || character == '"')
+                    .to_ascii_lowercase();
+                if name == "_" || name.contains('$') || name.starts_with('~') || name.is_empty() {
+                    continue;
+                }
+                if let Some(host) = name.strip_prefix('.') {
+                    if host.split('.').all(|label| {
+                        !label.is_empty()
+                            && label.len() <= 63
+                            && label.as_bytes()[0].is_ascii_alphanumeric()
+                            && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                            && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    }) {
+                        for value in [host.to_owned(), format!("*.{host}")] {
+                            if !names.contains(&value) { names.push(value); }
+                        }
+                    }
+                    continue;
+                }
+                let host = name.strip_prefix("*.").or_else(|| name.strip_prefix('*')).or_else(|| name.strip_suffix(".*")).unwrap_or(&name);
+                if host.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && label.as_bytes()[0].is_ascii_alphanumeric()
+                        && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                        && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                }) && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
 }
 
 fn nginx_ensure_maintenance_public_dir() -> Result<(), String> {
@@ -1987,6 +2041,7 @@ fn nginx_list_sites() -> Result<Value, String> {
         let enabled = nginx_site_enabled(&name)?;
         let content = fs::read_to_string(&entry.path()).map_err(|error| error.to_string())?;
         let content_hash = hex::encode(Sha256::digest(content.as_bytes()));
+        let server_names = nginx_server_names(&content);
         let ssl_enabled = content.lines().any(|line| {
             let line = line.trim();
             line.starts_with("listen ") && line.split_whitespace().any(|value| value == "ssl")
@@ -1994,7 +2049,7 @@ fn nginx_list_sites() -> Result<Value, String> {
         let maintenance_enabled = nginx_maintenance_paths(&name)
             .map(|(_, _, flag_path)| flag_path.exists())
             .unwrap_or(false);
-        sites.push(json!({"name":name,"enabled":enabled,"maintenance_enabled":maintenance_enabled,"ssl_enabled":ssl_enabled,"bytes":metadata.len(),"content_hash":content_hash}));
+        sites.push(json!({"name":name,"enabled":enabled,"maintenance_enabled":maintenance_enabled,"ssl_enabled":ssl_enabled,"bytes":metadata.len(),"content_hash":content_hash,"server_names":server_names}));
     }
     sites.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
     Ok(json!(sites))
@@ -3020,9 +3075,15 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 mod maintenance_tests {
     use super::{
         nginx_maintenance_block, nginx_maintenance_cookie_name, nginx_maintenance_secret_config,
-        nginx_remove_maintenance_block, nginx_server_open_offsets, nginx_ssl_certificate_name,
+        nginx_remove_maintenance_block, nginx_server_open_offsets, nginx_server_names, nginx_ssl_certificate_name,
         nginx_valid_maintenance_token,
     };
+
+    #[test]
+    fn lists_literal_and_wildcard_server_names_without_comments() {
+        let names = nginx_server_names("# server_name ignored.example;\nserver {\n server_name\n   Example.com *.example.net .example.org $host ~^regex;\n}\n");
+        assert_eq!(names, vec!["example.com", "*.example.net", "example.org", "*.example.org"]);
+    }
 
     #[test]
     fn ssl_certificate_lineage_uses_canonical_arg_site_uri() {

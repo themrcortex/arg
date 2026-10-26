@@ -140,7 +140,7 @@ fn controller_scope(identity: &ControllerIdentity, required: &str) -> Result<(),
     }
 }
 
-fn local_server_uuid(db: &Connection) -> Result<String, rusqlite::Error> {
+pub(super) fn local_server_uuid(db: &Connection) -> Result<String, rusqlite::Error> {
     if let Some(value) = db.query_row("SELECT value FROM settings WHERE key='federation_server_uuid'", [], |row| row.get::<_, String>(0)).optional()? {
         return Ok(value);
     }

@@ -9,6 +9,8 @@
 - Preserve old pairings through additive SQLite migrations and add focused tests for identity migration and workspace-key resolution.
 - Add explicit federation roles, scoped read-only/full pairings, capability negotiation, compatibility and health states, expiring workspace sessions, credential rotation, and endpoint validation with DNS pinning.
 - Restrict proxied remote sessions by read/write/terminal scopes and audit writes; read-only pairings cannot rotate their controller credentials.
+- Add a server-owned Application registry with UUIDs, domain and port conflict checks, optimistic edits, soft archive/restore, and honest unknown runtime status.
+- Add a responsive Applications page with read-only multi-VPS aggregation and bilingual registry documentation; source acquisition, builds, and execution remain gated for later phases.
 
 ## v0.6.8 — 2026-10-26
 

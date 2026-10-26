@@ -55,6 +55,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './comp
 import changelog from '../../CHANGELOG.md?raw'
 const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
+const ApplicationsPage = lazy(() => import('./ApplicationsPage').then((module) => ({ default: module.ApplicationsPage })))
 const notifyUser = (message: string) => {
   if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد|نپذیرفت|failed|error|invalid|could not|unable/i.test(message)) toast.error(message)
   else toast.success(message)
@@ -1033,7 +1034,7 @@ export default function App() {
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
               { title: 'سرور و شبکه', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nodes'].includes(item.id)) },
-              { title: 'سایت‌ها و ذخیره‌سازی', pages: allowedPages.filter((item) => ['nginx', 'docker', 'files', 's3'].includes(item.id)) },
+              { title: 'اپلیکیشن‌ها و سرویس‌ها', pages: allowedPages.filter((item) => ['apps', 'nginx', 'docker', 'files', 's3'].includes(item.id)) },
               { title: 'عملیات سرور', pages: allowedPages.filter((item) => ['terminal', 'packages', 'services', 'mysql', 'maintenance'].includes(item.id)) },
               { title: 'مدیریت ARG', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account', 'bug-report'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><TooltipProvider delayDuration={220}><div className="space-y-1">{section.pages.map((item) => {
@@ -1065,7 +1066,7 @@ export default function App() {
             {terminalMounted && workspaceNodeId !== 'all' && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
             <div key={currentPage}>
             {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <div className="arg-page-enter">
-            {workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
+            {currentPage === 'apps' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="اپلیکیشن‌ها"/>}><ApplicationsPage Heading={PageHeading} notify={notifyUser} allServers={workspaceNodeId === 'all'} workspaceKey={workspaceNodeId} onOpenWorkspace={openWorkspace}/></Suspense> : workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
               {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
               {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'nodes' && user.role === 'admin' && <NodesPage Heading={PageHeading} notify={notifyUser} workspaceMode={workspaceMode} onWorkspaceModeChange={changeWorkspaceMode} />}

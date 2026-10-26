@@ -1,8 +1,8 @@
 export type Locale = 'fa' | 'en'
 export type DocPage = { id: string; group: string; title: Record<Locale, string>; summary: Record<Locale, string>; file: string }
 export const groups: Record<Locale, string[]> = {
-  fa: ['شروع کار', 'راهنمای پنل', 'مدیریت سرویس‌ها', 'امنیت و نگهداری', 'توسعه', 'راهنمای نمای کلی و پایش', 'راهنمای سیستم و شبکه', 'راهنمای سایت‌ها و ذخیره‌سازی', 'راهنمای عملیات و مدیریت', 'ارتباط سرورها و فضای‌کار راه‌دور'],
-  en: ['Getting started', 'Panel guide', 'Service management', 'Security & maintenance', 'Development', 'Dashboard & monitoring guides', 'System & network guides', 'Websites & storage guides', 'Operations & administration guides', 'Server federation & remote workspaces'],
+  fa: ['شروع کار', 'راهنمای پنل', 'مدیریت سرویس‌ها', 'امنیت و نگهداری', 'توسعه', 'راهنمای نمای کلی و پایش', 'راهنمای سیستم و شبکه', 'راهنمای سایت‌ها و ذخیره‌سازی', 'راهنمای عملیات و مدیریت', 'ارتباط سرورها و فضای‌کار راه‌دور', 'پلتفرم اپلیکیشن‌ها'],
+  en: ['Getting started', 'Panel guide', 'Service management', 'Security & maintenance', 'Development', 'Dashboard & monitoring guides', 'System & network guides', 'Websites & storage guides', 'Operations & administration guides', 'Server federation & remote workspaces', 'Application platform'],
 }
 export const pages: DocPage[] = [
   { id: 'overview', group: '0', title: { fa: 'معرفی ARG', en: 'About ARG' }, summary: { fa: 'ARG چیست، برای چه کاری ساخته شده و چه محدودیت‌هایی دارد.', en: 'What ARG does, its architecture, intended use, and current limits.' }, file: 'overview' },
@@ -188,4 +188,5 @@ export const pages: DocPage[] = [
   { id: 'guide-nodes-01', group: '9', title: { fa: 'انتخاب نقش سرور و تغییر امن', en: 'Choosing and safely changing a server role' }, summary: { fa: 'معنی نقش‌های Federation و بررسی وابستگی پیش از تغییر.', en: 'Federation roles and dependency checks before changing a role.' }, file: 'guide-nodes-01' },
   { id: 'guide-nodes-02', group: '9', title: { fa: 'جفت‌سازی سرورها با دسترسی محدود', en: 'Pairing servers with scoped access' }, summary: { fa: 'ساخت کد یک‌بارمصرف، سطح دسترسی، مقصد HTTPS و شبکهٔ خصوصی.', en: 'One-time pairing, access mode, HTTPS endpoint, and private networks.' }, file: 'guide-nodes-02' },
   { id: 'guide-nodes-03', group: '9', title: { fa: 'بررسی اتصال، چرخش کلید و رفع ناسازگاری', en: 'Health checks, credential rotation, and compatibility' }, summary: { fa: 'وضعیت‌های اتصال، تمدید خودکار نشست و چرخش امن کلید.', en: 'Connection states, workspace renewal, and safe credential rotation.' }, file: 'guide-nodes-03' },
+  { id: 'application-registry', group: '10', title: { fa: 'فهرست اپلیکیشن‌ها', en: 'Application registry' }, summary: { fa: 'ثبت مالکیت، دامنه و پورت؛ فهرست خواندنی VPSها و تفاوت وضعیت هدف با اجرای واقعی.', en: 'Register app ownership, domains, and ports; browse VPS registries and distinguish intent from observed runtime.' }, file: 'application-registry' },
 ]

@@ -48,6 +48,15 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 - وضعیت‌های `healthy`، `degraded`، `offline`، `untrusted` و `incompatible` به همراه زمان بررسی و خطای پاک‌سازی‌شده ذخیره می‌شوند. Write راه‌دور در مقصد با نام Controller جفت‌شده Audit می‌شود.
 - تست‌های Rust شاخهٔ `development` شامل نقش/scope، مجوز نشست، تشخیص آدرس خصوصی، اعتبارسنجی endpoint و migration هستند. برای ادعای پوشش end-to-end هنوز اجرای واقعی بین دو VPS و TLS لازم است.
 
+### وضعیت پیاده‌سازی فاز ۰۳
+
+- Registry اپلیکیشن با UUID، مالکیت سرور، قالب و نوع منبع، برچسب، دامنه، رزرو پورت، وضعیت هدف/مشاهده‌شده، آرشیو نرم و شمارهٔ نسخه برای کنترل ویرایش هم‌زمان اضافه شده است.
+- جدول جداگانهٔ `application_services` برای adapterهای پردازش/منبع در فازهای بعد ساخته می‌شود؛ هنوز API اجرای سرویس نیست.
+- صفحهٔ اپلیکیشن‌ها مدیریت محلی و تجمیع خواندنی Nodeهای آماده را دارد. خطای VPS خاموش جداگانه نشان داده می‌شود و تغییر از فضای‌کار میزبان انجام می‌شود.
+- بررسی دامنه با رکوردهای فعال ARG و `server_name` زندهٔ Nginx از مسیر helper انجام می‌شود. اگر Nginx نصب باشد ولی قابل بررسی نباشد، ثبت دامنه رد می‌شود. پورت TCP با رزروهای ARG و جدول listenerهای کرنل بررسی می‌شود.
+- این Registry سورس دریافت نمی‌کند، Build/Deploy انجام نمی‌دهد، Runtime نصب نمی‌کند، Secret نمی‌سازد و سرویس را Running نشان نمی‌دهد. `observed_state` تا پیاده‌سازی adapter واقعی `unknown` باقی می‌ماند.
+- migration افزایشی و تست‌های اعتبارسنجی با `cargo test --locked` گذشتند؛ type-check/build فرانت‌اند و بررسی مستندات نیز موفق بود. تست واقعی چند VPS هنوز لازم است.
+
 ### واژگان و مالکیت
 
 | اصطلاح | معنی |
@@ -91,7 +100,7 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 
 ## Gate فازها و ماتریس تست
 
-پیش از اجرای اپلیکیشن باید baseline قابل‌تکرار برای Frontend، Rust، Shell، مستندات و هماهنگی نسخه ثبت شود. وضعیت این محیط در زمان Phase 00: فرمان `cargo` نصب نیست، پس اجرای تست Rust در این Workspace قابل ادعا نیست.
+پیش از اجرای واقعی اپلیکیشن baseline قابل‌تکرار برای Frontend، Rust، Shell، مستندات و هماهنگی نسخه نگه دار. در Workspace مورخ ۲۰۲۶-۱۰-۲۶، `cargo test --locked`، type-check و build فرانت‌اند، type-check و build مستندات و اعتبارسنجی محتوای دوزبانه با موفقیت اجرا شدند. این نتیجه جای تست واقعی ارتباط دو VPS را نمی‌گیرد.
 
 | محیط | پوشش لازم |
 | --- | --- |
@@ -108,10 +117,10 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 
 - **Backend:** Rust/Axum. ثبت Route در `src/routes.rs` است؛ ماژول‌های دامنه شامل Federation، Nginx، Docker، S3، Files، MySQL، Metrics و Maintenance هستند.
 - **Frontend:** React، TypeScript، Vite، Tailwind و اجزای Radix/shadcn. ناوبری در `frontend/src/navigation.ts` و Shell در `frontend/src/App.tsx` است.
-- **Persistence:** SQLite؛ ساخت schema فعلی در `src/main.rs` متمرکز است. کار جدید نباید وابستگی این فایل بزرگ را بیشتر کند.
+- **Persistence:** bootstrap دیتابیس SQLite در `src/main.rs` است؛ migration اپلیکیشن در `src/apps.rs` جدا شده و هنگام راه‌اندازی فراخوانی می‌شود.
 - **دسترسی privileged:** سرویس ARG از Unix socket خصوصی با `arg-privileged.service` حرف می‌زند. هیچ قابلیتی نباید آن را به runner عمومی root تبدیل کند.
 - **Federation:** پروتکل v2 و proxy فضای‌کار API/Terminal دارد. نقش سرور، scopeهای مقصد، مذاکرهٔ capability نسخهٔ ۱، تمدید نشست، چرخش کلید و وضعیت سلامت در فاز ۰۲ افزوده شده‌اند؛ تست واقعی دو VPS همچنان لازم است.
-- **پلتفرم اپ:** در این baseline، Application یکپارچه، runner اپ و Job Engine پایدار Deploy وجود ندارد.
+- **پلتفرم اپ:** فاز ۰۳ Registry اطلاعاتی و UI مالکیت را اضافه کرده است. adapter اجرا، runner اپ و Job Engine استقرار در فازهای بعدی‌اند.
 - **CI:** GitHub Actions برای CI و انتشار مستندات وجود دارد. دستورهای تست محلی در `docs/en/development.md` ثبت شده‌اند.
 - **نسخه‌بندی:** نسخه‌های Rust و Frontend هماهنگ‌اند؛ ابزارهای پایدار و prerelease به‌ترتیب `scripts/bump-version.sh`، `scripts/bump-development-version.sh` و `scripts/check-versioning.sh` هستند.
 

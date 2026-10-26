@@ -56,6 +56,7 @@ type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 mod docker;
+mod apps;
 mod files;
 mod federation;
 mod fast_actions;
@@ -4128,6 +4129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS federation_pairing_codes(code_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,created_by TEXT NOT NULL); CREATE TABLE IF NOT EXISTS federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS federation_proxy_sessions(controller_id TEXT NOT NULL REFERENCES federation_controllers(controller_id) ON DELETE CASCADE,token_hash TEXT NOT NULL UNIQUE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(controller_id,token_hash)); CREATE TRIGGER IF NOT EXISTS federation_proxy_session_cleanup AFTER DELETE ON federation_proxy_sessions BEGIN DELETE FROM sessions WHERE token_hash=OLD.token_hash; END; CREATE TABLE IF NOT EXISTS federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE INDEX IF NOT EXISTS idx_federated_nodes_last_seen ON federated_nodes(last_seen);")?;
     ensure_federation_identity_columns(&db)?;
     ensure_metric_storage_columns(&db)?;
+    apps::migrate(&db)?;
     s3::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;

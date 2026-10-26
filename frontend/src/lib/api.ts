@@ -142,10 +142,10 @@ export function terminalSocketUrl(path: string) {
   return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/${path.replace(/^\/+/, '')}`
 }
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+async function requestApi<T>(url: string, path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
-    response = await fetch(apiUrl(path), {
+    response = await fetch(url, {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       ...init,
@@ -173,6 +173,23 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(report)
   }
   return result as T
+}
+
+export function api<T>(path: string, init?: RequestInit): Promise<T> {
+  return requestApi<T>(apiUrl(path), path, init)
+}
+
+/** Fetch one server's API through the authenticated controller proxy. */
+export function apiForWorkspace<T>(workspaceKey: string, path: string, init?: RequestInit): Promise<T> {
+  const route = path.replace(/^\/+/, '')
+  if (!workspaceKey || workspaceKey === 'all' || isLocalOnlyApiPath(route)) {
+    return Promise.reject(new ApiError({ message: 'این API برای یک سرور مشخص لازم است.', path, status: 400, at: new Date().toISOString() }))
+  }
+  const slash = route.indexOf('?')
+  const endpoint = slash < 0 ? route : route.slice(0, slash)
+  const query = slash < 0 ? '' : route.slice(slash)
+  const url = `/api/nodes/${encodeURIComponent(workspaceKey)}/proxy/${endpoint}${query}`
+  return requestApi<T>(url, path, init)
 }
 export function formatNumber(n: number) {
   return new Intl.NumberFormat('en-US').format(n || 0)
