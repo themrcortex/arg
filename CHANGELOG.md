@@ -10,7 +10,11 @@
 - Add explicit federation roles, scoped read-only/full pairings, capability negotiation, compatibility and health states, expiring workspace sessions, credential rotation, and endpoint validation with DNS pinning.
 - Restrict proxied remote sessions by read/write/terminal scopes and audit writes; read-only pairings cannot rotate their controller credentials.
 - Add a server-owned Application registry with UUIDs, domain and port conflict checks, optimistic edits, soft archive/restore, and honest unknown runtime status.
-- Add a responsive Applications page with read-only multi-VPS aggregation and bilingual registry documentation; source acquisition, builds, and execution remain gated for later phases.
+- Add a responsive Applications page with read-only multi-VPS aggregation and bilingual registry documentation.
+- Add durable deployment jobs with persisted steps, idempotency, leases/heartbeat, restart recovery, admin-only cancellation/retry/SSE, and atomic release-pointer rollback.
+- Support public allowlisted HTTPS Git, bounded ZIP uploads, and allowlisted existing directories; reject traversal, symlinks, special files, suspicious ZIP ratios, and oversized releases, and exclude environment files.
+- Stream ZIP uploads to disk, verify their SHA-256 before extraction, pin fetched Git revisions for retries, and retain five recent releases plus the active/previous versions with audited cleanup.
+- Keep framework build scripts, runtime activation, HTTP health checks, and Nginx cutover disabled until their isolated runtime phases.
 
 ## v0.6.8 — 2026-10-26
 

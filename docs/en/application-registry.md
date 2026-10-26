@@ -14,7 +14,7 @@ Choose **Register application** and enter its management metadata:
 | --- | --- |
 | Name | Unique on the owning VPS while the record is active. |
 | Suggested framework | Laravel, Node.js, Python, WordPress, static, or custom. This is metadata and does not install a runtime. |
-| Source type | Manual, Git repository, archive, Docker, existing directory, or image. Selecting one does not fetch or execute it in this phase. |
+| Source type | Manual, Git repository, archive, Docker, existing directory, or image. Deploy currently accepts public Git, bounded ZIP, and allowlisted existing directories. |
 | Domain | Hostname or IP without a scheme or port. ARG checks active application records and readable Nginx configurations for collisions. |
 | TCP port | Optional host port. ARG checks other records and currently listening sockets in `/proc/net/tcp*`; it does not bind the port or change the firewall. |
 | Desired state | Administrator intent (`running`, `stopped`, or unset). Until a real observer is connected, observed state remains “not observed”. |
@@ -37,9 +37,9 @@ Edits use an optimistic version. If another administrator has changed the record
 - **Observed state: not observed** means no trusted runtime adapter is connected. ARG does not invent CPU/RAM usage or a Running badge.
 - **Live resources not connected** means no process or container has been associated with the record.
 
-## Later capabilities
+## Deployment status
 
-Deployment, builds, runtime installation, secret storage, environments, storage plans, health checks, and automatic reconciliation are disabled in this release. They must not be treated as operational controls. Later phases will add explicit ownership links to Nginx/Docker and persistent jobs with conflict checks and observed results.
+Durable source jobs are now available from a local application card. They record state, steps, actor, idempotency key, and server target; they support cancellation, retry, SSE, and release rollback. They stage files and atomically move a `current` pointer. See [Source deployments & durable jobs](./deployment-jobs.md) for limits and operations. Framework builds, runtime start/stop, environment secrets, health-check HTTP, Nginx activation, resource controls, storage plans, and automatic reconciliation are still disabled; the registry does not claim a site is running.
 
 ## API and schema
 
@@ -48,5 +48,7 @@ Deployment, builds, runtime installation, secret storage, environments, storage 
 - `GET /api/apps/{id}` reads a record.
 - `PUT /api/apps/{id}` performs an optimistic update with `expected_version`.
 - `DELETE /api/apps/{id}` soft-deletes; `POST /api/apps/{id}/restore` restores.
+- `POST /api/apps/{id}/deploy` enqueues Git/directory source; `/deploy/archive` accepts a bounded ZIP.
+- `GET /api/apps/{id}/deploy/jobs` reads persisted job history.
 
 The additive, idempotent migration creates `applications` and `application_services`. Records are scoped by `owner_server_uuid`; `observed_state` defaults to `unknown`, `reconcile_policy` to `manual`, and concurrent edits are guarded by `version`.

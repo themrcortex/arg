@@ -1,0 +1,2099 @@
+use super::*;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use futures_util::stream;
+use futures_util::StreamExt;
+use std::{
+    ffi::OsStr,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::{Component, Path as FsPath, PathBuf},
+    process::Stdio,
+    time::{Duration, SystemTime},
+};
+
+const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RELEASE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 20_000;
+const JOB_ACTIVE: &[&str] = &["queued", "validating", "running", "verifying"];
+
+#[derive(Deserialize, Serialize, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum Source {
+    Git {
+        repository: String,
+        reference: String,
+    },
+    Directory {
+        path: String,
+    },
+    Archive {
+        sha256: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeployRequest {
+    source: Source,
+    idempotency_key: String,
+    #[serde(default)]
+    healthcheck_file: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RetryRequest {
+    idempotency_key: String,
+}
+
+fn deployment_root() -> PathBuf {
+    env::var_os("ARG_DEPLOY_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/arg/deployments"))
+}
+
+pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS deployment_jobs (
+            id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id),
+            owner_server_uuid TEXT NOT NULL, actor TEXT NOT NULL, state TEXT NOT NULL,
+            source_json TEXT NOT NULL, idempotency_key TEXT NOT NULL, healthcheck_file TEXT,
+            attempt INTEGER NOT NULL DEFAULT 1, cancel_requested INTEGER NOT NULL DEFAULT 0,
+            worker_id TEXT, lease_until INTEGER, heartbeat_at INTEGER,
+            release_path TEXT, previous_release TEXT, source_commit TEXT, error_summary TEXT,
+            created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, updated_at INTEGER NOT NULL,
+            UNIQUE(application_id,idempotency_key));
+         CREATE INDEX IF NOT EXISTS deployment_jobs_queue ON deployment_jobs(state,created_at);
+         CREATE UNIQUE INDEX IF NOT EXISTS deployment_one_active_job_per_app ON deployment_jobs(application_id) WHERE state IN ('queued','validating','running','verifying');
+         CREATE INDEX IF NOT EXISTS deployment_jobs_app ON deployment_jobs(application_id,created_at DESC);
+         CREATE TABLE IF NOT EXISTS deployment_job_steps (
+            id INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES deployment_jobs(id) ON DELETE CASCADE,
+            sequence INTEGER NOT NULL, step TEXT NOT NULL, state TEXT NOT NULL, message TEXT NOT NULL,
+            started_at INTEGER NOT NULL, finished_at INTEGER, UNIQUE(job_id,sequence));
+         CREATE TABLE IF NOT EXISTS deployment_releases (
+            id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id),
+            job_id TEXT NOT NULL UNIQUE REFERENCES deployment_jobs(id), path TEXT NOT NULL,
+            state TEXT NOT NULL, source_commit TEXT, created_at INTEGER NOT NULL, activated_at INTEGER);
+         CREATE INDEX IF NOT EXISTS deployment_releases_app ON deployment_releases(application_id,created_at DESC);",
+    )?;
+    let has_source_commit = {
+        let mut statement = db.prepare("PRAGMA table_info(deployment_jobs)")?;
+        let names = statement
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        names.iter().any(|name| name == "source_commit")
+    };
+    if !has_source_commit {
+        db.execute(
+            "ALTER TABLE deployment_jobs ADD COLUMN source_commit TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn id() -> String {
+    let mut bytes = [0_u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let value = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &value[..8],
+        &value[8..12],
+        &value[12..16],
+        &value[16..20],
+        &value[20..]
+    )
+}
+
+fn valid_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
+}
+
+fn valid_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && !value.starts_with('-')
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._/-".contains(&c))
+}
+
+fn valid_repo(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let parts = url.path().trim_matches('/').split('/').collect::<Vec<_>>();
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && matches!(
+            url.host_str(),
+            Some("github.com" | "gitlab.com" | "bitbucket.org" | "codeberg.org")
+        )
+        && parts.len() == 2
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+}
+
+fn valid_relative_file(value: &str) -> bool {
+    if value.is_empty() || value.len() > 512 || value.contains(['\\', '\0']) {
+        return false;
+    }
+    let path = FsPath::new(value);
+    path.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+fn api_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+    error(status, message)
+}
+
+fn ensure_app(db: &Connection, app_id: &str, owner: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    let active: Option<Option<i64>> = db
+        .query_row(
+            "SELECT deleted_at FROM applications WHERE id=?1 AND owner_server_uuid=?2",
+            params![app_id, owner],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    match active {
+        Some(None) => Ok(()),
+        Some(Some(_)) => Err(api_error(
+            StatusCode::CONFLICT,
+            "اپلیکیشن آرشیو شده است؛ پیش از استقرار آن را بازیابی کن.",
+        )),
+        None => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "اپلیکیشن در این VPS پیدا نشد.",
+        )),
+    }
+}
+
+fn insert_job(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id: &str,
+    source: Source,
+    key: String,
+    healthcheck: Option<String>,
+    archive: Option<&[u8]>,
+    archive_file: Option<&FsPath>,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    check_origin(headers)?;
+    if !valid_key(&key) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Idempotency key نامعتبر است.",
+        ));
+    }
+    if healthcheck
+        .as_deref()
+        .is_some_and(|f| !valid_relative_file(f))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "مسیر Health check باید یک مسیر نسبی امن باشد.",
+        ));
+    }
+    if let Some(bytes) = archive {
+        if bytes.is_empty() || bytes.len() > MAX_ARCHIVE_BYTES {
+            return Err(api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ZIP باید غیرخالی و حداکثر ۲۵۶ MiB باشد.",
+            ));
+        }
+    }
+    if let Source::Git {
+        repository,
+        reference,
+    } = &source
+    {
+        if !valid_repo(repository) || !valid_reference(reference) {
+            return Err(api_error(StatusCode::BAD_REQUEST, "مخزن باید HTTPS عمومی از GitHub، GitLab، Bitbucket یا Codeberg و branch/tag/commit معتبر باشد؛ URL دارای credential پذیرفته نمی‌شود."));
+        }
+    }
+    if let Source::Directory { path } = &source {
+        if path.len() > 1024 || path.contains('\0') {
+            return Err(api_error(StatusCode::BAD_REQUEST, "مسیر پوشه معتبر نیست."));
+        }
+    }
+    let (actor, owner) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, headers)?.username;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        ensure_app(&db, app_id, &owner)?;
+        if let Some(existing) = db.query_row(
+            "SELECT id,source_json,state,healthcheck_file FROM deployment_jobs WHERE application_id=?1 AND idempotency_key=?2",
+            params![app_id, key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)),
+        ).optional().map_err(db_error)? {
+            if existing.1 != serde_json::to_string(&source).unwrap_or_default() || existing.3 != healthcheck {
+                return Err(api_error(StatusCode::CONFLICT, "این Idempotency key قبلاً برای منبع دیگری مصرف شده است."));
+            }
+            if let Some(path)=archive_file { let _=fs::remove_file(path); }
+            return read_job(&db, &existing.0).map_err(db_error);
+        }
+        let active: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deployment_jobs WHERE application_id=?1 AND state IN ('queued','validating','running','verifying'))",
+            [app_id], |row| row.get(0),
+        ).map_err(db_error)?;
+        if active {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "برای همین اپلیکیشن یک Job فعال است؛ ابتدا آن را بررسی یا لغو کن.",
+            ));
+        }
+        (actor, owner)
+    };
+    let job_id = id();
+    let at = now();
+    let source_json = serde_json::to_string(&source).map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "منبع Job قابل ذخیره نیست.",
+        )
+    })?;
+    let archive_path = if archive.is_some() || archive_file.is_some() {
+        let dir = deployment_root().join("uploads");
+        fs::create_dir_all(&dir).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "پوشهٔ دریافت آرشیو آماده نشد.",
+            )
+        })?;
+        let path = dir.join(format!("{job_id}.zip"));
+        if let Some(source_path) = archive_file {
+            fs::rename(source_path, &path).map_err(|_| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "فایل موقت ZIP به Job منتقل نشد.",
+                )
+            })?;
+        } else if let Some(archive_bytes) = archive {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)
+                    .map_err(|_| {
+                        api_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "فایل آرشیو موقت ساخته نشد.",
+                        )
+                    })?;
+                f.write_all(archive_bytes).map_err(|_| {
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "آرشیو به‌طور کامل ذخیره نشد.",
+                    )
+                })?;
+                f.sync_all().ok();
+            }
+            #[cfg(not(unix))]
+            fs::write(&path, archive_bytes)
+                .map_err(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "آرشیو ذخیره نشد."))?;
+        }
+        Some(path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    let db = state.lock().unwrap();
+    let inserted = db.execute(
+        "INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,healthcheck_file,created_at,updated_at) VALUES (?1,?2,?3,?4,'queued',?5,?6,?7,?8,?8)",
+        params![job_id,app_id,owner,actor,source_json,key,healthcheck,at],
+    );
+    if let Err(e) = inserted {
+        if let Some(path) = archive_path {
+            let _ = fs::remove_file(path);
+        }
+        return Err(db_error(e));
+    }
+    add_step(
+        &db,
+        &job_id,
+        "queued",
+        "complete",
+        "در صف اجرای محدود سرور قرار گرفت.",
+    )
+    .map_err(db_error)?;
+    audit(
+        &db,
+        &actor,
+        "deployment.enqueue",
+        &format!(
+            "job={job_id}; app={app_id}; source={}",
+            source_kind(&source)
+        ),
+    );
+    read_job(&db, &job_id).map_err(db_error)
+}
+
+fn source_kind(source: &Source) -> &'static str {
+    match source {
+        Source::Git { .. } => "git",
+        Source::Directory { .. } => "directory",
+        Source::Archive { .. } => "archive",
+    }
+}
+
+fn excluded_source_path(path: &FsPath) -> bool {
+    path.components().any(|component| {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        name.to_str().is_some_and(|name| {
+            name == ".git" || name == "node_modules" || name == ".env" || name.starts_with(".env.")
+        })
+    })
+}
+
+fn add_step(
+    db: &Connection,
+    job_id: &str,
+    step: &str,
+    state: &str,
+    message: &str,
+) -> rusqlite::Result<()> {
+    let sequence: i64 = db.query_row(
+        "SELECT COALESCE(MAX(sequence),0)+1 FROM deployment_job_steps WHERE job_id=?1",
+        [job_id],
+        |row| row.get(0),
+    )?;
+    db.execute("INSERT INTO deployment_job_steps(job_id,sequence,step,state,message,started_at,finished_at) VALUES (?1,?2,?3,?4,?5,?6,?6)",params![job_id,sequence,step,state,message,now()])?;
+    Ok(())
+}
+
+fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
+    let row: (String,String,String,String,String,i64,i64,Option<i64>,Option<String>,Option<String>,Option<String>,Option<String>,Option<String>) = db.query_row(
+        "SELECT id,application_id,owner_server_uuid,actor,state,attempt,created_at,started_at,finished_at,release_path,previous_release,source_commit,error_summary FROM deployment_jobs WHERE id=?1",
+        [job_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?)),
+    )?;
+    let mut statement = db.prepare("SELECT sequence,step,state,message,started_at,finished_at FROM deployment_job_steps WHERE job_id=?1 ORDER BY sequence")?;
+    let steps = statement.query_map([job_id], |r| Ok(json!({"sequence":r.get::<_,i64>(0)?,"step":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"message":r.get::<_,String>(3)?,"started_at":r.get::<_,i64>(4)?,"finished_at":r.get::<_,Option<i64>>(5)?})))?.collect::<Result<Vec<_>,_>>()?;
+    Ok(
+        json!({"id":row.0,"application_id":row.1,"owner_server_uuid":row.2,"actor":row.3,"state":row.4,"attempt":row.5,"created_at":row.6,"started_at":row.7,"finished_at":row.8,"release_path":row.9,"previous_release":row.10,"source_commit":row.11,"error":row.12,"steps":steps}),
+    )
+}
+
+fn list_jobs(db: &Connection, app_id: &str, limit: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = db.prepare(
+        "SELECT id FROM deployment_jobs WHERE application_id=?1 ORDER BY created_at DESC LIMIT ?2",
+    )?;
+    let ids = statement
+        .query_map(params![app_id, limit], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    ids.iter().map(|job| read_job(db, job)).collect()
+}
+
+pub(super) async fn create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    Json(input): Json<DeployRequest>,
+) -> ApiResult {
+    Ok(Json(insert_job(
+        &state,
+        &headers,
+        &app_id,
+        input.source,
+        input.idempotency_key,
+        input.healthcheck_file,
+        None,
+        None,
+    )?))
+}
+
+pub(super) async fn upload_archive(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    body: axum::body::Body,
+) -> ApiResult {
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|v| !v.starts_with("application/zip"))
+    {
+        return Err(api_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "فایل آرشیو باید با Content-Type: application/zip ارسال شود.",
+        ));
+    }
+    check_origin(&headers)?;
+    let key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    if !valid_key(&key) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Idempotency key نامعتبر است.",
+        ));
+    }
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        ensure_app(&db, &app_id, &owner)?;
+    }
+    let dir = deployment_root().join("uploads");
+    fs::create_dir_all(&dir).map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "پوشهٔ دریافت ZIP آماده نشد.",
+        )
+    })?;
+    let temp = dir.join(format!("upload-{}.tmp", id()));
+    #[cfg(unix)]
+    let mut file = {
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp)
+            .await
+            .map_err(|_| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "فایل موقت ZIP ساخته نشد.",
+                )
+            })?
+    };
+    #[cfg(not(unix))]
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "فایل موقت ZIP ساخته نشد.",
+            )
+        })?;
+    let mut hasher = Sha256::new();
+    let mut total = 0usize;
+    let mut body_stream = body.into_data_stream();
+    let upload_started = Instant::now();
+    loop {
+        if upload_started.elapsed() > Duration::from_secs(15 * 60) {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(api_error(
+                StatusCode::REQUEST_TIMEOUT,
+                "بارگذاری ZIP از مهلت ۱۵ دقیقه عبور کرد.",
+            ));
+        }
+        let chunk = match tokio::time::timeout(Duration::from_secs(30), body_stream.next()).await {
+            Ok(Some(Ok(data))) => data,
+            Ok(None) => break,
+            Ok(Some(Err(_))) => {
+                drop(file);
+                let _ = fs::remove_file(&temp);
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "جریان بارگذاری ZIP ناقص شد.",
+                ));
+            }
+            Err(_) => {
+                drop(file);
+                let _ = fs::remove_file(&temp);
+                return Err(api_error(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "برای بارگذاری ZIP داده‌ای نرسید؛ دوباره تلاش کن.",
+                ));
+            }
+        };
+        total = total.saturating_add(chunk.len());
+        if total > MAX_ARCHIVE_BYTES {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "ZIP باید حداکثر ۲۵۶ MiB باشد.",
+            ));
+        }
+        hasher.update(&chunk);
+        if file.write_all(&chunk).await.is_err() {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "نوشتن ZIP موقت ناموفق بود.",
+            ));
+        }
+    }
+    if total == 0 {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(api_error(StatusCode::BAD_REQUEST, "فایل ZIP خالی است."));
+    }
+    if file.sync_all().await.is_err() {
+        drop(file);
+        let _ = fs::remove_file(&temp);
+        return Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "ثبت کامل ZIP روی دیسک ناموفق بود.",
+        ));
+    }
+    drop(file);
+    let source = Source::Archive {
+        sha256: hex::encode(hasher.finalize()),
+    };
+    match insert_job(
+        &state,
+        &headers,
+        &app_id,
+        source,
+        key,
+        None,
+        None,
+        Some(&temp),
+    ) {
+        Ok(job) => Ok(Json(job)),
+        Err(problem) => {
+            let _ = fs::remove_file(&temp);
+            Err(problem)
+        }
+    }
+}
+
+pub(super) async fn list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    ensure_app(&db, &app_id, &owner)?;
+    Ok(Json(
+        json!({"jobs":list_jobs(&db,&app_id,50).map_err(db_error)?}),
+    ))
+}
+
+pub(super) async fn get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let job = read_job(&db, &job_id).map_err(db_error)?;
+    if job["owner_server_uuid"] != owner {
+        return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
+    }
+    Ok(Json(job))
+}
+
+pub(super) async fn cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?.username;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let old: Option<String> = db
+        .query_row(
+            "SELECT state FROM deployment_jobs WHERE id=?1 AND owner_server_uuid=?2",
+            params![job_id, owner],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let Some(old) = old else {
+        return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
+    };
+    if !JOB_ACTIVE.contains(&old.as_str()) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "این Job فعال نیست و لغو نمی‌شود.",
+        ));
+    }
+    let at = now();
+    if old == "queued" {
+        db.execute("UPDATE deployment_jobs SET cancel_requested=1,state='cancelled',finished_at=?1,updated_at=?1 WHERE id=?2",params![at,job_id]).map_err(db_error)?;
+        db.execute("UPDATE deployment_job_steps SET state='cancelled',finished_at=?1,message='پیش از شروع از سوی مدیر لغو شد.' WHERE job_id=?2 AND state='running'",params![at,job_id]).map_err(db_error)?;
+        add_step(
+            &db,
+            &job_id,
+            "cancelled",
+            "cancelled",
+            "پیش از شروع از سوی مدیر لغو شد.",
+        )
+        .map_err(db_error)?;
+    } else {
+        db.execute(
+            "UPDATE deployment_jobs SET cancel_requested=1,updated_at=?1 WHERE id=?2",
+            params![at, job_id],
+        )
+        .map_err(db_error)?;
+    }
+    audit(&db, &actor, "deployment.cancel", &format!("job={job_id}"));
+    Ok(Json(
+        json!({"cancel_requested":true,"job":read_job(&db,&job_id).map_err(db_error)?}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RollbackRequest {
+    release_id: String,
+}
+
+pub(super) async fn rollback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    Json(input): Json<RollbackRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if input.release_id.len() != 36
+        || !input
+            .release_id
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "شناسهٔ release معتبر نیست.",
+        ));
+    }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?.username;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    ensure_app(&db, &app_id, &owner)?;
+    let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM deployment_jobs WHERE application_id=?1 AND state IN ('queued','validating','running','verifying'))",[&app_id],|row|row.get(0)).map_err(db_error)?;
+    if active {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "تا پایان یا لغو Job فعال، Rollback هم‌زمان انجام نمی‌شود.",
+        ));
+    }
+    let row: Option<(String, String)> = db
+        .query_row(
+            "SELECT path,state FROM deployment_releases WHERE id=?1 AND application_id=?2",
+            params![input.release_id, app_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let Some((release_path, release_state)) = row else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "release برای این اپلیکیشن پیدا نشد.",
+        ));
+    };
+    if release_state != "previous" {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "فقط release قبلی قابل Rollback است.",
+        ));
+    }
+    let root = deployment_root().join("apps").join(&app_id);
+    let releases = root
+        .join("releases")
+        .canonicalize()
+        .map_err(|_| api_error(StatusCode::CONFLICT, "پوشهٔ release قابل دسترسی نیست."))?;
+    let selected = FsPath::new(&release_path)
+        .canonicalize()
+        .map_err(|_| api_error(StatusCode::CONFLICT, "فایل‌های release قبلی موجود نیستند."))?;
+    if !selected.starts_with(&releases) || !selected.is_dir() {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "مسیر release خارج از پوشهٔ مجاز است.",
+        ));
+    }
+    let current = root.join("current");
+    if current.exists() && !fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "current symlink نیست؛ Rollback برای جلوگیری از جایگزینی فایل واقعی متوقف شد.",
+        ));
+    }
+    let old = fs::read_link(&current)
+        .ok()
+        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()));
+    let temp = root.join(format!(".rollback-{}", id()));
+    std::os::unix::fs::symlink(FsPath::new("releases").join(&input.release_id), &temp)
+        .and_then(|_| fs::rename(&temp, &current))
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("تغییر اتمی release ناموفق بود: {e}"),
+            )
+        })?;
+    let at = now();
+    db.execute("UPDATE deployment_releases SET state=CASE WHEN id=?1 THEN 'active' WHEN id=?2 THEN 'previous' ELSE state END,activated_at=CASE WHEN id=?1 THEN ?3 ELSE activated_at END WHERE application_id=?4 AND state IN ('active','previous')",params![input.release_id,old,at,app_id]).map_err(db_error)?;
+    audit(
+        &db,
+        &actor,
+        "deployment.rollback",
+        &format!("app={app_id}; release={}", input.release_id),
+    );
+    Ok(Json(
+        json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old,"message":"اشاره‌گر release به‌صورت اتمی تغییر کرد؛ اجرای runtime یا healthcheck HTTP انجام نشد."}),
+    ))
+}
+
+pub(super) async fn retry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Json(input): Json<RetryRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?.username;
+    if !valid_key(&input.idempotency_key) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Idempotency key نامعتبر است.",
+        ));
+    }
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let old: (String,String,String,Option<String>,String,Option<String>)=db.query_row("SELECT application_id,owner_server_uuid,source_json,healthcheck_file,state,source_commit FROM deployment_jobs WHERE id=?1",[job_id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(db_error)?.ok_or_else(||api_error(StatusCode::NOT_FOUND,"Job پیدا نشد."))?;
+    if old.1 != owner {
+        return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
+    }
+    if JOB_ACTIVE.contains(&old.4.as_str()) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "Job فعال را نمی‌توان دوباره اجرا کرد.",
+        ));
+    }
+    let mut source: Source = serde_json::from_str(&old.2).map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "تنظیمات منبع Job قابل بازیابی نیست.",
+        )
+    })?;
+    if let (Source::Git { repository, .. }, Some(commit)) = (&source, old.5.as_ref()) {
+        source = Source::Git {
+            repository: repository.clone(),
+            reference: commit.clone(),
+        };
+    }
+    drop(db);
+    let archive_file = if matches!(&source, Source::Archive { .. }) {
+        let path = deployment_root()
+            .join("uploads")
+            .join(format!("{job_id}.zip"));
+        let temp = deployment_root()
+            .join("uploads")
+            .join(format!("retry-{}.tmp", id()));
+        fs::copy(path, &temp).map_err(|_| {
+            api_error(
+                StatusCode::CONFLICT,
+                "ZIP موقت موجود نیست؛ فایل را دوباره بارگذاری کن.",
+            )
+        })?;
+        Some(temp)
+    } else {
+        None
+    };
+    let result = insert_job(
+        &state,
+        &headers,
+        &old.0,
+        source,
+        input.idempotency_key,
+        old.3,
+        None,
+        archive_file.as_deref(),
+    );
+    let mut value = match result {
+        Ok(value) => value,
+        Err(problem) => {
+            if let Some(path) = archive_file {
+                let _ = fs::remove_file(path);
+            }
+            return Err(problem);
+        }
+    };
+    {
+        let db = state.lock().unwrap();
+        let new_id = value["id"].as_str().unwrap_or_default().to_owned();
+        db.execute(
+            "UPDATE deployment_jobs SET attempt=attempt+1 WHERE id=?1",
+            [&new_id],
+        )
+        .map_err(db_error)?;
+        audit(
+            &db,
+            &actor,
+            "deployment.retry",
+            &format!("from={job_id}; to={new_id}"),
+        );
+        value = read_job(&db, &new_id).map_err(db_error)?;
+    }
+    Ok(Json(value))
+}
+
+pub(super) async fn events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+) -> Result<
+    Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, Json<Value>),
+> {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let job = read_job(&db, &job_id).map_err(db_error)?;
+    if job["owner_server_uuid"] != owner {
+        return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
+    }
+    let state = state.clone();
+    let job_id = job_id.clone();
+    let events = stream::unfold(
+        (state, job_id, headers, 0_u64, false),
+        |(state, job_id, headers, revision, done)| async move {
+            if done {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            let result = {
+                let db = state.lock().unwrap();
+                if require_admin(&db, &headers).is_err() {
+                    None
+                } else {
+                    read_job(&db, &job_id).ok()
+                }
+            };
+            let Some(job) = result else {
+                return None;
+            };
+            let next_revision = job["steps"]
+                .as_array()
+                .map_or(revision, |steps| steps.len() as u64);
+            let terminal = matches!(
+                job["state"].as_str(),
+                Some("succeeded" | "failed" | "cancelled")
+            );
+            let event = if next_revision != revision || terminal {
+                Event::default()
+                    .event("job")
+                    .json_data(&job)
+                    .unwrap_or_default()
+            } else {
+                Event::default().comment("heartbeat")
+            };
+            Some((Ok(event), (state, job_id, headers, next_revision, terminal)))
+        },
+    );
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+pub(super) fn start_worker(state: AppState) {
+    tokio::spawn(async move {
+        recover_interrupted(&state);
+        cleanup_stale_upload_temps(&state, &deployment_root());
+        loop {
+            if let Some(job_id) = claim_next(&state) {
+                let heartbeat_state = state.clone();
+                let heartbeat_job = job_id.clone();
+                let heartbeat = tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(8));
+                    loop {
+                        interval.tick().await;
+                        let db = heartbeat_state.lock().unwrap();
+                        let at = now();
+                        let _=db.execute("UPDATE deployment_jobs SET lease_until=?1,heartbeat_at=?2,updated_at=?2 WHERE id=?3 AND state IN ('validating','running','verifying')",params![at+30,at,heartbeat_job]);
+                    }
+                });
+                process_job(state.clone(), job_id).await;
+                heartbeat.abort();
+            } else {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+            }
+        }
+    });
+}
+
+fn cleanup_stale_upload_temps(state: &AppState, root: &FsPath) {
+    let uploads = root.join("uploads");
+    let Ok(entries) = fs::read_dir(uploads) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            continue;
+        }
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|time| SystemTime::now().duration_since(time).ok());
+        if name.starts_with("upload-")
+            && name.ends_with(".tmp")
+            && age.is_some_and(|age| age > Duration::from_secs(60 * 60))
+        {
+            let _ = fs::remove_file(path);
+            continue;
+        }
+        let Some(job_id) = name.strip_suffix(".zip") else {
+            continue;
+        };
+        if !valid_key(job_id) {
+            continue;
+        }
+        let terminal = state
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT state IN ('failed','cancelled') FROM deployment_jobs WHERE id=?1",
+                [job_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if terminal && age.is_some_and(|age| age > Duration::from_secs(7 * 24 * 60 * 60)) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn recover_interrupted(state: &AppState) {
+    recover_interrupted_at(state, &deployment_root());
+}
+
+fn recover_interrupted_at(state: &AppState, root: &FsPath) {
+    let pending = {
+        let db = state.lock().unwrap();
+        db.prepare("SELECT id,application_id,actor,healthcheck_file,cancel_requested FROM deployment_jobs WHERE state IN ('validating','running','verifying')").and_then(|mut s|s.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?))).and_then(|rows|rows.collect::<Result<Vec<_>,_>>())).unwrap_or_default()
+    };
+    for (job, app, actor, healthcheck, cancel_requested) in pending {
+        let app_root = root.join("apps").join(&app);
+        let current = fs::read_link(app_root.join("current")).ok();
+        let expected = FsPath::new("releases").join(&job);
+        let release = app_root.join("releases").join(&job);
+        let activated = current.as_ref() == Some(&expected)
+            && verify_release(&release, healthcheck.as_deref()).is_ok();
+        let db = state.lock().unwrap();
+        let at = now();
+        let _=db.execute("UPDATE deployment_job_steps SET state='interrupted',finished_at=?1,message=message||' (runner restart)' WHERE job_id=?2 AND state='running'",params![at,job]);
+        if activated {
+            let previous:Option<(String,String)>=db.query_row("SELECT id,path FROM deployment_releases WHERE application_id=?1 AND state='active' AND id<>?2 ORDER BY created_at DESC LIMIT 1",params![app,job],|r|Ok((r.get(0)?,r.get(1)?))).optional().ok().flatten();
+            let _=db.execute("UPDATE deployment_releases SET state='retained' WHERE application_id=?1 AND state='previous'",[&app]);
+            let _=db.execute("UPDATE deployment_releases SET state='previous' WHERE application_id=?1 AND state='active' AND id<>?2",params![app,job]);
+            let source_commit: Option<String> = db
+                .query_row(
+                    "SELECT source_commit FROM deployment_jobs WHERE id=?1",
+                    [&job],
+                    |r| r.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            let _=db.execute("INSERT OR IGNORE INTO deployment_releases(id,application_id,job_id,path,state,source_commit,created_at,activated_at) VALUES (?1,?2,?1,?3,'active',?4,?5,?5)",params![job,app,release.to_string_lossy(),source_commit,at]);
+            let _ = db.execute(
+                "UPDATE deployment_releases SET state='active',activated_at=?1 WHERE id=?2",
+                params![at, job],
+            );
+            let _=db.execute("UPDATE deployment_jobs SET state='succeeded',release_path=?1,previous_release=?2,error_summary=NULL,finished_at=?3,updated_at=?3,worker_id=NULL,lease_until=NULL WHERE id=?4",params![release.to_string_lossy(),previous.as_ref().map(|p|p.1.as_str()),at,job]);
+            let _=add_step(&db,&job,"succeeded","succeeded","فعال‌سازی اتمی در لحظهٔ توقف ARG کامل شده بود؛ نتیجه پس از بررسی release بازیابی شد.");
+            audit(
+                &db,
+                &actor,
+                "deployment.recovered_success",
+                &format!("job={job}; app={app}"),
+            );
+        } else if cancel_requested {
+            let _ = fs::remove_dir_all(app_root.join(format!(".staging-{job}")));
+            let _ = fs::remove_dir_all(app_root.join(format!(".work-{job}")));
+            if current.as_ref() != Some(&expected) {
+                let _ = fs::remove_dir_all(&release);
+            }
+            let _=db.execute("UPDATE deployment_jobs SET state='cancelled',finished_at=?1,updated_at=?1,worker_id=NULL,lease_until=NULL WHERE id=?2",params![at,job]);
+            let _ = add_step(
+                &db,
+                &job,
+                "cancelled",
+                "cancelled",
+                "Job پس از راه‌اندازی مجدد ARG لغوشده بازیابی شد.",
+            );
+        } else {
+            let _=db.execute("UPDATE deployment_jobs SET state='queued',worker_id=NULL,lease_until=NULL,heartbeat_at=NULL,updated_at=?1 WHERE id=?2",params![at,job]);
+            let _ = add_step(
+                &db,
+                &job,
+                "recovered",
+                "complete",
+                "Job پس از restart به صف امن برگشت.",
+            );
+        }
+    }
+}
+
+fn claim_next(state: &AppState) -> Option<String> {
+    let db = state.lock().unwrap();
+    let at = now();
+    let worker = id();
+    let selected:Option<String>=db.query_row("SELECT id FROM deployment_jobs WHERE state='queued' AND cancel_requested=0 ORDER BY created_at LIMIT 1",[],|r|r.get(0)).optional().ok().flatten();
+    let job = selected?;
+    let changed=db.execute("UPDATE deployment_jobs SET state='validating',worker_id=?1,lease_until=?2,heartbeat_at=?3,started_at=COALESCE(started_at,?3),updated_at=?3 WHERE id=?4 AND state='queued'",params![worker,at+30,at,job]).ok()?;
+    if changed == 0 {
+        return None;
+    }
+    let _ = add_step(
+        &db,
+        &job,
+        "validating",
+        "running",
+        "بررسی مالکیت برنامه، فضای مقصد و منبع آغاز شد.",
+    );
+    Some(job)
+}
+
+fn progress(state: &AppState, job_id: &str, job_state: &str, step: &str, message: &str) {
+    let db = state.lock().unwrap();
+    let at = now();
+    let _=db.execute("UPDATE deployment_jobs SET state=?1,lease_until=?2,heartbeat_at=?3,updated_at=?3 WHERE id=?4",params![job_state,at+30,at,job_id]);
+    let _=db.execute("UPDATE deployment_job_steps SET state='complete',finished_at=?1 WHERE job_id=?2 AND state='running'",params![at,job_id]);
+    let _ = add_step(&db, job_id, step, "running", message);
+}
+
+fn cancelled(state: &AppState, job_id: &str) -> bool {
+    state
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT cancel_requested FROM deployment_jobs WHERE id=?1",
+            [job_id],
+            |r| r.get::<_, bool>(0),
+        )
+        .unwrap_or(true)
+}
+
+fn finish(state: &AppState, job_id: &str, final_state: &str, message: &str) {
+    let db = state.lock().unwrap();
+    let at = now();
+    let _=db.execute("UPDATE deployment_job_steps SET state=?1,message=?2,finished_at=?3 WHERE job_id=?4 AND state='running'",params![final_state,message,at,job_id]);
+    let _=db.execute("UPDATE deployment_jobs SET state=?1,error_summary=CASE WHEN ?1='failed' THEN ?2 ELSE NULL END,finished_at=?3,updated_at=?3,lease_until=NULL,worker_id=NULL WHERE id=?4",params![final_state,if final_state=="failed"{Some(message)}else{None},at,job_id]);
+    let _ = add_step(&db, job_id, final_state, final_state, message);
+}
+
+async fn process_job(state: AppState, job_id: String) {
+    let record = {
+        let db = state.lock().unwrap();
+        db.query_row("SELECT application_id,owner_server_uuid,source_json,healthcheck_file,cancel_requested FROM deployment_jobs WHERE id=?1",[&job_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,bool>(4)?))).optional().ok().flatten()
+    };
+    let Some((app_id, _owner, source_json, healthcheck, was_cancelled)) = record else {
+        return;
+    };
+    if was_cancelled || cancelled(&state, &job_id) {
+        finish(&state, &job_id, "cancelled", "پیش از شروع لغو شد.");
+        return;
+    }
+    let source: Source = match serde_json::from_str(&source_json) {
+        Ok(s) => s,
+        Err(_) => {
+            finish(&state, &job_id, "failed", "تنظیمات منبع Job خوانده نشد.");
+            return;
+        }
+    };
+    let root = deployment_root();
+    let app_root = root.join("apps").join(&app_id);
+    let releases = app_root.join("releases");
+    let stage = app_root.join(format!(".staging-{job_id}"));
+    let work = app_root.join(format!(".work-{job_id}"));
+    if let Err(e) = fs::create_dir_all(&releases).and_then(|_| fs::create_dir_all(&app_root)) {
+        finish(
+            &state,
+            &job_id,
+            "failed",
+            &format!("فضای استقرار آماده نشد: {e}"),
+        );
+        return;
+    }
+    if ensure_space(&app_root, 64 * 1024 * 1024).is_err() {
+        finish(
+            &state,
+            &job_id,
+            "failed",
+            "فضای آزاد برای استقرار کمتر از 64 MiB است.",
+        );
+        return;
+    }
+    let final_release = releases.join(&job_id);
+    let current = app_root.join("current");
+    let current_link = fs::read_link(&current).ok();
+    if current_link.as_ref() == Some(&FsPath::new("releases").join(&job_id))
+        && verify_release(&final_release, healthcheck.as_deref()).is_ok()
+    {
+        let db = state.lock().unwrap();
+        let at = now();
+        let previous:Option<String>=db.query_row("SELECT path FROM deployment_releases WHERE application_id=?1 AND state='active' AND id<>?2 ORDER BY created_at DESC LIMIT 1",params![app_id,job_id],|r|r.get(0)).optional().ok().flatten();
+        let source_commit: Option<String> = db
+            .query_row(
+                "SELECT source_commit FROM deployment_jobs WHERE id=?1",
+                [&job_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let _=db.execute("UPDATE deployment_releases SET state='retained' WHERE application_id=?1 AND state='previous'",[&app_id]);
+        let _=db.execute("UPDATE deployment_releases SET state='previous' WHERE application_id=?1 AND state='active' AND id<>?2",params![app_id,job_id]);
+        let _=db.execute("INSERT OR IGNORE INTO deployment_releases(id,application_id,job_id,path,state,source_commit,created_at,activated_at) VALUES (?1,?2,?1,?3,'active',?4,?5,?5)",params![job_id,app_id,final_release.to_string_lossy(),source_commit,at]);
+        let _ = db.execute(
+            "UPDATE deployment_releases SET state='active',activated_at=?1 WHERE id=?2",
+            params![at, job_id],
+        );
+        let _ = db.execute(
+            "UPDATE deployment_jobs SET release_path=?1,previous_release=?2 WHERE id=?3",
+            params![final_release.to_string_lossy(), previous, job_id],
+        );
+        drop(db);
+        finish(
+            &state,
+            &job_id,
+            "succeeded",
+            "فعال‌سازی قبلی پس از بررسی release بازیابی شد.",
+        );
+        return;
+    }
+    // A crash after staging rename but before pointer activation leaves an orphan directory.
+    // It is safe to discard because `current` has not selected it.
+    if final_release.exists() {
+        let _ = fs::remove_dir_all(&final_release);
+    }
+    let _ = fs::remove_dir_all(&stage);
+    let _ = fs::remove_dir_all(&work);
+    if let Err(e) = fs::create_dir_all(&stage).and_then(|_| fs::create_dir_all(&work)) {
+        finish(
+            &state,
+            &job_id,
+            "failed",
+            &format!("مسیر staging ساخته نشد: {e}"),
+        );
+        return;
+    }
+    progress(
+        &state,
+        &job_id,
+        "running",
+        "acquiring",
+        "منبع در فضای staging مجزا دریافت یا کپی می‌شود؛ هیچ اسکریپت پروژه اجرا نمی‌شود.",
+    );
+    let source_result = match &source {
+        Source::Git {
+            repository,
+            reference,
+        } => match acquire_git(repository, reference, &work).await {
+            Ok(revision) => {
+                let pinned = Source::Git {
+                    repository: repository.clone(),
+                    reference: revision.clone(),
+                };
+                if let Ok(source_json) = serde_json::to_string(&pinned) {
+                    let db = state.lock().unwrap();
+                    let _=db.execute("UPDATE deployment_jobs SET source_json=?1,source_commit=?2,updated_at=?3 WHERE id=?4",params![source_json,revision,now(),job_id]);
+                }
+                copy_tree(&work, &stage).map(|_| Some(revision))
+            }
+            Err(message) => Err(message),
+        },
+        Source::Directory { path } => acquire_directory(path, &stage).map(|_| None),
+        Source::Archive { sha256 } => {
+            let archive_path = root.join("uploads").join(format!("{job_id}.zip"));
+            verify_archive_digest(&archive_path, &sha256)
+                .and_then(|_| extract_archive(&archive_path, &stage))
+                .map(|_| None)
+        }
+    };
+    let commit = match source_result {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = fs::remove_dir_all(&stage);
+            let _ = fs::remove_dir_all(&work);
+            finish(&state, &job_id, "failed", &message);
+            return;
+        }
+    };
+    let _ = fs::remove_dir_all(&work);
+    if cancelled(&state, &job_id) {
+        let _ = fs::remove_dir_all(&stage);
+        finish(
+            &state,
+            &job_id,
+            "cancelled",
+            "منبع دریافت شد اما پیش از بررسی نهایی لغو شد.",
+        );
+        return;
+    }
+    progress(
+        &state,
+        &job_id,
+        "verifying",
+        "verifying",
+        "ساختار release، فایل Health check و symlinkها بررسی می‌شوند.",
+    );
+    if let Err(message) = verify_release(&stage, healthcheck.as_deref()) {
+        let _ = fs::remove_dir_all(&stage);
+        finish(&state, &job_id, "failed", &message);
+        return;
+    }
+    if cancelled(&state, &job_id) {
+        let _ = fs::remove_dir_all(&stage);
+        finish(
+            &state,
+            &job_id,
+            "cancelled",
+            "پیش از فعال‌سازی لغو شد؛ نسخهٔ جاری تغییری نکرد.",
+        );
+        return;
+    }
+    if let Err(e) = fs::rename(&stage, &final_release) {
+        finish(
+            &state,
+            &job_id,
+            "failed",
+            &format!("انتقال release به مسیر نهایی ناموفق بود: {e}"),
+        );
+        return;
+    }
+    if current.exists() && !fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        finish(
+            &state,
+            &job_id,
+            "failed",
+            "مسیر current symlink نیست؛ فعال‌سازی برای جلوگیری از جایگزینی فایل واقعی متوقف شد.",
+        );
+        let _ = fs::remove_dir_all(&final_release);
+        return;
+    }
+    let previous = fs::read_link(&current)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    progress(
+        &state,
+        &job_id,
+        "verifying",
+        "activating",
+        "release آماده است؛ اشاره‌گر نسخه با rename اتمی فعال می‌شود.",
+    );
+    let link_tmp = app_root.join(format!(".current-{job_id}"));
+    let _ = fs::remove_file(&link_tmp);
+    if let Err(e) = std::os::unix::fs::symlink(FsPath::new("releases").join(&job_id), &link_tmp)
+        .and_then(|_| fs::rename(&link_tmp, &current))
+    {
+        let _ = fs::remove_file(&link_tmp);
+        finish(
+            &state,
+            &job_id,
+            "failed",
+            &format!("فعال‌سازی اتمی انجام نشد: {e}"),
+        );
+        let _ = fs::remove_dir_all(&final_release);
+        return;
+    }
+    let db = state.lock().unwrap();
+    let at = now();
+    let _=db.execute("INSERT OR REPLACE INTO deployment_releases(id,application_id,job_id,path,state,source_commit,created_at,activated_at) VALUES (?1,?2,?1,?3,'active',?4,?5,?5)",params![job_id,app_id,final_release.to_string_lossy(),commit,at]);
+    let _=db.execute("UPDATE deployment_releases SET state='retained' WHERE application_id=?1 AND state='previous'",[&app_id]);
+    let _=db.execute("UPDATE deployment_releases SET state='previous' WHERE application_id=?1 AND id<>?2 AND state='active'",params![app_id,job_id]);
+    let _ = db.execute(
+        "UPDATE deployment_jobs SET release_path=?1,previous_release=?2 WHERE id=?3",
+        params![final_release.to_string_lossy(), previous, job_id],
+    );
+    drop(db);
+    finish(&state,&job_id,"succeeded","release با بررسی ساختار و تغییر اشاره‌گر اتمی آماده شد. اجرای runtime، ساخت framework و اتصال خودکار به Nginx در فازهای بعدی انجام می‌شود.");
+    prune_releases(&state, &app_id);
+    let _ = fs::remove_file(
+        deployment_root()
+            .join("uploads")
+            .join(format!("{job_id}.zip")),
+    );
+}
+
+fn prune_releases(state: &AppState, app_id: &str) {
+    prune_releases_at(state, &deployment_root(), app_id);
+}
+
+fn prune_releases_at(state: &AppState, root: &FsPath, app_id: &str) {
+    let app_root = root.join("apps").join(app_id);
+    let release_root = app_root.join("releases");
+    let Ok(canonical_root) = release_root.canonicalize() else {
+        return;
+    };
+    let current = fs::read_link(app_root.join("current"))
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+        });
+    let entries = {
+        let db = state.lock().unwrap();
+        let Ok(mut statement)=db.prepare("SELECT id,path,state FROM deployment_releases WHERE application_id=?1 ORDER BY created_at DESC,id DESC")else{return};
+        statement
+            .query_map([app_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .unwrap_or_default()
+    };
+    for (index, (release_id, path, state_name)) in entries.into_iter().enumerate() {
+        if index < 5
+            || state_name == "active"
+            || state_name == "previous"
+            || current.as_deref() == Some(release_id.as_str())
+        {
+            continue;
+        }
+        let candidate = FsPath::new(&path);
+        let Ok(canonical) = candidate.canonicalize() else {
+            continue;
+        };
+        if canonical == canonical_root
+            || !canonical.starts_with(&canonical_root)
+            || fs::symlink_metadata(candidate).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            continue;
+        }
+        if fs::remove_dir_all(&canonical).is_ok() {
+            let db = state.lock().unwrap();
+            let _=db.execute("UPDATE deployment_releases SET state='expired' WHERE id=?1 AND application_id=?2 AND state NOT IN ('active','previous')",params![release_id,app_id]);
+            audit(
+                &db,
+                "arg",
+                "deployment.release_prune",
+                &format!("app={app_id}; release={release_id}"),
+            );
+        }
+    }
+}
+
+fn ensure_space(path: &FsPath, needed: u64) -> io::Result<()> {
+    use std::ffi::CString;
+    let c = CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::other("invalid path"))?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let result = unsafe { libc::statvfs(c.as_ptr(), &mut stat) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let available = (stat.f_bavail as u128)
+        .saturating_mul(stat.f_frsize as u128)
+        .min(u64::MAX as u128) as u64;
+    if available < needed {
+        Err(io::Error::new(
+            io::ErrorKind::StorageFull,
+            "insufficient disk space",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn acquire_git(
+    repository: &str,
+    reference: &str,
+    destination: &FsPath,
+) -> Result<String, String> {
+    if !valid_repo(repository) || !valid_reference(reference) {
+        return Err("URL مخزن یا reference مجاز نیست.".into());
+    }
+    fs::create_dir_all(destination).map_err(|e| format!("پوشهٔ Git ساخته نشد: {e}"))?;
+    let run = tokio::process::Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.file.allow=never",
+            "init",
+            "--quiet",
+        ])
+        .current_dir(destination)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+    command_output(run, Duration::from_secs(15), "git init").await?;
+    let remote = tokio::process::Command::new("git")
+        .args(["remote", "add", "origin", repository])
+        .current_dir(destination)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output();
+    command_output(remote, Duration::from_secs(15), "ثبت مخزن").await?;
+    let fetch = tokio::process::Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "protocol.file.allow=never",
+            "-c",
+            "http.followRedirects=false",
+            "fetch",
+            "--depth=1",
+            "--no-tags",
+            "origin",
+            reference,
+        ])
+        .current_dir(destination)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .kill_on_drop(true)
+        .output();
+    command_output_bounded(
+        fetch,
+        Duration::from_secs(180),
+        "دریافت Git",
+        destination,
+        MAX_RELEASE_BYTES,
+    )
+    .await?;
+    let checkout = tokio::process::Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "checkout",
+            "--quiet",
+            "--detach",
+            "FETCH_HEAD",
+        ])
+        .current_dir(destination)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .kill_on_drop(true)
+        .output();
+    command_output_bounded(
+        checkout,
+        Duration::from_secs(30),
+        "انتخاب revision",
+        destination,
+        MAX_RELEASE_BYTES,
+    )
+    .await?;
+    let rev = tokio::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(destination)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .await
+        .map_err(|e| format!("خواندن revision ناموفق بود: {e}"))?;
+    if !rev.status.success() {
+        return Err("commit دریافت‌شده قابل شناسایی نیست.".into());
+    }
+    Ok(String::from_utf8_lossy(&rev.stdout)
+        .trim()
+        .chars()
+        .take(64)
+        .collect())
+}
+
+async fn command_output<F>(future: F, timeout: Duration, label: &str) -> Result<(), String>
+where
+    F: std::future::Future<Output = io::Result<std::process::Output>>,
+{
+    let output = tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| format!("{label} از مهلت زمانی گذشت."))?
+        .map_err(|e| format!("{label} اجرا نشد: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .chars()
+        .take(700)
+        .collect::<String>();
+    Err(format!(
+        "{label} ناموفق بود: {}",
+        stderr.trim().replace('\0', "")
+    ))
+}
+
+async fn command_output_bounded<F>(
+    future: F,
+    timeout: Duration,
+    label: &str,
+    directory: &FsPath,
+    max_bytes: u64,
+) -> Result<(), String>
+where
+    F: std::future::Future<Output = io::Result<std::process::Output>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            output = &mut future => {
+                let output = output.map_err(|e| format!("{label} اجرا نشد: {e}"))?;
+                if output.status.success() {
+                    return Ok(());
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(700)
+                    .collect::<String>();
+                return Err(format!("{label} ناموفق بود: {}", stderr.trim().replace('\0', "")));
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(format!("{label} از مهلت زمانی گذشت."));
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                match bounded_tree_size(directory, max_bytes) {
+                    Ok(size) if size > max_bytes => {
+                        return Err(format!("حجم مخزن Git از سقف {} GiB عبور کرد؛ دریافت متوقف شد.", max_bytes / (1024 * 1024 * 1024)));
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(format!("اندازهٔ دریافت Git کنترل نشد: {error}")),
+                }
+                ensure_space(directory, 64 * 1024 * 1024)
+                    .map_err(|_| "فضای خالی دیسک هنگام دریافت Git به کمتر از 64 MiB رسید.".to_owned())?;
+            }
+        }
+    }
+}
+
+fn bounded_tree_size(root: &FsPath, max_bytes: u64) -> io::Result<u64> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total = 0u64;
+    let mut entries = 0usize;
+    while let Some(directory) = pending.pop() {
+        for item in fs::read_dir(directory)? {
+            let item = item?;
+            entries += 1;
+            if entries > MAX_ARCHIVE_ENTRIES {
+                return Ok(max_bytes.saturating_add(1));
+            }
+            let metadata = fs::symlink_metadata(item.path())?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(item.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+                if total > max_bytes {
+                    return Ok(total);
+                }
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn acquire_directory(path: &str, dest: &FsPath) -> Result<(), String> {
+    let source = PathBuf::from(path)
+        .canonicalize()
+        .map_err(|e| format!("پوشهٔ منبع خوانده نشد: {e}"))?;
+    let allowed = [FsPath::new("/var/www"), FsPath::new("/opt/arg/apps")];
+    if !allowed.iter().any(|root| source.starts_with(root)) {
+        return Err("پوشهٔ موجود باید زیر /var/www یا /opt/arg/apps باشد.".into());
+    }
+    let meta = fs::metadata(&source).map_err(|e| e.to_string())?;
+    if !meta.is_dir() {
+        return Err("منبع موجود باید پوشه باشد.".into());
+    }
+    copy_tree(&source, dest)
+}
+
+fn copy_tree(source: &FsPath, dest: &FsPath) -> Result<(), String> {
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    fn walk(src: &FsPath, dst: &FsPath, count: &mut usize, bytes: &mut u64) -> Result<(), String> {
+        for entry in fs::read_dir(src).map_err(|e| format!("پوشهٔ منبع فهرست نشد: {e}"))?
+        {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            if excluded_source_path(FsPath::new(&name)) {
+                continue;
+            }
+            let meta = fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?;
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "منبع دارای symlink است و برای جلوگیری از خروج از پوشه پذیرفته نشد: {}",
+                    name.to_string_lossy()
+                ));
+            }
+            *count += 1;
+            if *count > MAX_ARCHIVE_ENTRIES {
+                return Err("تعداد فایل‌های منبع از ۲۰٬۰۰۰ بیشتر است.".into());
+            }
+            let target = dst.join(&name);
+            if meta.is_dir() {
+                fs::create_dir(&target).map_err(|e| e.to_string())?;
+                walk(&entry.path(), &target, count, bytes)?
+            } else if meta.is_file() {
+                *bytes = bytes.saturating_add(meta.len());
+                if *bytes > MAX_RELEASE_BYTES {
+                    return Err("حجم فایل‌های release از ۲ GiB بیشتر است.".into());
+                }
+                ensure_space(dst, meta.len().saturating_add(64 * 1024 * 1024))
+                    .map_err(|_| "فضای خالی دیسک برای کپی release کافی نیست.".to_owned())?;
+                fs::copy(entry.path(), &target).map_err(|e| format!("کپی فایل ناموفق بود: {e}"))?;
+                let mode = if meta.mode() & 0o111 != 0 {
+                    0o755
+                } else {
+                    0o644
+                };
+                fs::set_permissions(&target, fs::Permissions::from_mode(mode)).ok();
+            } else {
+                return Err("فایل خاص یا device در منبع پذیرفته نمی‌شود.".into());
+            }
+        }
+        Ok(())
+    }
+    walk(source, dest, &mut count, &mut bytes)
+}
+
+fn extract_archive(archive_path: &FsPath, dest: &FsPath) -> Result<(), String> {
+    let file = fs::File::open(archive_path).map_err(|e| format!("فایل ZIP موقت پیدا نشد: {e}"))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("ZIP معتبر نیست: {e}"))?;
+    if zip.len() > MAX_ARCHIVE_ENTRIES {
+        return Err("ZIP بیش از ۲۰٬۰۰۰ ورودی دارد.".into());
+    }
+    let mut expanded = 0u64;
+    for i in 0..zip.len() {
+        let mut item = zip
+            .by_index(i)
+            .map_err(|e| format!("ورودی ZIP خوانده نشد: {e}"))?;
+        let Some(relative) = item.enclosed_name() else {
+            return Err("مسیر ZIP شامل traversal یا مسیر مطلق است.".into());
+        };
+        if !relative
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return Err("مسیر ZIP معتبر نیست.".into());
+        }
+        if let Some(mode) = item.unix_mode() {
+            if mode & 0o170000 == 0o120000 {
+                return Err("symlink داخل ZIP پذیرفته نمی‌شود.".into());
+            }
+            if ![0o100000, 0o040000].contains(&(mode & 0o170000)) {
+                return Err("فایل خاص داخل ZIP پذیرفته نمی‌شود.".into());
+            }
+        }
+        if excluded_source_path(&relative) {
+            continue;
+        }
+        let size = item.size();
+        expanded = expanded.saturating_add(size);
+        if expanded > MAX_RELEASE_BYTES
+            || (size > 10 * 1024 * 1024 && item.compressed_size().saturating_mul(100) < size)
+        {
+            return Err("ZIP از حد حجم بازشده یا نسبت فشرده‌سازی امن عبور می‌کند.".into());
+        }
+        ensure_space(dest, size.saturating_add(64 * 1024 * 1024))
+            .map_err(|_| "فضای خالی دیسک برای استخراج release کافی نیست.".to_owned())?;
+        let target = dest.join(relative);
+        if item.is_dir() {
+            fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?
+        }
+        let mut out = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| format!("ساخت فایل ZIP ناموفق بود: {e}"))?;
+        let copied =
+            io::copy(&mut item, &mut out).map_err(|e| format!("بازکردن ZIP ناموفق بود: {e}"))?;
+        if copied != size {
+            return Err("اندازهٔ واقعی فایل ZIP با مقدار ثبت‌شده برابر نیست.".into());
+        }
+        #[cfg(unix)]
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).ok();
+    }
+    Ok(())
+}
+
+fn verify_archive_digest(path: &FsPath, expected: &str) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("فایل ZIP موقت پیدا نشد: {e}"))?;
+    if metadata.len() > MAX_ARCHIVE_BYTES as u64 {
+        return Err("آرشیو موقت از سقف اندازه بیشتر است.".into());
+    }
+    let bytes = fs::read(path).map_err(|e| format!("آرشیو موقت خوانده نشد: {e}"))?;
+    if hex::encode(Sha256::digest(&bytes)) != expected {
+        return Err("بررسی صحت آرشیو موقت شکست خورد؛ ZIP را دوباره بارگذاری کن.".into());
+    }
+    Ok(())
+}
+
+fn verify_release(path: &FsPath, healthcheck: Option<&str>) -> Result<(), String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("مسیر release وجود ندارد: {e}"))?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err("release یک پوشهٔ عادی نیست.".into());
+    }
+    if fs::read_dir(path)
+        .map_err(|e| e.to_string())?
+        .next()
+        .is_none()
+    {
+        return Err("منبع خالی است و release فعال نشد.".into());
+    }
+    if let Some(relative) = healthcheck {
+        if !valid_relative_file(relative) {
+            return Err("Health check path ناامن است.".into());
+        }
+        let file = path.join(relative);
+        let meta = fs::symlink_metadata(&file)
+            .map_err(|_| format!("فایل Health check پیدا نشد: {relative}"))?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            return Err("Health check باید فایل معمولی باشد.".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn repo_urls_are_https_public_and_credential_free() {
+        assert!(valid_repo("https://github.com/themrcortex/arg.git"));
+        assert!(!valid_repo("http://github.com/a/b"));
+        assert!(!valid_repo("https://user:secret@github.com/a/b"));
+        assert!(!valid_repo("https://127.0.0.1/a/b"));
+        assert!(!valid_repo("https://github.com/a/b?token=x"));
+    }
+    #[test]
+    fn references_and_health_paths_reject_option_and_traversal() {
+        assert!(valid_reference("release/v1.2"));
+        assert!(!valid_reference("--upload-pack=x"));
+        assert!(!valid_reference("../main"));
+        assert!(valid_relative_file("dist/index.html"));
+        assert!(!valid_relative_file("../../etc/passwd"));
+        assert!(!valid_relative_file("/tmp/a"));
+    }
+    #[test]
+    fn deployment_schema_is_additive_and_idempotent() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        migrate(&db).unwrap();
+        let tables:i64=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'deployment_%'",[],|r|r.get(0)).unwrap();
+        assert_eq!(tables, 3);
+    }
+    #[test]
+    fn zip_extraction_rejects_traversal_and_tree_copy_excludes_secrets() {
+        let root = std::env::temp_dir().join(format!("arg-deploy-test-{}", id()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("index.html"), "ok").unwrap();
+        fs::write(src.join(".env"), "secret").unwrap();
+        copy_tree(&src, &dst).unwrap();
+        assert!(dst.join("index.html").is_file());
+        assert!(!dst.join(".env").exists());
+        let archive_path = root.join("bad.zip");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("../../escape.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"bad").unwrap();
+        zip.finish().unwrap();
+        let result = extract_archive(&archive_path, &root.join("outside"));
+        assert!(result.unwrap_err().contains("traversal"));
+        assert!(!root.parent().unwrap().join("escape.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn git_worktree_size_guard_counts_regular_files_and_skips_symlinks() {
+        let root = std::env::temp_dir().join(format!("arg-deploy-size-{}", id()));
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/payload"), [0u8; 32]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/dev/zero", root.join("outside")).unwrap();
+
+        assert_eq!(bounded_tree_size(&root, 64).unwrap(), 32);
+        assert!(bounded_tree_size(&root, 16).unwrap() > 16);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_requeues_interrupted_job_and_marks_running_step() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        let at = now();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,created_at,updated_at) VALUES('job','app','server','admin','running','{}','key',?1,?1)",[at]).unwrap();
+        db.execute("INSERT INTO deployment_job_steps(job_id,sequence,step,state,message,started_at) VALUES('job',1,'acquiring','running','fetching',?1)",[at]).unwrap();
+        let state = Arc::new(Mutex::new(db));
+        recover_interrupted(&state);
+        let db = state.lock().unwrap();
+        let status: String = db
+            .query_row(
+                "SELECT state FROM deployment_jobs WHERE id='job'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let step: String = db
+            .query_row(
+                "SELECT state FROM deployment_job_steps WHERE job_id='job'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "queued");
+        assert_eq!(step, "interrupted");
+    }
+
+    #[test]
+    fn startup_recognizes_atomic_activation_before_process_crash() {
+        let root = std::env::temp_dir().join(format!("arg-deploy-recover-{}", id()));
+        let app_root = root.join("apps/app");
+        let release = app_root.join("releases/job");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(release.join("index.html"), "ready").unwrap();
+        std::os::unix::fs::symlink(FsPath::new("releases/job"), app_root.join("current")).unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        let at = now();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,created_at,updated_at) VALUES('job','app','server','admin','verifying','{}','key',?1,?1)",[at]).unwrap();
+        let state = Arc::new(Mutex::new(db));
+        recover_interrupted_at(&state, &root);
+        let db = state.lock().unwrap();
+        let status: String = db
+            .query_row(
+                "SELECT state FROM deployment_jobs WHERE id='job'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let releases: i64 = db
+            .query_row(
+                "SELECT count(*) FROM deployment_releases WHERE id='job' AND state='active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "succeeded");
+        assert_eq!(releases, 1);
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn job_enqueue_is_admin_only_idempotent_and_serialized_per_application() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL,deleted_at INTEGER); CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL,expires_at INTEGER NOT NULL,last_seen INTEGER); CREATE TABLE audit(id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);").unwrap();
+        migrate(&db).unwrap();
+        let admin_token = "deploy-admin-session";
+        let viewer_token = "deploy-viewer-session";
+        let at = now();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO settings(key,value) VALUES('federation_server_uuid','server')",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO users(id,username,role,enabled) VALUES(1,'admin','admin',1),(2,'viewer','viewer',1)",[]).unwrap();
+        db.execute(
+            "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?1,1,?3),(?2,2,?3)",
+            params![
+                session_hash(admin_token),
+                session_hash(viewer_token),
+                at + 3600
+            ],
+        )
+        .unwrap();
+        let state = Arc::new(Mutex::new(db));
+        let headers_for = |token: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, "arg.example".parse().unwrap());
+            headers.insert(header::ORIGIN, "https://arg.example".parse().unwrap());
+            headers.insert(
+                header::COOKIE,
+                format!("arg_session={token}").parse().unwrap(),
+            );
+            headers
+        };
+        let source = Source::Directory {
+            path: "/var/www/demo".into(),
+        };
+        let first = insert_job(
+            &state,
+            &headers_for(admin_token),
+            "app",
+            source.clone(),
+            "stable-key".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let second = insert_job(
+            &state,
+            &headers_for(admin_token),
+            "app",
+            source.clone(),
+            "stable-key".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(first["id"], second["id"]);
+        let conflict = insert_job(
+            &state,
+            &headers_for(admin_token),
+            "app",
+            Source::Git {
+                repository: "https://github.com/acme/site".into(),
+                reference: "main".into(),
+            },
+            "stable-key".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(conflict.0, StatusCode::CONFLICT);
+        let concurrent = insert_job(
+            &state,
+            &headers_for(admin_token),
+            "app",
+            source.clone(),
+            "second-key".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(concurrent.0, StatusCode::CONFLICT);
+        let unauthorized = insert_job(
+            &state,
+            &headers_for(viewer_token),
+            "app",
+            source,
+            "viewer-key".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(unauthorized.0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn release_retention_keeps_five_recent_and_active_previous() {
+        let root = std::env::temp_dir().join(format!("arg-release-retention-{}", id()));
+        let app_root = root.join("apps/app");
+        let release_root = app_root.join("releases");
+        fs::create_dir_all(&release_root).unwrap();
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        let mut ids = Vec::new();
+        for index in 0..8 {
+            let job = id();
+            ids.push(job.clone());
+            let release = release_root.join(&job);
+            fs::create_dir_all(&release).unwrap();
+            fs::write(release.join("index.html"), "ok").unwrap();
+            db.execute("INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,created_at,updated_at) VALUES(?1,'app','server','admin','succeeded','{}',?1,?2,?2)",params![job,index+1]).unwrap();
+            let status = if index == 7 {
+                "active"
+            } else if index == 6 {
+                "previous"
+            } else {
+                "retained"
+            };
+            db.execute("INSERT INTO deployment_releases(id,application_id,job_id,path,state,created_at) VALUES(?1,'app',?1,?2,?3,?4)",params![job,release.to_string_lossy(),status,index+1]).unwrap();
+        }
+        std::os::unix::fs::symlink(
+            FsPath::new("releases").join(ids[7].as_str()),
+            app_root.join("current"),
+        )
+        .unwrap();
+        let state = Arc::new(Mutex::new(db));
+        prune_releases_at(&state, &root, "app");
+        let db = state.lock().unwrap();
+        let expired: i64 = db
+            .query_row(
+                "SELECT count(*) FROM deployment_releases WHERE state='expired'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(expired, 3);
+        assert!(!release_root.join(&ids[0]).exists());
+        assert!(!release_root.join(&ids[1]).exists());
+        assert!(release_root.join(&ids[3]).exists());
+        assert!(release_root.join(&ids[6]).exists());
+        assert!(release_root.join(&ids[7]).exists());
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+}

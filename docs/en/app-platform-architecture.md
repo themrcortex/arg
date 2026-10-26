@@ -120,7 +120,7 @@ Every phase must add the tests for the behavior it changes. The final release ma
 - **Persistence:** SQLite bootstrap is in `src/main.rs`; the Application schema migration is isolated in `src/apps.rs` and invoked at startup.
 - **Privileged operations:** ARG service communicates with `arg-privileged.service` over a private Unix socket. No feature may turn this into a generic root command runner.
 - **Federation:** protocol v2 and remote workspace API/terminal proxy are implemented. Phase 02 adds server roles, destination-checked scopes, capability negotiation v1, workspace renewal, credential rotation, and health states; a real two-VPS integration test is still required.
-- **Application platform:** Phase 03 adds a metadata registry and ownership-aware UI. A runtime adapter, app runner, and durable deployment job engine remain future phases.
+- **Application platform:** Phase 03 adds an ownership-aware metadata registry. Phase 04 adds a durable single-worker job engine, bounded Git/ZIP/directory acquisition, release staging, atomic `current` pointer changes, progress history, cancellation, retry, and rollback. Framework builds, app runtimes, HTTP health checks, Nginx cutover, and per-app isolation remain future phases.
 - **CI:** GitHub Actions workflows exist for CI and documentation publishing. Local required checks are documented in `docs/en/development.md`.
 - **Versioning:** Rust and frontend versions are synchronized; stable and prerelease updates use `scripts/bump-version.sh`, `scripts/bump-development-version.sh`, and `scripts/check-versioning.sh`.
 

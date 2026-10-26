@@ -321,7 +321,7 @@ pub(super) async fn list(
     let owner = federation::local_server_uuid(&db).map_err(db_error)?;
     let apps = read_apps(&db, &owner, query.include_deleted).map_err(db_error)?;
     Ok(Json(
-        json!({"server_uuid":owner,"apps":apps,"features":{"deploy":false,"environment_secrets":false,"storage_plans":false,"automatic_reconciliation":false}}),
+        json!({"server_uuid":owner,"apps":apps,"features":{"deploy":true,"environment_secrets":false,"storage_plans":false,"automatic_reconciliation":false}}),
     ))
 }
 

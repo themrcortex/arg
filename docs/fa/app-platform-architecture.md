@@ -120,7 +120,7 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 - **Persistence:** bootstrap دیتابیس SQLite در `src/main.rs` است؛ migration اپلیکیشن در `src/apps.rs` جدا شده و هنگام راه‌اندازی فراخوانی می‌شود.
 - **دسترسی privileged:** سرویس ARG از Unix socket خصوصی با `arg-privileged.service` حرف می‌زند. هیچ قابلیتی نباید آن را به runner عمومی root تبدیل کند.
 - **Federation:** پروتکل v2 و proxy فضای‌کار API/Terminal دارد. نقش سرور، scopeهای مقصد، مذاکرهٔ capability نسخهٔ ۱، تمدید نشست، چرخش کلید و وضعیت سلامت در فاز ۰۲ افزوده شده‌اند؛ تست واقعی دو VPS همچنان لازم است.
-- **پلتفرم اپ:** فاز ۰۳ Registry اطلاعاتی و UI مالکیت را اضافه کرده است. adapter اجرا، runner اپ و Job Engine استقرار در فازهای بعدی‌اند.
+- **پلتفرم اپ:** فاز ۰۳ Registry مالکیت و فاز ۰۴ Job Engine پایدار، دریافت محدود Git/ZIP/پوشه، staging release، جابه‌جایی اتمی `current`، تاریخچهٔ پیشرفت، لغو، retry و rollback را اضافه کرده‌اند. build framework، runtime اپ، HTTP health check، cutover Nginx و ایزوله‌سازی مستقل اپ برای فازهای بعدی‌اند.
 - **CI:** GitHub Actions برای CI و انتشار مستندات وجود دارد. دستورهای تست محلی در `docs/en/development.md` ثبت شده‌اند.
 - **نسخه‌بندی:** نسخه‌های Rust و Frontend هماهنگ‌اند؛ ابزارهای پایدار و prerelease به‌ترتیب `scripts/bump-version.sh`، `scripts/bump-development-version.sh` و `scripts/check-versioning.sh` هستند.
 
