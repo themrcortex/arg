@@ -230,11 +230,27 @@ fn ensure_metric_storage_columns(db: &Connection) -> Result<(), rusqlite::Error>
 }
 
 fn ensure_federation_identity_columns(db: &Connection) -> Result<(), rusqlite::Error> {
+    let mut allow_private_was_added = false;
     for (table, name, definition) in [
         ("federated_nodes", "server_uuid", "TEXT"),
         ("federated_nodes", "public_name", "TEXT NOT NULL DEFAULT ''"),
+        ("federated_nodes", "scopes_json", "TEXT NOT NULL DEFAULT '[\"node.status.read\",\"node.services.read\",\"server.credential.rotate\",\"controller.self_revoke\",\"workspace.read\"]'"),
+        ("federated_nodes", "capabilities_json", "TEXT NOT NULL DEFAULT '[]'"),
+        ("federated_nodes", "compatibility_state", "TEXT NOT NULL DEFAULT 'legacy-read-only'"),
+        ("federated_nodes", "connection_state", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("federated_nodes", "last_error", "TEXT"),
+        ("federated_nodes", "last_check", "INTEGER"),
+        ("federated_nodes", "controller_token_expires_at", "INTEGER"),
+        ("federated_nodes", "workspace_token_expires_at", "INTEGER"),
+        ("federated_nodes", "allow_private_endpoint", "INTEGER NOT NULL DEFAULT 0"),
         ("federation_controllers", "local_label", "TEXT NOT NULL DEFAULT ''"),
         ("federation_controllers", "server_uuid", "TEXT"),
+        ("federation_controllers", "scopes_json", "TEXT NOT NULL DEFAULT '[\"node.status.read\",\"node.services.read\",\"server.identity.read\",\"server.credential.rotate\"]'"),
+        ("federation_controllers", "token_expires_at", "INTEGER"),
+        ("federation_pairing_codes", "scopes_json", "TEXT NOT NULL DEFAULT '[\"workspace.read\"]'"),
+        ("federation_proxy_sessions", "scopes_json", "TEXT NOT NULL DEFAULT '[\"workspace.read\"]'"),
+        ("federation_proxy_sessions", "expires_at", "INTEGER"),
+        ("federation_proxy_sessions", "actor_name", "TEXT NOT NULL DEFAULT ''"),
     ] {
         let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
         let existing: Vec<String> = statement
@@ -244,10 +260,23 @@ fn ensure_federation_identity_columns(db: &Connection) -> Result<(), rusqlite::E
         drop(statement);
         if !existing.iter().any(|column| column == name) {
             db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"))?;
+            if table == "federated_nodes" && name == "allow_private_endpoint" {
+                allow_private_was_added = true;
+            }
         }
+    }
+    if allow_private_was_added {
+        // Existing endpoints were explicitly entered by an administrator before this
+        // opt-in was added. Preserve those pairings while still hard-blocking metadata,
+        // loopback, and link-local targets at connect time.
+        db.execute("UPDATE federated_nodes SET allow_private_endpoint=1", [])?;
     }
     db.execute(
         "UPDATE federation_controllers SET local_label=controller_name WHERE local_label=''",
+        [],
+    )?;
+    db.execute(
+        "UPDATE federation_proxy_sessions SET expires_at=(SELECT expires_at FROM sessions WHERE sessions.token_hash=federation_proxy_sessions.token_hash), actor_name=COALESCE((SELECT controller_name FROM federation_controllers WHERE federation_controllers.controller_id=federation_proxy_sessions.controller_id), '') WHERE expires_at IS NULL OR actor_name=''",
         [],
     )?;
     Ok(())
@@ -4249,15 +4278,19 @@ mod update_progress_tests {
     #[test]
     fn federation_identity_migration_preserves_existing_pairings_and_is_idempotent() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE TABLE federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO federated_nodes VALUES(1,'Europe VPS','https://node.example.test','legacy-node-id','controller',2,10,20); INSERT INTO federation_controllers VALUES(1,'controller','Public Controller Name','hash',10,20,1);").unwrap();
+        db.execute_batch("CREATE TABLE federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE TABLE federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE federation_pairing_codes(code_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,created_by TEXT NOT NULL); CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,expires_at INTEGER); CREATE TABLE federation_proxy_sessions(controller_id TEXT NOT NULL,token_hash TEXT NOT NULL,user_id INTEGER NOT NULL); INSERT INTO federated_nodes VALUES(1,'Europe VPS','https://node.example.test','legacy-node-id','controller',2,10,20); INSERT INTO federation_controllers VALUES(1,'controller','Public Controller Name','hash',10,20,1); INSERT INTO sessions VALUES('legacy-session',9999999999); INSERT INTO federation_proxy_sessions VALUES('controller','legacy-session',1);").unwrap();
         ensure_federation_identity_columns(&db).unwrap();
         ensure_federation_identity_columns(&db).unwrap();
         let (local_label, public_name): (String, String) = db.query_row("SELECT local_label,controller_name FROM federation_controllers WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         let (node_label, node_id): (String, String) = db.query_row("SELECT name,node_id FROM federated_nodes WHERE id=1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (legacy_scope, expires_at, actor_name): (String, i64, String) = db.query_row("SELECT scopes_json,expires_at,actor_name FROM federation_proxy_sessions WHERE token_hash='legacy-session'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
         assert_eq!(local_label, "Public Controller Name");
         assert_eq!(public_name, "Public Controller Name");
         assert_eq!(node_label, "Europe VPS");
         assert_eq!(node_id, "legacy-node-id");
+        assert_eq!(legacy_scope, "[\"workspace.read\"]");
+        assert_eq!(expires_at, 9999999999);
+        assert_eq!(actor_name, "Public Controller Name");
     }
 
     #[test]

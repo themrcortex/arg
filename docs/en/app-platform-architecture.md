@@ -37,6 +37,17 @@ Existing pairings migrate additively without changing their node IDs or revoking
 - The All Servers overview checks each remote on demand, labels failed checks unavailable, and opens an explicit server workspace before management. No operation is rerouted to a different server on failure.
 - The Phase 01 Rust migration and route tests are present. Run them with `cargo test --locked` in an environment with the Rust toolchain.
 
+### Phase 02 implementation status
+
+- Federation roles are `standalone`, `member`, `controller-capable`, and `both`. Role changes require confirmation and are rejected while they would strand paired nodes or controllers.
+- Pairing codes grant either a read-only or full scope set. The destination stores and checks scopes for each controller; the controller also checks the grant before routing a remote request.
+- The destination applies a scope guard to remote workspace sessions. Reads, writes, terminal access, and root-terminal authorization have separate scopes. A legacy session is migrated to read-only scope instead of retaining its former unrestricted admin session.
+- Capability version 1 is exchanged during pairing. Nodes without compatible workspace-proxy or terminal capabilities stay explicitly legacy/read-only and receive `Upgrade Required` for unsupported actions.
+- Controller credentials can be rotated with a pending-secret retry protocol. Workspace sessions expire after 12 hours and are renewed before use. Revocation deletes the controller and its associated remote sessions.
+- Remote calls use HTTPS with certificate verification, redirects disabled, bounded timeouts, DNS resolution checks, and pinned resolved addresses for HTTP requests. Private network targets require explicit opt-in; loopback, link-local, and metadata targets are rejected.
+- The controller records `healthy`, `degraded`, `offline`, `untrusted`, and `incompatible` status plus the last check and a sanitized error. Remote writes are audited at the destination under the paired controller identity.
+- The `development` branch passed Rust tests for role/scope checks, session permission routing, private-address classification, endpoint validation, and additive migrations. A real two-VPS TLS integration run is still required before claiming end-to-end coverage.
+
 ### Vocabulary and ownership
 
 | Term | Meaning |
@@ -58,7 +69,7 @@ An Nginx site or Docker container can be linked to an Application, but must not 
 - “All servers” is an aggregation/read view. A mutation from that view must require an explicit destination.
 - The controller authenticates the user locally, but the destination independently validates the controller credential, actor, capability, scope, and requested operation.
 - Browser code must never receive or persist a raw Federation node token or remote workspace credential.
-- Remote tokens require bounded lifetime or rotation, immediate revocation, replay resistance, endpoint validation, and audit correlation. Long-lived workspace sessions are a migration risk and must be addressed before broad remote mutation APIs are added.
+- Remote tokens have bounded lifetimes or rotation, immediate revocation, endpoint validation, and destination-side audit. Workspace sessions expire after 12 hours and renew through the authenticated controller channel; retryable credential rotation preserves a pending credential on the controller.
 - Protocol negotiation advertises supported capabilities and version ranges. If a capability or safe compatibility cannot be established, the operation is unavailable; do not silently downgrade to a broader operation.
 - Remote requests use bounded payloads/timeouts, idempotency keys for retryable writes, and structured error responses. Streaming must have backpressure and cancellation behavior.
 
@@ -99,7 +110,7 @@ Every phase must add the tests for the behavior it changes. The final release ma
 - **Frontend:** React, TypeScript, Vite, Tailwind, and Radix/shadcn-style components. Navigation is defined in `frontend/src/navigation.ts` and shell behavior in `frontend/src/App.tsx`.
 - **Persistence:** SQLite, with schema/bootstrap code currently centralized in `src/main.rs`; new domain work should reduce coupling rather than expand that file.
 - **Privileged operations:** ARG service communicates with `arg-privileged.service` over a private Unix socket. No feature may turn this into a generic root command runner.
-- **Federation:** protocol v2 and remote workspace API/terminal proxy exist. The current handshake requires exact protocol equality and exposes a fixed capability list; negotiation and scoped authorization remain future work.
+- **Federation:** protocol v2 and remote workspace API/terminal proxy are implemented. Phase 02 adds server roles, destination-checked scopes, capability negotiation v1, workspace renewal, credential rotation, and health states; a real two-VPS integration test is still required.
 - **Application platform:** no unified Application entity, app runner, or durable deployment job engine is present in this baseline.
 - **CI:** GitHub Actions workflows exist for CI and documentation publishing. Local required checks are documented in `docs/en/development.md`.
 - **Versioning:** Rust and frontend versions are synchronized; stable and prerelease updates use `scripts/bump-version.sh`, `scripts/bump-development-version.sh`, and `scripts/check-versioning.sh`.

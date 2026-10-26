@@ -1,8 +1,8 @@
 export type Locale = 'fa' | 'en'
 export type DocPage = { id: string; group: string; title: Record<Locale, string>; summary: Record<Locale, string>; file: string }
 export const groups: Record<Locale, string[]> = {
-  fa: ['شروع کار', 'راهنمای پنل', 'مدیریت سرویس‌ها', 'امنیت و نگهداری', 'توسعه', 'راهنمای نمای کلی و پایش', 'راهنمای سیستم و شبکه', 'راهنمای سایت‌ها و ذخیره‌سازی', 'راهنمای عملیات و مدیریت'],
-  en: ['Getting started', 'Panel guide', 'Service management', 'Security & maintenance', 'Development', 'Dashboard & monitoring guides', 'System & network guides', 'Websites & storage guides', 'Operations & administration guides'],
+  fa: ['شروع کار', 'راهنمای پنل', 'مدیریت سرویس‌ها', 'امنیت و نگهداری', 'توسعه', 'راهنمای نمای کلی و پایش', 'راهنمای سیستم و شبکه', 'راهنمای سایت‌ها و ذخیره‌سازی', 'راهنمای عملیات و مدیریت', 'ارتباط سرورها و فضای‌کار راه‌دور'],
+  en: ['Getting started', 'Panel guide', 'Service management', 'Security & maintenance', 'Development', 'Dashboard & monitoring guides', 'System & network guides', 'Websites & storage guides', 'Operations & administration guides', 'Server federation & remote workspaces'],
 }
 export const pages: DocPage[] = [
   { id: 'overview', group: '0', title: { fa: 'معرفی ARG', en: 'About ARG' }, summary: { fa: 'ARG چیست، برای چه کاری ساخته شده و چه محدودیت‌هایی دارد.', en: 'What ARG does, its architecture, intended use, and current limits.' }, file: 'overview' },
@@ -184,4 +184,8 @@ export const pages: DocPage[] = [
   { id: 'guide-updates-05', group: '8', title: { fa: 'لغو آپدیت در حال اجرا', en: 'Cancelling an active update' }, summary: { fa: 'مراحل، تنظیمات و بررسی نتیجه برای «لغو آپدیت در حال اجرا» در پنل ARG.', en: 'Steps, settings, and verification for “Cancelling an active update” in the ARG panel.' }, file: 'guide-updates-05' },
   { id: 'guide-updates-06', group: '8', title: { fa: 'بازگشت به نسخهٔ قبلی', en: 'Rolling back to the previous version' }, summary: { fa: 'مراحل، تنظیمات و بررسی نتیجه برای «بازگشت به نسخهٔ قبلی» در پنل ARG.', en: 'Steps, settings, and verification for “Rolling back to the previous version” in the ARG panel.' }, file: 'guide-updates-06' },
   { id: 'guide-updates-07', group: '8', title: { fa: 'تازه‌سازی کامل پنل پس از آپدیت', en: 'Hard-refreshing the panel after update' }, summary: { fa: 'مراحل، تنظیمات و بررسی نتیجه برای «تازه‌سازی کامل پنل پس از آپدیت» در پنل ARG.', en: 'Steps, settings, and verification for “Hard-refreshing the panel after update” in the ARG panel.' }, file: 'guide-updates-07' },
+  { id: 'federation', group: '9', title: { fa: 'مدیریت سرورها و اتصال راه‌دور', en: 'Federation & remote servers' }, summary: { fa: 'نقش‌ها، Pairing، scopeها، امنیت، وضعیت اتصال و فضای‌کار راه‌دور.', en: 'Roles, pairing, scopes, security, connection health, and remote workspaces.' }, file: 'federation' },
+  { id: 'guide-nodes-01', group: '9', title: { fa: 'انتخاب نقش سرور و تغییر امن', en: 'Choosing and safely changing a server role' }, summary: { fa: 'معنی نقش‌های Federation و بررسی وابستگی پیش از تغییر.', en: 'Federation roles and dependency checks before changing a role.' }, file: 'guide-nodes-01' },
+  { id: 'guide-nodes-02', group: '9', title: { fa: 'جفت‌سازی سرورها با دسترسی محدود', en: 'Pairing servers with scoped access' }, summary: { fa: 'ساخت کد یک‌بارمصرف، سطح دسترسی، مقصد HTTPS و شبکهٔ خصوصی.', en: 'One-time pairing, access mode, HTTPS endpoint, and private networks.' }, file: 'guide-nodes-02' },
+  { id: 'guide-nodes-03', group: '9', title: { fa: 'بررسی اتصال، چرخش کلید و رفع ناسازگاری', en: 'Health checks, credential rotation, and compatibility' }, summary: { fa: 'وضعیت‌های اتصال، تمدید خودکار نشست و چرخش امن کلید.', en: 'Connection states, workspace renewal, and safe credential rotation.' }, file: 'guide-nodes-03' },
 ]

@@ -7,6 +7,8 @@
 - Give each ARG installation a stable server UUID and synchronize its configurable public name across paired controllers while retaining controller-local labels.
 - Add single/multi-server view preferences and a read-only all-servers overview; route selected workspaces by server identity, keep selections per browser session, and migrate existing numeric selections and legacy pairings safely.
 - Preserve old pairings through additive SQLite migrations and add focused tests for identity migration and workspace-key resolution.
+- Add explicit federation roles, scoped read-only/full pairings, capability negotiation, compatibility and health states, expiring workspace sessions, credential rotation, and endpoint validation with DNS pinning.
+- Restrict proxied remote sessions by read/write/terminal scopes and audit writes; read-only pairings cannot rotate their controller credentials.
 
 ## v0.6.8 — 2026-10-26
 
