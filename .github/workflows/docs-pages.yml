@@ -2,7 +2,7 @@ name: Documentation site
 
 on:
   push:
-    branches: [main]
+    branches: [main, development]
     paths:
       - 'docs/**'
       - 'docs-site/**'
