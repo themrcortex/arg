@@ -9,7 +9,7 @@ import { Badge } from './components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
 import { Input } from './components/ui/input'
-import { api } from './lib/api'
+import { api, terminalSocketUrl } from './lib/api'
 
 type Connection = 'connecting' | 'connected' | 'disconnected' | 'error'
 type TerminalTab = { id: string; name: string; mode: 'user' | 'root' }
@@ -171,10 +171,9 @@ function SessionTerminal({ tab, active, onClose, clipboardNote, setClipboardNote
     terminal.writeln(tab.mode === 'root' ? '\x1b[1;31mARG TERMINAL ROOT — FULL PRIVILEGE\x1b[0m' : '\x1b[38;2;221;164;111mARG SERVER TERMINAL\x1b[0m')
     terminal.writeln(`Session: ${tab.name} · User: ${tab.mode === 'root' ? 'root' : 'arg'} · Starting secure PTY…\r\n`)
 
-    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
     let socket: WebSocket
     try {
-      socket = new WebSocket(`${scheme}//${location.host}/api/terminal${tab.mode === 'root' ? '?mode=root' : ''}`)
+      socket = new WebSocket(terminalSocketUrl(`terminal${tab.mode === 'root' ? '?mode=root' : ''}`))
       socket.binaryType = 'arraybuffer'
       socketRef.current = socket
     } catch {

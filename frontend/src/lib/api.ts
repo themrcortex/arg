@@ -107,10 +107,37 @@ let latestApiFailure: ApiFailureReport | null = null
 export function getLastApiFailure() { return latestApiFailure }
 function recordApiFailure(report: ApiFailureReport) { latestApiFailure = report }
 
+const ACTIVE_NODE_KEY = 'arg.active-workspace-node'
+export function getActiveWorkspaceNode() {
+  try { return window.localStorage.getItem(ACTIVE_NODE_KEY) || '' } catch { return '' }
+}
+export function setActiveWorkspaceNode(id: string) {
+  try { if (id) window.localStorage.setItem(ACTIVE_NODE_KEY, id); else window.localStorage.removeItem(ACTIVE_NODE_KEY) } catch { /* Workspace selection can be unavailable under strict storage policies. */ }
+}
+function isLocalOnlyApiPath(path: string) {
+  const route = path.split('?', 1)[0].replace(/^\/+/, '')
+  return /^(state|setup|login|logout|account(?:\/|$)|nodes(?:\/|$)|federation(?:\/|$))/.test(route)
+}
+export function apiUrl(path: string) {
+  const node = getActiveWorkspaceNode()
+  const route = path.replace(/^\/+/, '')
+  if (!node || isLocalOnlyApiPath(route)) return `/api/${route}`
+  const slash = route.indexOf('?')
+  const endpoint = slash < 0 ? route : route.slice(0, slash)
+  const query = slash < 0 ? '' : route.slice(slash)
+  return `/api/nodes/${encodeURIComponent(node)}/proxy/${endpoint}${query}`
+}
+export function terminalSocketUrl(path: string) {
+  const node = getActiveWorkspaceNode()
+  const suffix = path.includes('?') ? path.slice(path.indexOf('?')) : ''
+  if (node) return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/nodes/${encodeURIComponent(node)}/workspace-terminal${suffix}`
+  return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/${path.replace(/^\/+/, '')}`
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`/api/${path}`, {
+    response = await fetch(apiUrl(path), {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       ...init,

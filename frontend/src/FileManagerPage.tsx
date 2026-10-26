@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Archive, ArrowDownToLine, ArrowUp, Check, Clipboard, ClipboardPaste, Copy, File, FilePlus2, FileText, Folder, FolderPlus, HardDrive, LoaderCircle, Pencil, RefreshCw, Search, Scissors, Settings2, Trash2, Upload, X } from 'lucide-react'
-import { api, type StorageInventory, type StorageVolume } from './lib/api'
+import { api, apiUrl, type StorageInventory, type StorageVolume } from './lib/api'
 import { formatPanelDate, usePanelTimeZone } from './lib/timezone'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
@@ -123,7 +123,7 @@ export function FileManagerPage({ Heading, notify }: { Heading: Heading; notify:
   const download = async (entry: Entry) => {
     setBusy(`download:${entry.path}`); setError('')
     try {
-      const response = await fetch(`/api/files/download?path=${encodeURIComponent(entry.path)}`, { credentials: 'same-origin' })
+      const response = await fetch(apiUrl(`files/download?path=${encodeURIComponent(entry.path)}`), { credentials: 'same-origin' })
       if (!response.ok) { const result = await response.json(); throw new Error(result.error || `HTTP ${response.status}`) }
       const url = URL.createObjectURL(await response.blob())
       const anchor = document.createElement('a'); anchor.href = url; anchor.download = entry.name; anchor.click(); URL.revokeObjectURL(url)

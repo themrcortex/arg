@@ -48,6 +48,8 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/nodes/{id}/status", get(federation::node_status))
         .route("/api/nodes/{id}/services", get(federation::node_services))
         .route("/api/nodes/{id}/services/action", post(federation::node_service_action))
+        .route("/api/nodes/{id}/workspace-terminal", get(federation::proxy_workspace_terminal))
+        .route("/api/nodes/{id}/proxy/{*path}", axum::routing::any(federation::proxy_workspace_api).layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)))
         .route("/api/nodes/{id}", axum::routing::delete(federation::remove_node))
         .route("/api/federation/pair", post(federation::accept_pair))
         .route("/api/federation/status", get(federation::status))

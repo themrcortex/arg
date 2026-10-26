@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ArrowDownToLine, ChevronLeft, ChevronRight, Cloud, Database, ExternalLink, Folder, HardDrive, KeyRound, LoaderCircle, Plus, RefreshCw, ShieldCheck, Trash2, UploadCloud, X } from 'lucide-react'
-import { api, formatBytes, formatNumber } from './lib/api'
+import { api, apiUrl, formatBytes, formatNumber } from './lib/api'
 import { Alert, AlertDescription } from './components/ui/alert'
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -154,7 +154,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
     finally { setWorking(''); if (uploadInput.current) uploadInput.current.value = '' }
   }
 
-  const downloadUrl = (key: string) => selected ? `/api/s3/connections/${selected.id}/objects/download?${new URLSearchParams({ bucket: bucketName, key })}` : '#'
+  const downloadUrl = (key: string) => selected ? apiUrl(`s3/connections/${selected.id}/objects/download?${new URLSearchParams({ bucket: bucketName, key })}`) : '#'
   const selectConnection = (id: number) => { setSelectedId(id); setPage(null) }
   const refreshBucketList = async () => {
     if (!selected) return

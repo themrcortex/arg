@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { AlertTriangle, Archive, CheckCircle2, Clock3, Cpu, Download, HardDrive, MemoryStick, RefreshCw, RotateCcw, Server, ShieldCheck, Trash2, Upload, Wrench } from 'lucide-react'
-import { api, formatBytes, formatNumber, type Dashboard } from './lib/api'
+import { api, apiUrl, formatBytes, formatNumber, type Dashboard } from './lib/api'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
@@ -83,7 +83,7 @@ export function MaintenancePage({ Heading, notify }: Common) {
     }
     setBusy('upload')
     try {
-      const response = await fetch('/api/maintenance/backups/upload', {
+      const response = await fetch(apiUrl('maintenance/backups/upload'), {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/vnd.sqlite3' }, body: file,
       })
@@ -98,7 +98,7 @@ export function MaintenancePage({ Heading, notify }: Common) {
   async function downloadBackup(id: string) {
     setBusy(`download:${id}`)
     try {
-      const response = await fetch(`/api/maintenance/backups/${encodeURIComponent(id)}/download`, { credentials: 'same-origin' })
+      const response = await fetch(apiUrl(`maintenance/backups/${encodeURIComponent(id)}/download`), { credentials: 'same-origin' })
       if (!response.ok) {
         const body = await response.json().catch(() => null) as { error?: string } | null
         throw new Error(body?.error || `HTTP ${response.status}`)
