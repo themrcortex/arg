@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Activity, Cpu, MemoryStick, RefreshCw, Save } from 'lucide-react'
-import { api, formatBytes, formatNumber } from '../lib/api'
+import { api, ApiError, formatBytes, formatNumber, type ApiDiagnostic } from '../lib/api'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
@@ -16,6 +16,7 @@ type RuntimeResponse = {
   memory_current_bytes?: number | null
   measurement_error?: string | null
   sampled_at?: number
+  diagnostics?: ApiDiagnostic[]
 }
 type ServiceOption = { unit: string; state: string; description: string }
 
@@ -28,12 +29,14 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [errorDiagnostic, setErrorDiagnostic] = useState<ApiDiagnostic | undefined>()
 
   const refresh = useCallback(async () => {
     void api<{ services: ServiceOption[] }>('services').then((result) => setServices(result.services || [])).catch(() => setServices([]))
     try {
       const result = await api<RuntimeResponse>(`nginx/sites/${encodeURIComponent(siteName)}/runtime`)
       setRuntime(result)
+      setErrorDiagnostic(undefined)
       if (result.configured) {
         setUnit(result.unit || '')
         setCpu(result.cpu_quota_percent == null ? '' : String(result.cpu_quota_percent))
@@ -42,6 +45,7 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
       setError('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'مصرف سرویس خوانده نشد.')
+      setErrorDiagnostic(cause instanceof ApiError ? cause.diagnostic : undefined)
     } finally { setLoading(false) }
   }, [siteName])
 
@@ -51,9 +55,11 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
     try {
       const result = await api<RuntimeResponse>(`nginx/sites/${encodeURIComponent(siteName)}/runtime`)
       setRuntime(result)
+      setErrorDiagnostic(undefined)
       setError('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'مصرف سرویس خوانده نشد.')
+      setErrorDiagnostic(cause instanceof ApiError ? cause.diagnostic : undefined)
     }
   }, [siteName])
 
@@ -61,7 +67,7 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
     if (!runtime?.configured) return
     const timer = window.setInterval(() => {
       if (!document.hidden) void refreshRuntime()
-    }, 15000)
+  }, 10000)
     return () => window.clearInterval(timer)
   }, [runtime?.configured, refreshRuntime])
 
@@ -78,20 +84,27 @@ export function NginxRuntimePanel({ siteName, notify }: { siteName: string; noti
       })
       notify('محدودیت‌های systemd ذخیره شد؛ این سقف‌ها روی کل سرویس انتخاب‌شده اعمال می‌شوند.')
       await refresh()
-    } catch (cause) { notify(cause instanceof Error ? cause.message : 'ذخیرهٔ محدودیت‌ها ناموفق بود.') }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'ذخیرهٔ محدودیت‌ها ناموفق بود.'
+      setError(message)
+      setErrorDiagnostic(cause instanceof ApiError ? cause.diagnostic : undefined)
+      notify(message)
+    }
     finally { setBusy(false) }
   }
 
   return <section className="space-y-4 rounded-xl border border-white/10 bg-background/35 p-4">
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h3 className="flex items-center gap-2 text-sm font-semibold text-white"><Activity size={15} className="text-primary"/>مصرف و سقف منابع برنامه</h3><p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">برای CPU و RAM باید برنامهٔ سایت در یک سرویس systemd جدا اجرا شود. این تنظیم روی کل سرویس اعمال می‌شود؛ اگر چند سایت از PHP-FPM مشترک استفاده کنند، محدودیت روی همهٔ آن‌ها اثر می‌گذارد.</p></div>
+      <div><h3 className="flex items-center gap-2 text-sm font-semibold text-white"><Activity size={15} className="text-primary"/>مصرف و سقف منابع برنامه</h3><p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">عدد CPU/RAM فقط وقتی مستقل و معتبر است که برنامه در سرویس systemd اختصاصی اجرا شود. Nginx و PHP-FPM مشترک مصرف چند سایت را با هم نشان می‌دهند و قابل تفکیک نیستند.</p></div>
       <Button size="sm" variant="outline" disabled={loading || busy} onClick={() => { setLoading(true); void refresh() }}><RefreshCw size={14} className={loading ? 'animate-spin' : ''}/>خواندن مصرف</Button>
     </div>
     {loading ? <Skeleton className="h-20"/> : <>
-      {error && <p role="status" className="rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-xs text-amber-100">{error}</p>}
+      {error && <div role="status" className="rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-xs text-amber-100"><p>{error}</p>{errorDiagnostic && <details className="mt-2 rounded-md border border-amber-100/10 p-2"><summary className="cursor-pointer">جزئیات خطای فنی و مقدار parse‌نشده</summary><pre dir="auto" className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-5">{JSON.stringify(errorDiagnostic, null, 2)}</pre></details>}</div>}
       {runtime?.configured && runtime.measurement_error && <p role="status" className="rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-xs leading-5 text-amber-100">{runtime.measurement_error}</p>}
+      {!!runtime?.diagnostics?.length && <details className="rounded-lg border border-white/10 bg-background/35 p-3"><summary className="cursor-pointer text-xs text-muted-foreground">جزئیات مقادیر دریافتی از systemd که قابل تفسیر نبودند ({runtime.diagnostics.length})</summary><pre dir="auto" className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-black/20 p-2 font-mono text-[10px] leading-5 text-muted-foreground">{JSON.stringify(runtime.diagnostics, null, 2)}</pre></details>}
+      {!runtime?.configured && <div role="status" className="rounded-lg border border-amber-300/15 bg-amber-300/[.035] p-3 text-xs leading-5 text-amber-100">برای این سایت هنوز سرویس برنامه انتخاب نشده، بنابراین عدد مصرف به‌صورت ساختگی نمایش داده نمی‌شود. سرویس واقعی همین برنامه را انتخاب کن؛ بعد از دریافت دو نمونهٔ CPU، مصرف زنده نمایش داده می‌شود. سرویس‌های مشترک مثل Nginx و PHP-FPM برای اندازه‌گیری مستقل این سایت مناسب نیستند.</div>}
       {runtime?.configured && <div className="grid gap-2 sm:grid-cols-3">
-        <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Cpu size={14}/>CPU فعلی سرویس</div><div className="mt-2 font-mono text-lg text-white" dir="ltr">{runtime.cpu_percent == null ? 'در حال نمونه‌گیری…' : `${formatNumber(Math.round(runtime.cpu_percent * 10) / 10)}%`}</div><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{runtime.cpu_percent == null ? 'نمونه‌گیری خودکار هر 15 ثانیه انجام می‌شود.' : `سقف ثبت‌شده: ${runtime.cpu_quota_percent == null ? 'بدون سقف' : `${formatNumber(runtime.cpu_quota_percent)}%`}`}</p></div>
+        <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><Cpu size={14}/>CPU فعلی سرویس</div><div className="mt-2 font-mono text-lg text-white" dir="ltr">{runtime.cpu_percent == null ? 'در حال نمونه‌گیری…' : `${formatNumber(Math.round(runtime.cpu_percent * 10) / 10)}%`}</div><p className="mt-1 text-[10px] leading-4 text-muted-foreground">{runtime.cpu_percent == null ? 'نمونه‌گیری اولیه انجام می‌شود؛ به‌روزرسانی مصرف هر ۱۰ ثانیه است.' : `سقف ثبت‌شده: ${runtime.cpu_quota_percent == null ? 'بدون سقف' : `${formatNumber(runtime.cpu_quota_percent)}%`}`}</p></div>
         <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="flex items-center gap-2 text-xs text-muted-foreground"><MemoryStick size={14}/>RAM فعلی سرویس</div><div className="mt-2 font-mono text-lg text-white" dir="ltr">{runtime.memory_current_bytes == null ? '—' : formatBytes(runtime.memory_current_bytes)}</div><p className="mt-1 text-[10px] text-muted-foreground">سقف: {runtime.memory_max_bytes == null ? 'بدون سقف' : formatBytes(runtime.memory_max_bytes)}</p></div>
         <div className="rounded-lg border border-white/[.07] bg-card/60 p-3"><div className="text-xs text-muted-foreground">واحد systemd متصل</div><div dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{runtime.unit}</div><p className="mt-1 text-[10px] text-muted-foreground">خوانده‌شده از cgroup سرویس</p></div>
       </div>}

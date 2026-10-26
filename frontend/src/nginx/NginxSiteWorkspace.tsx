@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Activity, ArrowRight, Globe, Info, Pencil, Power, Trash2 } from 'lucide-react'
+import { Globe, Info, Pencil, Power, Trash2 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
 
@@ -8,7 +8,6 @@ type Props = {
   description?: string
   enabled: boolean
   maintenanceEnabled?: boolean
-  onBack: () => void
   onMetadata: () => void
   onEdit: () => void
   onToggle: () => void
@@ -23,15 +22,11 @@ const sections = [
   ['nginx-site-repository', 'Git و گزارش‌ها'],
 ] as const
 
-export function NginxSiteWorkspace({ name, description, enabled, maintenanceEnabled, onBack, onMetadata, onEdit, onToggle, onDelete, children }: Props) {
+export function NginxSiteWorkspace({ name, description, enabled, maintenanceEnabled, onMetadata, onEdit, onToggle, onDelete, children }: Props) {
   return <main className="space-y-5" aria-label={`مدیریت سایت ${name}`}>
-    <div className="flex items-center justify-between gap-3">
-      <Button size="sm" variant="outline" onClick={onBack}><ArrowRight size={14}/>بازگشت به فهرست سایت‌ها</Button>
-      <span className="flex items-center gap-2 text-[11px] text-muted-foreground"><Activity size={13}/>محیط مدیریت اختصاصی سایت</span>
-    </div>
     <section className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-primary/20 bg-primary/[.045] p-5">
       <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2"><Globe size={18} className="text-primary"/><h2 dir="ltr" className="break-all font-mono text-lg font-bold text-white">{name}</h2><Badge variant={enabled ? 'success' : 'outline'}>{enabled ? 'روشن' : 'خاموش'}</Badge>{maintenanceEnabled && <Badge variant="warning">حالت تعمیرات</Badge>}</div>
+        <div className="flex flex-wrap items-center gap-2"><Globe size={18} className="text-primary"/><h2 dir="ltr" className="break-all font-mono text-lg font-bold text-white">{name}</h2><Badge variant={enabled ? 'success' : 'outline'}>{enabled ? 'روشن در Nginx' : 'خاموش در Nginx'}</Badge><Badge variant={maintenanceEnabled ? 'warning' : 'outline'}>تعمیرات: {maintenanceEnabled ? 'فعال' : 'خاموش'}</Badge></div>
         <p className="mt-2 text-xs leading-5 text-muted-foreground">{description || 'توضیحی برای این سایت ثبت نشده است.'}</p>
         <p dir="ltr" className="mt-2 break-all font-mono text-[11px] text-muted-foreground">/etc/nginx/sites-available/{name}</p>
       </div>

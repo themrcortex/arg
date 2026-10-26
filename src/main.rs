@@ -3723,15 +3723,16 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         // Query only the counters used by the UI. Some systemd releases reject
         // the quota property over D-Bus even though the cgroup counters work.
         command.args(["show", "--no-pager", "--property=CPUUsageNSec", "--property=MemoryCurrent", "--property=ControlGroup", "--property=LoadState", unit]);
-        let (show_ok, output) = command_result(&mut command).unwrap_or((false, String::new()));
+        let (show_ok, output) = command_result(&mut command).unwrap_or_else(|error| (false, error));
         let values: HashMap<String, String> = if show_ok {
             output.lines().filter_map(|line| line.split_once('=')).map(|(key,value)|(key.trim().to_owned(),value.trim().to_owned())).collect()
         } else { HashMap::new() };
         if values.get("LoadState").is_some_and(|value| value == "not-found") {
             return json!({"ok":false,"error":"سرویس انتخاب‌شده در systemd پیدا نشد. نام سرویس برنامهٔ همین سایت را بررسی کن."});
         }
-        let mut cpu_usage_ns = values.get("CPUUsageNSec").and_then(|v| parse_systemd_u64(v));
-        let mut memory_current_bytes = values.get("MemoryCurrent").and_then(|v| parse_systemd_u64(v));
+        let mut diagnostics = Vec::new();
+        let mut cpu_usage_ns = values.get("CPUUsageNSec").and_then(|v| parse_systemd_u64_field("CPUUsageNSec", v, &mut diagnostics));
+        let mut memory_current_bytes = values.get("MemoryCurrent").and_then(|v| parse_systemd_u64_field("MemoryCurrent", v, &mut diagnostics));
         let mut measurement_error = None;
         if cpu_usage_ns.is_none() || memory_current_bytes.is_none() {
             let cgroup = values.get("ControlGroup").filter(|path| valid_control_group_path(path))
@@ -3750,7 +3751,10 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
                 "ارتباط با systemd برای خواندن مصرف برقرار نشد و cgroup فعالی هم برای این سرویس پیدا نشد. فعال‌بودن سرویس را بررسی کن."
             });
         }
-        return json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":cpu_usage_ns,"memory_current_bytes":memory_current_bytes,"measurement_error":measurement_error}});
+        if !show_ok && !output.trim().is_empty() {
+            diagnostics.push(json!({"code":"SYSTEMD_SHOW_FAILED","source":"systemctl show","unit":unit,"raw":truncate_diagnostic(&output, 1200),"expected":"systemctl show should return key=value properties for an existing service"}));
+        }
+        return json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":cpu_usage_ns,"memory_current_bytes":memory_current_bytes,"measurement_error":measurement_error,"diagnostics":diagnostics}});
     }
     if action == "service-limits" {
         let Some(unit) = request["unit"].as_str().filter(|u| valid_service_unit(u)) else {
@@ -3775,8 +3779,16 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         command.args(["set-property", unit, "CPUAccounting=yes", "MemoryAccounting=yes", &cpu_property, &memory_property]);
         return match command_result(&mut command) {
             Ok((true, output)) => json!({"ok":true,"stdout":output}),
-            Ok((false, output)) => json!({"ok":false,"error":output}),
-            Err(error) => json!({"ok":false,"error":error}),
+            Ok((false, output)) => {
+                let parse_error = output.to_ascii_lowercase().contains("expected pattern");
+                let raw = truncate_diagnostic(&output, 1200);
+                json!({
+                    "ok":false,
+                    "error":format!("systemd محدودیت منابع را نپذیرفت. واحد: {unit}؛ مقدار CPU: {cpu_property}؛ مقدار RAM: {memory_property}؛ پاسخ خام: {raw}"),
+                    "diagnostic":{"code":if parse_error {"SYSTEMD_PROPERTY_PARSE_FAILED"} else {"SYSTEMD_SET_PROPERTY_FAILED"},"source":"systemctl set-property","operation":"service-limits","unit":unit,"fields":[{"name":"CPUQuota","value":cpu_property,"expected":"درصد CPU مانند 75%"},{"name":"MemoryMax","value":memory_property,"expected":"عدد بایت یا infinity"}],"raw":raw}
+                })
+            },
+            Err(error) => json!({"ok":false,"error":format!("اجرای systemctl set-property برای {unit} ناموفق بود: {error}"),"diagnostic":{"code":"SYSTEMD_COMMAND_FAILED","source":"systemctl set-property","operation":"service-limits","unit":unit,"raw":truncate_diagnostic(&error, 1200)}}),
         };
     }
     let Some(operation) = request["operation"].as_str() else {
@@ -3863,6 +3875,27 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
 
 fn parse_systemd_u64(value: &str) -> Option<u64> {
     value.trim().parse::<u64>().ok().filter(|value| *value != u64::MAX)
+}
+
+fn parse_systemd_u64_field(field: &str, raw: &str, diagnostics: &mut Vec<Value>) -> Option<u64> {
+    let value = raw.trim();
+    match value.parse::<u64>() {
+        Ok(number) if number != u64::MAX => Some(number),
+        Ok(_) => {
+            diagnostics.push(json!({"code":"SYSTEMD_COUNTER_UNAVAILABLE","source":"systemctl show","field":field,"raw":value,"expected":"عدد صحیح بدون علامت در واحد نانوثانیه یا بایت","hint":"این مقدار نشانگر ناموجود systemd است و مصرف قطعی ارائه نمی‌کند."}));
+            None
+        }
+        Err(_) => {
+            diagnostics.push(json!({"code":"SYSTEMD_COUNTER_PARSE_FAILED","source":"systemctl show","field":field,"raw":value,"expected":"عدد صحیح بدون علامت؛ رشتهٔ دریافتی قابل تبدیل به عدد نبود."}));
+            None
+        }
+    }
+}
+
+fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
+    let mut result: String = value.chars().take(max_chars).collect();
+    if value.chars().count() > max_chars { result.push_str("… [بقیهٔ متن حذف شد]"); }
+    result
 }
 
 fn valid_control_group_path(path: &str) -> bool {
@@ -4261,6 +4294,16 @@ mod update_progress_tests {
         assert!(super::valid_control_group_path("/system.slice/customer-app.service"));
         assert!(!super::valid_control_group_path("/system.slice/../../etc"));
         assert!(!super::valid_control_group_path("relative/path"));
+    }
+
+    #[test]
+    fn systemd_parse_failure_keeps_the_raw_value_and_expected_type() {
+        let mut diagnostics = Vec::new();
+        assert_eq!(super::parse_systemd_u64_field("MemoryCurrent", "not-a-number", &mut diagnostics), None);
+        assert_eq!(diagnostics[0]["field"], "MemoryCurrent");
+        assert_eq!(diagnostics[0]["raw"], "not-a-number");
+        assert!(diagnostics[0]["expected"].as_str().unwrap().contains("عدد صحیح"));
+        assert_eq!(super::truncate_diagnostic("abcdef", 3), "abc… [بقیهٔ متن حذف شد]");
     }
 
     #[test]

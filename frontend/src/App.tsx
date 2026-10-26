@@ -46,6 +46,7 @@ import { FileManagerPage } from './FileManagerPage'
 import { MaintenancePage } from './MaintenancePage'
 import { MysqlPage } from './MysqlPage'
 import { NodesPage } from './NodesPage'
+import { BugReportPage } from './BugReportPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
@@ -54,7 +55,7 @@ import changelog from '../../CHANGELOG.md?raw'
 const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
 const notifyUser = (message: string) => {
-  if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد/.test(message)) toast.error(message)
+  if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد|نپذیرفت|failed|error|invalid|could not|unable/i.test(message)) toast.error(message)
   else toast.success(message)
 }
 
@@ -993,10 +994,10 @@ export default function App() {
           <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'سرور و شبکه', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall'].includes(item.id)) },
+              { title: 'سرور و شبکه', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nodes'].includes(item.id)) },
               { title: 'سایت‌ها و ذخیره‌سازی', pages: allowedPages.filter((item) => ['nginx', 'docker', 'files', 's3'].includes(item.id)) },
               { title: 'عملیات سرور', pages: allowedPages.filter((item) => ['terminal', 'packages', 'services', 'mysql', 'maintenance'].includes(item.id)) },
-              { title: 'مدیریت ARG', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account'].includes(item.id)) },
+              { title: 'مدیریت ARG', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account', 'bug-report'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><TooltipProvider delayDuration={220}><div className="space-y-1">{section.pages.map((item) => {
               const button = <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} aria-label={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>
               return sidebarCollapsed ? <Tooltip key={item.id}><TooltipTrigger asChild>{button}</TooltipTrigger><TooltipContent side="left" align="center">{item.label}</TooltipContent></Tooltip> : button
@@ -1048,6 +1049,7 @@ export default function App() {
             )}
             {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} panelTimeZone={panelTimeZone} onTimeZoneChange={setPanelTimeZone} />}
             {currentPage === 'account' && <AccountPage Heading={PageHeading} user={user} setUser={(next) => setUser(next)} logout={logout} notify={notifyUser} />}
+            {currentPage === 'bug-report' && <BugReportPage Heading={PageHeading} notify={notifyUser} version={update.local_version} commit={update.local} page={currentPage} />}
             <footer className="arg-page-footer mt-12 flex flex-wrap items-center justify-between gap-3 border-t border-border/70 pt-6 text-xs text-muted-foreground">
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>

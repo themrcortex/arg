@@ -222,6 +222,7 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/nginx/domains/check", get(nginx::check_nginx_domains))
         .route("/api/nginx/status", get(nginx::nginx_status))
+        .route("/api/nginx/firewall", get(nginx::get_nginx_firewall_setting).put(nginx::update_nginx_firewall_setting))
         .route("/api/nginx/files", get(nginx::api_nginx_browse_files))
         .route("/api/nginx/action", post(nginx::nginx_action))
         .route(

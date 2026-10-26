@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Activity, AlertTriangle, Database, Eye, EyeOff, KeyRound, LoaderCircle, Play, RefreshCw, ShieldCheck, UserRound, Wrench, Save, Trash2, LockKeyhole, UnlockKeyhole, Gauge, Settings2, Plus, TerminalSquare } from 'lucide-react'
 import { api } from './lib/api'
+import { cachedRequest } from './lib/heavy-cache'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
@@ -65,9 +66,9 @@ export function MysqlPage({ Heading, notify }: Common) {
     setConfirmation('')
   }
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = true) => {
     setLoading(true)
-    try { setStatus(await api<MysqlStatus>('mysql/status')) }
+    try { setStatus(await cachedRequest('mysql-status', () => api<MysqlStatus>('mysql/status'), 15000, force)) }
     catch (cause) { notify(`خطا: ${cause instanceof Error ? cause.message : 'وضعیت MySQL دریافت نشد.'}`) }
     finally { setLoading(false) }
   }, [notify])
@@ -76,7 +77,7 @@ export function MysqlPage({ Heading, notify }: Common) {
     void api<{ authorized: boolean }>('mysql/access').then(async (result) => {
       if (!alive) return
       setAuthorized(result.authorized)
-      if (result.authorized) await refresh()
+      if (result.authorized) await refresh(false)
       else setLoading(false)
     }).catch((cause) => { if (alive) { setLoading(false); notify(`خطا: ${cause instanceof Error ? cause.message : 'بررسی دسترسی MySQL ناموفق بود.'}`) } })
       .finally(() => { if (alive) setCheckingAccess(false) })

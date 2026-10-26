@@ -4,6 +4,7 @@ use std::os::unix::fs::FileTypeExt;
 const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
 static NGINX_OPERATION_LOCK: Mutex<()> = Mutex::new(());
+static NGINX_CONFIG_TEST_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
 
 #[derive(Deserialize)]
 pub(super) struct NginxSiteContentInput {
@@ -32,6 +33,10 @@ pub(super) struct NginxMaintenanceSecretInput {
 #[derive(Deserialize)]
 pub(super) struct NginxActionInput {
     action: String,
+}
+#[derive(Deserialize)]
+pub(super) struct NginxFirewallInput {
+    enabled: bool,
 }
 #[derive(Deserialize)]
 pub(super) struct NginxCreateSiteInput {
@@ -106,20 +111,6 @@ pub(super) struct NginxBrowseQuery {
     path: Option<String>,
 }
 
-fn nginx_manager_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
-    let response = privileged_request(request)?;
-    if response["ok"] == true {
-        Ok(response["data"].clone())
-    } else {
-        Err(error(
-            StatusCode::BAD_REQUEST,
-            response["error"]
-                .as_str()
-                .unwrap_or("Nginx operation failed"),
-        ))
-    }
-}
-
 async fn nginx_manager_request_async(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
     let response = privileged_request_async(request).await?;
     if response["ok"] == true {
@@ -132,6 +123,125 @@ async fn nginx_manager_request_async(request: Value) -> Result<Value, (StatusCod
                 .unwrap_or("Nginx operation failed"),
         ))
     }
+}
+
+async fn ensure_nginx_web_firewall_rules(
+    state: &AppState,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let existing = {
+        let db = state.lock().unwrap();
+        [80_u16, 443_u16]
+            .into_iter()
+            .map(|port| {
+                let row: Option<(String, bool)> = db
+                    .query_row(
+                        "SELECT policy,enabled FROM managed_firewall_rules WHERE port=?1 AND protocol='tcp'",
+                        [port],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(db_error)?;
+                Ok::<_, (StatusCode, Json<Value>)>((port, row))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (port, rule) in &existing {
+        if let Some((policy, _)) = rule {
+            if policy != "allow" {
+                return Err(error(
+                    StatusCode::CONFLICT,
+                    &format!("قانون TCP/{port} در ARG مسدود است؛ ابتدا آن را در صفحهٔ فایروال اصلاح کن."),
+                ));
+            }
+        }
+    }
+    let mut changed = Vec::new();
+    for (port, rule) in &existing {
+        if rule.as_ref().is_some_and(|(_, enabled)| *enabled) {
+            continue;
+        }
+        let result = match privileged_request_async(
+            json!({"action":"add","port":port,"protocol":"tcp","policy":"allow"}),
+        )
+        .await
+        {
+            Ok(value) if value["ok"] == true => value,
+            Ok(value) => {
+                for changed_port in changed.iter().rev() {
+                    let _ = privileged_request_async(json!({"action":"remove","port":changed_port,"protocol":"tcp","policy":"allow"})).await;
+                }
+                return Err(error(
+                    StatusCode::BAD_GATEWAY,
+                    value["error"].as_str().unwrap_or("ثبت دسترسی وب در فایروال ناموفق بود؛ تغییرهای همین تلاش بازگردانده شدند."),
+                ));
+            }
+            Err(err) => {
+                for changed_port in changed.iter().rev() {
+                    let _ = privileged_request_async(json!({"action":"remove","port":changed_port,"protocol":"tcp","policy":"allow"})).await;
+                }
+                return Err(err);
+            }
+        };
+        if result["ok"] != true {
+            return Err(error(StatusCode::BAD_GATEWAY, "ثبت دسترسی وب در فایروال ناموفق بود."));
+        }
+        changed.push(*port);
+    }
+    let db = state.lock().unwrap();
+    for port in [80_u16, 443_u16] {
+        db.execute("INSERT INTO managed_firewall_rules(port,protocol,policy,enabled) VALUES (?1,'tcp','allow',1) ON CONFLICT(port,protocol) DO UPDATE SET policy='allow',enabled=1", [port]).map_err(db_error)?;
+    }
+    Ok(())
+}
+
+pub(super) async fn get_nginx_firewall_setting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let enabled = db
+        .query_row(
+            "SELECT value FROM settings WHERE key='nginx_manages_web_firewall'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .as_deref()
+        == Some("1");
+    Ok(Json(json!({"enabled":enabled,"managed_ports":[80,443],"protocol":"tcp"})))
+}
+
+pub(super) async fn update_nginx_firewall_setting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<NginxFirewallInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    if input.enabled {
+        ensure_nginx_web_firewall_rules(&state).await?;
+    }
+    let db = state.lock().unwrap();
+    db.execute(
+        "INSERT INTO settings(key,value) VALUES ('nginx_manages_web_firewall',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [if input.enabled { "1" } else { "0" }],
+    )
+    .map_err(db_error)?;
+    audit(
+        &db,
+        &actor,
+        "nginx.firewall.auto_manage",
+        if input.enabled { "enabled: tcp/80,tcp/443" } else { "disabled; existing rules preserved" },
+    );
+    Ok(Json(json!({
+        "enabled":input.enabled,
+        "message":if input.enabled {"مدیریت پورت‌های وب فعال شد؛ قوانین TCP/80 و TCP/443 ثبت شدند. خود UFW روشن یا خاموش نشد."} else {"مدیریت خودکار خاموش شد؛ قوانین فعلی فایروال دست‌نخورده ماندند."}
+    })))
 }
 
 pub(super) fn nginx_site_content(value: &Value) -> Result<&str, (StatusCode, Json<Value>)> {
@@ -158,7 +268,7 @@ pub(super) async fn nginx_sites(State(state): State<AppState>, headers: HeaderMa
     if let Some(sites) = result["sites"].as_array_mut() {
         for site in sites {
             if let Some(name) = site["name"].as_str().map(str::to_owned) {
-                let (description, snapshot) = {
+                let (description, snapshot, runtime_configured) = {
                     let db = state.lock().unwrap();
                     let description = db
                         .query_row(
@@ -174,9 +284,17 @@ pub(super) async fn nginx_sites(State(state): State<AppState>, headers: HeaderMa
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         )
                         .ok();
-                    (description, snapshot)
+                    let runtime_configured: bool = db
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM nginx_site_runtime WHERE site_name=?1)",
+                            [&name],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(false);
+                    (description, snapshot, runtime_configured)
                 };
                 site["description"] = json!(description);
+                site["runtime_configured"] = json!(runtime_configured);
                 // The helper already hashes every config during listing. Read
                 // the full file only for a new or changed site.
                 let listed_hash = site["content_hash"].as_str();
@@ -219,7 +337,12 @@ pub(super) async fn nginx_status(State(state): State<AppState>, headers: HeaderM
     if let Ok(entries) = std::fs::read_dir("/run/php") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("php") && name.ends_with("-fpm.sock") && entry.metadata().is_ok_and(|metadata| metadata.file_type().is_socket()) {
+            if name.starts_with("php")
+                && name.ends_with("-fpm.sock")
+                && entry
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.file_type().is_socket())
+            {
                 sockets.push(format!("unix:/run/php/{name}"));
             }
         }
@@ -242,7 +365,8 @@ pub(super) async fn api_nginx_browse_files(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
     }
-    let result = nginx_manager_request(json!({"action":"nginx-browse", "path":query.path}))?;
+    let result =
+        nginx_manager_request_async(json!({"action":"nginx-browse", "path":query.path})).await?;
     Ok(Json(result))
 }
 
@@ -262,7 +386,8 @@ pub(super) async fn nginx_action(
     if !allowed.contains(&input.action.as_str()) {
         return Err(error(StatusCode::BAD_REQUEST, "عملیات Nginx معتبر نیست."));
     }
-    let result = nginx_manager_request(json!({"action":format!("nginx-{}", input.action)}))?;
+    let result =
+        nginx_manager_request_async(json!({"action":format!("nginx-{}", input.action)})).await?;
     let db = state.lock().unwrap();
     audit(&db, &actor, "nginx.service.action", &input.action);
     Ok(Json(result))
@@ -284,9 +409,10 @@ pub(super) async fn create_nginx_site(
             "نام یا اندازهٔ فایل سایت معتبر نیست.",
         ));
     }
-    let result = nginx_manager_request(
+    let result = nginx_manager_request_async(
         json!({"action":"nginx-create", "name":input.name, "content":input.content}),
-    )?;
+    )
+    .await?;
     let db = state.lock().unwrap();
     db.execute(
         "INSERT OR IGNORE INTO nginx_site_metadata(name,description) VALUES (?1,'')",
@@ -312,7 +438,7 @@ pub(super) async fn delete_nginx_site(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    let result = nginx_manager_request(json!({"action":"nginx-delete", "name":name}))?;
+    let result = nginx_manager_request_async(json!({"action":"nginx-delete", "name":name})).await?;
     let db = state.lock().unwrap();
     db.execute("DELETE FROM nginx_site_metadata WHERE name=?1", [&name])
         .map_err(db_error)?;
@@ -340,9 +466,10 @@ pub(super) async fn rename_nginx_site(
     if !valid_nginx_site_name(&name) || !valid_nginx_site_name(&input.new_name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام فایل سایت معتبر نیست."));
     }
-    let mut result = nginx_manager_request(
+    let mut result = nginx_manager_request_async(
         json!({"action":"nginx-rename", "name":name, "new_name":input.new_name}),
-    )?;
+    )
+    .await?;
     let db = state.lock().unwrap();
     let old_description = db
         .query_row(
@@ -396,9 +523,12 @@ pub(super) async fn update_nginx_site_metadata(
             "نام سایت یا طول توضیحات معتبر نیست.",
         ));
     }
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    nginx_manager_request_async(json!({"action":"nginx-get", "name":name})).await?;
     let db = state.lock().unwrap();
-    let actor = require_admin(&db, &headers)?.username;
-    nginx_manager_request(json!({"action":"nginx-get", "name":name}))?;
     db.execute("INSERT INTO nginx_site_metadata(name,description) VALUES (?1,?2) ON CONFLICT(name) DO UPDATE SET description=excluded.description", params![name, input.description.trim()]).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.metadata", &format!("site={name}"));
     Ok(Json(
@@ -527,8 +657,10 @@ pub(super) async fn api_nginx_site_logs(
             "نوع لاگ یا نام سایت معتبر نیست.",
         ));
     }
-    let result =
-        nginx_manager_request(json!({"action":"nginx-site-logs", "name":name, "kind":input.kind}))?;
+    let result = nginx_manager_request_async(
+        json!({"action":"nginx-site-logs", "name":name, "kind":input.kind}),
+    )
+    .await?;
     let db = state.lock().unwrap();
     audit(
         &db,
@@ -552,12 +684,24 @@ pub(super) async fn fix_nginx_site_permissions(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    let result = nginx_manager_request_async(json!({"action":"nginx-site-permissions-fix","name":name})).await?;
+    let result =
+        nginx_manager_request_async(json!({"action":"nginx-site-permissions-fix","name":name}))
+            .await?;
     if result["ok"] != true {
-        return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("اصلاح دسترسی فایل‌های سایت ناموفق بود.")));
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            result["error"]
+                .as_str()
+                .unwrap_or("اصلاح دسترسی فایل‌های سایت ناموفق بود."),
+        ));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor, "nginx.site.permissions.fix", &format!("site={name}"));
+    audit(
+        &db,
+        &actor,
+        "nginx.site.permissions.fix",
+        &format!("site={name}"),
+    );
     Ok(Json(result))
 }
 
@@ -585,7 +729,9 @@ pub(super) async fn api_nginx_site_runtime(
     method: axum::http::Method,
     body: Option<Json<NginxSiteRuntimeInput>>,
 ) -> ApiResult {
-    if method == axum::http::Method::PUT { check_origin(&headers)?; }
+    if method == axum::http::Method::PUT {
+        check_origin(&headers)?;
+    }
     let actor = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
@@ -595,32 +741,62 @@ pub(super) async fn api_nginx_site_runtime(
     }
     if method == axum::http::Method::PUT {
         nginx_manager_request_async(json!({"action":"nginx-get", "name":name})).await?;
-        let input = body.ok_or_else(|| error(StatusCode::BAD_REQUEST, "تنظیمات منابع ارسال نشده است."))?.0;
+        let input = body
+            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "تنظیمات منابع ارسال نشده است."))?
+            .0;
         let unit = input.unit.trim();
         if !super::valid_service_unit(unit) {
-            return Err(error(StatusCode::BAD_REQUEST, "نام واحد systemd معتبر نیست."));
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "نام واحد systemd معتبر نیست.",
+            ));
         }
         if super::shared_web_service(unit) {
-            return Err(error(StatusCode::BAD_REQUEST, "سرویس وب یا PHP-FPM بین چند سایت مشترک است و محدودیتش همه را تحت‌تأثیر می‌گذارد. برای این سایت یک سرویس برنامهٔ مستقل معرفی کن."));
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "سرویس وب یا PHP-FPM بین چند سایت مشترک است و محدودیتش همه را تحت‌تأثیر می‌گذارد. برای این سایت یک سرویس برنامهٔ مستقل معرفی کن.",
+            ));
         }
-        if input.cpu_quota_percent.is_some_and(|value| !value.is_finite() || !(1.0..=10000.0).contains(&value))
-            || input.memory_max_bytes.is_some_and(|value| !(16 * 1024 * 1024..=1_099_511_627_776).contains(&value))
+        if input
+            .cpu_quota_percent
+            .is_some_and(|value| !value.is_finite() || !(1.0..=10000.0).contains(&value))
+            || input
+                .memory_max_bytes
+                .is_some_and(|value| !(16 * 1024 * 1024..=1_099_511_627_776).contains(&value))
         {
-            return Err(error(StatusCode::BAD_REQUEST, "واحد systemd یا سقف CPU/RAM معتبر نیست. CPU باید 1 تا 10000 درصد و RAM حداقل 16 MiB باشد."));
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "واحد systemd یا سقف CPU/RAM معتبر نیست. CPU باید 1 تا 10000 درصد و RAM حداقل 16 MiB باشد.",
+            ));
         }
         let result = privileged_request_async(json!({
             "action":"service-limits", "unit":unit,
             "cpu_quota_percent":input.cpu_quota_percent,
             "memory_max_bytes":input.memory_max_bytes
-        })).await?;
+        }))
+        .await?;
         if result["ok"] != true {
-            return Err(error(StatusCode::BAD_REQUEST, result["error"].as_str().unwrap_or("اعمال محدودیت منابع سرویس ناموفق بود.")));
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "error":result["error"].as_str().unwrap_or("اعمال محدودیت منابع سرویس ناموفق بود."),
+                "diagnostic":result["diagnostic"]
+            }))));
         }
         let db = state.lock().unwrap();
         db.execute("INSERT INTO nginx_site_runtime(site_name,unit,cpu_quota_percent,memory_max_bytes,last_cpu_usage_ns,last_sampled_at,updated_at) VALUES (?1,?2,?3,?4,NULL,NULL,?5) ON CONFLICT(site_name) DO UPDATE SET unit=excluded.unit,cpu_quota_percent=excluded.cpu_quota_percent,memory_max_bytes=excluded.memory_max_bytes,last_cpu_usage_ns=NULL,last_sampled_at=NULL,updated_at=excluded.updated_at", params![name, unit, input.cpu_quota_percent, input.memory_max_bytes.map(|value| value as i64), now()]).map_err(db_error)?;
-        audit(&db, &actor, "nginx.site.runtime.limits", &format!("site={name} unit={unit}"));
+        audit(
+            &db,
+            &actor,
+            "nginx.site.runtime.limits",
+            &format!("site={name} unit={unit}"),
+        );
     }
-    let (unit, cpu_limit, memory_limit, previous_cpu, previous_at): (String, Option<f64>, Option<i64>, Option<i64>, Option<i64>) = {
+    let (unit, cpu_limit, memory_limit, previous_cpu, previous_at): (
+        String,
+        Option<f64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    ) = {
         let db = state.lock().unwrap();
         db.query_row("SELECT unit,cpu_quota_percent,memory_max_bytes,last_cpu_usage_ns,last_sampled_at FROM nginx_site_runtime WHERE site_name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
             .optional().map_err(db_error)?
@@ -630,22 +806,45 @@ pub(super) async fn api_nginx_site_runtime(
     if unit.is_empty() {
         return Ok(Json(json!({"configured":false,"site":name})));
     }
-    let result = privileged_request_async(json!({"action":"service-resources","unit":unit})).await?;
+    let result =
+        privileged_request_async(json!({"action":"service-resources","unit":unit})).await?;
     if result["ok"] != true {
-        return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("خواندن مصرف سرویس ناموفق بود.")));
+        return Err((StatusCode::BAD_GATEWAY, Json(json!({
+            "error":result["error"].as_str().unwrap_or("خواندن مصرف سرویس ناموفق بود."),
+            "diagnostic":result["diagnostic"]
+        }))));
     }
     let data = result["data"].clone();
     let cpu_now = data["cpu_usage_ns"].as_u64();
-    let sampled_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64;
-    let cpu_percent = match (previous_cpu.and_then(|value| u64::try_from(value).ok()), previous_at) {
-        (Some(old_cpu), Some(old_at)) if old_at > 1_000_000_000_000 && sampled_at > old_at && sampled_at - old_at <= 60_000 => cpu_now.filter(|current| *current >= old_cpu).map(|current| (current - old_cpu) as f64 / ((sampled_at - old_at) as f64 * 10_000.0)),
+    let sampled_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
+    let cpu_percent = match (
+        previous_cpu.and_then(|value| u64::try_from(value).ok()),
+        previous_at,
+    ) {
+        (Some(old_cpu), Some(old_at))
+            if old_at > 1_000_000_000_000
+                && sampled_at > old_at
+                && sampled_at - old_at <= 60_000 =>
+        {
+            cpu_now
+                .filter(|current| *current >= old_cpu)
+                .map(|current| {
+                    (current - old_cpu) as f64 / ((sampled_at - old_at) as f64 * 10_000.0)
+                })
+        }
         _ => None,
     };
     {
         let db = state.lock().unwrap();
         db.execute("UPDATE nginx_site_runtime SET last_cpu_usage_ns=?1,last_sampled_at=?2 WHERE site_name=?3", params![cpu_now.map(|value| value as i64), sampled_at, name]).map_err(db_error)?;
     }
-    Ok(Json(json!({"configured":true,"unit":unit,"cpu_quota_percent":cpu_limit,"memory_max_bytes":memory_limit,"cpu_percent":cpu_percent,"memory_current_bytes":data["memory_current_bytes"],"measurement_error":data["measurement_error"],"sampled_at":sampled_at,"note":"Resource values apply to the associated systemd unit. A shared PHP-FPM unit affects every site using that pool."})))
+    Ok(Json(
+        json!({"configured":true,"unit":unit,"cpu_quota_percent":cpu_limit,"memory_max_bytes":memory_limit,"cpu_percent":cpu_percent,"memory_current_bytes":data["memory_current_bytes"],"measurement_error":data["measurement_error"],"sampled_at":sampled_at,"note":"Resource values apply to the associated systemd unit. A shared PHP-FPM unit affects every site using that pool."}),
+    ))
 }
 
 pub(super) async fn api_nginx_site_repository(
@@ -723,7 +922,7 @@ pub(super) async fn get_nginx_site(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    let mut result = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
+    let mut result = nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await?;
     let db = state.lock().unwrap();
     let content = nginx_site_content(&result)?.to_owned();
     let snapshot: Option<(String, Option<String>, String)> = db
@@ -769,8 +968,10 @@ pub(super) async fn save_nginx_site(
             "تنظیمات سایت نمی‌تواند بیشتر از 512 KB باشد.",
         ));
     }
-    let result =
-        nginx_manager_request(json!({"action":"nginx-save","name":name,"content":input.content}))?;
+    let result = nginx_manager_request_async(
+        json!({"action":"nginx-save","name":name,"content":input.content}),
+    )
+    .await?;
     let db = state.lock().unwrap();
     store_nginx_snapshot(&db, &name, &input.content, input.settings.as_ref()).map_err(db_error)?;
     audit(&db, &actor, "nginx.site.edit", &format!("site={name}"));
@@ -791,6 +992,7 @@ pub(super) async fn sync_nginx_site(
     if !valid_nginx_site_name(&name) || !["database", "file"].contains(&input.source.as_str()) {
         return Err(error(StatusCode::BAD_REQUEST, "منبع همگام‌سازی معتبر نیست."));
     }
+    let (db_content, settings) = {
     let db = state.lock().unwrap();
     if input.source == "database" {
         let (content, settings): (String, Option<String>) = db
@@ -805,14 +1007,8 @@ pub(super) async fn sync_nginx_site(
                     "نسخه‌ای در دیتابیس برای این سایت ذخیره نشده است.",
                 )
             })?;
-        nginx_manager_request(json!({"action":"nginx-save","name":name,"content":content}))?;
-        let parsed = settings.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        store_nginx_snapshot(&db, &name, &content, parsed.as_ref()).map_err(db_error)?;
+            (Some(content), settings)
     } else {
-        nginx_manager_request(json!({"action":"nginx-test"}))?;
-        let file = nginx_manager_request(json!({"action":"nginx-get","name":name}))?;
-        let content = nginx_site_content(&file)?;
-        // Keep the visual editor's DB metadata while accepting the on-disk file.
         let settings: Option<Option<String>> = db
             .query_row(
                 "SELECT settings_json FROM nginx_site_config_state WHERE name=?1",
@@ -821,11 +1017,27 @@ pub(super) async fn sync_nginx_site(
             )
             .optional()
             .map_err(db_error)?;
-        let parsed = settings
-            .flatten()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        store_nginx_snapshot(&db, &name, content, parsed.as_ref()).map_err(db_error)?;
+            (None, settings.flatten())
     }
+    };
+    let content = if let Some(content) = db_content {
+        nginx_manager_request_async(json!({"action":"nginx-save","name":name,"content":content}))
+            .await?;
+        content
+    } else {
+        nginx_manager_request_async(json!({"action":"nginx-test"})).await?;
+        let file = nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await?;
+        nginx_site_content(&file)?.to_owned()
+    };
+    let parsed = settings.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    if input.source == "database" {
+        let db = state.lock().unwrap();
+        store_nginx_snapshot(&db, &name, &content, parsed.as_ref()).map_err(db_error)?;
+    } else {
+        let db = state.lock().unwrap();
+        store_nginx_snapshot(&db, &name, &content, parsed.as_ref()).map_err(db_error)?;
+    }
+    let db = state.lock().unwrap();
     audit(
         &db,
         &actor,
@@ -936,9 +1148,27 @@ pub(super) async fn toggle_nginx_site(
     if !valid_nginx_site_name(&name) {
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
-    let result = nginx_manager_request(
+    if input.enabled {
+        let managed = {
+            let db = state.lock().unwrap();
+            db.query_row(
+                "SELECT value FROM settings WHERE key='nginx_manages_web_firewall'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .as_deref()
+                == Some("1")
+        };
+        if managed {
+            ensure_nginx_web_firewall_rules(&state).await?;
+        }
+    }
+    let result = nginx_manager_request_async(
         json!({"action":"nginx-toggle","name":name,"enabled":input.enabled}),
-    )?;
+    )
+    .await?;
     let db = state.lock().unwrap();
     audit(
         &db,
@@ -982,7 +1212,10 @@ pub(super) async fn nginx_site_maintenance(
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
     if input.file.len() > 1024 {
-        return Err(error(StatusCode::BAD_REQUEST, "مسیر فایل بیش از حد طولانی است."));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "مسیر فایل بیش از حد طولانی است.",
+        ));
     }
     if input.enabled
         && !matches!(
@@ -1038,13 +1271,17 @@ pub(super) async fn nginx_site_maintenance_secret(
         return Err(error(StatusCode::BAD_REQUEST, "نام سایت معتبر نیست."));
     }
     if !matches!(input.action.as_str(), "create" | "rotate" | "revoke") {
-        return Err(error(StatusCode::BAD_REQUEST, "عملیات کلید تعمیرات معتبر نیست."));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "عملیات کلید تعمیرات معتبر نیست.",
+        ));
     }
     let result = nginx_manager_request_async(json!({
         "action":"nginx-maintenance-secret",
         "name":name,
         "operation":input.action
-    })).await?;
+    }))
+    .await?;
     let db = state.lock().unwrap();
     audit(
         &db,
@@ -1183,12 +1420,19 @@ fn nginx_valid_maintenance_token(token: &str) -> bool {
     token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn nginx_maintenance_block(name: &str, file: &str, token: Option<&str>, _secure_cookie: bool) -> String {
+fn nginx_maintenance_block(
+    name: &str,
+    file: &str,
+    token: Option<&str>,
+    _secure_cookie: bool,
+) -> String {
     let mut block = format!("\n    # ARG_MAINTENANCE_BEGIN:{name}\n");
     if token.is_some_and(nginx_valid_maintenance_token) {
         let cookie = nginx_maintenance_cookie_name(name);
         let suffix = cookie.strip_prefix("arg_maint_").unwrap_or(&cookie);
-        block.push_str(&format!("    include {NGINX_MAINTENANCE_PUBLIC}/{name}.secret.conf;\n"));
+        block.push_str(&format!(
+            "    include {NGINX_MAINTENANCE_PUBLIC}/{name}.secret.conf;\n"
+        ));
         block.push_str(&format!(
             "    set $arg_maintenance_active_{suffix} 0;\n    if (-f {NGINX_MAINTENANCE_PUBLIC}/{name}.flag) {{ set $arg_maintenance_active_{suffix} 1; }}\n    if ($arg_maintenance_bypass_{suffix} = 1) {{ set $arg_maintenance_active_{suffix} 0; }}\n    if ($arg_maintenance_active_{suffix} = 1) {{ return 418; }}\n"
         ));
@@ -1218,7 +1462,9 @@ fn nginx_site_domains(content: &str) -> Vec<String> {
     let mut domains = Vec::new();
     for line in content.lines() {
         let line = line.trim();
-        let Some(value) = line.strip_prefix("server_name ") else { continue };
+        let Some(value) = line.strip_prefix("server_name ") else {
+            continue;
+        };
         for domain in value.trim_end_matches(';').split_whitespace() {
             let candidate = domain.trim_matches(|character| character == '\'' || character == '"');
             if candidate == "_"
@@ -1229,7 +1475,9 @@ fn nginx_site_domains(content: &str) -> Vec<String> {
                     !label.is_empty()
                         && label.as_bytes()[0].is_ascii_alphanumeric()
                         && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
-                        && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        && label
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
                 })
             {
                 continue;
@@ -1313,7 +1561,15 @@ fn nginx_maintenance_file(
             let canonical_root = fs::canonicalize(&root).map_err(|_| "ریشهٔ سایت پیدا نشد.")?;
             if !canonical.starts_with(&canonical_root)
                 || !canonical.is_file()
-                || !matches!(canonical.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "html" | "htm")
+                || !matches!(
+                    canonical
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "html" | "htm"
+                )
                 || fs::metadata(&canonical)
                     .map(|m| m.len() > 2 * 1024 * 1024)
                     .unwrap_or(true)
@@ -1329,7 +1585,15 @@ fn nginx_maintenance_file(
             let allowed = ["/var/www", "/srv/www", "/opt/sites"];
             if !allowed.iter().any(|root| canonical.starts_with(root))
                 || !canonical.is_file()
-                || !matches!(canonical.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str(), "html" | "htm")
+                || !matches!(
+                    canonical
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str(),
+                    "html" | "htm"
+                )
                 || fs::metadata(&canonical)
                     .map(|m| m.len() > 2 * 1024 * 1024)
                     .unwrap_or(true)
@@ -1381,7 +1645,10 @@ fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
         );
     }
     if flag_path.exists() {
-        return Err("حالت تعمیرات از قبل فعال است؛ ابتدا آن را پایان بده و سپس تنظیماتش را تغییر بده.".into());
+        return Err(
+            "حالت تعمیرات از قبل فعال است؛ ابتدا آن را پایان بده و سپس تنظیماتش را تغییر بده."
+                .into(),
+        );
     }
     if !nginx_site_enabled(name)? {
         return Err("برای فعال‌کردن حالت تعمیرات، ابتدا خود سایت Nginx را روشن کن.".into());
@@ -1421,13 +1688,17 @@ fn nginx_maintenance(name: &str, request: &Value) -> Result<Value, String> {
     if let Err(error) = nginx_atomic_write(&state_path, state.to_string().as_bytes(), 0o600) {
         let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
         let _ = fs::remove_file(&default_page);
-        return Err(format!("ذخیرهٔ وضعیت تعمیرات ناموفق بود؛ کانفیگ قبلی حفظ شد: {error}"));
+        return Err(format!(
+            "ذخیرهٔ وضعیت تعمیرات ناموفق بود؛ کانفیگ قبلی حفظ شد: {error}"
+        ));
     }
     if let Err(error) = nginx_atomic_write(&flag_path, b"maintenance\n", 0o644) {
         let _ = fs::remove_file(&state_path);
         let _ = nginx_atomic_write(&available, old.as_bytes(), 0o644);
         let _ = fs::remove_file(&default_page);
-        return Err(format!("فعال‌سازی نشانگر تعمیرات ناموفق بود؛ کانفیگ قبلی حفظ شد: {error}"));
+        return Err(format!(
+            "فعال‌سازی نشانگر تعمیرات ناموفق بود؛ کانفیگ قبلی حفظ شد: {error}"
+        ));
     }
     let command = if request["force"].as_bool().unwrap_or(false) {
         "restart"
@@ -1492,8 +1763,10 @@ fn nginx_maintenance_secret(name: &str, request: &Value) -> Result<Value, String
         return Err("برای مدیریت لینک مخفی، ابتدا حالت تعمیرات سایت را فعال کن.".into());
     }
     let old_content = fs::read_to_string(&available).map_err(|_| "فایل سایت پیدا نشد.")?;
-    let old_state_text = fs::read_to_string(&state_path).map_err(|_| "وضعیت تعمیرات سایت پیدا نشد.")?;
-    let mut state = serde_json::from_str::<Value>(&old_state_text).map_err(|_| "وضعیت تعمیرات سایت خوانده نشد.")?;
+    let old_state_text =
+        fs::read_to_string(&state_path).map_err(|_| "وضعیت تعمیرات سایت پیدا نشد.")?;
+    let mut state = serde_json::from_str::<Value>(&old_state_text)
+        .map_err(|_| "وضعیت تعمیرات سایت خوانده نشد.")?;
     let previous_token = state["secret_token"]
         .as_str()
         .filter(|token| nginx_valid_maintenance_token(token))
@@ -1503,10 +1776,15 @@ fn nginx_maintenance_secret(name: &str, request: &Value) -> Result<Value, String
         line.starts_with("listen ") && line.contains("443") && line.contains("ssl")
     });
     if matches!(operation, "create" | "rotate") && !secure_cookie {
-        return Err("برای ساخت لینک مخفی، ابتدا HTTPS را برای سایت فعال کن؛ لینک دسترسی روی HTTP امن نیست.".into());
+        return Err(
+            "برای ساخت لینک مخفی، ابتدا HTTPS را برای سایت فعال کن؛ لینک دسترسی روی HTTP امن نیست."
+                .into(),
+        );
     }
     if operation == "create" && previous_token.is_some() {
-        return Err("لینک مخفی از قبل فعال است؛ برای ساخت لینک تازه، نشست‌های قبلی را بازنشانی کن.".into());
+        return Err(
+            "لینک مخفی از قبل فعال است؛ برای ساخت لینک تازه، نشست‌های قبلی را بازنشانی کن.".into(),
+        );
     }
     if operation == "revoke" && previous_token.is_none() {
         return Err("کلید مخفی فعالی برای حذف وجود ندارد.".into());
@@ -1550,7 +1828,9 @@ fn nginx_maintenance_secret(name: &str, request: &Value) -> Result<Value, String
     nginx_atomic_write(&available, next_content.as_bytes(), 0o644)?;
     if let Err(error) = nginx_atomic_write(&state_path, next_state.as_bytes(), 0o600) {
         let _ = nginx_atomic_write(&available, old_content.as_bytes(), 0o644);
-        return Err(format!("ذخیرهٔ کلید مخفی ناموفق بود؛ تنظیمات قبلی حفظ شد: {error}"));
+        return Err(format!(
+            "ذخیرهٔ کلید مخفی ناموفق بود؛ تنظیمات قبلی حفظ شد: {error}"
+        ));
     }
     let secret_write = match new_token.as_deref() {
         Some(token) => nginx_maintenance_secret_config(name, token)
@@ -1564,18 +1844,26 @@ fn nginx_maintenance_secret(name: &str, request: &Value) -> Result<Value, String
     if let Err(error) = secret_write {
         let _ = nginx_atomic_write(&available, old_content.as_bytes(), 0o644);
         let _ = nginx_atomic_write(&state_path, old_state_text.as_bytes(), 0o600);
-        return Err(format!("ذخیرهٔ فایل امن کلید ناموفق بود؛ وضعیت قبلی بازگردانده شد: {error}"));
+        return Err(format!(
+            "ذخیرهٔ فایل امن کلید ناموفق بود؛ وضعیت قبلی بازگردانده شد: {error}"
+        ));
     }
     if let Err(error) = nginx_config_test().and_then(|_| nginx_reload_if_active()) {
         let _ = nginx_atomic_write(&available, old_content.as_bytes(), 0o644);
         let _ = nginx_atomic_write(&state_path, old_state_text.as_bytes(), 0o600);
         match old_secret_config {
-            Some(content) => { let _ = nginx_atomic_write(&secret_config_path, &content, 0o600); }
-            None => { let _ = fs::remove_file(&secret_config_path); }
+            Some(content) => {
+                let _ = nginx_atomic_write(&secret_config_path, &content, 0o600);
+            }
+            None => {
+                let _ = fs::remove_file(&secret_config_path);
+            }
         }
         let _ = nginx_config_test();
         let _ = nginx_reload_if_active();
-        return Err(format!("تغییر کلید اعمال نشد؛ نشست‌های قبلی حفظ شدند: {error}"));
+        return Err(format!(
+            "تغییر کلید اعمال نشد؛ نشست‌های قبلی حفظ شدند: {error}"
+        ));
     }
 
     let cookie = nginx_maintenance_cookie_name(name);
@@ -1625,6 +1913,15 @@ fn nginx_config_test() -> Result<(), String> {
         .arg("-t")
         .output()
         .map_err(|error| format!("اجرای nginx -t ناموفق بود: {error}"))?;
+    let detail = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = json!({"ok":output.status.success(),"output":detail.trim(),"checked_at":now()});
+    if let Ok(mut cache) = NGINX_CONFIG_TEST_CACHE.lock() {
+        *cache = Some((Instant::now(), report));
+    }
     if output.status.success() {
         Ok(())
     } else {
@@ -1690,10 +1987,14 @@ fn nginx_list_sites() -> Result<Value, String> {
         let enabled = nginx_site_enabled(&name)?;
         let content = fs::read_to_string(&entry.path()).map_err(|error| error.to_string())?;
         let content_hash = hex::encode(Sha256::digest(content.as_bytes()));
+        let ssl_enabled = content.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("listen ") && line.split_whitespace().any(|value| value == "ssl")
+        });
         let maintenance_enabled = nginx_maintenance_paths(&name)
             .map(|(_, _, flag_path)| flag_path.exists())
             .unwrap_or(false);
-        sites.push(json!({"name":name,"enabled":enabled,"maintenance_enabled":maintenance_enabled,"bytes":metadata.len(),"content_hash":content_hash}));
+        sites.push(json!({"name":name,"enabled":enabled,"maintenance_enabled":maintenance_enabled,"ssl_enabled":ssl_enabled,"bytes":metadata.len(),"content_hash":content_hash}));
     }
     sites.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
     Ok(json!(sites))
@@ -1811,7 +2112,9 @@ fn nginx_issue_ssl(
             .iter()
             .any(|configured| configured == &domain.to_ascii_lowercase())
         {
-            return Err(format!("دامنهٔ {domain} در server_name همین سایت نیست. ابتدا دامنه‌های سایت را ذخیره و دوباره بررسی کن."));
+            return Err(format!(
+                "دامنهٔ {domain} در server_name همین سایت نیست. ابتدا دامنه‌های سایت را ذخیره و دوباره بررسی کن."
+            ));
         }
     }
     let panel_domain = fs::read_to_string("/etc/arg/https-domain")
@@ -1907,7 +2210,9 @@ fn nginx_issue_ssl(
         );
         let _ = nginx_reload_if_active();
         detail.truncate(6000);
-        return Err(format!("صدور یا نصب گواهی کامل نشد؛ فایل سایت از پشتیبان بازگردانده شد. پورت 80، DNS و دسترسی Certbot را بررسی کن.\n{detail}"));
+        return Err(format!(
+            "صدور یا نصب گواهی کامل نشد؛ فایل سایت از پشتیبان بازگردانده شد. پورت 80، DNS و دسترسی Certbot را بررسی کن.\n{detail}"
+        ));
     }
     if let Err(error) = nginx_config_test() {
         let _ = nginx_atomic_write(
@@ -1950,7 +2255,9 @@ fn nginx_save_site(name: &str, content: &str) -> Result<Value, String> {
     let old_content = fs::read(&available).map_err(|error| error.to_string())?;
     let (_, _, maintenance_flag) = nginx_maintenance_paths(name)?;
     if maintenance_flag.exists() {
-        return Err("ابتدا حالت تعمیرات این سایت را خاموش کن؛ سپس تنظیمات Nginx را ویرایش کن.".into());
+        return Err(
+            "ابتدا حالت تعمیرات این سایت را خاموش کن؛ سپس تنظیمات Nginx را ویرایش کن.".into(),
+        );
     }
     let enabled = nginx_site_enabled(name)?;
     nginx_atomic_write(
@@ -2046,19 +2353,11 @@ fn nginx_service_status() -> Value {
         String::new()
     };
     let config_test = if installed {
-        nginx_command("nginx", &["-t"])
-            .ok()
-            .map(|out| {
-                let text = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                json!({"ok":out.status.success(),"output":text.trim()})
-            })
-            .unwrap_or_else(|| json!({"ok":false,"output":"اجرای nginx -t ناموفق بود."}))
+        NGINX_CONFIG_TEST_CACHE.lock().ok().and_then(|cache| {
+            cache.as_ref().filter(|(at, _)| at.elapsed() <= std::time::Duration::from_secs(30)).map(|(_, report)| report.clone())
+        }).unwrap_or_else(|| json!({"ok":null,"output":"هنوز تست کانفیگ اجرا نشده؛ برای اجرای بررسی زنده، دکمهٔ «تست کانفیگ» را بزن.","checked_at":null}))
     } else {
-        json!({"ok":false,"output":"Nginx نصب نیست."})
+        json!({"ok":false,"output":"Nginx نصب نیست.","checked_at":null})
     };
     json!({"installed":installed,"active":active,"enabled":enabled,"version":version,"config_test":config_test})
 }
@@ -2420,31 +2719,51 @@ fn nginx_fix_site_web_permissions(name: &str) -> Result<Value, String> {
     }).filter(|path| path.starts_with('/') && !path.contains('$'))
         .ok_or("در کانفیگ سایت مسیر root مطلق و ثابت پیدا نشد؛ ابتدا مسیر را در ویرایشگر سایت مشخص کن.")?;
     let requested = std::path::PathBuf::from(&root);
-    let canonical = fs::canonicalize(&requested).map_err(|_| "پوشهٔ root پیدا نشد یا قابل دسترسی نیست.")?;
-    let web_root = fs::canonicalize("/var/www").map_err(|_| "پوشهٔ /var/www در این سرور وجود ندارد.")?;
+    let canonical =
+        fs::canonicalize(&requested).map_err(|_| "پوشهٔ root پیدا نشد یا قابل دسترسی نیست.")?;
+    let web_root =
+        fs::canonicalize("/var/www").map_err(|_| "پوشهٔ /var/www در این سرور وجود ندارد.")?;
     if !canonical.starts_with(&web_root) || !canonical.is_dir() {
-        return Err("برای ایمنی، اصلاح خودکار فقط برای پوشه‌های واقعی زیر /var/www انجام می‌شود.".into());
+        return Err(
+            "برای ایمنی، اصلاح خودکار فقط برای پوشه‌های واقعی زیر /var/www انجام می‌شود.".into(),
+        );
     }
-    let user = std::process::Command::new("id").args(["-un", "www-data"]).output()
+    let user = std::process::Command::new("id")
+        .args(["-un", "www-data"])
+        .output()
         .map_err(|_| "کاربر www-data پیدا نشد؛ سرویس وب این کاربر را ندارد.")?;
     if !user.status.success() {
         return Err("کاربر www-data پیدا نشد؛ این عملیات برای Nginx/PHP-FPM روی Debian/Ubuntu طراحی شده است.".into());
     }
-    let setfacl = std::process::Command::new("setfacl").arg("--version").output();
+    let setfacl = std::process::Command::new("setfacl")
+        .arg("--version")
+        .output();
     if setfacl.is_err() {
-        let install = std::process::Command::new("apt-get").args(["-y", "install", "acl"]).output()
+        let install = std::process::Command::new("apt-get")
+            .args(["-y", "install", "acl"])
+            .output()
             .map_err(|error| format!("نصب خودکار ابزار مجوزها ناموفق بود: {error}"))?;
         if !install.status.success() {
-            return Err(format!("ARG نتوانست بستهٔ acl را خودکار نصب کند: {}", String::from_utf8_lossy(&install.stderr).trim()));
+            return Err(format!(
+                "ARG نتوانست بستهٔ acl را خودکار نصب کند: {}",
+                String::from_utf8_lossy(&install.stderr).trim()
+            ));
         }
     }
     let output = std::process::Command::new("setfacl")
         .args(["-R", "-m", "u:www-data:rX", "--"])
-        .arg(&canonical).output().map_err(|error| format!("اعمال دسترسی وب ناموفق بود: {error}"))?;
+        .arg(&canonical)
+        .output()
+        .map_err(|error| format!("اعمال دسترسی وب ناموفق بود: {error}"))?;
     if !output.status.success() {
-        return Err(format!("اصلاح دسترسی‌ها کامل نشد: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        return Err(format!(
+            "اصلاح دسترسی‌ها کامل نشد: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-    Ok(json!({"ok":true,"path":canonical,"user":"www-data","message":"دسترسی خواندن فایل‌ها و عبور از پوشه‌های سایت برای www-data تنظیم شد؛ مالکیت و مجوز سایر کاربران تغییر نکرد."}))
+    Ok(
+        json!({"ok":true,"path":canonical,"user":"www-data","message":"دسترسی خواندن فایل‌ها و عبور از پوشه‌های سایت برای www-data تنظیم شد؛ مالکیت و مجوز سایر کاربران تغییر نکرد."}),
+    )
 }
 
 fn nginx_site_logs(name: &str, kind: &str) -> Result<Value, String> {
@@ -2665,7 +2984,8 @@ fn execute_nginx_request(action: &str, request: &Value) -> Value {
             .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
             .and_then(nginx_maintenance_status),
         "nginx-maintenance-set" => request["name"]
-            .as_str().ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
+            .as_str()
+            .ok_or_else(|| "نام سایت ارسال نشده است.".to_owned())
             .and_then(|name| nginx_maintenance(name, request)),
         "nginx-maintenance-secret" => request["name"]
             .as_str()
@@ -2700,16 +3020,25 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 mod maintenance_tests {
     use super::{
         nginx_maintenance_block, nginx_maintenance_cookie_name, nginx_maintenance_secret_config,
-        nginx_ssl_certificate_name,
-        nginx_remove_maintenance_block, nginx_server_open_offsets, nginx_valid_maintenance_token,
+        nginx_remove_maintenance_block, nginx_server_open_offsets, nginx_ssl_certificate_name,
+        nginx_valid_maintenance_token,
     };
 
     #[test]
     fn ssl_certificate_lineage_uses_canonical_arg_site_uri() {
         let domains = vec!["www.example.com".to_owned(), "example.com".to_owned()];
-        assert_eq!(nginx_ssl_certificate_name(&domains).unwrap(), "arg-example.com");
+        assert_eq!(
+            nginx_ssl_certificate_name(&domains).unwrap(),
+            "arg-example.com"
+        );
 
-        let long_domain = format!("{}.{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(61));
+        let long_domain = format!(
+            "{}.{}.{}.{}",
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61)
+        );
         let name = nginx_ssl_certificate_name(&[long_domain]).unwrap();
         assert!(name.starts_with("arg-a"));
         assert!(name.len() <= 255);
@@ -2724,7 +3053,12 @@ mod maintenance_tests {
         for offset in offsets.into_iter().rev() {
             expanded.insert_str(
                 offset,
-                &nginx_maintenance_block("site", "/etc/nginx/arg-maintenance/site.html", None, true),
+                &nginx_maintenance_block(
+                    "site",
+                    "/etc/nginx/arg-maintenance/site.html",
+                    None,
+                    true,
+                ),
             );
         }
         assert_eq!(expanded.matches("ARG_MAINTENANCE_BEGIN:site").count(), 2);
@@ -2737,7 +3071,8 @@ mod maintenance_tests {
     #[test]
     fn secret_bypass_uses_opaque_cookie_and_private_exchange_path() {
         let token = "ab".repeat(32);
-        let block = nginx_maintenance_block("site-name", "/srv/maintenance.html", Some(&token), true);
+        let block =
+            nginx_maintenance_block("site-name", "/srv/maintenance.html", Some(&token), true);
         let secret_config = nginx_maintenance_secret_config("site-name", &token).unwrap();
         assert!(block.contains("site-name.secret.conf"));
         assert!(!block.contains(&token));
@@ -2746,7 +3081,10 @@ mod maintenance_tests {
         assert!(secret_config.contains("set $arg_maintenance_bypass_"));
         assert!(secret_config.contains("access_log off;"));
         assert!(secret_config.contains("HttpOnly; Secure; SameSite=Lax"));
-        assert!(secret_config.contains(&format!("$cookie_{} = {token}", nginx_maintenance_cookie_name("site-name"))));
+        assert!(secret_config.contains(&format!(
+            "$cookie_{} = {token}",
+            nginx_maintenance_cookie_name("site-name")
+        )));
         assert!(nginx_valid_maintenance_token(&token));
         assert!(!nginx_valid_maintenance_token("not-a-secret"));
     }

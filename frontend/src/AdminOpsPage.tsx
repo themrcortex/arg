@@ -29,7 +29,7 @@ export function AptPage({ Heading, notify }: Common) {
   const [selectedRuntimes, setSelectedRuntimes] = useState<string[]>([])
   const refresh = useCallback(async (force = false) => {
     setBusy('list'); setError('')
-    try { const result = await cachedRequest('apt-packages', () => api<{ packages: PackageRow[] }>('packages').then((response) => response.packages), 60000, force); setPackages(result) }
+    try { const result = await cachedRequest('apt-packages', () => api<{ packages: PackageRow[] }>('packages').then((response) => response.packages), 120000, force); setPackages(result) }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'فهرست بسته‌ها دریافت نشد.') }
     finally { setBusy('') }
   }, [])
@@ -133,7 +133,7 @@ export function ServicesPage({ Heading, notify }: Common) {
   const [error, setError] = useState('')
   const refresh = useCallback(async (force = false) => {
     setBusy('list'); setError('')
-    try { const result = await cachedRequest('system-services', () => api<{ services: ServiceRow[] }>('services').then((response) => response.services), 30000, force); setServices(result) }
+    try { const result = await cachedRequest('system-services', () => api<{ services: ServiceRow[] }>('services').then((response) => response.services), 120000, force); setServices(result) }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'فهرست سرویس‌ها دریافت نشد.') }
     finally { setBusy('') }
   }, [])

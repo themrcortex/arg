@@ -1,6 +1,6 @@
-import { Cloud, Container, Cpu, Files, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, type LucideIcon } from 'lucide-react'
+import { Bug, Cloud, Container, Cpu, Files, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, type LucideIcon } from 'lucide-react'
 
-export type PageId = 'dashboard' | 'system' | 'nodes' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account'
+export type PageId = 'dashboard' | 'system' | 'nodes' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account' | 'bug-report'
 export type NavigationItem = { id: PageId; label: string; icon: LucideIcon; admin?: boolean }
 
 export const navigation: NavigationItem[] = [
@@ -21,6 +21,7 @@ export const navigation: NavigationItem[] = [
   { id: 'maintenance', label: 'مدیریت سرور و ARG', icon: Wrench, admin: true },
   { id: 'users', label: 'کاربران', icon: Users, admin: true },
   { id: 'audit', label: 'گزارش عملیات', icon: ScrollText, admin: true },
+  { id: 'bug-report', label: 'گزارش باگ', icon: Bug },
   { id: 'settings', label: 'تنظیمات', icon: Settings },
   { id: 'account', label: 'حساب کاربری', icon: UserRound },
 ]

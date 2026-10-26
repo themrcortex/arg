@@ -79,14 +79,64 @@ export type Firewall = { available: boolean; status: string; error?: string }
 export type ManagedFirewallRule = { id: number; port: number; protocol: 'tcp' | 'udp'; policy: 'allow' | 'deny'; enabled: boolean }
 export type ManagedFirewallRulesResponse = { rules: ManagedFirewallRule[]; protected_ports?: number[] }
 
+export type ApiDiagnostic = Record<string, unknown> & {
+  code?: string
+  source?: string
+  operation?: string
+  field?: string
+  raw?: string
+  expected?: string
+  hint?: string
+}
+export type ApiFailureReport = { message: string; path: string; status: number; at: string; diagnostic?: ApiDiagnostic }
+
+export class ApiError extends Error {
+  readonly status: number
+  readonly path: string
+  readonly diagnostic?: ApiDiagnostic
+  constructor(report: ApiFailureReport) {
+    super(report.message)
+    this.name = 'ApiError'
+    this.status = report.status
+    this.path = report.path
+    this.diagnostic = report.diagnostic
+  }
+}
+
+let latestApiFailure: ApiFailureReport | null = null
+export function getLastApiFailure() { return latestApiFailure }
+function recordApiFailure(report: ApiFailureReport) { latestApiFailure = report }
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api/${path}`, {
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  })
-  const result = await response.json()
-  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`)
+  let response: Response
+  try {
+    response = await fetch(`/api/${path}`, {
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      ...init,
+    })
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : 'Network request failed'
+    const report = { message, path, status: 0, at: new Date().toISOString() }
+    recordApiFailure(report)
+    throw new ApiError(report)
+  }
+  const result: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const payload = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+    const diagnostic = payload.diagnostic && typeof payload.diagnostic === 'object'
+      ? payload.diagnostic as ApiDiagnostic
+      : undefined
+    const report: ApiFailureReport = {
+      message: typeof payload.error === 'string' ? payload.error : `HTTP ${response.status}`,
+      path,
+      status: response.status,
+      at: new Date().toISOString(),
+      diagnostic,
+    }
+    recordApiFailure(report)
+    throw new ApiError(report)
+  }
   return result as T
 }
 export function formatNumber(n: number) {

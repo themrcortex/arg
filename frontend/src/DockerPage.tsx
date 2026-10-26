@@ -50,7 +50,7 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
 
   const load = useCallback(async (force = false) => {
     setError('')
-    try { setData(await cachedRequest('docker', () => api<DockerData>('docker'), 30000, force)) }
+    try { setData(await cachedRequest('docker', () => api<DockerData>('docker'), 120000, force)) }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'وضعیت Docker دریافت نشد.') }
     finally { setLoading(false); setRefreshing(false) }
   }, [])
