@@ -44,6 +44,51 @@ pub(super) struct CreateUserRequest {
     password: String,
     privileges: String,
 }
+#[derive(Deserialize)]
+pub(super) struct DatabaseRequest {
+    name: String,
+    #[serde(default)]
+    confirmation: String,
+}
+#[derive(Deserialize)]
+pub(super) struct UserActionRequest {
+    username: String,
+    host: String,
+    action: String,
+    #[serde(default)]
+    confirmed: bool,
+}
+#[derive(Deserialize)]
+pub(super) struct UserPrivilegesRequest {
+    username: String,
+    host: String,
+    database: String,
+    privileges: String,
+    operation: String,
+    #[serde(default)]
+    confirmed: bool,
+}
+#[derive(Deserialize)]
+pub(super) struct MysqlSettingRequest {
+    name: String,
+    value: String,
+    #[serde(default)]
+    confirmed: bool,
+}
+#[derive(Deserialize)]
+pub(super) struct MysqlPresetRequest {
+    title: String,
+    database: Option<String>,
+    sql: String,
+}
+#[derive(Serialize)]
+struct MysqlPreset {
+    id: i64,
+    title: String,
+    database: Option<String>,
+    sql: String,
+    updated_at: i64,
+}
 
 const MANAGER_CONFIG: &str = "/etc/arg/mysql-manager.cnf";
 const MYSQL_USER_CATALOG_QUERY: &str =
@@ -143,6 +188,62 @@ fn valid_identifier(value: &str, max: usize) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
 }
+fn valid_mysql_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 255
+        && host.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'%' | b':' | b'-')
+        })
+}
+fn protected_mysql_user(user: &str) -> bool {
+    matches!(
+        user.to_ascii_lowercase().as_str(),
+        "root" | "mysql" | "mariadb.sys" | "mysql.infoschema" | "mysql.session" | "mysql.sys" | "debian-sys-maint" | "arg_manager"
+    )
+}
+const MYSQL_TUNABLES: &[(&str, &str)] = &[
+    ("max_connections", "integer"),
+    ("wait_timeout", "integer"),
+    ("interactive_timeout", "integer"),
+    ("max_allowed_packet", "bytes"),
+    ("long_query_time", "seconds"),
+    ("slow_query_log", "boolean"),
+    ("innodb_buffer_pool_size", "bytes"),
+];
+
+fn mysql_buffer_pool_limit_bytes() -> u64 {
+    let memory_kib = fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|contents| contents.lines().find(|line| line.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .unwrap_or(1_048_576);
+    memory_kib.saturating_mul(1024).saturating_mul(3) / 4
+}
+
+fn validate_mysql_setting(name: &str, value: &str) -> Result<(), String> {
+    let Some((_, kind)) = MYSQL_TUNABLES.iter().find(|(allowed, _)| *allowed == name) else {
+        return Err("این متغیر سرور در فهرست تنظیمات امن ARG نیست.".into());
+    };
+    match *kind {
+        "boolean" if ["ON", "OFF", "1", "0"].contains(&value.to_ascii_uppercase().as_str()) => Ok(()),
+        "integer" | "bytes" => {
+            let number = value.parse::<u64>().map_err(|_| "مقدار باید عدد صحیح باشد.")?;
+            let (minimum, maximum) = match name {
+                "max_connections" => (10, 10_000),
+                "wait_timeout" | "interactive_timeout" => (1, 31_536_000),
+                "max_allowed_packet" => (1_024, 1_073_741_824),
+                "innodb_buffer_pool_size" => (5_242_880, mysql_buffer_pool_limit_bytes().min(1_073_741_824_000)),
+                _ => (1, u64::MAX),
+            };
+            if !(minimum..=maximum).contains(&number) { return Err("مقدار خارج از محدودهٔ مجاز این تنظیم است.".into()); }
+            Ok(())
+        }
+        "seconds" => {
+            let number = value.parse::<f64>().map_err(|_| "زمان باید عددی بین 0 و 3600 ثانیه باشد.")?;
+            if number.is_finite() && (0.0..=3600.0).contains(&number) { Ok(()) } else { Err("زمان باید عددی بین 0 و 3600 ثانیه باشد.".into()) }
+        }
+        _ => Err("مقدار این تنظیم معتبر نیست.".into()),
+    }
+}
 fn safe_mysql_config_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -193,6 +294,16 @@ fn validate_sql(
         }
     }
     Ok(())
+}
+fn mysql_sql_requires_confirmation(sql: &str) -> bool {
+    const MUTATING: &[&str] = &[
+        "CREATE", "ALTER", "DROP", "TRUNCATE", "DELETE", "UPDATE", "INSERT", "REPLACE",
+        "GRANT", "REVOKE", "SET", "CALL", "RENAME", "ANALYZE", "OPTIMIZE", "REPAIR",
+        "FLUSH", "RESET", "KILL", "SHUTDOWN", "LOAD", "INSTALL", "UNINSTALL", "START",
+        "STOP", "CHANGE", "PURGE", "LOCK", "UNLOCK",
+    ];
+    sql.split(|character: char| !character.is_ascii_alphabetic())
+        .any(|word| MUTATING.contains(&word.to_ascii_uppercase().as_str()))
 }
 fn run_mysql(
     sql: &str,
@@ -424,7 +535,8 @@ fn ensure_manager_account() -> Result<(), String> {
 fn mysql_create_user_sql(input: &CreateUserRequest) -> Result<String, String> {
     if !valid_identifier(&input.database, 64)
         || !valid_identifier(&input.username, 32)
-        || !["localhost", "127.0.0.1", "%"].contains(&input.host.as_str())
+        || protected_mysql_user(&input.username)
+        || !valid_mysql_host(&input.host)
     {
         return Err("نام دیتابیس، کاربر یا Host معتبر نیست.".into());
     }
@@ -708,6 +820,173 @@ pub(super) async fn catalog(
         json!({"output":result["output"].as_str().unwrap_or("")}),
     ))
 }
+
+pub(super) async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_mysql_access(&db, &headers)?;
+    }
+    let sql = "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected','Max_used_connections','Connections','Queries','Slow_queries','Uptime','Innodb_buffer_pool_read_requests','Innodb_buffer_pool_reads')";
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("خواندن آمار MySQL ناموفق بود."))); }
+    Ok(Json(json!({"output":result["output"].as_str().unwrap_or("")})))
+}
+
+pub(super) async fn settings(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_mysql_access(&db, &headers)?;
+    }
+    let names = MYSQL_TUNABLES.iter().map(|(name, _)| format!("'{name}'")).collect::<Vec<_>>().join(",");
+    let sql = format!("SHOW GLOBAL VARIABLES WHERE Variable_name IN ({names})");
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("خواندن تنظیمات MySQL ناموفق بود."))); }
+    Ok(Json(json!({"output":result["output"].as_str().unwrap_or(""),"tunable_names":MYSQL_TUNABLES.iter().map(|(name, _)| *name).collect::<Vec<_>>()})))
+}
+
+pub(super) async fn update_setting(
+    State(state): State<AppState>, headers: HeaderMap, Json(input): Json<MysqlSettingRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    validate_mysql_setting(&input.name, &input.value).map_err(|e| error(StatusCode::BAD_REQUEST, &e))?;
+    if !input.confirmed { return Err(error(StatusCode::BAD_REQUEST, "برای اعمال تغییر تنظیم سرور، تأیید صریح لازم است.")); }
+    let actor = { let db = state.lock().unwrap(); require_mysql_access(&db, &headers)? };
+    let value = if matches!(input.value.to_ascii_uppercase().as_str(), "ON" | "OFF") { input.value.to_ascii_uppercase() } else { input.value.clone() };
+    let sql = format!("SET GLOBAL {} = {}", input.name, value);
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("اعمال تنظیم MySQL ناموفق بود."))); }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "mysql.setting.update", &format!("variable={}; value={}", input.name, value));
+    Ok(Json(json!({"updated":true,"message":"تنظیم در حال اجرای MySQL اعمال شد. برای دائمی‌شدن پس از راه‌اندازی مجدد، فایل تنظیمات سرور را جداگانه بررسی کن."})))
+}
+
+fn valid_application_database(name: &str) -> bool {
+    valid_identifier(name, 64) && !["mysql", "sys", "performance_schema", "information_schema"].contains(&name)
+}
+
+pub(super) async fn create_database(
+    State(state): State<AppState>, headers: HeaderMap, Json(input): Json<DatabaseRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_application_database(&input.name) || input.confirmation != format!("CREATE DATABASE {}", input.name) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام دیتابیس معتبر نیست یا تأیید ساخت با نام آن مطابقت ندارد."));
+    }
+    let actor = { let db = state.lock().unwrap(); require_mysql_access(&db, &headers)? };
+    let sql = format!("CREATE DATABASE `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", input.name);
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("ساخت دیتابیس ناموفق بود."))); }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "mysql.database.create", &input.name);
+    Ok(Json(json!({"created":true,"message":format!("دیتابیس {} ساخته شد.", input.name)})))
+}
+
+pub(super) async fn delete_database(
+    State(state): State<AppState>, Path(name): Path<String>, headers: HeaderMap, Json(input): Json<DatabaseRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_application_database(&name) || input.confirmation != format!("DROP DATABASE {name}") {
+        return Err(error(StatusCode::BAD_REQUEST, "برای حذف، نام دیتابیس و عبارت تأیید باید دقیقاً مطابقت داشته باشند."));
+    }
+    let actor = { let db = state.lock().unwrap(); require_mysql_access(&db, &headers)? };
+    let sql = format!("DROP DATABASE `{name}`");
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("حذف دیتابیس ناموفق بود."))); }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "mysql.database.drop", &name);
+    Ok(Json(json!({"deleted":true,"message":format!("دیتابیس {} حذف شد.", name)})))
+}
+
+pub(super) async fn user_action(
+    State(state): State<AppState>, headers: HeaderMap, Json(input): Json<UserActionRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_identifier(&input.username, 32) || protected_mysql_user(&input.username) || !valid_mysql_host(&input.host) || !["grants", "lock", "unlock", "delete"].contains(&input.action.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "حساب یا عملیات انتخاب‌شده مجاز نیست."));
+    }
+    if input.action != "grants" && !input.confirmed { return Err(error(StatusCode::BAD_REQUEST, "برای تغییر وضعیت حساب تأیید صریح لازم است.")); }
+    let actor = { let db = state.lock().unwrap(); require_mysql_access(&db, &headers)? };
+    let user = input.username.replace('\'', "''");
+    let host = input.host.replace('\'', "''");
+    let sql = match input.action.as_str() {
+        "grants" => format!("SHOW GRANTS FOR '{user}'@'{host}'"),
+        "lock" => format!("ALTER USER '{user}'@'{host}' ACCOUNT LOCK"),
+        "unlock" => format!("ALTER USER '{user}'@'{host}' ACCOUNT UNLOCK"),
+        "delete" => format!("DROP USER '{user}'@'{host}'"),
+        _ => unreachable!(),
+    };
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("عملیات حساب MySQL ناموفق بود."))); }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, &format!("mysql.user.{}", input.action), &format!("target={}@{}", input.username, input.host));
+    Ok(Json(json!({"output":result["output"].as_str().unwrap_or(""),"message":format!("عملیات {} برای {}@{} انجام شد.", input.action, input.username, input.host)})))
+}
+
+pub(super) async fn update_user_privileges(
+    State(state): State<AppState>, headers: HeaderMap, Json(input): Json<UserPrivilegesRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_identifier(&input.username, 32) || protected_mysql_user(&input.username) || !valid_mysql_host(&input.host) || !valid_application_database(&input.database) || !["grant", "revoke"].contains(&input.operation.as_str()) || !["read_only", "read_write", "full"].contains(&input.privileges.as_str()) {
+        return Err(error(StatusCode::BAD_REQUEST, "حساب، دیتابیس، سطح دسترسی یا عملیات معتبر نیست."));
+    }
+    if !input.confirmed { return Err(error(StatusCode::BAD_REQUEST, "برای تغییر مجوز حساب تأیید صریح لازم است.")); }
+    let privileges = match input.privileges.as_str() {
+        "read_only" => "SELECT, SHOW VIEW",
+        "read_write" => "SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, DROP, EXECUTE, SHOW VIEW",
+        "full" => "ALL PRIVILEGES",
+        _ => unreachable!(),
+    };
+    let username = input.username.replace('\'', "''");
+    let host = input.host.replace('\'', "''");
+    let database = input.database.replace('`', "``");
+    let sql = if input.operation == "grant" {
+        format!("GRANT {privileges} ON `{database}`.* TO '{username}'@'{host}'")
+    } else if input.privileges == "full" {
+        format!("REVOKE ALL PRIVILEGES, GRANT OPTION ON `{database}`.* FROM '{username}'@'{host}'")
+    } else {
+        format!("REVOKE {privileges} ON `{database}`.* FROM '{username}'@'{host}'")
+    };
+    let actor = { let db = state.lock().unwrap(); require_mysql_access(&db, &headers)? };
+    let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+    if result["ok"] != true { return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("تغییر مجوز کاربر ناموفق بود."))); }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, &format!("mysql.user.privileges.{}", input.operation), &format!("target={}@{} database={} privilege={}", input.username, input.host, input.database, input.privileges));
+    Ok(Json(json!({"updated":true,"message":format!("مجوز {} برای {}@{} روی {} اعمال شد.", input.privileges, input.username, input.host, input.database)})))
+}
+
+pub(super) async fn presets(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    let actor = require_mysql_access(&db, &headers)?;
+    let mut statement = db.prepare("SELECT id,title,database_name,statement,updated_at FROM mysql_sql_presets WHERE user_id=?1 ORDER BY title COLLATE NOCASE").map_err(db_error)?;
+    let items = statement.query_map([actor.id], |row| Ok(MysqlPreset { id:row.get(0)?, title:row.get(1)?, database:row.get(2)?, sql:row.get(3)?, updated_at:row.get(4)? })).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+    Ok(Json(json!({"presets":items})))
+}
+
+pub(super) async fn save_preset(
+    State(state): State<AppState>, headers: HeaderMap, Json(input): Json<MysqlPresetRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if input.title.trim().is_empty() || input.title.trim().chars().count() > 80 { return Err(error(StatusCode::BAD_REQUEST, "نام پریست باید بین 1 تا 80 نویسه باشد.")); }
+    validate_sql(&input.sql, input.database.as_deref(), false).map_err(|e| error(StatusCode::BAD_REQUEST, &e))?;
+    let actor = { let db = state.lock().unwrap(); require_mysql_access(&db, &headers)? };
+    let db = state.lock().unwrap();
+    let count: i64 = db.query_row("SELECT COUNT(*) FROM mysql_sql_presets WHERE user_id=?1", [actor.id], |row| row.get(0)).map_err(db_error)?;
+    if count >= 40 && db.query_row("SELECT EXISTS(SELECT 1 FROM mysql_sql_presets WHERE user_id=?1 AND title=?2)", params![actor.id, input.title.trim()], |row| row.get::<_,bool>(0)).map_err(db_error)? == false {
+        return Err(error(StatusCode::CONFLICT, "حداکثر 40 پریست برای هر حساب ذخیره می‌شود."));
+    }
+    db.execute("INSERT INTO mysql_sql_presets(user_id,title,database_name,statement,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?5) ON CONFLICT(user_id,title) DO UPDATE SET database_name=excluded.database_name,statement=excluded.statement,updated_at=excluded.updated_at", params![actor.id, input.title.trim(), input.database.as_deref(), input.sql, now()]).map_err(db_error)?;
+    audit(&db, &actor.username, "mysql.preset.save", input.title.trim());
+    Ok(Json(json!({"saved":true,"message":"پریست SQL ذخیره شد."})))
+}
+
+pub(super) async fn delete_preset(State(state): State<AppState>, Path(id): Path<i64>, headers: HeaderMap) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_mysql_access(&db, &headers)?;
+    let changed = db.execute("DELETE FROM mysql_sql_presets WHERE id=?1 AND user_id=?2", params![id, actor.id]).map_err(db_error)?;
+    if changed == 0 { return Err(error(StatusCode::NOT_FOUND, "پریست پیدا نشد.")); }
+    audit(&db, &actor.username, "mysql.preset.delete", &id.to_string());
+    Ok(Json(json!({"deleted":true})))
+}
 pub(super) async fn query(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -720,17 +999,7 @@ pub(super) async fn query(
             "درخواست SQL از اندازهٔ مجاز بزرگ‌تر است.",
         ));
     }
-    let writes_data = input
-        .sql
-        .split(|character: char| !character.is_ascii_alphabetic())
-        .map(str::to_ascii_uppercase)
-        .any(|word| {
-            [
-                "CREATE", "ALTER", "DROP", "TRUNCATE", "DELETE", "UPDATE", "INSERT", "REPLACE",
-                "GRANT", "REVOKE",
-            ]
-            .contains(&word.as_str())
-        });
+    let writes_data = mysql_sql_requires_confirmation(&input.sql);
     if writes_data && !input.confirm_write {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -781,8 +1050,8 @@ pub(super) async fn reset_password(
 ) -> ApiResult {
     check_origin(&headers)?;
     if !valid_identifier(&input.username, 32)
-        || input.username == "arg_manager"
-        || !(input.host == "localhost" || input.host == "127.0.0.1" || input.host == "%")
+        || protected_mysql_user(&input.username)
+        || !valid_mysql_host(&input.host)
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -1066,7 +1335,8 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 mod tests {
     use super::{
         mysql_password_literal, safe_mysql_config_value, valid_identifier, valid_mysql_credentials,
-        validate_sql, MYSQL_USER_CATALOG_FALLBACK_QUERY, MYSQL_USER_CATALOG_QUERY,
+        validate_sql, validate_mysql_setting, valid_application_database, valid_mysql_host,
+        mysql_sql_requires_confirmation, MYSQL_USER_CATALOG_FALLBACK_QUERY, MYSQL_USER_CATALOG_QUERY,
     };
     #[test]
     fn mysql_inputs_are_bounded_and_quoted() {
@@ -1130,5 +1400,30 @@ mod tests {
         let mut invalid = request;
         invalid.database = "app_db; GRANT ALL ON *".into();
         assert!(super::mysql_create_user_sql(&invalid).is_err());
+    }
+
+    #[test]
+    fn database_and_account_admin_guards_exclude_system_accounts() {
+        assert!(valid_application_database("customer_app"));
+        assert!(!valid_application_database("mysql"));
+        assert!(!valid_application_database("performance_schema"));
+        assert!(valid_mysql_host("10.20.%"));
+        assert!(!valid_mysql_host("localhost' OR 1=1"));
+    }
+
+    #[test]
+    fn runtime_mysql_settings_are_allowlisted_and_bounded() {
+        assert!(validate_mysql_setting("max_connections", "240").is_ok());
+        assert!(validate_mysql_setting("slow_query_log", "ON").is_ok());
+        assert!(validate_mysql_setting("max_connections", "1000000").is_err());
+        assert!(validate_mysql_setting("init_file", "/tmp/evil.sql").is_err());
+    }
+
+    #[test]
+    fn mutating_sql_requires_confirmation_for_advanced_operations() {
+        assert!(!mysql_sql_requires_confirmation("SHOW GLOBAL VARIABLES;"));
+        assert!(mysql_sql_requires_confirmation("SET GLOBAL slow_query_log = ON;"));
+        assert!(mysql_sql_requires_confirmation("CALL rotate_data();"));
+        assert!(mysql_sql_requires_confirmation("RENAME TABLE old_table TO new_table;"));
     }
 }
