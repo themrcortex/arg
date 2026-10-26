@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.8 — 2026-10-26
+
+### Improved
+- Complete the copper glass visual treatment throughout the ARG panel, including S3 connection cards, service pages, form controls, tooltips, terminal frame and the update overlay.
+- Preserve readable terminal and code output, status colors and reduced-transparency behavior.
+
 ## v0.6.8-dev.2 — 2026-10-26
 
 ### Improved
