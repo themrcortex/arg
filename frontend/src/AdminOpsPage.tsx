@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import { Activity, Check, ChevronLeft, ChevronRight, CircleAlert, Download, LayoutGrid, List, LoaderCircle, Package, Power, RefreshCw, Search, ServerCog, Square, TerminalSquare, Trash2, Zap } from 'lucide-react'
+import { Activity, Check, ChevronLeft, ChevronRight, CircleAlert, Code2, Download, LayoutGrid, List, LoaderCircle, Package, Power, RefreshCw, Search, ServerCog, Square, TerminalSquare, Trash2, Zap } from 'lucide-react'
 import { api } from './lib/api'
 import { cachedRequest, cachedSnapshot, invalidateCached } from './lib/heavy-cache'
 import { Button } from './components/ui/button'
@@ -12,6 +12,7 @@ import { Skeleton } from './components/ui/skeleton'
 type Heading = (props: { title: string; description: string }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
 type PackageRow = { name: string; version: string; summary: string }
+type RuntimePack = { id: string; family: 'php' | 'python' | 'node' | 'java' | 'ruby'; version: string; label: string; packages: string[] }
 type ServiceRow = { unit: string; enabled: string; state: string; sub_state: string; description: string }
 
 export function AptPage({ Heading, notify }: Common) {
@@ -23,6 +24,9 @@ export function AptPage({ Heading, notify }: Common) {
   const [busy, setBusy] = useState(() => cachedSnapshot('apt-packages') ? '' : 'list')
   const [output, setOutput] = useState('')
   const [error, setError] = useState('')
+  const [runtimePacks, setRuntimePacks] = useState<RuntimePack[]>([])
+  const [runtimeLoadError, setRuntimeLoadError] = useState('')
+  const [selectedRuntimes, setSelectedRuntimes] = useState<string[]>([])
   const refresh = useCallback(async (force = false) => {
     setBusy('list'); setError('')
     try { const result = await cachedRequest('apt-packages', () => api<{ packages: PackageRow[] }>('packages').then((response) => response.packages), 60000, force); setPackages(result) }
@@ -30,12 +34,28 @@ export function AptPage({ Heading, notify }: Common) {
     finally { setBusy('') }
   }, [])
   useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => {
+    let active = true
+    void cachedRequest('apt-runtime-packs', () => api<{ runtimes: RuntimePack[] }>('packages/runtimes').then((response) => response.runtimes), 300000)
+      .then((result) => { if (active) { setRuntimePacks(result); setRuntimeLoadError('') } })
+      .catch((cause) => { if (active) setRuntimeLoadError(cause instanceof Error ? cause.message : 'فهرست نسخه‌های قابل نصب دریافت نشد.') })
+    return () => { active = false }
+  }, [])
   const run = async (action: string, names: string[] = []) => {
     if (busy) return
     setBusy(action); setError(''); setOutput('')
     try {
       const result = await api<{ output: string }>('packages/action', { method: 'POST', body: JSON.stringify({ action, packages: names }) })
       invalidateCached('apt-packages')
+      if (['update', 'upgrade', 'full-upgrade', 'install', 'remove'].includes(action)) {
+        invalidateCached('apt-runtime-packs')
+        try {
+          const catalog = await api<{ runtimes: RuntimePack[] }>('packages/runtimes')
+          setRuntimePacks(catalog.runtimes)
+          setSelectedRuntimes((current) => current.filter((id) => catalog.runtimes.some((pack) => pack.id === id)))
+          setRuntimeLoadError('')
+        } catch (cause) { setRuntimeLoadError(cause instanceof Error ? cause.message : 'فهرست نسخه‌های قابل نصب دریافت نشد.') }
+      }
       setOutput(result.output || `APT ${action} completed successfully.`)
       notify(`عملیات APT (${action}) با موفقیت انجام شد.`)
       if (['install', 'remove', 'autoremove', 'upgrade', 'full-upgrade'].includes(action)) await refresh(true)
@@ -43,6 +63,10 @@ export function AptPage({ Heading, notify }: Common) {
     finally { setBusy('') }
   }
   const install = (event: FormEvent) => { event.preventDefault(); const names = packageInput.trim().split(/[\s,]+/).filter(Boolean); if (names.length) { void run('install', names); setPackageInput('') } }
+  const installSelectedRuntimes = () => {
+    const names = [...new Set(runtimePacks.filter((pack) => selectedRuntimes.includes(pack.id)).flatMap((pack) => pack.packages))]
+    if (names.length) void run('install', names)
+  }
   const filtered = useMemo(() => packages.filter((pkg) => `${pkg.name} ${pkg.summary}`.toLowerCase().includes(query.toLowerCase())).slice(0, 250), [packages, query])
   const pageSize = packageView === 'grid' ? 12 : 16
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
@@ -77,6 +101,10 @@ export function AptPage({ Heading, notify }: Common) {
         })}</div>
       </section>)}
     </div>
+    <Card className="mb-5 overflow-hidden"><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[#dda46f]/10 text-[#dda46f]"><Code2 size={18}/></span><div><CardTitle>پک زبان‌ها و Runtimeها</CardTitle><CardDescription>نسخه‌ها از مخازن APT همین سرور خوانده می‌شوند؛ فقط بسته‌های واقعاً در دسترس نمایش داده می‌شوند.</CardDescription></div></div><Button disabled={!!busy || !selectedRuntimes.length} onClick={installSelectedRuntimes}><Download size={15}/>{busy === 'install' ? 'در حال نصب…' : `نصب ${selectedRuntimes.length.toLocaleString('en-US')} پک`}</Button></div></CardHeader><CardContent>
+      {runtimeLoadError ? <Alert className="border-amber-400/25 bg-amber-400/[.05]"><CircleAlert size={16}/><AlertDescription>{runtimeLoadError} از «بازخوانی» دوباره تلاش کن.</AlertDescription></Alert> : !runtimePacks.length ? <p className="rounded-xl border border-dashed border-border p-5 text-sm text-muted-foreground">نسخهٔ جداگانه‌ای از PHP، Python، Node.js، Java یا Ruby در فهرست مخازن فعلی پیدا نشد. نسخهٔ پیش‌فرض سیستم را از بخش نصب بسته با نام بستهٔ رسمی مخزن نصب کن.</p> : <><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{runtimePacks.map((pack) => { const selected = selectedRuntimes.includes(pack.id); return <label key={pack.id} className={`flex cursor-pointer gap-3 rounded-xl border p-3 transition ${selected ? 'border-[#dda46f]/45 bg-[#dda46f]/[.06]' : 'border-border bg-card/45 hover:border-[#dda46f]/25'}`}><input type="checkbox" checked={selected} disabled={!!busy} onChange={(event) => setSelectedRuntimes((current) => event.target.checked ? [...current, pack.id] : current.filter((id) => id !== pack.id))} className="mt-1 accent-[#dda46f]"/><span className="min-w-0 flex-1"><b className="block text-sm">{pack.label}</b><span className="mt-1 block text-[11px] text-muted-foreground">{pack.family === 'php' ? 'CLI + PHP-FPM و افزونه‌های موجود' : pack.family === 'python' ? 'Interpreter + venv/dev در صورت وجود' : pack.family === 'node' ? 'نسخهٔ دقیق موجود در مخزن APT' : pack.family === 'java' ? 'بستهٔ JDK در صورت موجودبودن، وگرنه JRE' : 'Ruby و ابزارهای توسعه در صورت وجود'}</span><code dir="ltr" className="mt-2 block break-all text-left font-mono text-[10px] text-muted-foreground">{pack.packages.join(' · ')}</code></span></label> })}</div><p className="mt-3 text-[11px] leading-5 text-muted-foreground">Node.js از نسخه‌های موجود در مخازن پیکربندی‌شده انتخاب می‌شود. ARG مخزن خارجی اضافه نمی‌کند؛ برای نسخه‌ای که در فهرست نیست، ابتدا مخزن رسمی مورداعتماد را جداگانه تنظیم و سپس این بخش را بازخوانی کن.</p></>}
+      {busy === 'install' && <div className="mt-4 overflow-hidden rounded-full bg-white/[.05]"><div className="arg-apt-progress h-1.5 rounded-full bg-[#dda46f]"/></div>}
+    </CardContent></Card>
     <Card className="mb-5 overflow-hidden"><CardHeader><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[#dda46f]/10 text-[#dda46f]"><Download size={18}/></span><div><CardTitle>نصب بسته</CardTitle><CardDescription>نام یک یا چند بسته را وارد کن؛ حداکثر 25 بسته در هر عملیات.</CardDescription></div></div></CardHeader><CardContent><form onSubmit={install} className="flex flex-wrap gap-2"><Input value={packageInput} onChange={(event) => setPackageInput(event.target.value)} placeholder="مثال: curl nginx htop" dir="ltr" className="min-w-56 flex-1 text-left font-mono"/><Button type="submit" disabled={!!busy || !packageInput.trim()}><Download size={15}/>{busy === 'install' ? <><LoaderCircle size={14} className="animate-spin"/>در حال نصب…</> : 'نصب بسته'}</Button></form><code dir="ltr" className="mt-3 inline-block rounded-md bg-black/20 px-2 py-1 text-[11px] text-muted-foreground">sudo apt-get -y install -- &lt;package&gt;</code>{busy === 'install' && <div className="mt-4 overflow-hidden rounded-full bg-white/[.05]"><div className="arg-apt-progress h-1.5 rounded-full bg-[#dda46f]"/></div>}</CardContent></Card>
     {error && <Alert className="mb-4 border-rose-400/25 bg-rose-400/[.06]"><CircleAlert size={16}/><AlertDescription>{error}</AlertDescription></Alert>}
     {output && <Card className="mb-5"><CardHeader className="pb-2"><CardTitle className="text-sm">گزارش آخرین عملیات</CardTitle></CardHeader><CardContent><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-[#090d12] p-4 text-left font-mono text-xs leading-5 text-muted-foreground" dir="ltr">{output}</pre></CardContent></Card>}

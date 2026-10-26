@@ -2606,6 +2606,20 @@ async fn list_packages(State(state): State<AppState>, headers: HeaderMap) -> Api
     }
     Ok(Json(result["data"].clone()))
 }
+async fn list_runtime_packs(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    let result = privileged_request_async(json!({"action":"apt-runtime-catalog"})).await?;
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            result["error"].as_str().unwrap_or("Runtime package catalog unavailable"),
+        ));
+    }
+    Ok(Json(result["data"].clone()))
+}
 async fn run_apt_operation(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2629,8 +2643,10 @@ async fn run_apt_operation(
         "remove",
     ];
     if !allowed.contains(&input.action.as_str())
-        || input.packages.len() > 25
-        || input.packages.iter().any(|p| !valid_package_name(p))
+        || input.packages.len() > (if input.action == "install" { 100 } else { 25 })
+        || input.packages.iter().any(|p| {
+            if input.action == "install" { !valid_apt_install_spec(p) } else { !valid_package_name(p) }
+        })
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -2754,6 +2770,17 @@ fn valid_package_name(name: &str) -> bool {
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"-".contains(&b)));
     valid_base && valid_arch
+}
+fn valid_apt_install_spec(spec: &str) -> bool {
+    let Some((package, version)) = spec.split_once('=') else {
+        return valid_package_name(spec);
+    };
+    !version.is_empty()
+        && version.len() <= 128
+        && valid_package_name(package)
+        && version.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || b".+:~_-".contains(&byte)
+        })
 }
 fn valid_service_unit(unit: &str) -> bool {
     unit.len() <= 255
@@ -3252,6 +3279,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-site-repository") => "nginx-site-repository",
         Some("nginx-browse") => "nginx-browse",
         Some("apt-list") => "apt-list",
+        Some("apt-runtime-catalog") => "apt-runtime-catalog",
         Some("apt-run") => "apt-run",
         Some("service-list") => "service-list",
         Some("service-action") => "service-action",
@@ -3480,6 +3508,87 @@ fn command_result(command: &mut std::process::Command) -> Result<(bool, String),
     Ok((output.status.success(), result))
 }
 fn execute_apt_request(action: &str, request: &Value) -> Value {
+    if action == "apt-runtime-catalog" {
+        let mut command = std::process::Command::new("apt-cache");
+        command.arg("pkgnames");
+        let Ok((true, output)) = command_result(&mut command) else {
+            return json!({"ok":false,"error":"Could not read package names from configured APT repositories"});
+        };
+        let available: std::collections::HashSet<String> = output.lines().map(str::trim).filter(|name| valid_package_name(name)).map(str::to_owned).collect();
+        let mut runtimes = Vec::<Value>::new();
+
+        let mut php_versions = std::collections::BTreeSet::new();
+        let mut python_versions = std::collections::BTreeSet::new();
+        let mut java_versions = std::collections::BTreeSet::new();
+        let mut ruby_versions = std::collections::BTreeSet::new();
+        for name in &available {
+            if let Some(rest) = name.strip_prefix("php") {
+                if let Some((version, component)) = rest.split_once('-') {
+                    if version.contains('.') && matches!(component, "cli" | "fpm") {
+                        php_versions.insert(version.to_owned());
+                    }
+                }
+            }
+            if let Some(rest) = name.strip_prefix("python3.") {
+                let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                if !digits.is_empty() {
+                    python_versions.insert(format!("3.{digits}"));
+                }
+            }
+            if let Some(rest) = name.strip_prefix("openjdk-") {
+                if let Some((version, component)) = rest.split_once('-') {
+                    if version.bytes().all(|byte| byte.is_ascii_digit()) && matches!(component, "jdk" | "jre" | "jdk-headless" | "jre-headless") {
+                        java_versions.insert(version.to_owned());
+                    }
+                }
+            }
+            if let Some(rest) = name.strip_prefix("ruby") {
+                let version: String = rest.chars().take_while(|character| character.is_ascii_digit() || *character == '.').collect();
+                if version.contains('.') && version.chars().last().is_some_and(|character| character.is_ascii_digit()) {
+                    ruby_versions.insert(version);
+                }
+            }
+        }
+        for version in php_versions {
+            let base = format!("php{version}");
+            let mut packages: Vec<String> = ["cli", "fpm", "common", "curl", "mysql", "xml", "mbstring", "zip", "gd", "intl", "opcache", "sqlite3", "bcmath"].iter().map(|part| format!("{base}-{part}")).filter(|name| available.contains(name)).collect();
+            packages.sort(); packages.dedup();
+            if !packages.is_empty() { runtimes.push(json!({"id":format!("php-{version}"),"family":"php","version":version.clone(),"label":format!("PHP {version}"),"packages":packages})); }
+        }
+        for version in python_versions {
+            let base = format!("python{version}");
+            let mut packages: Vec<String> = ["", "-venv", "-dev"].iter().map(|suffix| format!("{base}{suffix}")).filter(|name| available.contains(name)).collect();
+            if available.contains("python3-pip") { packages.push("python3-pip".into()); }
+            packages.sort(); packages.dedup();
+            if !packages.is_empty() { runtimes.push(json!({"id":format!("python-{version}"),"family":"python","version":version.clone(),"label":format!("Python {version}"),"packages":packages})); }
+        }
+        for version in java_versions {
+            let jdk = format!("openjdk-{version}-jdk");
+            let jre = format!("openjdk-{version}-jre");
+            let packages: Vec<String> = if available.contains(&jdk) { vec![jdk] } else if available.contains(&jre) { vec![jre] } else { Vec::new() };
+            if !packages.is_empty() { runtimes.push(json!({"id":format!("java-{version}"),"family":"java","version":version.clone(),"label":format!("OpenJDK {version}"),"packages":packages})); }
+        }
+        for version in ruby_versions {
+            let base = format!("ruby{version}");
+            let packages: Vec<String> = [base.clone(), format!("{base}-dev")].into_iter().filter(|name| available.contains(name)).collect();
+            if !packages.is_empty() { runtimes.push(json!({"id":format!("ruby-{version}"),"family":"ruby","version":version.clone(),"label":format!("Ruby {version}"),"packages":packages})); }
+        }
+
+        let mut node_versions = std::process::Command::new("apt-cache");
+        node_versions.args(["madison", "nodejs"]);
+        if let Ok((true, output)) = command_result(&mut node_versions) {
+            let mut seen = std::collections::HashSet::new();
+            for version in output.lines().filter_map(|line| line.split('|').nth(1)).map(str::trim).filter(|value| !value.is_empty()) {
+                if !seen.insert(version.to_owned()) || !valid_apt_install_spec(&format!("nodejs={version}")) { continue; }
+                let mut packages = vec![format!("nodejs={version}")];
+                if available.contains("npm") { packages.push("npm".into()); }
+                runtimes.push(json!({"id":format!("node-{version}"),"family":"node","version":version.to_owned(),"label":format!("Node.js {version}"),"packages":packages}));
+                if seen.len() >= 20 { break; }
+            }
+        }
+        runtimes.sort_by(|a, b| a["family"].as_str().cmp(&b["family"].as_str()).then_with(|| a["version"].as_str().cmp(&b["version"].as_str())));
+        return json!({"ok":true,"data":{"runtimes":runtimes,"source":"configured APT repositories"}});
+    }
     if action == "apt-list" {
         let mut command = std::process::Command::new("dpkg-query");
         command.args([
@@ -3527,8 +3636,8 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
         .as_array()
         .map(|items| items.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    if packages.len() > 25
-        || packages.iter().any(|name| !valid_package_name(name))
+    if packages.len() > (if operation == "install" { 100 } else { 25 })
+        || packages.iter().any(|name| if operation == "install" { !valid_apt_install_spec(name) } else { !valid_package_name(name) })
         || ["install", "remove"].contains(&operation) && packages.is_empty()
     {
         return json!({"ok":false,"error":"Invalid package list"});
@@ -4029,9 +4138,17 @@ async fn clear_trusted_transport_marker(
 mod update_progress_tests {
     use super::{
         backup_database, default_update_build_mode, ensure_metric_storage_columns,
-        firewall_rule_validation_error, update_progress_payload, valid_update_build_mode,
+        firewall_rule_validation_error, update_progress_payload, valid_apt_install_spec, valid_update_build_mode,
         valid_tls_source_path, Connection, FirewallRuleInput,
     };
+
+    #[test]
+    fn apt_install_specs_allow_pinned_versions_without_shell_syntax() {
+        assert!(valid_apt_install_spec("php8.5-fpm"));
+        assert!(valid_apt_install_spec("nodejs=1:22.18.0-1nodesource1"));
+        assert!(!valid_apt_install_spec("nodejs=22.18;touch /tmp/pwned"));
+        assert!(!valid_apt_install_spec("=1.0"));
+    }
 
     #[test]
     fn update_build_mode_only_accepts_supported_choices() {

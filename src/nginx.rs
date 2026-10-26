@@ -1,4 +1,5 @@
 use super::*;
+use std::os::unix::fs::FileTypeExt;
 
 const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
@@ -213,9 +214,23 @@ pub(super) async fn nginx_status(State(state): State<AppState>, headers: HeaderM
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
     }
-    nginx_manager_request_async(json!({"action":"nginx-status"}))
-        .await
-        .map(Json)
+    let mut result = nginx_manager_request_async(json!({"action":"nginx-status"})).await?;
+    let mut sockets = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/run/php") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("php") && name.ends_with("-fpm.sock") && entry.metadata().is_ok_and(|metadata| metadata.file_type().is_socket()) {
+                sockets.push(format!("unix:/run/php/{name}"));
+            }
+        }
+    }
+    sockets.sort();
+    sockets.dedup();
+    if sockets.is_empty() && std::path::Path::new("/run/php/php-fpm.sock").exists() {
+        sockets.push("unix:/run/php/php-fpm.sock".into());
+    }
+    result["php_fpm_sockets"] = json!(sockets);
+    Ok(Json(result))
 }
 
 pub(super) async fn api_nginx_browse_files(
@@ -1714,6 +1729,27 @@ fn nginx_atomic_write(path: &std::path::Path, content: &[u8], mode: u32) -> Resu
     result
 }
 
+fn nginx_ssl_certificate_name(domains: &[String]) -> Result<String, String> {
+    let uri = domains
+        .iter()
+        .filter(|domain| valid_domain_name(domain) && !domain.starts_with("*."))
+        .min_by_key(|domain| {
+            (
+                domain.starts_with("www."),
+                domain.len(),
+                (*domain).to_ascii_lowercase(),
+            )
+        })
+        .ok_or_else(|| "دامنهٔ اصلی معتبری برای نام گواهی پیدا نشد.".to_owned())?
+        .to_ascii_lowercase();
+    if uri.len() <= 250 {
+        Ok(format!("arg-{uri}"))
+    } else {
+        let suffix = &hex::encode(Sha256::digest(uri.as_bytes()))[..12];
+        Ok(format!("arg-{}-{suffix}", &uri[..220]))
+    }
+}
+
 fn nginx_issue_ssl(
     name: &str,
     email: &str,
@@ -1801,16 +1837,25 @@ fn nginx_issue_ssl(
     fs::set_permissions(&backup, fs::Permissions::from_mode(0o600))
         .map_err(|error| error.to_string())?;
 
-    // Keep site certificates in their own lineage. Certbot otherwise tries to
-    // expand an unrelated certificate (for example the panel certificate) and
-    // prompts even when --non-interactive is set.
-    let certificate_name = format!(
+    // Keep site certificates in an ARG-owned, readable lineage named after the
+    // site's canonical URI. Preserve lineages created by older ARG versions so
+    // renewals continue to work and we do not issue a duplicate certificate.
+    let requested_certificate_name = nginx_ssl_certificate_name(domains)?;
+    let renewal_dir = std::path::Path::new("/etc/letsencrypt/renewal");
+    let requested_lineage = renewal_dir.join(format!("{requested_certificate_name}.conf"));
+    let legacy_certificate_name = format!(
         "arg-site-{}",
         &hex::encode(Sha256::digest(name.as_bytes()))[..16]
     );
-    let has_site_lineage = std::path::Path::new("/etc/letsencrypt/renewal")
-        .join(format!("{certificate_name}.conf"))
-        .exists();
+    let legacy_lineage = renewal_dir.join(format!("{legacy_certificate_name}.conf"));
+    let (certificate_name, has_site_lineage) = if requested_lineage.exists() {
+        (requested_certificate_name, true)
+    } else if legacy_lineage.exists() {
+        (legacy_certificate_name, true)
+    } else {
+        (requested_certificate_name, false)
+    };
+    let legacy_lineage_preserved = certificate_name.starts_with("arg-site-");
     let mut command = std::process::Command::new("timeout");
     command.args([
         "600s",
@@ -1879,7 +1924,7 @@ fn nginx_issue_ssl(
     let certificate = format!("/etc/letsencrypt/live/{certificate_name}/fullchain.pem");
     detail.truncate(3000);
     Ok(
-        json!({"message":"گواهی صادر و در تنظیمات سایت فعال شد. Certbot تمدید خودکار را مدیریت می‌کند.","domains":domains,"certificate":certificate,"backup":backup,"output":detail.trim()}),
+        json!({"message":"گواهی صادر و در تنظیمات سایت فعال شد. Certbot تمدید خودکار را مدیریت می‌کند.","domains":domains,"certificate_name":certificate_name,"certificate":certificate,"legacy_lineage_preserved":legacy_lineage_preserved,"backup":backup,"output":detail.trim()}),
     )
 }
 
@@ -2645,8 +2690,20 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 mod maintenance_tests {
     use super::{
         nginx_maintenance_block, nginx_maintenance_cookie_name, nginx_maintenance_secret_config,
+        nginx_ssl_certificate_name,
         nginx_remove_maintenance_block, nginx_server_open_offsets, nginx_valid_maintenance_token,
     };
+
+    #[test]
+    fn ssl_certificate_lineage_uses_canonical_arg_site_uri() {
+        let domains = vec!["www.example.com".to_owned(), "example.com".to_owned()];
+        assert_eq!(nginx_ssl_certificate_name(&domains).unwrap(), "arg-example.com");
+
+        let long_domain = format!("{}.{}.{}.{}", "a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(61));
+        let name = nginx_ssl_certificate_name(&[long_domain]).unwrap();
+        assert!(name.starts_with("arg-a"));
+        assert!(name.len() <= 255);
+    }
 
     #[test]
     fn finds_server_blocks_without_matching_comments_or_nested_locations() {

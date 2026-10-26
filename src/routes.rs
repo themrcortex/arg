@@ -129,6 +129,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/update/progress", get(panel_update_progress))
         .route("/api/update/logs", get(panel_update_logs))
         .route("/api/packages", get(list_packages))
+        .route("/api/packages/runtimes", get(list_runtime_packs))
         .route("/api/packages/action", post(run_apt_operation))
         .route("/api/services", get(list_system_services))
         .route("/api/services/action", post(run_service_operation))
