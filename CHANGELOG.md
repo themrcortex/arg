@@ -1,5 +1,21 @@
 # ARG Change Log
 
+## v0.6.9-dev.9 — 2026-10-27
+
+### Added
+- Add on-demand app-linked Nginx traffic snapshots by reading a dedicated access log with a 4 MiB and 5,000-line ceiling; show only measured request counts, response body bytes, status groups, and logged hourly buckets.
+- Add durable in-app monitoring events for supported application service/CPU/RAM alert transitions, with admin acknowledgement and one-year retention.
+- Add an authenticated role-capability endpoint and explicit UI guidance that `operator` and `viewer` currently have no separate admin operation grants.
+- Add a read-only host security inventory for selected scanner binaries; it does not install or execute scanners or claim that a tool is configured or active.
+- Add an audited Ed25519 trust-key registry and constrained extension manifest validation. Package bytes are not uploaded or verified, and extensions cannot be installed or executed.
+
+### Changed
+- Bound Nginx access-log sampling by both file bytes and line count, avoiding an unbounded helper output buffer.
+- Record Phases 33–37 as partial implementations in the Persian and English roadmap, with unimplemented acceptance items called out.
+
+### Validation
+- 167 Rust tests, `cargo check --locked`, frontend TypeScript check and production build, bilingual documentation check and production build, optimized Rust release build, and `git diff --check` passed. The post-push version check is still pending. External VPS/provider tests were not run.
+
 ## v0.6.9-dev.8 — 2026-10-27
 
 ### Added
