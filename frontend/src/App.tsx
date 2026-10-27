@@ -204,16 +204,11 @@ const developer = (
 
 function Brand({ large = false }: { large?: boolean }) {
   return (
-    <div className="flex items-center gap-3">
-      <img src="/arg/brand/arg-symbol.svg" alt="" aria-hidden="true" className={large ? 'h-14 w-14' : 'h-11 w-11'} />
-      <div>
-        <div className={cn('brand-text font-black leading-none text-primary', large ? 'text-[31px]' : 'text-[21px]')} dir="ltr">ARG</div>
-        <div className="mt-1 text-sm font-bold text-foreground">ارگ</div>
-        <div className="mt-1 text-[10px] font-semibold uppercase tracking-[.2em] text-muted-foreground" dir="ltr">
-          VPS CONTROL CENTER
-        </div>
-      </div>
-    </div>
+    <img
+      src="/arg/brand/arg-logo.png"
+      alt="ARG"
+      className={cn('h-auto w-full object-contain', large ? 'max-w-[300px]' : 'max-w-[240px]')}
+    />
   )
 }
 
@@ -1074,8 +1069,6 @@ export default function App() {
             leading={
               <>
                 <Button ref={mobileMenuButton} variant="ghost" size="icon" className="h-9 w-9 shrink-0 lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button>
-                <span className="hidden text-[10px] font-semibold tracking-[.18em] text-primary lg:inline" dir="ltr">VPS CONTROL CENTER</span>
-                <Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge>
               </>
             }
             breadcrumb={

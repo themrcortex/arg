@@ -43,10 +43,10 @@ export function SidebarNavigation({ items, currentPage, collapsed, mobileOpen, d
     >
       <div className="arg-sidebar-pattern" aria-hidden="true" />
       <div className="arg-sidebar-corner" aria-hidden="true" />
-      <div className="arg-brand-row relative z-10 flex min-h-[68px] items-center justify-between gap-1">
-        <div className="arg-brand-lockup flex min-w-0 flex-1 items-center gap-1.5" aria-label="ARG VPS Control Center">
-          <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-9 w-9 shrink-0" />
-          <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-product-label" dir="ltr"><span>VPS CONTROL CENTER</span></div></div>
+      <div className="arg-brand-row relative z-10 flex min-h-[72px] items-center justify-between gap-1">
+        <div className="arg-brand-lockup flex min-w-0 flex-1 items-center" aria-label="ARG">
+          <img src="/arg/brand/arg-logo.png" alt="ARG" className="arg-brand-full" />
+          <img src="/arg/brand/arg-logo-mark.png" alt="" aria-hidden="true" className="arg-brand-mark" />
         </div>
         <Button variant="ghost" size="icon" className="arg-collapse hidden h-8 w-8 shrink-0 lg:inline-flex" onClick={onToggleCollapsed} aria-label={collapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!collapsed} title={collapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{collapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
         <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close h-8 w-8 shrink-0 lg:hidden" onClick={onCloseMobile} aria-label="بستن منو"><X size={18}/></Button>
