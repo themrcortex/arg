@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "predev": "node scripts/update-docs-metadata.mjs && node scripts/generate-search-index.mjs",
+    "prebuild": "node scripts/update-docs-metadata.mjs && node scripts/generate-search-index.mjs"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",

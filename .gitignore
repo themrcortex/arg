@@ -7,3 +7,6 @@
 /docs-site/node_modules/
 /docs-site/dist/
 /docs-site/*.tsbuildinfo
+
+/docs-site/public/search-index.*.json
+/docs-site/public/content/

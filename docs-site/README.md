@@ -18,11 +18,11 @@ npm run build
 
 ## Publishing
 
-`.github/workflows/docs-pages.yml` builds and deploys the site to GitHub Pages on changes to `docs/**` or `docs-site/**` on `main`. The repository Pages source must be set to **GitHub Actions** once in repository settings. The expected URL is `https://themrcortex.github.io/arg/`.
+`.github/workflows/docs-pages.yml` builds and deploys the site to GitHub Pages on changes to `docs/**` or `docs-site/**` on `main` or `development`. Both branches publish to the repository's Pages site at `https://themrcortex.github.io/arg/`; the repository Pages source must be set to **GitHub Actions** in repository settings.
 
 ## Add or update a guide
 
-1. Edit both `../docs/fa/<page>.md` and `../docs/en/<page>.md`.
+1. Edit both `../docs/fa/<page>.md` and `../docs/en/<page>.md`. The predev/prebuild scripts copy catalog Markdown into `public/content/<locale>/` for one-article-at-a-time loading; generated copies are ignored by Git.
 2. Add/adjust the page entry and navigation group in `src/catalog.ts`.
 3. Keep heading levels ordered (`##`, then `###`), use fenced code blocks, and clearly label unavailable or risky behavior.
 4. Run `npm run check`, `npm run build`, and `bash ../scripts/tests/test-docs-content.sh` from the repository root or respective directory.
