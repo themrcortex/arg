@@ -1,38 +1,62 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Settings2, Shield, Sun, ChartNoAxesCombined, Code2, X } from 'lucide-react'
-import { groups, navigation, pages, readingOrder, pageNeighbors, pageTrail, type DocPage, type Locale } from './catalog'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, ChevronDown, ChevronLeft, Command, ExternalLink, Github, Globe2, Menu, Moon, Search, Sun, X } from 'lucide-react'
+import { groups, navigation, pages, readingOrder, pageNeighbors, pageTrail, resolvePageId, type DocPage, type Locale } from './catalog'
 import { Badge } from './components/ui/badge'
 import { ARG_VERSION } from './version'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from './components/ui/card'
 
-const faContent = import.meta.glob('../../docs/fa/*.md', { query: '?raw', import: 'default' }) as Record<string, () => Promise<string>>
-const enContent = import.meta.glob('../../docs/en/*.md', { query: '?raw', import: 'default' }) as Record<string, () => Promise<string>>
 const sourceFor = async (locale: Locale, file: string) => {
-  const load = (locale === 'fa' ? faContent : enContent)[`../../docs/${locale}/${file}.md`]
-  if (!load) throw new Error(`Documentation article not found: ${locale}/${file}`)
-  return load()
+  const response = await fetch(`${import.meta.env.BASE_URL}content/${locale}/${encodeURIComponent(file)}.md`)
+  if (!response.ok) throw new Error(`Documentation article not found: ${locale}/${file}`)
+  return response.text()
 }
 const getInitialPage = () => {
   const requested = new URLSearchParams(window.location.search).get('page')
-  return pages.some((item) => item.id === requested) ? requested! : 'overview'
+  return requested ? resolvePageId(requested) || 'overview' : 'overview'
+}
+const normalizeLegacyPageUrl = () => {
+  const url = new URL(window.location.href)
+  const requested = url.searchParams.get('page')
+  const resolved = requested ? resolvePageId(requested) : undefined
+  if (!requested || !resolved || requested === resolved) return
+  url.searchParams.set('page', resolved)
+  url.hash = ''
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
 }
 
-function parseArticle(source: string, locale: Locale) {
+const slugHeading = (text: string) => text.toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'section'
+
+function parseArticle(source: string, locale: Locale, pageTitle: string) {
   const rendered = String(marked.parse(source, { gfm: true, breaks: false }))
   const doc = new DOMParser().parseFromString(rendered, 'text/html')
+  const firstTitle = doc.body.querySelector('h1')
+  if (firstTitle?.textContent?.trim() === pageTitle.trim()) firstTitle.remove()
+  doc.body.querySelectorAll('h1').forEach((heading) => {
+    const replacement = doc.createElement('h2')
+    replacement.innerHTML = heading.innerHTML
+    heading.replaceWith(replacement)
+  })
   const seen = new Map<string, number>()
-  const toc = Array.from(doc.body.querySelectorAll('h2,h3')).map((heading) => {
+  const toc = Array.from(doc.body.querySelectorAll('h2,h3,h4,h5,h6')).map((heading) => {
     const text = heading.textContent?.trim() || ''
-    const slug = text.toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'section'
+    const slug = slugHeading(text)
     const count = seen.get(slug) || 0
     seen.set(slug, count + 1)
     const id = count ? `${slug}-${count + 1}` : slug
     heading.id = id
-    return { id, text, depth: Number(heading.tagName.slice(1)) }
-  })
+    const permalink = doc.createElement('a')
+    permalink.className = 'heading-anchor'
+    permalink.href = `#${id}`
+    permalink.setAttribute('aria-label', locale === 'fa' ? `پیوند مستقیم به تیتر ${text}` : `Permalink to ${text}`)
+    permalink.title = locale === 'fa' ? 'پیوند مستقیم به این تیتر' : 'Permalink to this heading'
+    permalink.textContent = '¶'
+    heading.append(permalink)
+    const depth = Number(heading.tagName.slice(1))
+    return depth <= 3 ? { id, text, depth } : null
+  }).filter((item): item is { id: string; text: string; depth: number } => item !== null)
   doc.body.querySelectorAll('pre').forEach((pre) => {
     const code = pre.querySelector('code')
     const language = code?.className.match(/language-([\w+-]+)/)?.[1] || 'text'
@@ -55,6 +79,18 @@ function parseArticle(source: string, locale: Locale) {
     link.setAttribute('rel', 'noopener noreferrer')
   })
   return { html: DOMPurify.sanitize(doc.body.innerHTML), toc }
+}
+
+const initialExpandedGroups = () => {
+  try {
+    const stored = JSON.parse(localStorage.getItem('arg-docs-expanded') || '[]') as unknown
+    if (!Array.isArray(stored)) return new Set<string>()
+    const ids = stored.filter((id): id is string => typeof id === 'string')
+    const subgroup = [...ids].reverse().find((id) => id.includes(':'))
+    if (subgroup) return new Set([subgroup.slice(0, subgroup.indexOf(':')), subgroup])
+    const category = [...ids].reverse().find((id) => !id.includes(':'))
+    return category ? new Set([category]) : new Set<string>()
+  } catch { return new Set<string>() }
 }
 
 const copyText = async (value: string) => {
@@ -85,7 +121,7 @@ export default function App() {
   const [activeHeading, setActiveHeading] = useState('')
   const [readingProgress, setReadingProgress] = useState(0)
   const [targetAnchor, setTargetAnchor] = useState(() => decodeURIComponent(window.location.hash.slice(1)))
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => { try { return new Set(JSON.parse(localStorage.getItem('arg-docs-expanded') || '[]') as string[]) } catch { return new Set() } })
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(initialExpandedGroups)
   const searchRef = useRef<HTMLInputElement>(null)
   const mobileSearchRef = useRef<HTMLInputElement>(null)
   const previousFocus = useRef<HTMLElement | null>(null)
@@ -93,9 +129,8 @@ export default function App() {
   const previousPageId = useRef(pageId)
   const deferredQuery = useDeferredValue(query)
   const page = pages.find((item) => item.id === pageId) || pages[0]
-  const article = useMemo(() => parseArticle(articleSource, locale), [articleSource, locale])
+  const article = useMemo(() => parseArticle(articleSource, locale, page.title[locale]), [articleSource, locale, page.title, page.id])
   const isFa = locale === 'fa'
-  const visiblePages = useMemo(() => pages.filter((item) => `${item.title[locale]} ${item.summary[locale]}`.toLocaleLowerCase().includes(deferredQuery.trim().toLocaleLowerCase())), [locale, deferredQuery])
   const texts = isFa ? {
     title: 'مستندات ARG', subtitle: 'راهنمای کامل مدیریت VPS', search: 'جست‌وجو در مستندات…', searchHint: 'برای جست‌وجو / را بزن', toc: 'در این صفحه', start: 'شروع سریع', github: 'مخزن GitHub', support: 'پشتیبانی', language: 'English', updated: 'همگام با نسخهٔ پایدار', empty: 'صفحه‌ای پیدا نشد.', menu: 'فهرست مستندات', copy: 'کپی شد', copied: 'کپی شد', previous: 'صفحهٔ قبل', next: 'صفحهٔ بعد', allDocs: 'صفحه', close: 'بستن فهرست', count: 'راهنما', disclaimer: 'مستندات بر اساس قابلیت‌های موجود مخزن نوشته شده‌اند. مواردی که هنوز پیاده‌سازی نشده‌اند صریحاً مشخص شده‌اند.', top: 'بازگشت به بالا', loadingPage: 'در حال بارگذاری راهنما…', articleError: 'بارگذاری این راهنما ناموفق بود.', retry: 'تلاش دوباره',
   } : {
@@ -136,7 +171,12 @@ export default function App() {
   }, [locale, isFa, page, texts.title, theme])
 
   useEffect(() => {
+    normalizeLegacyPageUrl()
+  }, [])
+
+  useEffect(() => {
     const onPop = () => {
+      normalizeLegacyPageUrl()
       startPageTransition()
       setPageId(getInitialPage())
       setTargetAnchor(decodeURIComponent(window.location.hash.slice(1)))
@@ -210,18 +250,13 @@ export default function App() {
 
   useEffect(() => {
     const [category, section] = pageTrail(page.id)
-    setExpandedGroups((current) => new Set(current).add(category?.id || page.group).add(`${category?.id || page.group}:${section?.id || ''}`))
+    const categoryId = category?.id || page.group
+    setExpandedGroups(new Set([categoryId, `${categoryId}:${section?.id || ''}`]))
     requestAnimationFrame(() => {
       const sidebar = mobileNav ? '.mobile-sidebar' : '.desktop-sidebar'
       document.querySelector(`${sidebar} .nav-link.active`)?.scrollIntoView({ block: 'nearest' })
     })
   }, [page.group, page.id, mobileNav])
-
-  useEffect(() => {
-    if (!query.trim()) return
-    const matchingGroups = new Set(visiblePages.flatMap((item) => { const [category, section] = pageTrail(item.id); return [category?.id || item.group, `${category?.id || item.group}:${section?.id || ''}`] }))
-    setExpandedGroups((current) => new Set([...current, ...matchingGroups]))
-  }, [query, visiblePages, page.group])
 
   useEffect(() => { localStorage.setItem('arg-docs-expanded', JSON.stringify([...expandedGroups])) }, [expandedGroups])
 
@@ -265,7 +300,15 @@ export default function App() {
   }
 
   function toggleExpanded(id: string) {
-    setExpandedGroups((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next })
+    setExpandedGroups((current) => {
+      if (!id.includes(':')) {
+        if (current.has(id)) return new Set()
+        return new Set([id])
+      }
+      const category = id.slice(0, id.indexOf(':'))
+      if (current.has(id)) return new Set([category])
+      return new Set([category, id])
+    })
   }
 
   function focusDocsSearch() {
@@ -277,6 +320,7 @@ export default function App() {
 
   function renderSidebar(mobile = false) {
     const idPrefix = mobile ? 'mobile-' : 'desktop-'
+    const searching = query.trim().length >= 2
     const activeTrail = pageTrail(page.id)
     const activeCategory = activeTrail[0]?.id
     const activeSection = activeTrail[1]?.id
@@ -284,33 +328,28 @@ export default function App() {
       <div className="sidebar-heading"><div className="sidebar-heading-icon"><BookOpen size={17}/></div><div className="sidebar-heading-copy min-w-0"><p>{isFa ? 'راهنمای ARG' : 'ARG docs'}</p><span>{texts.menu} · {readingOrder.length} {texts.allDocs}</span></div><button className="mobile-close" onClick={() => setMobileNav(false)} aria-label={texts.close}><X size={18}/></button></div>
       <label className="side-search"><Search size={15}/><input ref={mobile ? mobileSearchRef : undefined} aria-label={texts.search} placeholder={texts.search} value={query} onChange={(event) => setQuery(event.target.value)}/><kbd>/</kbd></label>
       <nav className="side-nav" aria-label={texts.menu}>
-        {query.trim().length >= 2 && (searchIndex ? rankedSearchResults.length ? <div className="inline-search-results">{rankedSearchResults.map((result) => {
+        {searching && (searchIndex ? rankedSearchResults.length ? <div className="inline-search-results">{rankedSearchResults.map((result) => {
           const target = pages.find((item) => item.id === result.id)!
           return <button key={result.id} onClick={() => navigate(target, result.heading?.id)}><small>{groupsList[target.group]}</small><strong>{highlightText(target.title[locale], query.trim())}</strong><span>{highlightText(result.heading?.text || result.excerpt || target.summary[locale], query.trim())}</span></button>
         })}</div> : <p className="empty-search">{isFa ? 'نتیجه‌ای پیدا نشد.' : 'No results found.'}</p> : <p className="empty-search">{isFa ? 'در حال آماده‌سازی جست‌وجو…' : 'Preparing search…'}</p>)}
-        {navigation.map((category) => {
-          const visibleSections = category.children.map((section) => ({ ...section, pages: section.pages.filter((item) => visiblePages.some((visible) => visible.id === item.id)) })).filter((section) => section.pages.length)
-          if (!visibleSections.length) return null
+        {!searching && navigation.map((category) => {
+          const visibleSections = category.children
           const categoryOpen = expandedGroups.has(category.id)
-          const categoryPageCount = category.children.reduce((count, section) => count + section.pages.length, 0)
-          const iconMap = { gettingStarted: BookOpen, dashboard: ChartNoAxesCombined, network: Network, docker: Container, data: Database, applications: Boxes, system: Settings2, security: Shield, reference: Code2 }
-          const CategoryIcon = iconMap[category.id as keyof typeof iconMap] || BookOpen
           const categoryContentId = `${idPrefix}category-${category.id}`
           return <section key={category.id} className="nav-group">
-            <button className={`nav-category ${activeCategory === category.id ? 'is-current' : ''}`} aria-expanded={categoryOpen} aria-controls={categoryContentId} onClick={() => toggleExpanded(category.id)}><span className="nav-category-label"><span className="nav-category-icon"><CategoryIcon size={16}/></span><span className="nav-category-title">{category.title[locale]}</span></span><span className="nav-category-meta"><small>{categoryPageCount}</small><ChevronDown size={14}/></span></button>
+            <button className={`nav-category ${activeCategory === category.id ? 'is-current' : ''}`} aria-expanded={categoryOpen} aria-controls={categoryContentId} onClick={() => toggleExpanded(category.id)}><span className="nav-category-title">{category.title[locale]}</span><ChevronDown size={14}/></button>
             <div className="nav-category-children" id={categoryContentId} hidden={!categoryOpen}>{visibleSections.map((section) => {
               const key = `${category.id}:${section.id}`
               const open = expandedGroups.has(key)
               const sectionIsCurrent = activeCategory === category.id && activeSection === section.id
               const sectionContentId = `${idPrefix}section-${category.id}-${section.id}`
               return <details key={key} className={`nav-subgroup ${sectionIsCurrent ? 'is-current' : ''}`} open={open}>
-                <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open} aria-controls={sectionContentId}><span className="nav-subgroup-title">{section.title[locale]}</span><span className="nav-subgroup-meta"><small>{section.pages.length}</small><ChevronDown size={13}/></span></summary>
+                <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open} aria-controls={sectionContentId}><span className="nav-subgroup-title">{section.title[locale]}</span><ChevronDown size={13}/></summary>
                 <div className="nav-group-pages" id={sectionContentId}>{section.pages.map((item) => <a key={item.id} href={`?page=${item.id}`} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(item) }} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</a>)}</div>
               </details>
             })}</div>
           </section>
         })}
-        {!visiblePages.length && <p className="empty-search">{texts.empty}</p>}
       </nav>
       <div className="sidebar-bottom"><p>{texts.disclaimer}</p></div>
     </>
@@ -357,7 +396,7 @@ export default function App() {
         {page.id === 'overview' && <section className="hero-card" aria-labelledby="home-title">
           <div className="hero-copy">
             <p className="hero-kicker"><span className="hero-kicker-mark"><BookOpen size={14}/></span>{isFa ? 'مستندات رسمی ARG' : 'ARG DOCUMENTATION'}</p>
-            <h1 id="home-title">{isFa ? <>مدیریت VPS،<br/><span>ساده و روشن.</span></> : <>A clearer way<br/><span>to manage your VPS.</span></>}</h1>
+            <h1 id="home-title">{isFa ? <>مدیریت VPS،<br/><span>ساده و روشن.</span></> : <>A clearer way<br/><span>to manage your VPS.</span></>}<a className="title-anchor" href="#home-title" aria-label={isFa ? 'پیوند مستقیم به تیتر صفحه' : 'Permalink to page title'} title={isFa ? 'پیوند مستقیم به این تیتر' : 'Permalink to this heading'}>¶</a></h1>
             <p>{isFa ? 'راهنمای دوزبانه برای نصب، ایمن‌سازی و مدیریت VPS لینوکسی با ARG؛ بر پایهٔ قابلیت‌های موجود در همین نسخه.' : 'A bilingual guide to installing, securing, and managing a Linux VPS with ARG, grounded in the features available in this release.'}</p>
             <div className="hero-actions"><Button onClick={() => { const install = pages.find((item) => item.id === 'install'); if (install) navigate(install) }}>{texts.start}<ArrowDown size={15}/></Button><Button variant="outline" onClick={focusDocsSearch}><Search size={15}/>{isFa ? 'جست‌وجو در راهنماها' : 'Search the docs'}<kbd>/</kbd></Button></div>
             <div className="hero-facts"><span><code>Rust</code>{isFa ? 'هستهٔ سرور' : 'server backend'}</span><span><code>React</code>{isFa ? 'پنل وب' : 'web panel'}</span><span><code>systemd</code>{isFa ? 'مدیریت سرویس' : 'service manager'}</span></div>
@@ -367,7 +406,7 @@ export default function App() {
             <a className="hero-github" href="https://github.com/themrcortex/arg" target="_blank" rel="noreferrer"><Github size={15}/>{texts.github}<ExternalLink size={12}/></a>
           </div>
         </section>}
-        {page.id !== 'overview' && <div className="article-heading"><div><p className="eyebrow"><span className="eyebrow-dot"/>{trail[0]?.title[locale] || groupsList[page.group]}</p><h1>{page.title[locale]}</h1><p className="article-summary">{page.summary[locale]}</p></div><span className="article-index">{String(index + 1).padStart(2, '0')} <i>/</i> {String(pages.length).padStart(2, '0')}</span></div>}
+        {page.id !== 'overview' && <div className="article-heading"><div><p className="eyebrow"><span className="eyebrow-dot"/>{trail[0]?.title[locale] || groupsList[page.group]}</p><h1 id="article-title">{page.title[locale]}<a className="title-anchor" href="#article-title" aria-label={isFa ? 'پیوند مستقیم به تیتر صفحه' : 'Permalink to page title'} title={isFa ? 'پیوند مستقیم به این تیتر' : 'Permalink to this heading'}>¶</a></h1><p className="article-summary">{page.summary[locale]}</p></div><span className="article-index">{String(index + 1).padStart(2, '0')} <i>/</i> {String(pages.length).padStart(2, '0')}</span></div>}
         {article.toc.length > 0 && <details className="mobile-toc"><summary>{texts.toc}<ChevronLeft size={14}/></summary><nav>{article.toc.map((item) => <a key={item.id} className={item.depth === 3 ? 'toc-sub' : ''} href={`#${item.id}`} onClick={() => setMobileNav(false)}>{item.text}</a>)}</nav></details>}
         {articleLoading ? <section className="article-skeleton" role="status" aria-label={texts.loadingPage}><span className="skeleton-line w-4/5"/><span className="skeleton-line w-full"/><span className="skeleton-line w-11/12"/><span className="skeleton-line w-3/5"/><div className="skeleton-block"/><span className="skeleton-line w-full"/><span className="skeleton-line w-5/6"/></section> : articleError ? <section className="article-load-error" role="alert"><p>{texts.articleError}</p><Button variant="outline" size="sm" onClick={() => setArticleReload((value) => value + 1)}>{texts.retry}</Button></section> : <div className="article-content" dangerouslySetInnerHTML={{ __html: article.html }} onClick={async (event) => {
           const target = event.target as HTMLElement

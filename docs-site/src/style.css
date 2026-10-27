@@ -470,3 +470,107 @@ mark { border-radius:2px; background:hsl(var(--primary) / .25); color:inherit; }
   .hero-facts { gap:8px 12px; font-size:10px; }
   .hero-start { padding:15px; }
 }
+
+/* Keep documentation navigation flush to the leading edge (right in Persian), with one open path. */
+.docs-layout {
+  max-width: none;
+  grid-template-columns: 268px minmax(0, 1fr) 220px;
+  gap: clamp(20px, 2.4vw, 36px);
+  padding-inline-start: 0;
+  padding-inline-end: clamp(18px, 2.5vw, 36px);
+}
+.desktop-sidebar {
+  top: 64px;
+  height: calc(100vh - 64px);
+  margin: 0;
+  border: 0;
+  border-inline-end: 1px solid var(--docs-line);
+  border-radius: 0;
+  background: hsl(var(--background));
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.sidebar-heading { padding-inline: 16px; }
+.side-search { margin-inline: 14px; }
+.side-nav { padding-inline: 14px; }
+.nav-group { margin: 0; padding: 0; border: 0; }
+.nav-category {
+  min-height: 43px;
+  padding: 0 10px;
+  border: 0;
+  border-block-end: 1px solid var(--docs-line);
+  border-radius: 0;
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  font-weight: 600;
+}
+.nav-category:hover, .nav-category:focus-visible { background: var(--docs-soft); }
+.nav-category.is-current { border-inline-start: 2px solid hsl(var(--primary)); background: transparent; color: hsl(var(--primary)); }
+.nav-category.is-current[aria-expanded='true'] { background: transparent; }
+.nav-category > svg { flex: 0 0 14px; color: hsl(var(--muted-foreground)); transition: transform .18s ease; }
+.nav-category[aria-expanded='true'] > svg { transform: rotate(180deg); }
+.nav-category-children {
+  margin: 0;
+  padding: 4px 0 8px;
+  padding-inline-start: 11px;
+  border-inline-start: 1px solid var(--docs-line);
+  animation: nav-expand .15s ease both;
+}
+.nav-subgroup { margin: 0; }
+.nav-subgroup summary {
+  min-height: 35px;
+  padding: 0 8px;
+  border-radius: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+}
+.nav-subgroup summary:focus-visible { outline-offset: -2px; }
+.nav-subgroup.is-current > summary { color: hsl(var(--foreground)); font-weight: 600; }
+.nav-subgroup > summary > svg { flex: 0 0 13px; color: hsl(var(--muted-foreground)); transition: transform .18s ease; }
+.nav-subgroup[open] > summary > svg { transform: rotate(180deg); }
+.nav-subgroup .nav-group-pages { padding: 1px 0 5px; padding-inline-start: 5px; }
+.nav-subgroup .nav-link {
+  min-height: 34px;
+  margin: 1px 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  font-size: 11px;
+}
+.nav-subgroup .nav-link:hover { transform: none; }
+.nav-subgroup .nav-link.active {
+  border-inline-start: 2px solid hsl(var(--primary));
+  background: hsl(var(--primary) / .09);
+  color: hsl(var(--foreground));
+}
+.nav-subgroup .nav-link.active::before { display: none; }
+.nav-link-text { font-size: 11px; }
+.nav-category-children[hidden] { display: none; }
+.article-content h2, .article-content h3, .article-content h4, .article-content h5, .article-content h6 { scroll-margin-top: 88px; }
+.heading-anchor, .title-anchor {
+  display: inline-block;
+  margin-inline-start: .45em;
+  color: hsl(var(--primary));
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .72em;
+  font-weight: 500;
+  line-height: 1;
+  text-decoration: none;
+  opacity: .48;
+  vertical-align: .08em;
+  transition: opacity .15s ease;
+}
+.heading-anchor { opacity: 0; }
+.article-content h2:hover .heading-anchor, .article-content h3:hover .heading-anchor,
+.article-content h4:hover .heading-anchor, .article-content h5:hover .heading-anchor,
+.article-content h6:hover .heading-anchor, .heading-anchor:focus-visible,
+.title-anchor:focus-visible { opacity: 1; }
+.title-anchor:hover, .heading-anchor:hover { opacity: 1; }
+.heading-anchor:focus-visible, .title-anchor:focus-visible { outline: 2px solid hsl(var(--primary) / .8); outline-offset: 3px; }
+@media (max-width: 1199px) {
+  .docs-layout { grid-template-columns: 232px minmax(0, 1fr); padding-inline-start: 0; padding-inline-end: 20px; }
+}
+@media (max-width: 760px) {
+  .docs-layout { display: block; padding: 0 17px; }
+}

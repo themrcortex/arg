@@ -13,7 +13,7 @@ For manual edits ARG runs `nginx -t` before applying changes and restores the pr
 - **Enable/Disable:** create or remove the Nginx enabled symlink and validate configuration.
 - **Rename/Description:** change an internal label or note. Domain changes edit `server_name`/configuration; they do not change DNS.
 - **Test/Reload/Restart:** validate syntax and manage the Nginx service.
-- **Domain/DNS:** check DNS answers against the server address; update records at the DNS provider yourself.
+- **Domain/DNS:** check DNS answers against the server address; update records at the DNS provider yourself. For Cloudflare, see [Cloudflare DNS management](?page=cloudflare-dns).
 - **SSL:** request a certificate for the selected site and configure Nginx. DNS, ports 80/443, external reachability, CA limits, and current config all matter. Site certificates are separate from ARG panel certificates.
 - **Maintenance mode:** select a default maintenance response or a configured project/static file. It affects new requests; it does not necessarily stop in-flight requests. Force mode can interrupt active work.
 - **Custom Actions:** add site-specific buttons backed by supported operations; this is not arbitrary root shell access.
