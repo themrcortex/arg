@@ -3,18 +3,6 @@
 @tailwind utilities;
 
 
-:root {
-  color-scheme: dark;
-  --background: 214 35% 7%; --foreground: 43 21% 94%; --card: 211 30% 10%; --primary: 29 62% 65%;
-  --muted: 212 20% 14%; --muted-foreground: 207 11% 62%; --border: 211 21% 21%; --accent: 211 22% 16%; --radius: .8rem;
-  --docs-line: rgba(255,255,255,.075); --docs-soft: rgba(255,255,255,.035); --docs-code: #080d12;
-}
-:root[data-theme='light'] {
-  color-scheme: light;
-  --background: 0 0% 100%; --foreground: 222 28% 12%; --card: 210 25% 98%; --primary: 27 65% 45%;
-  --muted: 210 20% 95%; --muted-foreground: 215 13% 42%; --border: 214 20% 88%; --accent: 210 18% 94%;
-  --docs-line: rgba(15,23,42,.09); --docs-soft: rgba(15,23,42,.035); --docs-code: #f5f6f7;
-}
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scroll-padding-top: 86px; }
 body { min-width: 320px; margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, Arial, sans-serif; font-size: 14px; }

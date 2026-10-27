@@ -8,7 +8,13 @@ for (const locale of ['fa', 'en']) {
   const files = (await readdir(resolve(root, 'docs', locale))).filter((file) => file.endsWith('.md'))
   const records = await Promise.all(files.map(async (file) => {
     const markdown = await readFile(resolve(root, 'docs', locale, file), 'utf8')
-    const headings = [...markdown.matchAll(/^#{2,3}\s+(.+)$/gm)].map((match) => ({ id: slug(match[1].replace(/[`*_]/g, '').trim()), text: match[1].replace(/[`*_]/g, '').trim() }))
+    const seen = new Map()
+    const headings = [...markdown.matchAll(/^#{2,3}\s+(.+)$/gm)].map((match) => {
+      const text = match[1].replace(/[`*_]/g, '').trim()
+      const base = slug(text), occurrence = seen.get(base) || 0
+      seen.set(base, occurrence + 1)
+      return { id: occurrence ? `${base}-${occurrence + 1}` : base, text }
+    })
     const plain = markdown.replace(/```[\w+-]*\n?([\s\S]*?)```/g, '$1').replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/[`*_>#|~-]/g, ' ').replace(/\s+/g, ' ').trim()
     const title = headings.find((item) => item.text)?.text || basename(file, '.md')
     const description = plain.replace(title, '').trim().slice(0, 240)
