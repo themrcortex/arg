@@ -1,1 +1,1 @@
-export const ARG_VERSION = '0.7.0'
+export const ARG_VERSION = '0.7.1-dev.1'
