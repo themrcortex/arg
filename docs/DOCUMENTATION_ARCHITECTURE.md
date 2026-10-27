@@ -6,7 +6,7 @@ The public docs site is a Vite + React application in `docs-site/`. Markdown rem
 
 1. Add `docs/fa/<file>.md` and `docs/en/<file>.md` with matching, accurate content. Keep commands, paths, and configuration literals unchanged between translations.
 2. Add one typed entry to `pages` in `src/catalog.ts`. Use a stable, descriptive kebab-case ID, a semantic `group`, localized `title` and `summary`, and the shared file basename.
-3. Add its topic mapping in `sectionFor` and a bilingual label in `sectionTitles` when it introduces a new subsection. Existing sections include monitoring, network, firewall, Nginx, Docker, files, S3, databases, services, terminal, accounts, audit, settings, updates, maintenance, security, and troubleshooting.
+3. Add its topic mapping in `sectionFor` and a bilingual label in `sectionTitles` when it introduces a new subsection. Top-level categories include getting started, monitoring, networking, Docker, files and data, application platform, system administration, security and maintenance, and developers and reference. Subsections include monitoring, network, federation, firewall, Nginx, Docker, files, S3, databases, application registry, runtimes and runners, deployments, services, terminal, accounts, audit, settings, updates, maintenance, security, and troubleshooting.
 4. `categoryOrder` controls top-level order. The order of entries in `pages` controls article order inside each generated section. `readingOrder` derives previous/next order from the tree.
 5. Keep titles and page sections meaningful, and link to the canonical article instead of duplicating setup instructions.
 

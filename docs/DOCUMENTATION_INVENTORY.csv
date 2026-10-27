@@ -18,6 +18,10 @@ updates,امنیت و نگهداری,Security & maintenance,security/updates,art
 security,امنیت و نگهداری,Security & maintenance,security/security,article,fa + en present,content review pending,security,reorganized; source content retained
 troubleshooting,امنیت و نگهداری,Security & maintenance,security/troubleshooting,article,fa + en present,content review pending,troubleshooting,reorganized; source content retained
 development,توسعه,Developers & reference,reference/development,article,fa + en present,content review pending,development,reorganized; source content retained
+public-api,توسعه,Developers & reference,reference/public-api,article,fa + en present,content review pending,public,reorganized; source content retained
+app-platform-architecture,توسعه,Application platform,applications/app-platform-architecture,article,fa + en present,content review pending,app,reorganized; source content retained
+app-platform-roadmap-13-18,توسعه,Application platform,applications/app-platform-roadmap-13-18,article,fa + en present,content review pending,app,reorganized; source content retained
+app-platform-roadmap-18-48,توسعه,Application platform,applications/app-platform-roadmap-18-48,article,fa + en present,content review pending,app,reorganized; source content retained
 glossary,توسعه,Developers & reference,reference/glossary,article,fa + en present,content review pending,glossary,reorganized; source content retained
 guide-dashboard-01,راهنمای نمای کلی و پایش,Dashboard & monitoring,dashboard/guide-dashboard-01,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-dashboard-02,راهنمای نمای کلی و پایش,Dashboard & monitoring,dashboard/guide-dashboard-02,step guide,fa + en present,content review pending,guide,reorganized; source content retained
@@ -147,6 +151,7 @@ guide-maintenance-05,راهنمای عملیات و مدیریت,Security & main
 guide-maintenance-06,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-maintenance-06,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-maintenance-07,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-maintenance-07,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-maintenance-08,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-maintenance-08,step guide,fa + en present,content review pending,guide,reorganized; source content retained
+guide-maintenance-09,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-maintenance-09,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-users-01,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-users-01,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-users-02,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-users-02,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-users-03,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-users-03,step guide,fa + en present,content review pending,guide,reorganized; source content retained
@@ -177,3 +182,14 @@ guide-updates-04,راهنمای عملیات و مدیریت,Security & maintena
 guide-updates-05,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-updates-05,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-updates-06,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-updates-06,step guide,fa + en present,content review pending,guide,reorganized; source content retained
 guide-updates-07,راهنمای عملیات و مدیریت,Security & maintenance,security/guide-updates-07,step guide,fa + en present,content review pending,guide,reorganized; source content retained
+federation,ارتباط سرورها و فضای‌کار راه‌دور,Networking & websites,network/federation,article,fa + en present,content review pending,federation,reorganized; source content retained
+guide-nodes-01,ارتباط سرورها و فضای‌کار راه‌دور,Networking & websites,network/guide-nodes-01,step guide,fa + en present,content review pending,guide,reorganized; source content retained
+guide-nodes-02,ارتباط سرورها و فضای‌کار راه‌دور,Networking & websites,network/guide-nodes-02,step guide,fa + en present,content review pending,guide,reorganized; source content retained
+guide-nodes-03,ارتباط سرورها و فضای‌کار راه‌دور,Networking & websites,network/guide-nodes-03,step guide,fa + en present,content review pending,guide,reorganized; source content retained
+application-registry,پلتفرم اپلیکیشن‌ها,Application platform,applications/application-registry,article,fa + en present,content review pending,application,reorganized; source content retained
+runtime-manager,پلتفرم اپلیکیشن‌ها,Application platform,applications/runtime-manager,article,fa + en present,content review pending,runtime,reorganized; source content retained
+laravel-runner,پلتفرم اپلیکیشن‌ها,Application platform,applications/laravel-runner,article,fa + en present,content review pending,laravel,reorganized; source content retained
+node-runner,پلتفرم اپلیکیشن‌ها,Application platform,applications/node-runner,article,fa + en present,content review pending,node,reorganized; source content retained
+static-and-ssr,پلتفرم اپلیکیشن‌ها,Application platform,applications/static-and-ssr,article,fa + en present,content review pending,static,reorganized; source content retained
+app-resources,پلتفرم اپلیکیشن‌ها,Application platform,applications/app-resources,article,fa + en present,content review pending,app,reorganized; source content retained
+deployment-jobs,پلتفرم اپلیکیشن‌ها,Application platform,applications/deployment-jobs,article,fa + en present,content review pending,deployment,reorganized; source content retained
