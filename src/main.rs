@@ -65,6 +65,8 @@ mod app_s3;
 mod app_snapshots;
 mod app_storage;
 mod app_templates;
+mod workflow_drafts;
+mod dashboard_preferences;
 mod app_workspaces;
 mod apps;
 mod buildpacks;
@@ -4716,6 +4718,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     private_networks::migrate(&db)?;
     dns::migrate(&db)?;
     app_monitoring::migrate(&db)?;
+    workflow_drafts::migrate(&db)?;
+    dashboard_preferences::migrate(&db)?;
     extensions::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;

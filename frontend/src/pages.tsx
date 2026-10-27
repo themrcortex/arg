@@ -32,6 +32,7 @@ import {
   Trash2,
   Radio,
   RefreshCw,
+  SlidersHorizontal,
   ScrollText,
   ShieldCheck,
   UserRound,
@@ -85,6 +86,17 @@ type Sample = { at: number; time: string; rx: number; tx: number }
 type ResourceSample = { at: number; cpu: number; memory: number; disk: number }
 type StoredSample = { at: number; cpu: number; memory: number; disk: number; rx: number; tx: number; disk_read: number | null; disk_write: number | null; disk_used_bytes: number | null; disk_total_bytes: number | null }
 type HistoryRange = '5m' | '1h' | '24h' | '7d' | '30d' | 'custom'
+type DashboardWidget = 'resources' | 'history' | 'operations'
+type DashboardPreferences = { version: 1; preset: 'minimal' | 'devops' | 'hosting' | 'fleet' | 'custom'; order: DashboardWidget[]; hidden: DashboardWidget[] }
+const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = { version: 1, preset: 'devops', order: ['resources', 'history', 'operations'], hidden: [] }
+const DASHBOARD_WIDGET_LABELS: Record<DashboardWidget, string> = { resources: 'مصرف منابع', history: 'تاریخچهٔ منابع', operations: 'شبکه، پورت، فایروال و Fast Actions' }
+
+function dashboardPreset(preset: DashboardPreferences['preset']): DashboardPreferences {
+  if (preset === 'minimal') return { version: 1, preset, order: ['resources', 'history', 'operations'], hidden: ['operations'] }
+  if (preset === 'hosting') return { version: 1, preset, order: ['operations', 'resources', 'history'], hidden: [] }
+  if (preset === 'fleet') return { version: 1, preset, order: ['operations', 'history', 'resources'], hidden: [] }
+  return { ...DEFAULT_DASHBOARD_PREFERENCES, preset }
+}
 
 function localDateTime(timestamp: number) {
   const date = new Date(timestamp)
@@ -321,6 +333,18 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
   const [firewall, setFirewall] = useState<Firewall | null>(null)
   const [ruleCount, setRuleCount] = useState<number | null>(null)
   const [s3Summary, setS3Summary] = useState<{ connections: number; healthy_connections: number; contracts_due_soon: number; usage_bytes: number | null; quota_bytes: number | null } | null>(null)
+  const [preferences, setPreferences] = useState<DashboardPreferences>(DEFAULT_DASHBOARD_PREFERENCES)
+  const [preferencesDraft, setPreferencesDraft] = useState<DashboardPreferences>(DEFAULT_DASHBOARD_PREFERENCES)
+  const [preferencesOpen, setPreferencesOpen] = useState(false)
+  const [preferencesSaving, setPreferencesSaving] = useState(false)
+  useEffect(() => {
+    let active = true
+    void api<{ preferences: DashboardPreferences }>('account/dashboard-preferences')
+      .then((result) => { if (active && result.preferences) setPreferences(result.preferences) })
+      .catch(() => { /* Dashboard still works with the built-in layout when older servers lack this API. */ })
+    return () => { active = false }
+  }, [user.id])
+  useEffect(() => { if (preferencesOpen) setPreferencesDraft({ ...preferences, order: [...preferences.order], hidden: [...preferences.hidden] }) }, [preferencesOpen, preferences])
   useEffect(() => {
     let active = true
     const readFirewall = async () => {
@@ -338,14 +362,36 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
   const load = data?.load?.trim().split(/\s+/) || []
   const percent = (value: number | null) => value === null ? '—' : `${formatNumber(Math.round(value * 10) / 10)}%`
   const firewallActive = firewall?.available && /active/i.test(firewall.status) && !/inactive/i.test(firewall.status)
-  return <div className="arg-dashboard space-y-5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="text-[10px] font-semibold tracking-[.18em] text-primary" dir="ltr">ARG / OVERVIEW</div><h1 className="mt-1 text-2xl font-bold text-foreground md:text-[27px]">نمای کلی سرور</h1></div><RefreshButton label="تازه‌سازی" onRefresh={refresh}/></div>
+  const setCustomPreferences = (next: DashboardPreferences) => setPreferencesDraft({ ...next, preset: 'custom' })
+  const widgetOrder = (widget: DashboardWidget) => 10 + Math.max(0, preferences.order.indexOf(widget)) * 10
+  const widgetHidden = (widget: DashboardWidget) => preferences.hidden.includes(widget)
+  const moveWidget = (widget: DashboardWidget, offset: -1 | 1) => {
+    const current = preferencesDraft.order.indexOf(widget)
+    const target = current + offset
+    if (target < 0 || target >= preferencesDraft.order.length) return
+    const order = [...preferencesDraft.order]
+    ;[order[current], order[target]] = [order[target], order[current]]
+    setCustomPreferences({ ...preferencesDraft, order })
+  }
+  async function saveDashboardPreferences() {
+    setPreferencesSaving(true)
+    try {
+      const result = await api<{ preferences: DashboardPreferences }>('account/dashboard-preferences', { method: 'PUT', body: JSON.stringify(preferencesDraft) })
+      setPreferences(result.preferences)
+      setPreferencesOpen(false)
+      notify('چیدمان داشبورد برای حساب تو ذخیره شد.')
+    } catch (cause) { notify(cause instanceof Error ? cause.message : 'ذخیرهٔ چیدمان داشبورد ناموفق بود.') }
+    finally { setPreferencesSaving(false) }
+  }
+  const presetLabels: Record<DashboardPreferences['preset'], string> = { minimal: 'حداقلی', devops: 'DevOps', hosting: 'میزبانی', fleet: 'Fleet', custom: 'شخصی‌سازی‌شده' }
+  return <div className="arg-dashboard flex flex-col gap-5">
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="text-[10px] font-semibold tracking-[.18em] text-primary" dir="ltr">ARG / OVERVIEW</div><h1 className="mt-1 text-2xl font-bold text-foreground md:text-[27px]">نمای کلی سرور</h1></div><div className="flex items-center gap-2"><Dialog open={preferencesOpen} onOpenChange={setPreferencesOpen}><DialogTrigger asChild><Button size="sm" variant="outline"><SlidersHorizontal size={14}/>چیدمان</Button></DialogTrigger><DialogContent className="max-h-[88dvh] max-w-xl overflow-y-auto"><DialogHeader><DialogTitle>شخصی‌سازی داشبورد</DialogTitle><DialogDescription>ترتیب و نمایش بخش‌های فعلی فقط برای حساب کاربری خودت ذخیره می‌شود. این presetها ویجت یا دادهٔ تازه‌ای ایجاد نمی‌کنند.</DialogDescription></DialogHeader><div className="space-y-4"><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{(['minimal','devops','hosting','fleet'] as const).map((preset) => <Button key={preset} type="button" variant={preferencesDraft.preset === preset ? 'default' : 'outline'} size="sm" onClick={() => setPreferencesDraft(dashboardPreset(preset))}>{presetLabels[preset]}</Button>)}</div><div className="space-y-2">{preferencesDraft.order.map((widget, index) => <div key={widget} className="flex flex-wrap items-center gap-3 rounded-xl border border-border/70 bg-background/50 p-3"><div className="flex min-w-0 flex-1 items-center gap-2"><span className="w-6 font-mono text-xs text-muted-foreground" dir="ltr">{index + 1}</span><span className="text-xs">{DASHBOARD_WIDGET_LABELS[widget]}</span></div><div className="flex items-center gap-2"><label className="flex items-center gap-2 text-[11px] text-muted-foreground">نمایش<Switch checked={!preferencesDraft.hidden.includes(widget)} onCheckedChange={(checked) => { const hidden = checked ? preferencesDraft.hidden.filter((item) => item !== widget) : [...preferencesDraft.hidden, widget]; setCustomPreferences({ ...preferencesDraft, hidden }) }}/></label><Button type="button" size="icon" variant="ghost" disabled={index === 0} aria-label="انتقال به بالا" onClick={() => moveWidget(widget, -1)}><ChevronUp size={15}/></Button><Button type="button" size="icon" variant="ghost" disabled={index === preferencesDraft.order.length - 1} aria-label="انتقال به پایین" onClick={() => moveWidget(widget, 1)}><ChevronDown size={15}/></Button></div></div>)}</div><div className="flex flex-wrap justify-between gap-2 border-t border-border pt-3"><Button type="button" variant="ghost" disabled={preferencesSaving} onClick={() => setPreferencesDraft(DEFAULT_DASHBOARD_PREFERENCES)}>بازنشانی</Button><Button type="button" disabled={preferencesSaving} onClick={() => void saveDashboardPreferences()}>{preferencesSaving ? 'در حال ذخیره…' : 'ذخیرهٔ چیدمان'}</Button></div></div></DialogContent></Dialog><RefreshButton label="تازه‌سازی" onRefresh={refresh}/></div></div>
     <section className="arg-dashboard-server-strip flex flex-wrap items-center justify-between gap-4 rounded-xl border px-4 py-3.5" aria-label="مشخصات سرور">
       <div className="flex min-w-0 items-center gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-primary/15 bg-primary/[.06]"><img src="/arg/icons/metric-app.svg" alt="" aria-hidden="true" className="h-5 w-5"/></span><div className="min-w-0"><p className="text-[10px] text-muted-foreground">سرور تحت مدیریت</p><p dir="ltr" className="truncate font-mono text-sm font-semibold text-foreground">{data?.hostname || 'در حال دریافت مشخصات…'}</p></div></div>
       <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[10px] ${data ? 'border-emerald-400/15 bg-emerald-400/[.04] text-emerald-200' : 'border-white/10 bg-white/[.025] text-muted-foreground'}`}><span className={`h-1.5 w-1.5 rounded-full ${data ? 'bg-emerald-300' : 'bg-muted-foreground'}`}/>{data ? 'وضعیت سیستم دریافت شد' : loading ? 'در حال دریافت وضعیت' : 'داده در دسترس نیست'}</div>
     </section>
     {(dashboardError || historyError) && <Alert className="border-amber-400/25 bg-amber-400/[.06]"><AlertDescription>{dashboardError && historyError ? 'دریافت وضعیت سرور و تاریخچه ناموفق بود.' : dashboardError ? 'دریافت وضعیت فعلی سرور ناموفق بود.' : 'دریافت تاریخچهٔ منابع ناموفق بود.'} <RefreshButton className="mr-2 inline-flex h-auto border-0 p-0 font-semibold text-primary underline" label="تلاش دوباره" onRefresh={refresh}/></AlertDescription></Alert>}
-    <section aria-label="مصرف منابع سرور" className="space-y-3">
+    <section aria-label="مصرف منابع سرور" className="space-y-3" style={{ order: widgetOrder('resources'), display: widgetHidden('resources') ? 'none' : undefined }}>
       <div className="flex items-end justify-between gap-3"><div><h2 className="text-sm font-bold text-foreground">مصرف منابع</h2><p className="mt-1 text-[11px] text-muted-foreground">شاخص‌های اصلی این سرور</p></div><a href="#/system" className="shrink-0 text-xs text-primary hover:underline">جزئیات سیستم</a></div>
       {loading && !data ? <div className="arg-kpi-grid grid gap-3">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-[145px]"/>)}</div> : <div className="arg-kpi-grid grid gap-3">
         <ArgKpi icon="metric-cpu" label="پردازنده" value={percent(cpu)} detail={cpu === null ? 'نمونهٔ CPU موجود نیست' : 'آخرین نمونهٔ ثبت‌شده'} progress={cpu ?? undefined} tone="green"/>
@@ -359,6 +405,7 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
         <DashboardMiniStat icon="metric-app" label="مصرف خود پنل ARG" value={data ? `${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}% CPU` : '—'} detail={data ? `RAM ${formatBytes(data.process_rss_bytes)}` : 'داده‌ای در دسترس نیست'} tone="blue"/>
       </div>}
     </section>
+    <div className="space-y-4" style={{ order: widgetOrder('history'), display: widgetHidden('history') ? 'none' : undefined }}>
     <div className="flex flex-wrap items-center justify-between gap-3 pt-2"><h2 className="text-base font-bold text-foreground">تاریخچهٔ منابع</h2><TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/></div>
     {!historyEnabled && <HistoryPaused/>}
     <div className="arg-chart-grid grid gap-4 lg:grid-cols-2">
@@ -366,12 +413,15 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
       <ArgChartPanel icon="metric-memory" title="مصرف حافظه" description="درصد RAM استفاده‌شده در بازهٔ انتخاب‌شده"><TimeSeriesChart samples={resourceHistory} series={[{ key: 'memory', label: 'حافظه', color: '#DDA46F' }]} max={100} unit="%"/></ArgChartPanel>
       <ArgChartPanel className="lg:col-span-2" icon="metric-network" title="ترافیک شبکه" description="نرخ دریافت و ارسال بر حسب بایت بر ثانیه"><TrafficChart history={history}/></ArgChartPanel>
     </div>
+    </div>
+    <div className="space-y-4" style={{ order: widgetOrder('operations'), display: widgetHidden('operations') ? 'none' : undefined }}>
     <div className="arg-operation-grid grid gap-3">
       <section className="arg-dashboard-panel min-w-0 rounded-[14px] border p-4"><div className="mb-4 flex items-center justify-between gap-2"><h2 className="font-bold text-foreground">رابط‌های شبکه</h2><a href="#/network" className="text-xs text-primary hover:underline">مشاهدهٔ همه</a></div>{data?.interfaces.length ? <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="border-b border-border text-muted-foreground"><th className="pb-3 text-right">رابط</th><th className="pb-3 text-right">نشانی</th><th className="pb-3 text-left">وضعیت</th></tr></thead><tbody>{data.interfaces.slice(0, 4).map((item) => <tr key={item.name} className="border-b border-border/60 last:border-0"><td className="py-3 font-mono" dir="ltr">{item.name}</td><td className="max-w-24 truncate py-3 font-mono text-muted-foreground" dir="ltr" title={item.addresses?.join(', ')}>{item.addresses?.[0] || '—'}</td><td className="py-3 text-left"><span className={item.state === 'up' ? 'text-emerald-300' : 'text-amber-300'}>{item.state === 'up' ? 'فعال' : item.state}</span></td></tr>)}</tbody></table></div> : <p className="py-6 text-sm text-muted-foreground">رابط شبکه‌ای گزارش نشده است.</p>}</section>
       <section className="arg-dashboard-panel min-w-0 rounded-[14px] border p-4"><div className="mb-4 flex items-center justify-between gap-2"><h2 className="font-bold text-foreground">پورت‌های شنونده</h2><a href="#/ports" className="text-xs text-primary hover:underline">جزئیات</a></div>{data?.ports.length ? <div className="overflow-x-auto"><table className="w-full text-xs"><thead><tr className="border-b border-border text-muted-foreground"><th className="pb-3 text-right">پورت</th><th className="pb-3 text-right">پروتکل</th><th className="pb-3 text-left">نسخهٔ IP</th></tr></thead><tbody>{data.ports.slice(0, 4).map((port, index) => <tr key={`${port.port}-${port.protocol}-${port.ipv6}-${index}`} className="border-b border-border/60 last:border-0"><td className="py-3 font-mono" dir="ltr">{port.port}</td><td className="py-3 font-mono">{port.protocol}</td><td className="py-3 text-left font-mono">{port.ipv6 ? 'IPv6' : 'IPv4'}</td></tr>)}</tbody></table></div> : <p className="py-6 text-sm text-muted-foreground">پورت شنونده‌ای گزارش نشده است.</p>}</section>
       <section className="arg-dashboard-panel min-w-0 rounded-[14px] border p-4"><div className="mb-4 flex items-center justify-between gap-2"><h2 className="font-bold text-foreground">وضعیت فایروال</h2><a href="#/firewall" className="text-xs text-primary hover:underline">جزئیات</a></div><div className="grid grid-cols-2 gap-3"><div className="rounded-lg border border-border bg-secondary/40 p-3"><span className="text-xs text-muted-foreground">وضعیت UFW</span><div className={`mt-3 font-bold ${firewall?.available ? firewallActive ? 'text-emerald-300' : 'text-amber-300' : 'text-muted-foreground'}`}>{firewall ? firewall.available ? firewallActive ? 'فعال' : 'غیرفعال' : 'نصب نشده' : 'نامشخص'}</div></div><div className="rounded-lg border border-border bg-secondary/40 p-3"><span className="text-xs text-muted-foreground">قوانین مدیریت‌شده</span><div className="mt-3 font-mono text-lg font-bold" dir="ltr">{ruleCount === null ? '—' : formatNumber(ruleCount)}</div></div></div></section>
     </div>
     <div className="border-t border-white/[.07] pt-5"><FastActionsPanel user={user} notify={notify}/></div>
+    </div>
   </div>
 }
 

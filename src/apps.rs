@@ -565,12 +565,8 @@ pub(super) async fn create_from_template(
     template_id: String,
     input: app_templates::TemplateDraftInput,
 ) -> ApiResult {
-    let framework = match template_id.as_str() {
-        "laravel-app" => "laravel",
-        "react-vite-static" => "vite",
-        "node-api" => "node",
-        _ => return Err(error(StatusCode::NOT_FOUND, "Preset اپلیکیشن پیدا نشد.")),
-    };
+    let framework = template_framework(&template_id)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "Preset اپلیکیشن پیدا نشد."))?;
     let app = AppInput {
         name: input.name,
         description: input.description,
@@ -587,6 +583,17 @@ pub(super) async fn create_from_template(
         static_spa_fallback: true,
     };
     create(State(state), headers, Json(app)).await
+}
+
+fn template_framework(template_id: &str) -> Option<&'static str> {
+    match template_id {
+        "laravel-app" => Some("laravel"),
+        "react-vite-static" => Some("vite"),
+        "node-api" => Some("node"),
+        "python-web" => Some("python"),
+        "wordpress-app" => Some("wordpress"),
+        _ => None,
+    }
 }
 
 pub(super) async fn get(
@@ -796,9 +803,19 @@ pub(super) async fn restore(
 mod tests {
     use super::{
         domain_patterns_overlap, is_auto_framework, is_static_framework, is_node_runtime_framework,
-        listening_tcp_ports, migrate, normalized_domain, valid_domain, valid_runtime_version,
+        listening_tcp_ports, migrate, normalized_domain, template_framework, valid_domain, valid_runtime_version,
         valid_static_output_path, AppInput, AppUpdate,
     };
+
+    #[test]
+    fn all_published_app_templates_map_to_supported_framework_records() {
+        assert_eq!(template_framework("laravel-app"), Some("laravel"));
+        assert_eq!(template_framework("react-vite-static"), Some("vite"));
+        assert_eq!(template_framework("node-api"), Some("node"));
+        assert_eq!(template_framework("python-web"), Some("python"));
+        assert_eq!(template_framework("wordpress-app"), Some("wordpress"));
+        assert_eq!(template_framework("arbitrary"), None);
+    }
 
     #[test]
     fn domain_validation_normalizes_hosts_and_rejects_url_fragments() {

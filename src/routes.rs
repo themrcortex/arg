@@ -18,6 +18,7 @@ pub(super) fn router(state: AppState) -> Router {
             post(revoke_other_account_sessions),
         )
         .route("/api/account/capabilities", get(account_capabilities))
+        .route("/api/account/dashboard-preferences", get(dashboard_preferences::read).put(dashboard_preferences::save))
         .route("/api/terminal", get(terminal_socket))
         .route(
             "/api/terminal/root/authorize",
@@ -182,6 +183,8 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/apps/{id}/source/tree", get(app_code::tree))
         .route("/api/apps/{id}/source/file", get(app_code::file))
         .route("/api/apps/{id}/snapshots", get(app_snapshots::list).post(app_snapshots::create))
+        .route("/api/apps/{id}/workflows", get(workflow_drafts::list).post(workflow_drafts::create))
+        .route("/api/apps/{id}/workflows/{workflow_id}", axum::routing::delete(workflow_drafts::delete))
         .route("/api/apps/{id}/containers", get(app_compose::list).post(app_compose::link))
         .route("/api/apps/{id}/containers/{container_id}", axum::routing::delete(app_compose::unlink))
         .route("/api/apps/{id}/nginx-site", get(nginx_domains::get).put(nginx_domains::link).delete(nginx_domains::unlink))
