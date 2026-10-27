@@ -9,6 +9,7 @@ import { Label } from './components/ui/label'
 import { Skeleton } from './components/ui/skeleton'
 import { HostSecurityPanel } from './HostSecurityPanel'
 import { ExtensionSecurityPanel } from './ExtensionSecurityPanel'
+import { ApiKeysPanel, DoctorPanel } from './PlatformReadinessPanels'
 
 type Common = { Heading: (props: { title: string; description: string; action?: ReactNode }) => ReactNode; notify: (message: string) => void }
 type Backup = { id: string; size_bytes: number; modified_at?: number | null }
@@ -159,6 +160,8 @@ export function MaintenancePage({ Heading, notify }: Common) {
 
     <HostSecurityPanel/>
     <ExtensionSecurityPanel notify={notify}/>
+    <DoctorPanel />
+    <ApiKeysPanel />
 
     <div className="mt-5 grid gap-4 xl:grid-cols-2">
       <Card className="rounded-2xl border-border/80 bg-card/80"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Wrench size={18} className="text-primary"/>تعمیر فایل‌های ARG</CardTitle><CardDescription>نسخهٔ نصب‌شده با آپدیتر امن و ساخت کامل بازسازی می‌شود؛ در صورت خطا، نسخهٔ قبلی برمی‌گردد.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><div className="text-xs text-muted-foreground">این عملیات ممکن است چند دقیقه طول بکشد و پنل موقتاً در دسترس نباشد.</div><Button onClick={() => void action('repair')} disabled={!!busy}><Wrench size={15}/>{busy === 'repair' ? 'در حال تعمیر…' : 'تعمیر و بازسازی ARG'}</Button></CardContent></Card>
