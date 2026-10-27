@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.2-dev.1 — 2026-10-27
+
+### Development
+- Development prerelease based on the next patch after main.
+
 ## v0.7.1 — 2026-10-27
 
 ### Changed
