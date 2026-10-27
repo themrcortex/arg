@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, ChevronDown, ChevronLeft, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Server, Settings2, Shield, Sun, ChartNoAxesCombined, Code2, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Server, Settings2, Shield, Sun, ChartNoAxesCombined, Code2, X } from 'lucide-react'
 import { groups, navigation, pages, readingOrder, pageNeighbors, pageTrail, type DocPage, type Locale } from './catalog'
 import { Badge } from './components/ui/badge'
 import { ARG_VERSION } from './version'
@@ -281,8 +281,8 @@ export default function App() {
           const visibleSections = category.children.map((section) => ({ ...section, pages: section.pages.filter((item) => visiblePages.some((visible) => visible.id === item.id)) })).filter((section) => section.pages.length)
           if (!visibleSections.length) return null
           const categoryOpen = expandedGroups.has(category.id)
-          const iconMap = { gettingStarted: BookOpen, dashboard: ChartNoAxesCombined, network: Network, docker: Container, data: Database, system: Settings2, security: Shield, reference: Code2 }
-          const CategoryIcon = iconMap[category.id as keyof typeof iconMap]
+          const iconMap = { gettingStarted: BookOpen, dashboard: ChartNoAxesCombined, network: Network, docker: Container, data: Database, applications: Boxes, system: Settings2, security: Shield, reference: Code2 }
+          const CategoryIcon = iconMap[category.id as keyof typeof iconMap] || BookOpen
           return <section key={category.id} className="nav-group">
             <button className="nav-category" aria-expanded={categoryOpen} onClick={() => toggleExpanded(category.id)}><span className="nav-category-label"><CategoryIcon size={15}/>{category.title[locale]}</span><ChevronDown size={14}/></button>
             {categoryOpen && <div className="nav-category-children">{visibleSections.map((section) => {
