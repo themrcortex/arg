@@ -1,5 +1,15 @@
 # ARG Change Log
 
+## v0.6.9-dev.6 — 2026-10-27
+
+### Development
+- Add the Phase 18–22 implementation checkpoint to the development release.
+- Encrypt S3 helper credential payloads with AES-256-GCM using a root-only vault key; migrate legacy credential files lazily during helper reads.
+- Add workspace, project, and environment metadata with additive migration, scoped CRUD APIs, application assignment, and environment selectors.
+- Add versioned Laravel, React/Vite, and Node template drafts; no source acquisition or deployment is implied.
+- Require an optimized Rust release build in CI and publish the bilingual Phase 18–48 roadmap.
+- Repository checks: 141 Rust tests, frontend type-check/build, documentation check/build, and optimized Rust build passed. Disposable-host and multi-VPS acceptance remains pending.
+
 ## v0.6.9-dev.5 — 2026-10-27
 
 ### Development
