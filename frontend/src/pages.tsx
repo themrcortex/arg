@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   Activity,
   ArrowLeft,
@@ -80,6 +80,7 @@ import { formatPanelDate, usePanelTimeZone } from './lib/timezone'
 import { cachedRequest, invalidateCached } from './lib/heavy-cache'
 import { S3OverviewKpi, StorageInventorySection, StorageOverviewKpi } from './components/storage/StorageInventory'
 import { useConfirmDialog } from './hooks/useConfirmDialog'
+import { EmptyState, FilterBar } from './components/ui/data-views'
 import { SslIssueWizard } from './nginx/SslIssueWizard'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
@@ -1512,12 +1513,19 @@ export function NginxPage({ Heading, notify }: Common) {
 const roleNames: Record<Role, string> = { admin: 'مدیر', operator: 'اپراتور', viewer: 'ناظر' }
 export function UsersPage({ current, Heading, notify }: { current: User } & Common) {
   const [users, setUsers] = useState<User[]>([])
+  const [query, setQuery] = useState('')
+  const [roleFilter, setRoleFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState('all')
   const [loading, setLoading] = useState(true)
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [role, setRole] = useState<Role>('viewer')
+  const filteredUsers = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase()
+    return users.filter((item) => (!needle || item.username.toLocaleLowerCase().includes(needle)) && (roleFilter === 'all' || item.role === roleFilter) && (statusFilter === 'all' || (statusFilter === 'enabled' ? item.enabled : !item.enabled)))
+  }, [users, query, roleFilter, statusFilter])
   const refresh = useCallback(async () => {
     try {
       setUsers((await api<{ users: User[] }>('users')).users)
@@ -1645,11 +1653,16 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
       </div>
       <div className="mt-5"><DistributionBars title="ترکیب نقش‌ها" description="تعداد حساب‌ها در هر سطح دسترسی" items={(['admin', 'operator', 'viewer'] as Role[]).map((role) => ({ label: roleNames[role], value: users.filter((item) => item.role === role).length }))} /></div>
       <div className="mt-5">
-        <SectionCard title="فهرست کاربران" description="تغییر نقش یا غیرفعال‌سازی در گزارش عملیات ثبت می‌شود">
+        <SectionCard title="فهرست کاربران" description={`${formatNumber(filteredUsers.length)} از ${formatNumber(users.length)} حساب · تغییر نقش یا غیرفعال‌سازی در گزارش عملیات ثبت می‌شود`}>
           {loading ? (
             <Skeleton className="h-48" />
           ) : (
-            <Table>
+            <>
+            <FilterBar value={query} onChange={setQuery} placeholder="جست‌وجوی نام کاربری…" className="mb-3">
+              <Select value={roleFilter} onValueChange={setRoleFilter}><SelectTrigger className="h-10 w-full sm:w-36" aria-label="فیلتر نقش"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">همهٔ نقش‌ها</SelectItem><SelectItem value="admin">مدیر</SelectItem><SelectItem value="operator">اپراتور</SelectItem><SelectItem value="viewer">ناظر</SelectItem></SelectContent></Select>
+              <Select value={statusFilter} onValueChange={setStatusFilter}><SelectTrigger className="h-10 w-full sm:w-36" aria-label="فیلتر وضعیت"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">همهٔ وضعیت‌ها</SelectItem><SelectItem value="enabled">فعال</SelectItem><SelectItem value="disabled">غیرفعال</SelectItem></SelectContent></Select>
+            </FilterBar>
+            <Table className="min-w-[620px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>کاربر</TableHead>
@@ -1659,7 +1672,7 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {users.map((u) => (
+                {filteredUsers.map((u) => (
                   <TableRow key={u.id}>
                     <TableCell>
                       <div className="flex items-center gap-3">
@@ -1705,8 +1718,10 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
                     </TableCell>
                   </TableRow>
                 ))}
+                {!filteredUsers.length && <TableRow><TableCell colSpan={4} className="p-3"><EmptyState icon={<Users size={17}/>} title="کاربری پیدا نشد" description="عبارت جست‌وجو یا فیلتر نقش و وضعیت را تغییر بده." className="min-h-32"/></TableCell></TableRow>}
               </TableBody>
             </Table>
+            </>
           )}
         </SectionCard>
       </div>
@@ -1734,7 +1749,14 @@ function downloadText(filename: string, content: string, type = 'text/plain') {
 export function AuditPage({ Heading, notify }: Common) {
   const timeZone = usePanelTimeZone()
   const [events, setEvents] = useState<AuditEvent[]>([])
+  const [query, setQuery] = useState('')
+  const [actionFilter, setActionFilter] = useState('all')
   const [loading, setLoading] = useState(true)
+  const actions = useMemo(() => [...new Set(events.map((event) => event.action))].sort(), [events])
+  const filteredEvents = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase()
+    return events.filter((event) => (actionFilter === 'all' || event.action === actionFilter) && (!needle || `${event.actor} ${event.action} ${event.detail}`.toLocaleLowerCase().includes(needle)))
+  }, [events, query, actionFilter])
   const refresh = useCallback(async () => {
     try {
       setEvents((await api<{ events: AuditEvent[] }>('audit')).events)
@@ -1759,13 +1781,18 @@ export function AuditPage({ Heading, notify }: Common) {
       <div className="mb-5"><DistributionBars title="ترکیب عملیات اخیر" description="از میان 100 رویداد آخر ثبت‌شده" items={['login', 'logout', 'account.password', 'user.create', 'user.update'].map((action) => ({ label: action, value: events.filter((event) => event.action === action).length }))} /></div>
       <SectionCard
         title="آخرین رویدادها"
-        description="100 رویداد اخیر"
+        description={`${formatNumber(filteredEvents.length)} نتیجه از ${formatNumber(events.length)} رویداد اخیر`}
         right={<ScrollText size={18} className="text-primary" />}
       >
         {loading ? (
           <Skeleton className="h-48" />
-        ) : events.length ? (
-          <Table>
+        ) : (
+          <>
+          <FilterBar value={query} onChange={setQuery} placeholder="جست‌وجوی کاربر، عملیات یا جزئیات…" className="mb-3">
+            <Select value={actionFilter} onValueChange={setActionFilter}><SelectTrigger className="h-10 w-full sm:w-52" aria-label="فیلتر عملیات"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="all">همهٔ عملیات</SelectItem>{actions.map((action) => <SelectItem key={action} value={action}>{action}</SelectItem>)}</SelectContent></Select>
+          </FilterBar>
+          {filteredEvents.length ? (
+          <Table className="min-w-[760px]">
             <TableHeader>
               <TableRow>
                 <TableHead>زمان</TableHead>
@@ -1775,7 +1802,7 @@ export function AuditPage({ Heading, notify }: Common) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {events.map((e, i) => (
+              {filteredEvents.map((e, i) => (
                 <TableRow key={`${e.at}-${i}`}>
                   <TableCell className="whitespace-nowrap text-muted-foreground">
                     {formatPanelDate(e.at, timeZone, { dateStyle: 'medium', timeStyle: 'medium' })}
@@ -1792,7 +1819,9 @@ export function AuditPage({ Heading, notify }: Common) {
             </TableBody>
           </Table>
         ) : (
-          <div className="py-12 text-center text-sm text-muted-foreground">هنوز رویدادی ثبت نشده است.</div>
+          <EmptyState icon={<ScrollText size={17}/>} title={events.length ? 'رویدادی پیدا نشد' : 'هنوز رویدادی ثبت نشده'} description={events.length ? 'عبارت جست‌وجو یا فیلتر عملیات را تغییر بده.' : 'ورودها و تغییرات مدیریتی پس از ثبت در این بخش نمایش داده می‌شوند.'}/>
+          )}
+          </>
         )}
       </SectionCard>
     </>
