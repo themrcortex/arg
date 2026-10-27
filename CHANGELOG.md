@@ -1,5 +1,23 @@
 # ARG Change Log
 
+## v0.6.9-dev.11 — 2026-10-27
+
+### Added
+- Add an installable, shell-only PWA cache and offline status notice. The service worker bypasses every `/api` request, bounds cached fingerprinted assets, and ARG removes its shell cache at logout.
+- Add read-only ARG Doctor checks for OS family, systemd, Docker presence, root disk availability, TLS file presence, runtime executable presence, saved S3/node state, and app/deployment counts.
+- Add an HTTPS-only v1 read API for application and deployment summaries, pagination, OpenAPI, and audited create/revoke controls for expiring API keys.
+- Add Persian and English public API and Doctor/PWA guides.
+
+### Security
+- Store API bearer tokens as hashes only; reveal raw tokens once, cap active keys at 10 per administrator, enforce fixed read scopes and 60 requests per minute, and mark responses `no-store`.
+- Exclude deployment source configuration and detailed error output from the public API. The API has no write scopes, webhooks, or tenant-specific key restrictions.
+
+### Changed
+- Record Phases 43–47 as partial in both roadmaps. Team isolation/tenant quotas, full installer profiles, remote/mobile acceptance, and the optional AI assistant remain open and are not presented as implemented.
+
+### Validation
+- 178 Rust tests, two Service Worker policy tests, `cargo check --locked`, frontend type-check/build, documentation check/build (194 pages per locale), optimized Rust release build, and `git diff --check` passed. No live multi-tenant, mobile browser, provider, installer-profile, or AI acceptance is claimed.
+
 ## v0.6.9-dev.10 — 2026-10-27
 
 ### Added
