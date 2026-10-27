@@ -8,7 +8,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
-  ChevronRight,
   Eye,
   EyeOff,
   Github,
@@ -52,7 +51,10 @@ import { BugReportPage } from './BugReportPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
+import { AppShell } from './components/shell/AppShell'
+import { SidebarNavigation } from './components/shell/SidebarNavigation'
+import { TopNavigation } from './components/shell/TopNavigation'
+import { ThemeToggle } from './components/shell/ThemeToggle'
 import changelog from '../../CHANGELOG.md?raw'
 const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
@@ -1010,6 +1012,9 @@ export default function App() {
   const latestChangelog = changelog.match(/^## v[^\n]*(?:\n(?!## v)[^\n]*)*/m)?.[0] || changelog
   const allowedPages = navigation.filter((item) => !item.admin || user.role === 'admin')
   const currentPage = allowedPages.some((item) => item.id === page) ? page : 'dashboard'
+  const currentPageLabel = allowedPages.find((item) => item.id === currentPage)?.label || 'نمای کلی'
+  const activeWorkspace = workspaceNodes.find((node) => node.workspace_key === workspaceNodeId)
+  const currentWorkspaceLabel = workspaceNodeId === 'all' ? 'همهٔ سرورها' : activeWorkspace?.public_name || activeWorkspace?.name || 'این VPS'
   const updateLocked = updating || reloadQueued || (!reloadScheduled.current && sharedUpdate.updating)
   const activeUpdateStage: UpdateStage = reloadQueued ? 5 : updating ? updateStage : sharedUpdateStage
   const activeUpdateStartedAt = updating ? updateStartedAt : sharedUpdate.started_at ? sharedUpdate.started_at * 1000 : null
@@ -1041,37 +1046,10 @@ export default function App() {
   }
   return (
     <PanelTimeZoneContext.Provider value={panelTimeZone}>
-      <div className="app-shell min-h-screen lg:grid" style={{ gridTemplateColumns: `${sidebarCollapsed ? 56 : 224}px minmax(0, 1fr)` }}>
-        <aside id="arg-sidebar" inert={updateLocked} aria-hidden={updateLocked} role={mobileOpen ? 'dialog' : undefined} aria-modal={mobileOpen ? true : undefined} aria-label="ناوبری اصلی" tabIndex={-1} className={cn('arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(80vw,260px)] max-w-[100vw] flex-col border-l px-3 py-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0', sidebarCollapsed ? 'arg-sidebar-collapsed lg:w-[56px]' : 'lg:w-[224px]', mobileOpen ? 'translate-x-0' : 'translate-x-full')}>
-          <div className="arg-sidebar-pattern" aria-hidden="true" />
-          <div className="arg-sidebar-corner" aria-hidden="true" />
-          <div className="arg-brand-row relative z-10 flex min-h-[78px] items-center justify-between gap-1">
-            <div className="arg-brand-lockup flex min-w-0 flex-1 items-center gap-1.5" aria-label="ARG VPS Control Manager">
-              <img src="/arg/brand/arg-symbol.svg" alt="" className="arg-brand-mark h-9 w-9 shrink-0" />
-              <div className="arg-brand-copy min-w-0"><div className="arg-wordmark" dir="ltr">ARG</div><div className="arg-product-label" dir="ltr"><span>VPS CONTROL CENTER</span></div></div>
-            </div>
-            <Button variant="ghost" size="icon" className="arg-collapse hidden h-8 w-8 shrink-0 lg:inline-flex" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!sidebarCollapsed} title={sidebarCollapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{sidebarCollapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
-            <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close h-8 w-8 shrink-0 lg:hidden" onClick={() => setMobileOpen(false)} aria-label="بستن منو"><X size={18}/></Button>
-          </div>
-          <div className="arg-divider relative z-10 mx-2 my-3" aria-hidden="true" />
-          <div className="arg-navigation relative z-10 flex-1 space-y-5 overflow-y-auto px-1 pb-4">
-            {[
-              { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
-              { title: 'سرور و شبکه', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nodes'].includes(item.id)) },
-              { title: 'اپلیکیشن‌ها و سرویس‌ها', pages: allowedPages.filter((item) => ['apps', 'nginx', 'docker', 'files', 's3', 'dns'].includes(item.id)) },
-              { title: 'عملیات سرور', pages: allowedPages.filter((item) => ['terminal', 'packages', 'services', 'mysql', 'maintenance'].includes(item.id)) },
-              { title: 'مدیریت ARG', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account', 'bug-report'].includes(item.id)) },
-            ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><TooltipProvider delayDuration={220}><div className="space-y-1">{section.pages.map((item) => {
-              const button = <button key={item.id} onClick={() => selectPage(item.id)} aria-current={currentPage === item.id ? 'page' : undefined} aria-label={sidebarCollapsed ? item.label : undefined} className={cn('arg-nav-item group flex min-h-[46px] w-full items-center gap-3 rounded-[11px] px-3 text-right text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]', currentPage === item.id ? 'is-active' : '')}><item.icon className="arg-nav-icon shrink-0" size={21} strokeWidth={1.8}/><span className="arg-nav-label flex-1">{item.label}</span></button>
-              return sidebarCollapsed ? <Tooltip key={item.id}><TooltipTrigger asChild>{button}</TooltipTrigger><TooltipContent side="left" align="center">{item.label}</TooltipContent></Tooltip> : button
-            })}</div></TooltipProvider></nav>)}
-          </div>
-          <div className="arg-sidebar-footer relative z-10 mt-auto pt-2">
-            <div className="arg-divider mx-2 mb-3" aria-hidden="true" />
-            <div className={cn('arg-service-status mb-2 flex min-h-8 items-center gap-2 px-3 text-[11px]', sidebarCollapsed && 'justify-center px-0')} title={sidebarCollapsed ? 'سرویس متصل' : undefined}><span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400"/><span className="arg-nav-label">سرویس متصل</span></div>
-          </div>
-          <img className="arg-fortress" src="/arg/illustrations/arg-fortress-minimal.svg" alt="" aria-hidden="true" />
-        </aside>
+      <AppShell
+        collapsed={sidebarCollapsed}
+        sidebar={<SidebarNavigation items={allowedPages} currentPage={currentPage} collapsed={sidebarCollapsed} mobileOpen={mobileOpen} disabled={updateLocked} mobileCloseButton={mobileCloseButton} onSelectPage={selectPage} onToggleCollapsed={() => setSidebarCollapsed((value) => !value)} onCloseMobile={() => setMobileOpen(false)} />}
+      >
         {mobileOpen && (
           <button
             aria-label="بستن منو"
@@ -1080,10 +1058,34 @@ export default function App() {
           />
         )}
         <div className="min-w-0" inert={updateLocked} aria-hidden={updateLocked}>
-          <header className="utility-bar sticky top-0 z-20 flex h-[62px] items-center justify-between gap-3 border-b border-white/10 px-5 md:px-8">
-            <div className="flex items-center gap-2"><Button ref={mobileMenuButton} variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button><span className="hidden text-[10px] font-semibold tracking-[.18em] text-primary sm:inline" dir="ltr">VPS CONTROL CENTER</span><span className="hidden h-4 w-px bg-white/10 sm:inline-block"/><Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge></div>
-            <div className="flex items-center gap-1.5">{user.role === 'admin' && workspaceMode === 'multi' && <label className="mr-1 flex h-9 max-w-[170px] items-center rounded-lg border border-white/10 bg-background/60 px-2"><span className="sr-only">فضای کار</span><select aria-label="انتخاب فضای کار VPS" value={workspaceNodeId} onChange={(event) => { const key = event.target.value; if (key === 'all') { openWorkspace('all'); return } const selected = workspaceNodes.find((node) => node.workspace_key === key); if (key && !selected?.workspace_ready) { notifyUser('این Node برای فضای کار کامل آماده نیست؛ آن را حذف و دوباره جفت‌سازی کن.'); return } openWorkspace(key) }} className="min-w-0 max-w-full bg-transparent text-xs text-foreground outline-none"><option value="">این VPS</option><option value="all">همهٔ سرورها · فقط خواندنی</option>{workspaceNodes.map((node) => <option key={node.workspace_key} value={node.workspace_key} disabled={!node.workspace_ready}>{node.public_name && node.public_name !== node.name ? `${node.public_name} · ${node.name}` : node.public_name || node.name}{node.workspace_ready ? '' : ' · نیاز به جفت‌سازی'}</option>)}</select></label>}<Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="GitHub پروژه" title="GitHub پروژه"><Github size={18}/></a><a href="https://themrcortex.github.io/arg/" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="مستندات ARG" title="مستندات ARG"><BookOpen size={17}/></a><a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 place-items-center rounded-lg text-muted-foreground transition hover:bg-white/[.06] hover:text-white" aria-label="راهنما و پشتیبانی"><LifeBuoy size={18}/></a><span className="mx-1 h-5 w-px bg-white/10"/><Badge variant="outline" className="hidden sm:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-10 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end" sideOffset={8} collisionPadding={16}><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
-          </header>
+          <TopNavigation
+            leading={
+              <>
+                <Button ref={mobileMenuButton} variant="ghost" size="icon" className="h-9 w-9 shrink-0 lg:hidden" onClick={() => setMobileOpen(true)} aria-label="باز کردن منو" aria-expanded={mobileOpen} aria-controls="arg-sidebar"><Menu size={19}/></Button>
+                <span className="hidden text-[10px] font-semibold tracking-[.18em] text-primary lg:inline" dir="ltr">VPS CONTROL CENTER</span>
+                <Badge variant="success" className="hidden sm:inline-flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>LIVE</Badge>
+              </>
+            }
+            breadcrumb={
+              <>
+                <span className="text-muted-foreground">سرور</span><ChevronLeft size={13} className="text-muted-foreground/70"/>
+                <span className="max-w-[18rem] truncate font-semibold text-foreground" aria-current="page">{currentPageLabel}</span>
+                <span className="hidden xl:inline text-muted-foreground">· {currentWorkspaceLabel}</span>
+              </>
+            }
+            actions={
+              <>
+                {user.role === 'admin' && workspaceMode === 'multi' && <label className="mr-1 flex h-9 max-w-[148px] shrink-0 items-center rounded-lg border border-border/70 bg-background/70 px-2 sm:max-w-[180px]"><span className="sr-only">فضای کار</span><select aria-label="انتخاب فضای کار VPS" value={workspaceNodeId} onChange={(event) => { const key = event.target.value; if (key === 'all') { openWorkspace('all'); return } const selected = workspaceNodes.find((node) => node.workspace_key === key); if (key && !selected?.workspace_ready) { notifyUser('این Node برای فضای کار کامل آماده نیست؛ آن را حذف و دوباره جفت‌سازی کن.'); return } openWorkspace(key) }} className="min-w-0 max-w-full bg-transparent text-xs text-foreground outline-none"><option value="">این VPS</option><option value="all">همهٔ سرورها · فقط خواندنی</option>{workspaceNodes.map((node) => <option key={node.workspace_key} value={node.workspace_key} disabled={!node.workspace_ready}>{node.public_name && node.public_name !== node.name ? `${node.public_name} · ${node.name}` : node.public_name || node.name}{node.workspace_ready ? '' : ' · نیاز به جفت‌سازی'}</option>)}</select></label>}
+                <ThemeToggle />
+                <Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative h-9 w-9 shrink-0 text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button>
+                <a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground" aria-label="GitHub پروژه" title="GitHub پروژه"><Github size={18}/></a>
+                <a href="https://themrcortex.github.io/arg/" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground" aria-label="مستندات ARG" title="مستندات ARG"><BookOpen size={17}/></a>
+                <a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground" aria-label="راهنما و پشتیبانی" title="راهنما و پشتیبانی"><LifeBuoy size={18}/></a>
+                <Badge variant="outline" className="hidden shrink-0 md:inline-flex">FA <span className="mr-1 text-muted-foreground">فارسی</span></Badge>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" className="h-9 shrink-0 gap-2 rounded-lg px-2"><Avatar className="h-8 w-8"><AvatarFallback>{user.username.slice(0, 1).toUpperCase()}</AvatarFallback></Avatar><span className="hidden max-w-24 truncate text-xs sm:inline">{user.username}</span><ChevronDown size={14} className="text-muted-foreground"/></Button></DropdownMenuTrigger><DropdownMenuContent align="end" sideOffset={8} collisionPadding={16}><DropdownMenuItem onSelect={() => selectPage('account')}><UserRound size={15}/>حساب کاربری</DropdownMenuItem><DropdownMenuItem onSelect={() => selectPage('settings')}><Settings size={15}/>تنظیمات پنل</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+              </>
+            }
+          />
           <main className="arg-main-canvas relative mx-auto max-w-[1500px] px-5 pb-16 pt-8 md:px-9 md:pt-10">
             <OfflineNotice />
             {location.protocol !== 'https:' && <Alert className="mb-6 border-amber-400/30 bg-amber-400/[.07] text-amber-100"><AlertTriangle size={17}/><div className="min-w-0 flex-1"><AlertTitle>اتصال این پنل امن نیست</AlertTitle><AlertDescription className="text-amber-100/75">این صفحه با HTTP باز شده است؛ رمز عبور و نشست می‌توانند در مسیر شبکه افشا شوند. برای راه‌اندازی HTTPS، گواهی SSL را در تنظیمات ثبت کن.</AlertDescription></div><Button size="sm" variant="outline" className="shrink-0 border-amber-300/30" onClick={() => selectPage('settings')}>تنظیم گواهی SSL</Button></Alert>}
@@ -1126,7 +1128,7 @@ export default function App() {
         <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating} rollback={sharedUpdate.operation === 'rollback' || (sharedUpdate.job_id?.startsWith('arg-rollback-') ?? false)} branch={sharedUpdate.branch} buildMode={sharedUpdate.build_mode} refreshing={reloadQueued} canCancel={user.role === 'admin'} canceling={cancelingUpdate} onCancel={() => void cancelUpdate()}/>
         <UpdateActionConfirmation action={updateConfirmAction} busy={cancelingUpdate || rollingBack} onCancel={() => setUpdateConfirmAction(null)} onConfirm={() => void (updateConfirmAction === 'rollback' ? executeRollbackUpdate() : executeCancelUpdate())}/>
         <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} updateBranch={updateBranch} onUpdateBranchChange={changeUpdateBranch} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onRollback={() => void rollbackUpdate()} rollingBack={rollingBack} onForceRefresh={() => void forceFreshPanelReload(false)}/>
-      </div>
+      </AppShell>
     </PanelTimeZoneContext.Provider>
   )
 }
