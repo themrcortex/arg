@@ -1,14 +1,11 @@
 # ARG Change Log
 
-## v0.7.1-dev.1 — 2026-10-27
-
-### Development
-- Development prerelease based on the next patch after main.
-
-## Unreleased
+## v0.7.1 — 2026-10-27
 
 ### Changed
-- Make the desktop sidebar a full-height navigation rail flush with the right edge, removing the floating inset, rounded shell, and backdrop blur.
+- Dock the desktop sidebar full-height to the right edge and remove its floating inset, rounded shell, and backdrop blur.
+
+## Unreleased
 
 ## v0.7.0 — 2026-10-27
 
