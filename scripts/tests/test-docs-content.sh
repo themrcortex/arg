@@ -28,5 +28,12 @@ for lang in ('fa', 'en'):
     guide_files = list((root / 'docs' / lang).glob('guide-*.md'))
     if len(guide_files) < 150:
         raise SystemExit(f'Expected at least 150 focused {lang} guides, found {len(guide_files)}')
+semantic_groups = set(re.findall(r"\{ id: '([^']+)', group: '([^']+)'", catalog))
+if any(group.isdigit() for _, group in semantic_groups):
+    raise SystemExit('Documentation categories must use semantic IDs, not numeric group IDs')
+expected_categories = {'gettingStarted', 'dashboard', 'network', 'docker', 'data', 'system', 'security', 'reference'}
+catalog_groups = {group for _, group in semantic_groups}
+if not expected_categories.issubset(catalog_groups):
+    raise SystemExit(f'Missing semantic navigation categories: {sorted(expected_categories - catalog_groups)}')
 print(f'Bilingual documentation content checks passed ({len(entries)} pages, {len(entries) * 2} localized articles).')
 PY
