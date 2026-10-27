@@ -35,9 +35,15 @@ ARG فایل‌ها را در `/var/lib/arg/deployments/apps/<application-id>/re
 - **Rollback:** فقط آخرین release قبلی همان اپ قابل انتخاب است. ARG مسیر و مالکیت release را بررسی و symlink `current` را اتمی جابه‌جا می‌کند. فایل‌ها پاک نمی‌شوند.
 - **شکست پیش از فعال‌سازی:** release جاری تغییر نمی‌کند. Job موفق تنها پس از تغییر اشاره‌گر و ثبت نتیجه اعلام می‌شود.
 
-## محدودیت‌های صریح
+## اتصال Runnerهای Runtime که بعد از موتور پایه اضافه شدند
 
-این فاز سورس را بسته‌بندی و release را آماده/فعال می‌کند، اما **فرمان build، اجرای Node/Python/PHP، نصب dependency، ساخت یا تغییر کانفیگ Nginx، restart سرویس، healthcheck HTTP و فعال‌سازی خودکار سایت را انجام نمی‌دهد**. فایل Health check اختیاری فقط وجود یک فایل معمولی در release را کنترل می‌کند. این کارها به فازهای بعدی runtime، محیط و اتصال وب‌سایت وابسته‌اند؛ مقدار Running در صفحهٔ اپلیکیشن همچنان نامشخص می‌ماند تا منبع مشاهدهٔ واقعی اضافه شود.
+موتور پایهٔ Deploy هنوز فرمان دلخواه پروژه را اجرا نمی‌کند. اتصال Runtime فقط وقتی فعال می‌شود که برای چارچوب اپ Runner مشخص پیاده شده باشد:
+
+- **Laravel:** [مدیریت Laravel](./laravel-runner.md) نصب Composer از lockfile، فایل محیط خصوصی، عملیات تأییدشدهٔ Artisan، Nginx/PHP-FPM و سرویس‌های اختیاری را توضیح می‌دهد.
+- **Node.js:** [اجرای اپلیکیشن Node.js](./node-runner.md) lockfileهای پشتیبانی‌شده، نصب و build محدود، محیط Runtime، سرویس systemd مختص اپ، بررسی loopback، reverse proxy کنترل‌شدهٔ Nginx و بازیابی release را توضیح می‌دهد.
+- **چارچوب‌های دیگر:** Python، WordPress، اجرای فرمان سفارشی، انتشار استاتیک React/Vite و SSR مربوط به Next.js/Nuxt هنوز در این Runnerها نیستند. صرف فعال‌شدن release به معنی Running بودن این برنامه‌ها نیست.
+
+فیلد اختیاری `healthcheck_file` وجود یک فایل معمولی در release را بررسی می‌کند. Runnerهای Laravel و Node بررسی فعال‌سازی مخصوص خودشان را دارند؛ بررسی وجود فایل جای بررسی Runtime را نمی‌گیرد. rollback کد، migration دیتابیس یا اثرهای خارجی ایجادشده توسط کد اپ را برنمی‌گرداند.
 
 ## API
 
@@ -48,5 +54,6 @@ ARG فایل‌ها را در `/var/lib/arg/deployments/apps/<application-id>/re
 - `GET /api/deploy/jobs/{id}/events` — رویدادهای Server-Sent Events؛ نشست مدیر در طول stream دوباره بررسی می‌شود.
 - `POST /api/deploy/jobs/{id}/cancel` و `POST /api/deploy/jobs/{id}/retry`.
 - `POST /api/apps/{id}/deploy/rollback` — بدنهٔ `{"release_id":"…"}`.
+- Node Runner: `GET /api/apps/{id}/node`، `GET|PUT /api/apps/{id}/node/service`، `PUT /api/apps/{id}/node/environment` و `GET /api/apps/{id}/node/service/logs`.
 
 همهٔ نوشتن‌ها نیازمند نشست مدیر، Origin معتبر و رویداد audit هستند. مسیر مقصد از UUID اپ تولید می‌شود و از درخواست کاربر گرفته نمی‌شود.

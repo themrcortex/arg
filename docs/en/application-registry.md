@@ -13,7 +13,7 @@ Choose **Register application** and enter its management metadata:
 | Field | Purpose |
 | --- | --- |
 | Name | Unique on the owning VPS while the record is active. |
-| Suggested framework | Laravel, Node.js, Python, WordPress, static, or custom. This is metadata and does not install a runtime. |
+| Suggested framework | Laravel, Node.js, Python, WordPress, static, or custom. This selects available runner panels; it does not install a runtime. |
 | Source type | Manual, Git repository, archive, Docker, existing directory, or image. Deploy currently accepts public Git, bounded ZIP, and allowlisted existing directories. |
 | Domain | Hostname or IP without a scheme or port. ARG checks active application records and readable Nginx configurations for collisions. |
 | TCP port | Optional host port. ARG checks other records and currently listening sockets in `/proc/net/tcp*`; it does not bind the port or change the firewall. |
@@ -39,7 +39,7 @@ Edits use an optimistic version. If another administrator has changed the record
 
 ## Deployment status
 
-Durable source jobs are now available from a local application card. They record state, steps, actor, idempotency key, and server target; they support cancellation, retry, SSE, and release rollback. They stage files and atomically move a `current` pointer. See [Source deployments & durable jobs](./deployment-jobs.md) for limits and operations. Application records can also save a requested PHP/Node/Python runtime version and a separate Node build version from the installed inventory; see [Runtime manager](./runtime-manager.md). Laravel apps have a limited runner in their card: it checks the active release, stores a private environment file, and runs selected Artisan commands after administrator confirmation; see [Laravel management](./laravel-runner.md). A dedicated PHP-FPM pool, Queue systemd service, HTTP health check, and automatic Nginx activation are not created in this phase; the registry does not claim a site is running.
+Durable source jobs are available from a local application card. They record state, steps, actor, idempotency key, and server target; they support cancellation, retry, SSE, and release rollback. They stage files and atomically move a `current` pointer. See [Source deployments & durable jobs](./deployment-jobs.md) for limits and operations. Application records can save requested PHP/Node/Python runtime versions and a separate Node build version from the installed inventory; see [Runtime manager](./runtime-manager.md). Laravel apps have a runner for private environment configuration, allowlisted Artisan commands, web/queue services, and database provisioning; see [Laravel management](./laravel-runner.md). Node apps have lockfile-driven builds, isolated systemd services, private runtime environment variables, loopback health checks, and a guarded ARG-managed Nginx reverse proxy; see [Node.js application runner](./node-runner.md). These implemented runners do not make every registry framework executable: Python, WordPress, arbitrary custom apps, static/SSR build templates, and broader staging workflows remain separate phases. The registry continues to report observed service state rather than claiming a site is running from metadata alone.
 
 ## API and schema
 

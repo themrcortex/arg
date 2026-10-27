@@ -35,9 +35,15 @@ Only one job per application may be active, and one worker runs jobs per VPS. Th
 - **Rollback:** only a previous release belonging to the same application can be selected. ARG validates the release path and atomically switches `current`; files are not deleted.
 - **Failure before activation:** the current release is unchanged. A job reports success only after the pointer switch and result are recorded.
 
-## Explicit limitations
+## Runtime integrations added after the base job engine
 
-This phase packages source and prepares/activates a release, but it **does not run framework builds, start Node/Python/PHP, install dependencies, create or edit Nginx configuration, restart services, perform HTTP health checks, or automatically publish the website**. The optional health-check path only verifies that a regular file exists inside the release. Those features depend on later runtime, environment, and website integration phases; application runtime remains unknown until an actual observer is implemented.
+The base deployment job still does not run arbitrary project commands. Framework-specific integrations run only when the application has an implemented runner:
+
+- **Laravel:** see [Laravel management](./laravel-runner.md) for Composer lockfile installs, private environment, approved Artisan operations, Nginx/PHP-FPM, and optional services.
+- **Node.js:** see [Node.js application runner](./node-runner.md) for supported lockfiles, bounded dependency/build steps, runtime environment, a per-app systemd service, loopback verification, guarded Nginx proxy creation, and release recovery.
+- **Other frameworks:** Python, WordPress, custom command execution, static React/Vite publishing, and Next.js/Nuxt SSR remain outside these two runners. They must not be treated as a running service just because a release was activated.
+
+The optional `healthcheck_file` is a regular-file check inside the release. Laravel and Node runners add their own framework-specific activation checks; a file-existence check is not a substitute for those runtime checks. Database migrations or other external side effects produced by application code are not reversed by code rollback.
 
 ## API
 
@@ -48,5 +54,6 @@ This phase packages source and prepares/activates a release, but it **does not r
 - `GET /api/deploy/jobs/{id}/events` — Server-Sent Events; administrator session is rechecked during the stream.
 - `POST /api/deploy/jobs/{id}/cancel` and `POST /api/deploy/jobs/{id}/retry`.
 - `POST /api/apps/{id}/deploy/rollback` — body: `{"release_id":"…"}`.
+- Node Runner: `GET /api/apps/{id}/node`, `GET|PUT /api/apps/{id}/node/service`, `PUT /api/apps/{id}/node/environment`, and `GET /api/apps/{id}/node/service/logs`.
 
 All writes require an administrator session, valid Origin, and an audit event. The destination path is derived from the application's UUID and is never accepted from the request.

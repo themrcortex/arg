@@ -193,6 +193,16 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/apps/{id}/laravel/environment",
             put(laravel::save_environment).post(laravel::generate_key),
         )
+        .route("/api/apps/{id}/node", get(node::inspect))
+        .route(
+            "/api/apps/{id}/node/service",
+            get(node::service).put(node::set_service),
+        )
+        .route(
+            "/api/apps/{id}/node/environment",
+            put(node::save_environment),
+        )
+        .route("/api/apps/{id}/node/service/logs", get(node::logs))
         .route("/api/apps/{id}/deploy", post(deploy::create))
         .route(
             "/api/apps/{id}/deploy/archive",

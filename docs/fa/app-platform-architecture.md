@@ -6,9 +6,9 @@
 
 ARG یک سرویس مستقل Rust/Axum با رابط React/TypeScript/Vite است. خروجی Frontend داخل باینری Release قرار می‌گیرد. SQLite حساب‌های پنل، نشست‌ها، تنظیمات، Audit، نمونه‌های مانیتورینگ و metadata قابلیت‌ها را نگه می‌دارد. عملیات نیازمند دسترسی بالاتر از مرز Unix socket خصوصی به Helper محدودشده عبور می‌کنند.
 
-موجودی اولیهٔ فاز ۰۰ ماژول‌های `src/federation.rs`، `src/nginx.rs`، `src/docker.rs`، `src/s3/`، `src/files.rs`، `src/metrics.rs` و `src/maintenance.rs` را پوشش می‌داد. Federation امکان جفت‌کردن ARGها، خواندن وضعیت و سرویس‌های راه‌دور و proxy کردن فضای‌کار احراز‌شده به Node انتخاب‌شده را دارد. سایت‌های Nginx، منابع Docker و Bucketهای S3 همچنان منابع همان سروری هستند که روی آن قرار دارند. فازهای ۰۳ تا ۰۶ از آن زمان Registry اپلیکیشن، موتور Deploy پایدار، مدیریت Runtime و Runner لاراول را افزوده‌اند؛ مرز دقیق قابلیت‌های موجود در جدول وضعیت فازها آمده است.
+موجودی اولیهٔ فاز ۰۰ ماژول‌های `src/federation.rs`، `src/nginx.rs`، `src/docker.rs`، `src/s3/`، `src/files.rs`، `src/metrics.rs` و `src/maintenance.rs` را پوشش می‌داد. Federation امکان جفت‌کردن ARGها، خواندن وضعیت و سرویس‌های راه‌دور و proxy کردن فضای‌کار احراز‌شده به Node انتخاب‌شده را دارد. سایت‌های Nginx، منابع Docker و Bucketهای S3 همچنان منابع همان سروری هستند که روی آن قرار دارند. فازهای ۰۳ تا ۰۷ از آن زمان Registry اپلیکیشن، موتور Deploy پایدار، مدیریت Runtime، Runner لاراول و Runner مربوط به Node.js را افزوده‌اند؛ مرز دقیق قابلیت‌های موجود در جدول وضعیت فازها آمده است.
 
-bootstrap دیتابیس SQLite در `src/main.rs` باقی است؛ کد دامنهٔ اپ، Deploy، Runtime و Laravel به‌ترتیب در `src/apps.rs`، `src/deploy.rs`، `src/runtimes.rs` و `src/laravel.rs` تفکیک شده است. تغییرات schema آینده باید migration افزایشی و idempotent باشند و داده‌های کاربران، نشست‌ها، Nodeها، S3، Nginx، Docker و اپلیکیشن‌ها را حفظ کنند. نسخهٔ پروتکل Node فعلی `arg-node/2` است؛ هر تغییر سازگاری پروتکل باید جداگانه بررسی شود.
+bootstrap دیتابیس SQLite در `src/main.rs` باقی است؛ کد دامنهٔ اپ، Deploy، Runtime، Laravel و Node به‌ترتیب در `src/apps.rs`، `src/deploy.rs`، `src/runtimes.rs`، `src/laravel.rs` و `src/node.rs` تفکیک شده است. تغییرات schema آینده باید migration افزایشی و idempotent باشند و داده‌های کاربران، نشست‌ها، Nodeها، S3، Nginx، Docker و اپلیکیشن‌ها را حفظ کنند. نسخهٔ پروتکل Federation Node فعلی `arg-node/2` است؛ هر تغییر سازگاری پروتکل باید جداگانه بررسی شود.
 
 ARG باید روی یک VPS بدون Node جفت‌شده و بدون Docker همچنان کامل و مفید باشد. وابستگی‌های اختیاری نباید اجباری شوند. نبود Docker، PHP، Node.js، S3 یا قابلیت شبکه باید صادقانه `در دسترس نیست` نشان داده شود، نه وضعیت سالم ساختگی.
 
@@ -68,7 +68,8 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 | ۰۴ — Jobهای استقرار پایدار | کامل | Job پایدار، دریافت محدود سورس، فعال‌سازی Release، لغو، retry، retention و rollback پیاده شده و تست مخزن دارد. |
 | ۰۵ — مدیریت Runtime | کامل | inventory، پیش‌نمایش امن APT، ترجیح نسخهٔ هر اپ و کنترل‌های فرانت‌اند پیاده شده؛ نصب واقعی بسته‌ها به VPS آزمایشی Debian/Ubuntu نیاز دارد. |
 | ۰۶ — Runner لاراول | دروازهٔ خودکار فاز گذشت؛ تست میزبان باقی است | وب/PHP-FPM، ساخت دیتابیس، Artisan، سرویس‌های اختیاری و refresh/rollback پیاده شده‌اند. تست Rust، build انتشار، type-check و build فرانت‌اند موفق‌اند. اجرای یکپارچگی Nginx/MySQL/systemd روی میزبان آزمایشی هنوز انجام نشده است. |
-| ۰۷ تا ۴۸ | برنامه‌ریزی‌شده | تا عبور از تست هر فاز، قابلیت آن منتشرشده محسوب نمی‌شود. |
+| ۰۷ — Runner مربوط به Node.js | دروازهٔ خودکار فاز گذشت؛ تست میزبان باقی است | build بر اساس lockfile، unit موقت systemd، محیط خصوصی Runtime، سرویس مستقل DynamicUser، بررسی loopback/HTTP، reverse proxy کنترل‌شدهٔ Nginx و بازیابی Deploy پیاده شده‌اند. تست و build مخزن موفق‌اند؛ آزمایش Node/systemd/Nginx روی VPS جداگانه باقی است. |
+| ۰۸ تا ۴۸ | برنامه‌ریزی‌شده | تا عبور از تست هر فاز، قابلیت آن منتشرشده محسوب نمی‌شود. |
 
 «کامل» یعنی پیاده‌سازی مخزن و تست خودکار همان فاز موجود است؛ به معنی آزمون واقعی Federation چند VPS، مرجع صدور گواهی، APT، MySQL یا systemd روی VPS عملیاتی نیست.
 
@@ -93,6 +94,15 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 - Queue، Scheduler، Horizon، Reverb و Octane از قالب‌های ثابت systemd استفاده می‌کنند. Reverb/Octane فقط روی loopback گوش می‌دهند؛ Octane مسیر upstream سایت را در Nginx تغییر می‌دهد و هنگام خاموش‌شدن به PHP-FPM برمی‌گرداند.
 - Deploy و rollback دستی، وب و سرویس‌های فعال Laravel را تازه‌سازی می‌کنند و در شکست برای بازگشت به Release/runtime قبلی تلاش می‌کنند. این کار migration دیتابیس را برعکس نمی‌کند.
 - تغییرات فعلی تشخیص خودکار نسخهٔ «system» برای PHP-FPM، بررسی تعارض سرویس/پورت، پاک‌سازی کاربر MySQL نیمه‌ساخته و بازیابی امن Release را تکمیل می‌کنند. ۱۰۵ تست Rust، `cargo build --locked --release`، type-check و build تولیدی Frontend موفق‌اند. رفتار واقعی Nginx، MySQL و systemd همچنان به VPS آزمایشی نیاز دارد.
+
+### وضعیت پیاده‌سازی فاز ۰۷
+
+- پروژهٔ Node از `package.json` و دقیقاً یک lockfile پشتیبانی‌شده بازرسی می‌شود. npm، pnpm و Yarn Classic در حالت نصب قابل‌تکرار اجرا می‌شوند؛ مدیر بستهٔ متعارض یا پشتیبانی‌نشده صریحاً رد می‌شود. وجود `scripts.start` ضروری و `scripts.build` اختیاری است.
+- نصب dependency و build فقط هنگام Deploy اپ Node و در unit موقت systemd اجرا می‌شوند؛ DynamicUser، فضای موقت خصوصی، filesystem محدود، سقف ثابت منبع/زمان/خروجی و نبود دسترسی به دادهٔ خصوصی ARG اعمال می‌شود.
+- هر اپ Node یک unit مشتق از UUID، فایل `.env` خصوصی، mount فقط‌خواندنی release/محیط، گروه اختصاصی، مسیر نوشتنی `shared/data`، میزبان/پورت loopback، سقف منابع، restart در شکست و مهلت توقف تمیز دارد. API مقدار secret را بازخوانی نمی‌کند.
+- پیش از موفقیت، listener واقعی فقط روی loopback بررسی و درخواست HTTP فرستاده می‌شود. با ثبت دامنه، reverse proxy جداگانهٔ تحت مالکیت ARG تنها پس از بررسی تعارض ساخته می‌شود؛ سایت نامرتبط یا دستی‌تغییریافته بازنویسی نمی‌شود. صدور گواهی یک اقدام جدا در صفحهٔ Nginx است.
+- Deploy و rollback فقط سرویسی را restart می‌کنند که قبلاً فعال بوده است. شکست فعال‌سازی تلاش می‌کند اشاره‌گر و وضعیت سرویس قبلی را بازگرداند. این عملیات اثر خارجی یا migration دیتابیس اپ را برعکس نمی‌کند.
+- دروازهٔ خودکار فاز شامل ۱۱۵ تست Rust و type-check/build فرانت‌اند بود. build انتشار و مستندات نیز در بررسی نهایی همین فاز اجرا می‌شوند. اجرای واقعی npm، lifecycle پردازش systemd و Nginx به VPS آزمایشی Debian/Ubuntu نیاز دارد و با تست واحد ادعا نمی‌شود.
 
 ### واژگان و مالکیت
 
@@ -157,7 +167,7 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 - **Persistence:** bootstrap دیتابیس SQLite در `src/main.rs` است؛ migration اپلیکیشن در `src/apps.rs` جدا شده و هنگام راه‌اندازی فراخوانی می‌شود.
 - **دسترسی privileged:** سرویس ARG از Unix socket خصوصی با `arg-privileged.service` حرف می‌زند. هیچ قابلیتی نباید آن را به runner عمومی root تبدیل کند.
 - **Federation:** پروتکل v2 و proxy فضای‌کار API/Terminal دارد. نقش سرور، scopeهای مقصد، مذاکرهٔ capability نسخهٔ ۱، تمدید نشست، چرخش کلید و وضعیت سلامت در فاز ۰۲ افزوده شده‌اند؛ تست واقعی دو VPS همچنان لازم است.
-- **پلتفرم اپ:** فاز ۰۳ Registry مالکیت را اضافه می‌کند. فاز ۰۴ Job پایدار، دریافت محدود Git/ZIP/پوشه، staging Release، تغییر اتمی `current`، پیشرفت، لغو، retry و rollback را اضافه می‌کند. فاز ۰۵ inventory Runtime و پیش‌نمایش امن APT را دارد. فاز ۰۶ بازرسی Laravel، فایل محیط خصوصی، Artisan محدود، تنظیم PHP-FPM/Nginx مستقل، ساخت دیتابیس و سرویس‌های اختیاری systemd را اضافه می‌کند. Runnerهای Node و Static/SSR، شبکه و Volume اپ، مهاجرت بین سرورها و فازهای بعدی هنوز باقی‌اند.
+- **پلتفرم اپ:** فاز ۰۳ Registry مالکیت را اضافه می‌کند. فاز ۰۴ Job پایدار، دریافت محدود Git/ZIP/پوشه، staging Release، تغییر اتمی `current`، پیشرفت، لغو، retry و rollback را اضافه می‌کند. فاز ۰۵ inventory Runtime و پیش‌نمایش امن APT را دارد. فاز ۰۶ Laravel، فایل محیط خصوصی، Artisan محدود، PHP-FPM/Nginx، دیتابیس و سرویس‌های systemd را اضافه می‌کند. فاز ۰۷ Runner مربوط به Node.js، build بر اساس lockfile، unit ایزوله، فایل Runtime خصوصی، health check loopback و reverse proxy کنترل‌شده را اضافه می‌کند. قالب‌های static/SSR، شبکه و Volume اپ، مهاجرت بین سرورها و فازهای بعدی باقی‌اند.
 - **CI:** GitHub Actions برای CI و انتشار مستندات وجود دارد. دستورهای تست محلی در `docs/en/development.md` ثبت شده‌اند.
 - **نسخه‌بندی:** نسخه‌های Rust و Frontend هماهنگ‌اند؛ ابزارهای پایدار و prerelease به‌ترتیب `scripts/bump-version.sh`، `scripts/bump-development-version.sh` و `scripts/check-versioning.sh` هستند.
 

@@ -699,26 +699,69 @@ pub(super) async fn rollback(
         || !input
             .release_id
             .bytes()
-            .all(|b| b.is_ascii_hexdigit() || b == b'-')
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
     {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "شناسهٔ release معتبر نیست.",
         ));
     }
+    let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
     let (actor, runtime, row) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
         ensure_app(&db, &app_id, &owner)?;
-        let active: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM deployment_jobs WHERE application_id=?1 AND state IN ('queued','validating','running','verifying'))", [&app_id], |row| row.get(0)).map_err(db_error)?;
-        if active { return Err(api_error(StatusCode::CONFLICT, "تا پایان یا لغو Job فعال، Rollback هم‌زمان انجام نمی‌شود.")); }
-        let row: Option<(String, String)> = db.query_row("SELECT path,state FROM deployment_releases WHERE id=?1 AND application_id=?2", params![input.release_id, app_id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(db_error)?;
-        let runtime = db.query_row("SELECT a.framework,a.runtime_version,s.domain,s.enabled FROM applications a LEFT JOIN laravel_app_sites s ON s.application_id=a.id WHERE a.id=?1", [&app_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<bool>>(3)?.unwrap_or(false)))).optional().map_err(db_error)?;
+        let active: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM deployment_jobs WHERE application_id=?1 AND state IN ('queued','validating','running','verifying'))",
+                [&app_id],
+                |query| query.get(0),
+            )
+            .map_err(db_error)?;
+        if active {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "تا پایان یا لغو Job فعال، Rollback هم‌زمان انجام نمی‌شود.",
+            ));
+        }
+        let row: Option<(String, String)> = db
+            .query_row(
+                "SELECT path,state FROM deployment_releases WHERE id=?1 AND application_id=?2",
+                params![input.release_id, app_id],
+                |query| Ok((query.get(0)?, query.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let runtime = db
+            .query_row(
+                "SELECT a.framework,a.runtime_version,s.domain,s.enabled FROM applications a LEFT JOIN laravel_app_sites s ON s.application_id=a.id WHERE a.id=?1",
+                [&app_id],
+                |query| {
+                    Ok((
+                        query.get::<_, String>(0)?,
+                        query.get::<_, String>(1)?,
+                        query.get::<_, Option<String>>(2)?,
+                        query.get::<_, Option<bool>>(3)?.unwrap_or(false),
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_error)?;
         (actor, runtime, row)
     };
-    let Some((release_path, release_state)) = row else { return Err(api_error(StatusCode::NOT_FOUND,"release برای این اپلیکیشن پیدا نشد.")); };
-    if release_state != "previous" { return Err(api_error(StatusCode::CONFLICT,"فقط release قبلی قابل Rollback است.")); }
+    let Some((release_path, release_state)) = row else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "release برای این اپلیکیشن پیدا نشد.",
+        ));
+    };
+    if release_state != "previous" {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "فقط release قبلی قابل Rollback است.",
+        ));
+    }
     let root = deployment_root().join("apps").join(&app_id);
     let releases = root
         .join("releases")
@@ -734,92 +777,115 @@ pub(super) async fn rollback(
         ));
     }
     let current = root.join("current");
-    if current.exists() && !fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink())
-    {
+    if current.exists() && !fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(api_error(
             StatusCode::CONFLICT,
             "current symlink نیست؛ Rollback برای جلوگیری از جایگزینی فایل واقعی متوقف شد.",
         ));
     }
     let old_link = fs::read_link(&current).ok();
-    let old = old_link.as_ref().and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()));
+    let old_pointer = old_link
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
+    let old_id = old_link
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_string());
     let temp = root.join(format!(".rollback-{}", id()));
     std::os::unix::fs::symlink(FsPath::new("releases").join(&input.release_id), &temp)
         .and_then(|_| fs::rename(&temp, &current))
-        .map_err(|e| {
+        .map_err(|error| {
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("تغییر اتمی release ناموفق بود: {e}"),
+                &format!("تغییر اتمی release ناموفق بود: {error}"),
             )
         })?;
+
+    let framework = runtime.as_ref().map(|runtime| runtime.0.as_str()).unwrap_or_default();
     let mut nginx_snapshot: Option<(String, String)> = None;
-    if let Some((_framework, runtime_version, domain, web_enabled)) =
-        runtime.filter(|row| row.0 == "laravel")
-    {
-        let mut failure = None;
-        if web_enabled {
-            let result = privileged_request_async(json!({"action":"laravel-web","app_id":app_id,"domain":domain.clone().unwrap_or_default(),"runtime_version":runtime_version,"enabled":true})).await;
-            match result {
-                Ok(value) if value["ok"] == true => {
-                    let data = &value["data"];
-                    if let (Some(name), Some(content)) = (data["site_name"].as_str(), data["nginx_content"].as_str()) {
-                        nginx_snapshot = Some((name.to_owned(), content.to_owned()));
+    let refresh_result = if framework == "laravel" {
+        let (_, runtime_version, domain, web_enabled) = runtime.as_ref().unwrap();
+        match refresh_laravel_runtime(
+            &app_id,
+            runtime_version,
+            domain.as_deref(),
+            *web_enabled,
+        )
+        .await
+        {
+            Ok(snapshot) => {
+                nginx_snapshot = snapshot;
+                Ok(())
+            }
+            Err(message) => Err(message),
+        }
+    } else if framework == "node" {
+        node::refresh_after_deploy(&app_id, old_pointer.as_deref())
+            .await
+            .map(|_| ())
+    } else {
+        Ok(())
+    };
+
+    if let Err(message) = refresh_result {
+        let restored = restore_current_pointer(&root, old_pointer.as_deref(), &id());
+        let recovery = if restored.is_ok() {
+            if framework == "laravel" {
+                let (_, runtime_version, domain, web_enabled) = runtime.as_ref().unwrap();
+                match refresh_laravel_runtime(
+                    &app_id,
+                    runtime_version,
+                    domain.as_deref(),
+                    *web_enabled,
+                )
+                .await
+                {
+                    Ok(snapshot) => {
+                        if let Some((name, content)) = snapshot {
+                            let db = state.lock().unwrap();
+                            let _ = nginx::store_nginx_snapshot(&db, &name, &content, None);
+                        }
+                        "وب و سرویس‌های Laravel قبلی دوباره آماده شدند."
+                    }
+                    Err(error) => {
+                        return Err(api_error(
+                            StatusCode::BAD_GATEWAY,
+                            &format!("{message} اشاره‌گر قبلی برگشت، اما بازیابی سرویس Laravel هم شکست خورد: {error}"),
+                        ));
                     }
                 }
-                Ok(value) => failure = Some(value["error"].as_str().unwrap_or("کانفیگ وب پس از rollback آماده نشد.").to_owned()),
-                Err(_) => failure = Some("ارتباط با helper برای بازآماده‌سازی وب Laravel برقرار نشد.".into()),
-            }
-        }
-        if failure.is_none() {
-            let result = privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id})).await;
-            match result {
-                Ok(value) if value["ok"] == true => {}
-                Ok(value) => failure = Some(value["error"].as_str().unwrap_or("سرویس‌های پس‌زمینه پس از rollback راه‌اندازی نشدند.").to_owned()),
-                Err(_) => failure = Some("ارتباط با helper برای راه‌اندازی مجدد سرویس‌های Laravel برقرار نشد.".into()),
-            }
-        }
-        if let Some(message) = failure {
-            let previous = old_link.as_deref().map(|path| path.to_string_lossy().to_string());
-            let restored = restore_current_pointer(&root, previous.as_deref(), &id());
-            let recovery_note = if restored.is_ok() {
-                let recovered_snapshot = if web_enabled {
-                    match privileged_request_async(json!({"action":"laravel-web","app_id":app_id,"domain":domain.clone().unwrap_or_default(),"runtime_version":runtime_version,"enabled":true})).await {
-                        Ok(value) if value["ok"] == true => {
-                            let data = &value["data"];
-                            match (data["site_name"].as_str(), data["nginx_content"].as_str()) {
-                                (Some(name), Some(content)) => Some((name.to_owned(), content.to_owned())),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
+            } else if framework == "node" {
+                match node::refresh_after_deploy(&app_id, old_pointer.as_deref()).await {
+                    Ok(_) => "سرویس Node با release قبلی دوباره بررسی شد.",
+                    Err(error) => {
+                        return Err(api_error(
+                            StatusCode::BAD_GATEWAY,
+                            &format!("{message} اشاره‌گر قبلی برگشت، اما بازیابی سرویس Node هم شکست خورد: {error}"),
+                        ));
                     }
-                } else {
-                    None
-                };
-                let services_recovered = matches!(
-                    privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id})).await,
-                    Ok(value) if value["ok"] == true
-                );
-                let snapshot_recovered = recovered_snapshot.is_some();
-                let snapshot_saved = recovered_snapshot.is_some_and(|(name, content)| {
-                    let db = state.lock().unwrap();
-                    nginx::store_nginx_snapshot(&db, &name, &content, None).is_ok()
-                });
-                match (services_recovered, snapshot_recovered, snapshot_saved) {
-                    (true, _, true) => "اشاره‌گر release به نسخهٔ قبلی بازگشت؛ کانفیگ Nginx و سرویس‌های قبلی دوباره آماده شدند.",
-                    (true, false, _) if !web_enabled => "اشاره‌گر release به نسخهٔ قبلی بازگشت و سرویس‌های قبلی دوباره آماده شدند.",
-                    (true, _, _) => "اشاره‌گر release به نسخهٔ قبلی بازگشت و سرویس‌ها دوباره اجرا شدند، اما snapshot کانفیگ Nginx ذخیره نشد.",
-                    (false, _, _) => "اشاره‌گر release به نسخهٔ قبلی بازگشت، اما آماده‌سازی دوبارهٔ سرویس‌ها کامل نشد.",
                 }
             } else {
-                "بازگرداندن خودکار اشاره‌گر هم شکست خورد؛ مسیر current را فوراً بررسی کن."
-            };
-            return Err(api_error(StatusCode::BAD_GATEWAY, &format!("{message} {recovery_note}")));
-        }
+                "اشاره‌گر release قبلی بازگردانده شد."
+            }
+        } else {
+            return Err(api_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("{message} بازگرداندن اشاره‌گر قبلی هم شکست خورد: {restored:?}"),
+            ));
+        };
+        return Err(api_error(
+            StatusCode::BAD_GATEWAY,
+            &format!("{message} {recovery}"),
+        ));
     }
+
     let db = state.lock().unwrap();
     let at = now();
-    db.execute("UPDATE deployment_releases SET state=CASE WHEN id=?1 THEN 'active' WHEN id=?2 THEN 'previous' ELSE state END,activated_at=CASE WHEN id=?1 THEN ?3 ELSE activated_at END WHERE application_id=?4 AND state IN ('active','previous')",params![input.release_id,old,at,app_id]).map_err(db_error)?;
+    db.execute(
+        "UPDATE deployment_releases SET state=CASE WHEN id=?1 THEN 'active' WHEN id=?2 THEN 'previous' ELSE state END,activated_at=CASE WHEN id=?1 THEN ?3 ELSE activated_at END WHERE application_id=?4 AND state IN ('active','previous')",
+        params![input.release_id, old_id, at, app_id],
+    )
+    .map_err(db_error)?;
     let snapshot_warning = nginx_snapshot.and_then(|(name, content)| {
         nginx::store_nginx_snapshot(&db, &name, &content, None)
             .err()
@@ -832,10 +898,10 @@ pub(super) async fn rollback(
         &format!("app={app_id}; release={}", input.release_id),
     );
     let message = snapshot_warning.map_or_else(
-        || "release قبلی فعال شد و سرویس‌های Laravel بررسی شدند. دیتابیس rollback نشد.".to_owned(),
+        || format!("release قبلی فعال شد؛ سرویس {} بررسی شد. دیتابیس rollback نشد.", if framework == "node" { "Node" } else if framework == "laravel" { "Laravel" } else { "اپلیکیشن" }),
         |warning| format!("release قبلی فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
     );
-    Ok(Json(json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old,"message":message})))
+    Ok(Json(json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old_id,"message":message})))
 }
 
 #[cfg(test)]
@@ -1395,12 +1461,12 @@ async fn process_job(state: AppState, job_id: String) {
         );
         return;
     }
-    let framework = {
+    let (framework, build_runtime_version) = {
         let db = state.lock().unwrap();
         db.query_row(
-            "SELECT framework FROM applications WHERE id=?1",
+            "SELECT framework,build_runtime_version FROM applications WHERE id=?1",
             [&app_id],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .ok()
@@ -1416,6 +1482,27 @@ async fn process_job(state: AppState, job_id: String) {
             "پوشهٔ storage و .env را برای ماندگاری میان releaseها آماده می‌کند؛ هیچ دستور پروژه‌ای اجرا نمی‌شود.",
         );
         if let Err(message) = laravel::prepare_release(&app_id, &stage) {
+            let _ = fs::remove_dir_all(&stage);
+            finish(&state, &job_id, "failed", &message);
+            return;
+        }
+    }
+    if framework == "node" {
+        progress(
+            &state,
+            &job_id,
+            "running",
+            "node-build",
+            "lockfile بررسی می‌شود؛ وابستگی‌ها و اسکریپت build در محیط موقت systemd اجرا می‌شوند.",
+        );
+        if let Err(message) = node::prepare_release(&app_id, &stage) {
+            let _ = fs::remove_dir_all(&stage);
+            finish(&state, &job_id, "failed", &message);
+            return;
+        }
+        if let Err(message) =
+            node::prepare_build(&app_id, &job_id, &stage, &build_runtime_version).await
+        {
             let _ = fs::remove_dir_all(&stage);
             finish(&state, &job_id, "failed", &message);
             return;
@@ -1451,6 +1538,13 @@ async fn process_job(state: AppState, job_id: String) {
             &format!("انتقال release به مسیر نهایی ناموفق بود: {e}"),
         );
         return;
+    }
+    if framework == "node" {
+        if let Err(message) = node::activate_release(&final_release) {
+            let _ = fs::remove_dir_all(&final_release);
+            finish(&state, &job_id, "failed", &format!("فایل محیط پایدار به release متصل نشد: {message}"));
+            return;
+        }
     }
     if current.exists() && !fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink())
     {
@@ -1488,37 +1582,43 @@ async fn process_job(state: AppState, job_id: String) {
         let _ = fs::remove_dir_all(&final_release);
         return;
     }
-    let laravel_runtime = {
-        let db = state.lock().unwrap();
-        db.query_row(
-            "SELECT a.framework,a.runtime_version,s.domain,s.enabled FROM applications a LEFT JOIN laravel_app_sites s ON s.application_id=a.id WHERE a.id=?1",
-            [&app_id],
-            |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,Option<bool>>(3)?.unwrap_or(false))),
-        ).optional().ok().flatten()
-    };
     let mut nginx_snapshot = None;
-    if let Some((_framework, runtime_version, domain, web_enabled)) =
-        laravel_runtime.filter(|(framework, _, _, _)| framework == "laravel")
-    {
-        match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled).await {
-            Ok(snapshot) => nginx_snapshot = snapshot,
-            Err(message) => {
-                let recovery = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
-                let detail = match recovery {
-                    Ok(()) => match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled).await {
-                        Ok(snapshot) => {
-                            if let Some(snapshot) = snapshot.as_ref() {
-                                let _ = persist_laravel_nginx_snapshot(&state, snapshot);
+    if framework == "laravel" {
+        let laravel_runtime = {
+            let db = state.lock().unwrap();
+            db.query_row(
+                "SELECT runtime_version,domain,enabled FROM applications a LEFT JOIN laravel_app_sites s ON s.application_id=a.id WHERE a.id=?1",
+                [&app_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<bool>>(2)?.unwrap_or(false))),
+            ).optional().ok().flatten()
+        };
+        if let Some((runtime_version, domain, web_enabled)) = laravel_runtime {
+            match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled).await {
+                Ok(snapshot) => nginx_snapshot = snapshot,
+                Err(message) => {
+                    let recovery = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                    let detail = match recovery {
+                        Ok(()) => match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled).await {
+                            Ok(snapshot) => {
+                                if let Some(snapshot) = snapshot.as_ref() {
+                                    let _ = persist_laravel_nginx_snapshot(&state, snapshot);
+                                }
+                                format!("{message} اشاره‌گر به release قبلی برگشت و سرویس‌های قبلی دوباره بررسی شدند؛ دیتابیس تغییر نکرد.")
                             }
-                            format!("{message} اشاره‌گر به release قبلی برگشت و سرویس‌های قبلی دوباره بررسی شدند؛ دیتابیس تغییر نکرد.")
-                        }
-                        Err(recovery_error) => format!("{message} کد به release قبلی برگشت، اما آماده‌سازی دوبارهٔ سرویس هم شکست خورد: {recovery_error}. وضعیت Nginx و systemd را بررسی کن."),
-                    },
-                    Err(rollback_error) => format!("{message} بازگرداندن اشاره‌گر هم شکست خورد: {rollback_error}. مسیر current را فوراً بررسی کن."),
-                };
-                finish(&state, &job_id, "failed", &detail);
-                return;
+                            Err(recovery_error) => format!("{message} کد به release قبلی برگشت، اما آماده‌سازی دوبارهٔ سرویس هم شکست خورد: {recovery_error}. وضعیت Nginx و systemd را بررسی کن."),
+                        },
+                        Err(rollback_error) => format!("{message} بازگرداندن اشاره‌گر هم شکست خورد: {rollback_error}. مسیر current را فوراً بررسی کن."),
+                    };
+                    finish(&state, &job_id, "failed", &detail);
+                    return;
+                }
             }
+        }
+    }
+    if framework == "node" {
+        if let Err(message) = node::refresh_after_deploy(&app_id, previous.as_deref()).await {
+            finish(&state, &job_id, "failed", &message);
+            return;
         }
     }
     let db = state.lock().unwrap();
@@ -1537,7 +1637,11 @@ async fn process_job(state: AppState, job_id: String) {
     });
     drop(db);
     let success_message = snapshot_warning.map_or_else(
-        || "release فعال شد؛ کانفیگ وب و سرویس‌های Laravel بررسی شدند. Migration دیتابیس خودکار اجرا نمی‌شود.".to_owned(),
+        || match framework.as_str() {
+            "laravel" => "release فعال شد؛ کانفیگ وب و سرویس‌های Laravel بررسی شدند. Migration دیتابیس خودکار اجرا نمی‌شود.".to_owned(),
+            "node" => "release فعال شد؛ سرویس Node در صورت فعال‌بودن restart و سلامت loopback آن بررسی شد.".to_owned(),
+            _ => "release فعال شد و اشاره‌گر جاری به‌صورت اتمی جابه‌جا شد.".to_owned(),
+        },
         |warning| format!("release فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
     );
     finish(&state, &job_id, "succeeded", &success_message);

@@ -2729,6 +2729,141 @@ fn nginx_create_site(name: &str, content: &str) -> Result<Value, String> {
     )
 }
 
+/// Create an application-scoped HTTP reverse proxy for the Node runner.
+/// Existing sites are never adopted or overwritten: the generated site is
+/// separate, and a conflicting server_name must be resolved by an admin.
+pub(super) fn configure_node_proxy(
+    app_id: &str,
+    domain: &str,
+    port: u16,
+) -> Result<Value, String> {
+    let _guard = NGINX_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if app_id.len() != 36
+        || app_id.chars().enumerate().any(|(index, value)| {
+            if [8, 13, 18, 23].contains(&index) {
+                value != '-'
+            } else {
+                !value.is_ascii_hexdigit()
+            }
+        })
+        || port < 1024
+        || !valid_domain_name(domain)
+        || domain.contains('*')
+        || domain.contains('$')
+    {
+        return Err("شناسهٔ اپ، دامنه یا پورت Node معتبر نیست.".into());
+    }
+    let domain = domain.to_ascii_lowercase();
+    let name = format!("arg-node-{}", &app_id[..12]);
+    let (available, _) = nginx_site_paths(&name)?;
+    let expected_marker = format!("# Managed by ARG Node runner app={app_id} ");
+    let expected_proxy = format!("proxy_pass http://127.0.0.1:{port};");
+    let expected_name = format!("server_name {domain};");
+    let current = match fs::symlink_metadata(&available) {
+        Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= 512 * 1024 => {
+            let content = fs::read_to_string(&available).map_err(|error| error.to_string())?;
+            if !content.starts_with(&expected_marker) {
+                return Err(format!("نام فایل رزروشدهٔ {name} متعلق به تنظیمی غیر از Node Runner است؛ فایل تغییر نکرد."));
+            }
+            if !content.contains(&expected_name) || !content.contains(&expected_proxy) {
+                return Err("دامنه یا پورت اپ با Nginx فعلی فرق دارد؛ تنظیمات سایت را در صفحهٔ Nginx بازبینی کن. فایل موجود بازنویسی نشد.".into());
+            }
+            Some(content)
+        }
+        Ok(_) => return Err("فایل reverse proxy موجود فایل عادی نیست.".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if current.is_none() && nginx_domain_is_claimed(&domain, &name)? {
+        return Err(format!("دامنهٔ {domain} از قبل در یک فایل Nginx دیگر استفاده شده است؛ ARG سایت موجود را تغییر نمی‌دهد."));
+    }
+    if current.is_none() {
+        let content = node_proxy_config(app_id, &domain, port);
+        nginx_create_site(&name, &content)?;
+    }
+    if !nginx_site_enabled(&name)? {
+        if let Err(error) = nginx_set_site_enabled(&name, true) {
+            if current.is_none() {
+                let _ = nginx_delete_site(&name);
+            }
+            return Err(error);
+        }
+    }
+    let actual = nginx_get_site(&name)?;
+    Ok(json!({"site_name":name,"content":actual["content"].as_str().unwrap_or_default()}))
+}
+
+fn node_proxy_config(app_id: &str, domain: &str, port: u16) -> String {
+    format!("# Managed by ARG Node runner app={app_id} domain={domain} port={port}\nserver {{\n    listen 80;\n    server_name {domain};\n    server_tokens off;\n    client_max_body_size 32m;\n\n    location / {{\n        proxy_pass http://127.0.0.1:{port};\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_read_timeout 3600s;\n        proxy_send_timeout 3600s;\n    }}\n\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n    location ~* \\.(?:env|ini|log|sql|sqlite|bak|zip|gz|tar)$ {{ deny all; }}\n}}\n")
+}
+
+fn nginx_domain_is_claimed(domain: &str, own_site: &str) -> Result<bool, String> {
+    for directory in [NGINX_AVAILABLE_DIR, "/etc/nginx/conf.d"] {
+        let path = std::path::Path::new(directory);
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            if entry.file_name().to_str() == Some(own_site)
+                || !entry.file_type().map_err(|error| error.to_string())?.is_file()
+            {
+                continue;
+            }
+            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+            if metadata.len() > 512 * 1024 {
+                continue;
+            }
+            let content = fs::read_to_string(entry.path()).map_err(|error| error.to_string())?;
+            if nginx_server_names(&content)
+                .iter()
+                .any(|name| server_name_overlaps(name, domain))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod node_proxy_tests {
+    use super::{node_proxy_config, server_name_overlaps};
+
+    #[test]
+    fn node_proxy_has_loopback_upstream_websocket_and_safe_file_rules() {
+        let config = node_proxy_config("12345678-1234-4234-8234-123456789abc", "api.example.com", 31234);
+        assert!(config.contains("server_name api.example.com;"));
+        assert!(config.contains("proxy_pass http://127.0.0.1:31234;"));
+        assert!(config.contains("proxy_set_header Upgrade $http_upgrade;"));
+        assert!(config.contains("proxy_read_timeout 3600s;"));
+        assert!(config.contains("location ~ /\\.(?!well-known(?:/|$))"));
+    }
+
+    #[test]
+    fn node_proxy_detects_literal_and_wildcard_domain_conflicts() {
+        assert!(server_name_overlaps("api.example.com", "api.example.com"));
+        assert!(server_name_overlaps("*.example.com", "api.example.com"));
+        assert!(server_name_overlaps("*.example.com", "v1.api.example.com"));
+        assert!(!server_name_overlaps("*.other.com", "api.example.com"));
+        assert!(!server_name_overlaps("example.com", "api.example.com"));
+    }
+}
+
+fn server_name_overlaps(name: &str, domain: &str) -> bool {
+    if name.eq_ignore_ascii_case(domain) {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    let domain = domain.to_ascii_lowercase();
+    name.strip_prefix("*.")
+        .is_some_and(|suffix| domain.len() > suffix.len() + 1 && domain.ends_with(&format!(".{suffix}")))
+}
+
 fn nginx_delete_site(name: &str) -> Result<Value, String> {
     if name == "default" {
         return Err("حذف سایت پیش‌فرض سیستم از پنل مجاز نیست.".into());

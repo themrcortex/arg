@@ -66,6 +66,7 @@ mod maintenance;
 mod metrics;
 mod mysql;
 mod nginx;
+mod node;
 mod routes;
 mod runtimes;
 mod s3;
@@ -3643,6 +3644,16 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("laravel-web-status") => "laravel-web-status",
         Some("laravel-service") => "laravel-service",
         Some("laravel-refresh-services") => "laravel-refresh-services",
+        Some("node-build-step") => "node-build-step",
+        Some("node-service-enable") => "node-service-enable",
+        Some("node-service-disable") => "node-service-disable",
+        Some("node-service-restart") => "node-service-restart",
+        Some("node-service-status") => "node-service-status",
+        Some("node-service-logs") => "node-service-logs",
+        Some("node-environment-save") => "node-environment-save",
+        Some("node-environment-keys") => "node-environment-keys",
+        Some("node-environment-permissions") => "node-environment-permissions",
+        Some("node-nginx-proxy") => "node-nginx-proxy",
         Some("apt-list") => "apt-list",
         Some("apt-runtime-catalog") => "apt-runtime-catalog",
         Some("apt-preview") => "apt-preview",
@@ -3787,6 +3798,9 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     if action.starts_with("laravel-") {
         return laravel::execute_privileged_request(action, request);
+    }
+    if action.starts_with("node-") {
+        return node::execute_privileged_request(action, request);
     }
     if action.starts_with("s3-") {
         return s3::execute_privileged_request(action, request);

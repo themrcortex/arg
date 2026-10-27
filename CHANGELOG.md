@@ -13,6 +13,12 @@
 - Resolve the `system` PHP-FPM choice from installed versions, check service ports for conflicts, and keep database/file configuration aligned during rollback recovery.
 - Document the implemented scope and remaining VPS-only integration checks in Persian and English.
 
+### Phase 07 — Node.js runner
+- Inspect Node manifests and supported npm/pnpm/Yarn Classic lockfiles; run reproducible dependency installation and optional build in bounded transient systemd sandboxes.
+- Add per-application DynamicUser services with private runtime environment, read-only releases, loopback-only binding, resource limits, restart policy, logs, and service health verification.
+- Generate a separate ARG-managed Nginx reverse proxy only after domain conflict checks; preserve unrelated/manual sites and keep TLS issuance explicit.
+- Reconcile Node deploy and rollback with service state, restoring the previous release when activation or health verification fails; add bilingual operator documentation and test the automated phase gate.
+
 ## v0.6.9-dev.1 — 2026-10-26
 
 ### Development
