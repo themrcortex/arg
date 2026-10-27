@@ -225,8 +225,17 @@
 .arg-sidebar-pattern { inset: 5% 0 14% auto; width: 30px; max-height: 72%; background: url('/arg/patterns/arg-edge-right.svg') center top / 30px 380px repeat-y; opacity: .055; }
 .arg-sidebar-corner { top: 0; right: 0; width: min(120px, 55%); height: 120px; background: url('/arg/patterns/arg-corner-top.svg') top right / contain no-repeat; opacity: .06; }
 .arg-brand-lockup { overflow: hidden; padding: 0; border: 0; background: transparent; }
-.arg-brand-full { display: block; width: min(100%, 168px); max-width: 100%; max-height: 64px; height: auto; object-fit: contain; object-position: right center; }
+.arg-brand-full { display: block; width: min(100%, 168px); max-width: 100%; max-height: 40px; height: auto; object-fit: contain; object-position: right center; }
+.arg-brand-full-light { display: none; }
 .arg-sidebar .arg-brand-mark { display: none; width: 42px; height: 42px; flex: 0 0 42px; object-fit: contain; }
+.arg-auth-brand { width: 100%; max-width: 240px; }
+.arg-auth-brand-large { max-width: 300px; }
+.arg-auth-logo { display: block; width: 100%; height: auto; object-fit: contain; }
+.arg-auth-logo-light { display: none; }
+:root[data-theme='light'] .arg-brand-full-dark,
+:root[data-theme='light'] .arg-auth-logo-dark { display: none; }
+:root[data-theme='light'] .arg-brand-full-light,
+:root[data-theme='light'] .arg-auth-logo-light { display: block; }
 .arg-persian-name { margin-top: 3px; color: var(--arg-text); font-family: 'Abar', 'Peyda', sans-serif; font-weight: 700; line-height: 1; }
 .arg-collapse, .arg-mobile-close { color: var(--arg-accent); }
 .arg-collapse:hover, .arg-mobile-close:hover { background: var(--arg-hover); color: var(--arg-text); }
@@ -250,7 +259,7 @@
 .arg-page-enter > .arg-section-card + .mb-5 { margin-top: 1.25rem; }
 @media (min-width: 1024px) {
   .arg-sidebar-collapsed { padding-inline: 6px; }
-  .arg-sidebar-collapsed .arg-brand-row { min-height: 84px; justify-content: center; flex-wrap: wrap; padding-inline: 0; }
+  .arg-sidebar-collapsed .arg-brand-row { min-height: 76px; justify-content: center; flex-wrap: wrap; padding-inline: 0; }
   .arg-sidebar-collapsed .arg-brand-lockup { width: 100%; flex: 0 0 auto; justify-content: center; padding: 0; border: 0; background: transparent; }
   .arg-sidebar-collapsed .arg-brand-full { display: none; }
   .arg-sidebar-collapsed .arg-brand-mark { display: block; width: 42px; height: 42px; }

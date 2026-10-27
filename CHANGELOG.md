@@ -13,6 +13,7 @@
 ## Unreleased
 
 ### Changed
+- Refine the ARG logo lockup with a shorter emblem, more balanced wordmark proportions, and increased spacing; reduce its displayed height while keeping the cropped mark in the collapsed sidebar.
 - Use the provided ARG logo in the sign-in screen and sidebar, show its cropped symbol in the collapsed sidebar, and remove the duplicate control-center and LIVE labels.
 
 ## v0.7.0 — 2026-10-27

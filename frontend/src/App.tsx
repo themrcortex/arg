@@ -204,11 +204,10 @@ const developer = (
 
 function Brand({ large = false }: { large?: boolean }) {
   return (
-    <img
-      src="/arg/brand/arg-logo.png"
-      alt="ARG"
-      className={cn('h-auto w-full object-contain', large ? 'max-w-[300px]' : 'max-w-[240px]')}
-    />
+    <div role="img" aria-label="ARG" className={cn('arg-auth-brand', large && 'arg-auth-brand-large')}>
+      <img src="/arg/brand/arg-logo-compact.png" alt="" aria-hidden="true" className="arg-auth-logo arg-auth-logo-dark" />
+      <img src="/arg/brand/arg-logo-compact-light.png" alt="" aria-hidden="true" className="arg-auth-logo arg-auth-logo-light" />
+    </div>
   )
 }
 
