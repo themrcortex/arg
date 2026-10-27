@@ -321,6 +321,10 @@ fn update_guard_exempt(path: &str) -> bool {
         "/api/update"
             | "/api/update/progress"
             | "/api/update/cancel"
+            | "/api/federation/update"
+            | "/api/federation/update/progress"
+            | "/api/federation/update/cancel"
+            | "/api/federation/update/rollback"
             | "/api/state"
             | "/api/logout"
             | "/api/login"
@@ -4859,6 +4863,8 @@ mod update_progress_tests {
     fn cancellation_endpoint_remains_available_while_update_lock_is_active() {
         assert!(super::update_guard_exempt("/api/update/cancel"));
         assert!(super::update_guard_exempt("/api/update/progress"));
+        assert!(super::update_guard_exempt("/api/federation/update/cancel"));
+        assert!(super::update_guard_exempt("/api/federation/update/progress"));
         assert!(!super::update_guard_exempt("/api/update/rollback"));
         assert!(!super::update_guard_exempt("/api/nginx/restart"));
     }

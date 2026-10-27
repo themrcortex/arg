@@ -73,6 +73,22 @@ pub(super) fn router(state: AppState) -> Router {
                 .put(federation::rename_controller_admin),
         )
         .route("/api/nodes/{id}/status", get(federation::node_status))
+        .route(
+            "/api/nodes/{id}/update",
+            get(federation::node_update_check).post(federation::node_update_run),
+        )
+        .route(
+            "/api/nodes/{id}/update/progress",
+            get(federation::node_update_progress),
+        )
+        .route(
+            "/api/nodes/{id}/update/cancel",
+            post(federation::node_update_cancel),
+        )
+        .route(
+            "/api/nodes/{id}/update/rollback",
+            post(federation::node_update_rollback),
+        )
         .route("/api/nodes/{id}/services", get(federation::node_services))
         .route(
             "/api/nodes/{id}/services/action",
@@ -97,6 +113,22 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/federation/pair", post(federation::accept_pair))
         .route("/api/federation/status", get(federation::status))
+        .route(
+            "/api/federation/update",
+            get(federation::remote_update_check).post(federation::remote_update_run),
+        )
+        .route(
+            "/api/federation/update/progress",
+            get(federation::remote_update_progress),
+        )
+        .route(
+            "/api/federation/update/cancel",
+            post(federation::remote_update_cancel),
+        )
+        .route(
+            "/api/federation/update/rollback",
+            post(federation::remote_update_rollback),
+        )
         .route("/api/federation/services", get(federation::services))
         .route(
             "/api/federation/services/action",

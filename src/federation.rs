@@ -84,6 +84,14 @@ pub(super) struct ServerRoleRequest { role: String, #[serde(default)] confirmed:
 #[derive(Deserialize)]
 pub(super) struct RotateCredentialRequest { new_token: String }
 
+#[derive(Deserialize)]
+pub(super) struct UpdateBranchQuery {
+    #[serde(default = "default_node_update_branch")]
+    branch: String,
+}
+
+fn default_node_update_branch() -> String { "main".to_owned() }
+
 #[derive(Clone)]
 struct ControllerIdentity { id: i64, name: String, scopes: Vec<String>, token_expires_at: Option<i64> }
 
@@ -110,11 +118,11 @@ fn known_scope(scope: &str) -> bool {
 }
 
 fn known_capability(capability: &str) -> bool {
-    ["node.status.read", "node.services.read", "node.services.manage", "workspace.api.proxy", "workspace.session.renew", "workspace.terminal", "server.identity.read", "server.public_name.sync", "server.credential.rotate", "capabilities.negotiate.v1"].contains(&capability)
+    ["node.status.read", "node.services.read", "node.services.manage", "node.update.manage", "workspace.api.proxy", "workspace.session.renew", "workspace.terminal", "server.identity.read", "server.public_name.sync", "server.credential.rotate", "capabilities.negotiate.v1"].contains(&capability)
 }
 
 fn supported_capabilities() -> Vec<&'static str> {
-    vec!["capabilities.negotiate.v1", "node.status.read", "node.services.read", "node.services.manage", "workspace.api.proxy", "workspace.session.renew", "workspace.terminal", "server.identity.read", "server.public_name.sync", "server.credential.rotate"]
+    vec!["capabilities.negotiate.v1", "node.status.read", "node.services.read", "node.services.manage", "node.update.manage", "workspace.api.proxy", "workspace.session.renew", "workspace.terminal", "server.identity.read", "server.public_name.sync", "server.credential.rotate"]
 }
 
 fn decode_scopes(raw: &str) -> Vec<String> {
@@ -928,6 +936,104 @@ pub(super) async fn status(State(state): State<AppState>, headers: HeaderMap) ->
     ))
 }
 
+pub(super) async fn remote_update_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<UpdateBranchQuery>,
+) -> ApiResult {
+    if !valid_update_branch(&query.branch) {
+        return Err(error(StatusCode::BAD_REQUEST, "شاخهٔ به‌روزرسانی Node معتبر نیست."));
+    }
+    let db = state.lock().unwrap();
+    let identity = authorize_controller(&db, &headers, "node.services.manage")?;
+    audit(&db, &identity.name, "federation.node.update.check", &format!("branch={}", query.branch));
+    drop(db);
+    let _update_guard = UPDATE_OPERATION_GATE.read().await;
+    if update_started_at().is_some() {
+        return Ok(Json(json!({"status":"unavailable","error":"ARG_UPDATE_IN_PROGRESS","branch":query.branch,"instance":metrics::process_instance_id()})));
+    }
+    let mut result = update_status(&query.branch).await;
+    result["instance"] = json!(metrics::process_instance_id());
+    Ok(Json(result))
+}
+
+pub(super) async fn remote_update_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    authorize_controller(&db, &headers, "node.services.manage")?;
+    drop(db);
+    let _update_guard = UPDATE_OPERATION_GATE.read().await;
+    let fallback_started = update_started_at();
+    let output = privileged_request_async(json!({"action":"update-progress"})).await;
+    let raw = output.ok().and_then(|value| value["stdout"].as_str().map(str::to_owned));
+    Ok(Json(update_progress_payload(raw.as_deref(), fallback_started, metrics::process_instance_id())))
+}
+
+pub(super) async fn remote_update_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(input): Query<PanelUpdateQuery>,
+) -> ApiResult {
+    if !valid_update_build_mode(&input.mode) || !valid_update_branch(&input.branch) {
+        return Err(error(StatusCode::BAD_REQUEST, "شاخه یا روش ساخت به‌روزرسانی معتبر نیست."));
+    }
+    let _exclusive = UPDATE_OPERATION_GATE.write().await;
+    if update_started_at().is_some() {
+        return Err(error(StatusCode::CONFLICT, "ARG_UPDATE_IN_PROGRESS: به‌روزرسانی دیگری روی Node در حال اجراست."));
+    }
+    let actor = {
+        let db = state.lock().unwrap();
+        authorize_controller(&db, &headers, "node.services.manage")?.name
+    };
+    let output = privileged_request_async(json!({"action":"update-run","mode":input.mode,"branch":input.branch})).await?;
+    if output["ok"] != true {
+        let detail = output["error"].as_str().unwrap_or("به‌روزرسانی Node زمان‌بندی نشد.");
+        let status = if detail.contains("ARG_UPDATE_IN_PROGRESS") { StatusCode::CONFLICT } else { StatusCode::BAD_GATEWAY };
+        return Err(error(status, detail));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "federation.node.update.run", &format!("branch={} mode={}", input.branch, input.mode));
+    Ok(Json(json!({"scheduled":true,"branch":input.branch,"mode":input.mode,"message":"به‌روزرسانی روی Node زمان‌بندی شد؛ کلید و شناسهٔ اتصال حفظ می‌شوند."})))
+}
+
+pub(super) async fn remote_update_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let actor = {
+        let db = state.lock().unwrap();
+        authorize_controller(&db, &headers, "node.services.manage")?.name
+    };
+    let output = privileged_request_async(json!({"action":"update-cancel"})).await?;
+    if output["ok"] != true {
+        return Err(error(StatusCode::CONFLICT, output["error"].as_str().unwrap_or("لغو به‌روزرسانی Node ناموفق بود.")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "federation.node.update.cancel", "controller requested rollback-safe cancellation");
+    Ok(Json(json!({"cancelled":true,"message":output["stdout"].as_str().unwrap_or("لغو به‌روزرسانی درخواست شد.")})))
+}
+
+pub(super) async fn remote_update_rollback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let actor = {
+        let db = state.lock().unwrap();
+        authorize_controller(&db, &headers, "node.services.manage")?.name
+    };
+    let output = privileged_request_async(json!({"action":"update-rollback"})).await?;
+    if output["ok"] != true {
+        let detail = output["error"].as_str().unwrap_or("بازگشت نسخهٔ Node ناموفق بود.");
+        let status = if detail.contains("ARG_UPDATE_IN_PROGRESS") { StatusCode::CONFLICT } else { StatusCode::BAD_GATEWAY };
+        return Err(error(status, detail));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "federation.node.update.rollback", "controller requested previous release rollback");
+    Ok(Json(json!({"scheduled":true,"message":output["stdout"].as_str().unwrap_or("بازگشت نسخه روی Node زمان‌بندی شد.")})))
+}
+
 pub(super) async fn services(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     {
         let db = state.lock().unwrap();
@@ -1035,6 +1141,18 @@ async fn remote_node_request(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value, (StatusCode, Json<Value>)> {
+    remote_node_request_with_timeout(state, id, required_scope, method, path, body, 10).await
+}
+
+async fn remote_node_request_with_timeout(
+    state: &AppState,
+    id: i64,
+    required_scope: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+    timeout_seconds: u64,
+) -> Result<Value, (StatusCode, Json<Value>)> {
     let (endpoint, remote_id, last_token, allow_private) = {
         let db = state.lock().unwrap();
         let (endpoint, remote_id, scopes_json, compatibility_state, capabilities_json, allow_private): (String, String, String, String, String, bool) = db
@@ -1053,6 +1171,12 @@ async fn remote_node_request(
                 return Err(error(StatusCode::UPGRADE_REQUIRED, "نسخهٔ Node از تونل امن فضای کار پشتیبانی نمی‌کند؛ هر دو پنل را به‌روزرسانی و دوباره جفت‌سازی کن."));
             }
         }
+        if path.starts_with("api/federation/update") {
+            let capabilities = decode_scopes(&capabilities_json);
+            if compatibility_state != "compatible" || !capabilities.iter().any(|capability| capability == "node.update.manage") {
+                return Err(error(StatusCode::UPGRADE_REQUIRED, "این Node هنوز قابلیت امن به‌روزرسانی راه‌دور را اعلام نکرده است؛ ابتدا خود Node را از SSH یا صفحهٔ محلی به نسخهٔ جدید ارتقا بده."));
+            }
+        }
         let token_path = token_path(&db, id)?;
         (endpoint, remote_id, read_node_token(&token_path)?, allow_private)
     };
@@ -1062,7 +1186,7 @@ async fn remote_node_request(
     let url = endpoint
         .join(path)
         .map_err(|_| error(StatusCode::BAD_GATEWAY, "مسیر پروتکل Node نامعتبر است."))?;
-    let client = http_client_for_endpoint(&endpoint, &addresses, 10)?;
+    let client = http_client_for_endpoint(&endpoint, &addresses, timeout_seconds)?;
     let mut request = client
         .request(method, url)
         .bearer_auth(last_token)
@@ -1116,6 +1240,44 @@ fn mark_node_connection(state: &AppState, id: i64, connection_state: &str, last_
     let _ = db.execute("UPDATE federated_nodes SET connection_state=?1,last_check=?2,last_error=?3 WHERE id=?4", params![connection_state, now(), last_error, id]);
 }
 
+fn node_identity_matches(
+    stored_node_id: &str,
+    stored_server_uuid: Option<&str>,
+    remote_node_id: &str,
+    remote_server_uuid: &str,
+) -> bool {
+    stored_node_id == remote_node_id
+        && stored_server_uuid.map_or(true, |stored| stored.eq_ignore_ascii_case(remote_server_uuid))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeUpdateRoute {
+    Federation,
+    WorkspaceProxy,
+}
+
+fn node_update_route(
+    scopes: &[String],
+    capabilities: &[String],
+    compatibility: &str,
+) -> Result<NodeUpdateRoute, &'static str> {
+    if !scopes.iter().any(|scope| scope == "node.services.manage") {
+        return Err("این اتصال فقط‌خواندنی است؛ ارتقای Node به دسترسی کامل نیاز دارد.");
+    }
+    if compatibility != "compatible" {
+        return Err("نسخهٔ مقصد با پروتکل امن Federation سازگار نیست؛ ابتدا خود Node را محلی یا از SSH به‌روز کن. اتصال و کلید این پنل حفظ می‌شوند.");
+    }
+    if capabilities.iter().any(|capability| capability == "node.update.manage") {
+        return Ok(NodeUpdateRoute::Federation);
+    }
+    if capabilities.iter().any(|capability| capability == "workspace.api.proxy")
+        && scopes.iter().any(|scope| scope == "workspace.write")
+    {
+        return Ok(NodeUpdateRoute::WorkspaceProxy);
+    }
+    Err("نسخهٔ مقصد نه API به‌روزرسانی Federation و نه تونل مدیریت کامل را اعلام کرده است؛ ابتدا Node را محلی یا از SSH به‌روز کن. اتصال و کلید این پنل حفظ می‌شوند.")
+}
+
 fn should_forget_node_after_revoke_failure(status: StatusCode, connection_state: &str) -> bool {
     // A rejected credential (401) cannot revoke the peer-side grant, but it is
     // safe to remove the unusable local pairing. A 403 may still represent an
@@ -1148,6 +1310,133 @@ async fn ensure_workspace_session(state: &AppState, id: i64) -> Result<String, (
     Ok(token.to_owned())
 }
 
+async fn remote_workspace_json_request(
+    state: &AppState,
+    id: i64,
+    method: reqwest::Method,
+    path_and_query: &str,
+    timeout_seconds: u64,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
+    if !valid_workspace_api_path(path)
+        || path_and_query.len() > 2048
+        || query.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(error(StatusCode::BAD_REQUEST, "مسیر Update راه‌دور معتبر نیست."));
+    }
+    let required_scope = if method == reqwest::Method::GET || method == reqwest::Method::HEAD {
+        "workspace.read"
+    } else {
+        "workspace.write"
+    };
+    let (endpoint_text, allow_private) = {
+        let db = state.lock().unwrap();
+        let (endpoint, scopes_json, capabilities_json, compatibility_state, allow_private): (String, String, String, String, bool) = db
+            .query_row(
+                "SELECT endpoint,scopes_json,capabilities_json,compatibility_state,allow_private_endpoint!=0 FROM federated_nodes WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "Node پیدا نشد."))?;
+        if !decode_scopes(&scopes_json).iter().any(|scope| scope == required_scope) {
+            return Err(error(StatusCode::FORBIDDEN, "این اتصال مجوز workspace لازم برای به‌روزرسانی Node را ندارد."));
+        }
+        if compatibility_state != "compatible"
+            || !decode_scopes(&capabilities_json).iter().any(|capability| capability == "workspace.api.proxy")
+        {
+            return Err(error(StatusCode::UPGRADE_REQUIRED, "تونل امن workspace در این Node پشتیبانی نمی‌شود."));
+        }
+        (endpoint, allow_private)
+    };
+    let token = ensure_workspace_session(state, id).await?;
+    let endpoint = validate_endpoint(&endpoint_text).map_err(|message| error(StatusCode::BAD_GATEWAY, &message))?;
+    let addresses = resolve_endpoint_addresses(&endpoint, allow_private).await.map_err(|message| error(StatusCode::BAD_GATEWAY, &message))?;
+    let host = endpoint.host_str().ok_or_else(|| error(StatusCode::BAD_GATEWAY, "میزبان Node موجود نیست."))?;
+    let mut url = endpoint.join(&format!("api/{path}")).map_err(|_| error(StatusCode::BAD_GATEWAY, "مسیر Update راه‌دور معتبر نیست."))?;
+    if !query.is_empty() {
+        url.set_query(Some(query));
+    }
+    let client = http_client_for_endpoint(&endpoint, &addresses, timeout_seconds)?;
+    let origin_port = endpoint.port().map(|port| format!(":{port}")).unwrap_or_default();
+    let response = client
+        .request(method, url)
+        .header(axum::http::header::COOKIE, format!("arg_session={token}"))
+        .header(axum::http::header::ORIGIN, format!("https://{host}{origin_port}"))
+        .header("X-ARG-Transport", "https")
+        .send()
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(_) => {
+            mark_node_connection(state, id, "offline", Some("ارتباط امن workspace برای به‌روزرسانی برقرار نشد."));
+            return Err(error(StatusCode::BAD_GATEWAY, "ارتباط با Node برقرار نشد؛ شبکه، سرویس و گواهی HTTPS را بررسی کن."));
+        }
+    };
+    let status = response.status();
+    let value = response.json::<Value>().await.map_err(|_| error(StatusCode::BAD_GATEWAY, "پاسخ به‌روزرسانی Node قابل‌خواندن نیست."))?;
+    if !status.is_success() {
+        let connection_state = if status == StatusCode::UPGRADE_REQUIRED { "incompatible" } else { "degraded" };
+        let detail = value["error"].as_str().unwrap_or("Node درخواست به‌روزرسانی را نپذیرفت.").chars().take(240).collect::<String>();
+        mark_node_connection(state, id, connection_state, Some(&detail));
+        let outward = match status {
+            StatusCode::UNAUTHORIZED => StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN => StatusCode::FORBIDDEN,
+            StatusCode::UPGRADE_REQUIRED => StatusCode::UPGRADE_REQUIRED,
+            _ => StatusCode::BAD_GATEWAY,
+        };
+        return Err(error(outward, value["error"].as_str().unwrap_or("Node عملیات را نپذیرفت.")));
+    }
+    let db = state.lock().unwrap();
+    db.execute(
+        "UPDATE federated_nodes SET last_seen=?1,last_check=?1,connection_state='healthy',last_error=NULL WHERE id=?2",
+        params![now(), id],
+    )
+    .map_err(db_error)?;
+    Ok(value)
+}
+
+async fn fetch_and_cache_node_status(state: &AppState, id: i64) -> Result<Value, (StatusCode, Json<Value>)> {
+    let value = remote_node_request(
+        state,
+        id,
+        "node.status.read",
+        reqwest::Method::GET,
+        "api/federation/status",
+        None,
+    )
+    .await?;
+    let remote_uuid = value["server_uuid"].as_str().filter(|uuid| valid_server_uuid(uuid))
+        .ok_or_else(|| error(StatusCode::BAD_GATEWAY, "Node شناسهٔ پایدار سرور را گزارش نکرد؛ برای جلوگیری از جابه‌جایی اتصال، به‌روزرسانی متوقف شد."))?
+        .to_ascii_lowercase();
+    let remote_node_id = value["node_id"].as_str().filter(|node_id| !node_id.is_empty() && node_id.len() <= 128)
+        .ok_or_else(|| error(StatusCode::BAD_GATEWAY, "Node شناسهٔ پروتکل معتبری گزارش نکرد؛ به‌روزرسانی متوقف شد."))?;
+    let db = state.lock().unwrap();
+    let stored: Option<(String, Option<String>)> = db.query_row(
+        "SELECT node_id,server_uuid FROM federated_nodes WHERE id=?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(db_error)?;
+    let (stored_node_id, stored_uuid) = stored.ok_or_else(|| error(StatusCode::NOT_FOUND, "Node پیدا نشد."))?;
+    if !node_identity_matches(&stored_node_id, stored_uuid.as_deref(), remote_node_id, &remote_uuid) {
+        let _ = db.execute("UPDATE federated_nodes SET connection_state='untrusted',last_check=?1,last_error=?2 WHERE id=?3", params![now(), "هویت پاسخ‌دهنده با Node جفت‌شده تطبیق ندارد؛ هیچ اعتبارنامه‌ای حذف یا جایگزین نشد.", id]);
+        return Err(error(StatusCode::CONFLICT, "هویت سرور مقصد با اتصال جفت‌شده یکی نیست؛ عملیات ایستاد و کلید و شناسهٔ Node بدون تغییر باقی ماندند."));
+    }
+    let public_name = value["public_name"].as_str().and_then(|name| validate_public_name(name).ok());
+    let protocol_version = value["protocol_version"].as_u64().unwrap_or(0) as u32;
+    let capabilities = value["capabilities"].as_array().map(|items| items.iter().filter_map(Value::as_str).filter(|capability| known_capability(capability)).map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
+    let negotiated = value["capabilities_version"].as_u64() == Some(CAPABILITIES_VERSION as u64)
+        && protocol_version == PROTOCOL_VERSION;
+    let compatibility = if negotiated { "compatible" } else { "legacy-read-only" };
+    if let Some(public_name) = public_name {
+        db.execute("UPDATE federated_nodes SET server_uuid=COALESCE(server_uuid,?1),public_name=?2,capabilities_json=?3,compatibility_state=?4,protocol_version=?5 WHERE id=?6", params![remote_uuid, public_name, serde_json::to_string(&capabilities).unwrap_or_else(|_| "[]".to_owned()), compatibility, protocol_version as i64, id]).map_err(db_error)?;
+    } else {
+        db.execute("UPDATE federated_nodes SET server_uuid=COALESCE(server_uuid,?1),capabilities_json=?2,compatibility_state=?3,protocol_version=?4 WHERE id=?5", params![remote_uuid, serde_json::to_string(&capabilities).unwrap_or_else(|_| "[]".to_owned()), compatibility, protocol_version as i64, id]).map_err(db_error)?;
+    }
+    Ok(value)
+}
+
 pub(super) async fn node_status(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1157,30 +1446,141 @@ pub(super) async fn node_status(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
     }
-    let value = remote_node_request(
-        &state,
-        id,
-        "node.status.read",
-        reqwest::Method::GET,
-        "api/federation/status",
-        None,
-    )
-    .await?;
-    if let Some(uuid) = value["server_uuid"].as_str().filter(|uuid| valid_server_uuid(uuid)) {
+    fetch_and_cache_node_status(&state, id).await.map(Json)
+}
+
+fn ensure_node_update_management(state: &AppState, id: i64) -> Result<NodeUpdateRoute, (StatusCode, Json<Value>)> {
+    let db = state.lock().unwrap();
+    let (scopes_json, capabilities_json, compatibility): (String, String, String) = db.query_row(
+        "SELECT scopes_json,capabilities_json,compatibility_state FROM federated_nodes WHERE id=?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::NOT_FOUND, "Node پیدا نشد."))?;
+    node_update_route(&decode_scopes(&scopes_json), &decode_scopes(&capabilities_json), &compatibility).map_err(|reason| {
+        let status = if reason.starts_with("این اتصال فقط‌خواندنی") { StatusCode::FORBIDDEN } else { StatusCode::UPGRADE_REQUIRED };
+        error(status, reason)
+    })
+}
+
+pub(super) async fn node_update_check(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(query): Query<UpdateBranchQuery>,
+) -> ApiResult {
+    {
         let db = state.lock().unwrap();
-        let public_name = value["public_name"].as_str().and_then(|name| validate_public_name(name).ok());
-        let protocol_version = value["protocol_version"].as_u64().unwrap_or(0) as u32;
-        let capabilities = value["capabilities"].as_array().map(|items| items.iter().filter_map(Value::as_str).filter(|capability| known_capability(capability)).map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
-        let negotiated = value["capabilities_version"].as_u64() == Some(CAPABILITIES_VERSION as u64)
-            && protocol_version == PROTOCOL_VERSION;
-        let compatibility = if negotiated { "compatible" } else { "legacy-read-only" };
-        if let Some(public_name) = public_name {
-            db.execute("UPDATE federated_nodes SET server_uuid=?1,public_name=?2,capabilities_json=?3,compatibility_state=?4,protocol_version=?5 WHERE id=?6", params![uuid.to_ascii_lowercase(), public_name, serde_json::to_string(&capabilities).unwrap_or_else(|_| "[]".to_owned()), compatibility, protocol_version as i64, id]).map_err(db_error)?;
-        } else {
-            db.execute("UPDATE federated_nodes SET server_uuid=?1,capabilities_json=?2,compatibility_state=?3,protocol_version=?4 WHERE id=?5", params![uuid.to_ascii_lowercase(), serde_json::to_string(&capabilities).unwrap_or_else(|_| "[]".to_owned()), compatibility, protocol_version as i64, id]).map_err(db_error)?;
-        }
+        require_admin(&db, &headers)?;
     }
-    Ok(Json(value))
+    if !valid_update_branch(&query.branch) {
+        return Err(error(StatusCode::BAD_REQUEST, "شاخهٔ به‌روزرسانی Node معتبر نیست."));
+    }
+    let node_status = fetch_and_cache_node_status(&state, id).await?;
+    let (scopes_json, capabilities_json, compatibility): (String, String, String) = {
+        let db = state.lock().unwrap();
+        db.query_row("SELECT scopes_json,capabilities_json,compatibility_state FROM federated_nodes WHERE id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(db_error)?
+    };
+    let route = match node_update_route(&decode_scopes(&scopes_json), &decode_scopes(&capabilities_json), &compatibility) {
+        Ok(route) => route,
+        Err(reason) => {
+            let db = state.lock().unwrap();
+            let actor = require_admin(&db, &headers)?.username;
+            audit(&db, &actor, "federation.node.update.check", &format!("node_id={id}; unsupported; branch={}", query.branch));
+            return Ok(Json(json!({"supported":false,"reason":reason,"node_status":node_status,"update":null,"progress":null})));
+        }
+    };
+    let (update, progress) = match route {
+        NodeUpdateRoute::Federation => (
+            remote_node_request_with_timeout(&state, id, "node.services.manage", reqwest::Method::GET, &format!("api/federation/update?branch={}", query.branch), None, 180).await?,
+            remote_node_request(&state, id, "node.services.manage", reqwest::Method::GET, "api/federation/update/progress", None).await?,
+        ),
+        NodeUpdateRoute::WorkspaceProxy => (
+            remote_workspace_json_request(&state, id, reqwest::Method::GET, &format!("update?branch={}", query.branch), 180).await?,
+            remote_workspace_json_request(&state, id, reqwest::Method::GET, "update/progress", 15).await?,
+        ),
+    };
+    {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?.username;
+        audit(&db, &actor, "federation.node.update.check", &format!("node_id={id}; branch={}", query.branch));
+    }
+    Ok(Json(json!({"supported":true,"reason":null,"route":match route { NodeUpdateRoute::Federation => "federation", NodeUpdateRoute::WorkspaceProxy => "workspace-proxy" },"node_status":node_status,"update":update,"progress":progress})))
+}
+
+pub(super) async fn node_update_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    match ensure_node_update_management(&state, id)? {
+        NodeUpdateRoute::Federation => remote_node_request(&state, id, "node.services.manage", reqwest::Method::GET, "api/federation/update/progress", None).await.map(Json),
+        NodeUpdateRoute::WorkspaceProxy => remote_workspace_json_request(&state, id, reqwest::Method::GET, "update/progress", 15).await.map(Json),
+    }
+}
+
+pub(super) async fn node_update_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Query(input): Query<PanelUpdateQuery>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_update_build_mode(&input.mode) || !valid_update_branch(&input.branch) {
+        return Err(error(StatusCode::BAD_REQUEST, "شاخه یا روش ساخت به‌روزرسانی معتبر نیست."));
+    }
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let result = match ensure_node_update_management(&state, id)? {
+        NodeUpdateRoute::Federation => remote_node_request(&state, id, "node.services.manage", reqwest::Method::POST, &format!("api/federation/update?mode={}&branch={}", input.mode, input.branch), None).await?,
+        NodeUpdateRoute::WorkspaceProxy => remote_workspace_json_request(&state, id, reqwest::Method::POST, &format!("update?mode={}&branch={}", input.mode, input.branch), 15).await?,
+    };
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "federation.node.update.run", &format!("node_id={id}; branch={} mode={}", input.branch, input.mode));
+    Ok(Json(result))
+}
+
+pub(super) async fn node_update_cancel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let result = match ensure_node_update_management(&state, id)? {
+        NodeUpdateRoute::Federation => remote_node_request(&state, id, "node.services.manage", reqwest::Method::POST, "api/federation/update/cancel", None).await?,
+        NodeUpdateRoute::WorkspaceProxy => remote_workspace_json_request(&state, id, reqwest::Method::POST, "update/cancel", 15).await?,
+    };
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "federation.node.update.cancel", &format!("node_id={id}"));
+    Ok(Json(result))
+}
+
+pub(super) async fn node_update_rollback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?.username
+    };
+    let result = match ensure_node_update_management(&state, id)? {
+        NodeUpdateRoute::Federation => remote_node_request(&state, id, "node.services.manage", reqwest::Method::POST, "api/federation/update/rollback", None).await?,
+        NodeUpdateRoute::WorkspaceProxy => remote_workspace_json_request(&state, id, reqwest::Method::POST, "update/rollback", 15).await?,
+    };
+    let db = state.lock().unwrap();
+    audit(&db, &actor, "federation.node.update.rollback", &format!("node_id={id}"));
+    Ok(Json(result))
 }
 
 pub(super) async fn node_services(
@@ -1908,6 +2308,31 @@ mod tests {
     }
 
     #[test]
+    fn remote_update_requires_full_scope_and_a_supported_update_route() {
+        assert!(known_capability("node.update.manage"));
+        assert!(supported_capabilities().contains(&"node.update.manage"));
+        let full = vec!["node.services.manage".to_owned()];
+        let read_only = vec!["node.status.read".to_owned()];
+        let update_capability = vec!["node.update.manage".to_owned()];
+        let legacy_full = vec!["node.services.manage".to_owned(), "workspace.write".to_owned()];
+        let legacy_proxy = vec!["workspace.api.proxy".to_owned()];
+        assert_eq!(node_update_route(&full, &update_capability, "compatible"), Ok(NodeUpdateRoute::Federation));
+        assert!(node_update_route(&read_only, &update_capability, "compatible").unwrap_err().contains("فقط‌خواندنی"));
+        assert!(node_update_route(&full, &[], "compatible").unwrap_err().contains("تونل مدیریت کامل"));
+        assert_eq!(node_update_route(&legacy_full, &legacy_proxy, "compatible"), Ok(NodeUpdateRoute::WorkspaceProxy));
+        assert!(node_update_route(&legacy_full, &legacy_proxy, "legacy-read-only").is_err());
+    }
+
+    #[test]
+    fn remote_status_cannot_rebind_a_node_to_another_server_identity() {
+        let uuid = "123e4567-e89b-42d3-a456-426614174000";
+        assert!(node_identity_matches("node-a", Some(uuid), "node-a", uuid.to_uppercase().as_str()));
+        assert!(!node_identity_matches("node-a", Some(uuid), "node-b", uuid));
+        assert!(!node_identity_matches("node-a", Some(uuid), "node-a", "123e4567-e89b-42d3-a456-426614174001"));
+        assert!(node_identity_matches("node-a", None, "node-a", uuid));
+    }
+
+    #[test]
     fn federation_roles_and_pairing_scopes_are_explicit() {
         assert!(role_valid("standalone"));
         assert!(role_valid("member"));
@@ -1948,6 +2373,10 @@ mod tests {
         assert!(valid_workspace_api_path("dashboard"));
         assert!(valid_workspace_api_path("files/list"));
         assert!(valid_workspace_api_path("nginx/sites/example.com"));
+        assert!(valid_workspace_api_path("update"));
+        assert!(valid_workspace_api_path("update/progress"));
+        assert!(valid_workspace_api_path("update/cancel"));
+        assert!(valid_workspace_api_path("update/rollback"));
         assert!(!valid_workspace_api_path("../login"));
         assert!(!valid_workspace_api_path("files/%2e%2e/login"));
         assert!(!valid_workspace_api_path("nodes/1/proxy/dashboard"));

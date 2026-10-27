@@ -1,5 +1,19 @@
 # ARG Change Log
 
+## Unreleased
+
+### Added
+- Add controller-side Node update controls for compatible, fully managed ARG peers, including stable/development branch choice, fast/complete build choice, live helper progress, cancellation, and rollback.
+- Reuse the authenticated workspace tunnel for earlier compatible full-access Nodes that predate the dedicated update capability.
+- Show a review step before scheduling a remote update and verify the same server UUID and Node identity after the service restarts.
+
+### Security
+- Require the negotiated `node.update.manage` capability and the existing full-management scope; older and read-only Nodes remain linked but cannot receive remote update commands.
+- Preserve Node credentials and identity on network loss, failed verification, cancellation, or rollback; reject status responses that try to rebind a pairing to another server.
+
+### Validation
+- Frontend `npm run check`, `npm run build`, `npm run test:offline`, and `git diff --check` passed. Rust tests/build could not be run because `cargo` and `rustc` are unavailable in the current environment.
+
 ## v0.6.9-dev.12 — 2026-10-27
 
 ### Changed
