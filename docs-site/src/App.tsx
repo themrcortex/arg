@@ -269,8 +269,11 @@ export default function App() {
   }
 
   function renderSidebar(mobile = false) {
+    const activeTrail = pageTrail(page.id)
+    const activeCategory = activeTrail[0]?.id
+    const activeSection = activeTrail[1]?.id
     return <>
-      <div className="sidebar-heading"><div className="sidebar-heading-icon"><BookOpen size={16}/></div><div className="min-w-0"><p>{texts.menu}</p><span>{readingOrder.length} {texts.allDocs}</span></div><button className="mobile-close" onClick={() => setMobileNav(false)} aria-label={texts.close}><X size={18}/></button></div>
+      <div className="sidebar-heading"><div className="sidebar-heading-icon"><BookOpen size={17}/></div><div className="sidebar-heading-copy min-w-0"><p>{isFa ? 'راهنمای ARG' : 'ARG docs'}</p><span>{texts.menu} · {readingOrder.length} {texts.allDocs}</span></div><button className="mobile-close" onClick={() => setMobileNav(false)} aria-label={texts.close}><X size={18}/></button></div>
       <label className="side-search"><Search size={15}/><input ref={mobile ? mobileSearchRef : undefined} aria-label={texts.search} placeholder={texts.search} value={query} onChange={(event) => setQuery(event.target.value)}/><kbd>/</kbd></label>
       <nav className="side-nav" aria-label={texts.menu}>
         {query.trim().length >= 2 && (searchIndex ? rankedSearchResults.length ? <div className="inline-search-results">{rankedSearchResults.map((result) => {
@@ -281,15 +284,17 @@ export default function App() {
           const visibleSections = category.children.map((section) => ({ ...section, pages: section.pages.filter((item) => visiblePages.some((visible) => visible.id === item.id)) })).filter((section) => section.pages.length)
           if (!visibleSections.length) return null
           const categoryOpen = expandedGroups.has(category.id)
+          const categoryPageCount = category.children.reduce((count, section) => count + section.pages.length, 0)
           const iconMap = { gettingStarted: BookOpen, dashboard: ChartNoAxesCombined, network: Network, docker: Container, data: Database, applications: Boxes, system: Settings2, security: Shield, reference: Code2 }
           const CategoryIcon = iconMap[category.id as keyof typeof iconMap] || BookOpen
           return <section key={category.id} className="nav-group">
-            <button className="nav-category" aria-expanded={categoryOpen} onClick={() => toggleExpanded(category.id)}><span className="nav-category-label"><CategoryIcon size={15}/>{category.title[locale]}</span><ChevronDown size={14}/></button>
+            <button className={`nav-category ${activeCategory === category.id ? 'is-current' : ''}`} aria-expanded={categoryOpen} onClick={() => toggleExpanded(category.id)}><span className="nav-category-label"><span className="nav-category-icon"><CategoryIcon size={16}/></span><span className="nav-category-title">{category.title[locale]}</span></span><span className="nav-category-meta"><small>{categoryPageCount}</small><ChevronDown size={14}/></span></button>
             {categoryOpen && <div className="nav-category-children">{visibleSections.map((section) => {
               const key = `${category.id}:${section.id}`
               const open = expandedGroups.has(key)
-              return <details key={key} className="nav-subgroup" open={open}>
-                <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open}><span>{section.title[locale]}</span><ChevronDown size={13}/></summary>
+              const sectionIsCurrent = activeCategory === category.id && activeSection === section.id
+              return <details key={key} className={`nav-subgroup ${sectionIsCurrent ? 'is-current' : ''}`} open={open}>
+                <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open}><span className="nav-subgroup-title">{section.title[locale]}</span><span className="nav-subgroup-meta"><small>{section.pages.length}</small><ChevronDown size={13}/></span></summary>
                 <div className="nav-group-pages">{section.pages.map((item) => <button key={item.id} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={() => navigate(item)} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</button>)}</div>
               </details>
             })}</div>}
