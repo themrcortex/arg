@@ -2,22 +2,24 @@
 
 ## Unreleased
 
+## v0.7.0 — 2026-10-27
+
 ### Added
-- Add controller-side Node update controls for compatible, fully managed ARG peers, including stable/development branch choice, fast/complete build choice, live helper progress, cancellation, and rollback.
-- Reuse the authenticated workspace tunnel for earlier compatible full-access Nodes that predate the dedicated update capability.
-- Show a review step before scheduling a remote update and verify the same server UUID and Node identity after the service restarts.
-- Give each Nginx site a dedicated, tabbed workspace with overview, configuration, domains and SSL, operations, and activity sections.
-- Keep the selected Nginx site and tab in the hash URL so direct links and browser refresh reopen the same workspace.
-- Add per-application detail routes with platform marks, and a live topology view for controller-to-Node status exchanges.
+- Refresh the dashboard UI with a shared glass design system, responsive navigation, reusable data views, and step-based flows for complex operations.
+- Add detailed application workspaces with framework marks, per-application routes, and server-to-Node connection topology based on real status exchanges.
+- Give each Nginx site a dedicated, tabbed workspace for overview, configuration, domains and SSL, operations, and activity; persist the selected site and tab in the hash URL.
+- Expand the bilingual documentation site with grouped navigation, search, and updated guides.
+- Add controller-side updates for compatible full-access Nodes, including branch/build-mode choice, progress, cancellation, rollback, and post-update identity checks.
+
+### Fixed
+- Reconcile S3 mount status against both systemd and the live mount table, and safely normalize stale mount-directory ownership before mounting.
+- Release database locks before awaiting Node update operations so the Axum handlers remain `Send` and build successfully.
 
 ### Security
-- Require the negotiated `node.update.manage` capability and the existing full-management scope; older and read-only Nodes remain linked but cannot receive remote update commands.
-- Preserve Node credentials and identity on network loss, failed verification, cancellation, or rollback; reject status responses that try to rebind a pairing to another server.
-- Verify S3 mount state against both systemd and the live mount table, and safely normalize stale mount-directory ownership before mounting.
-- End database mutex scopes before awaiting remote update operations, keeping Axum handlers `Send` and buildable.
+- Require the negotiated `node.update.manage` capability and full-management scope for remote updates; retain pairing identity and credentials through network loss, failed verification, cancellation, and rollback.
 
 ### Validation
-- Frontend `npm run check`, `npm run build`, `npm run test:offline`, and `git diff --check` passed.
+- Frontend type-check, production build, offline service-worker tests, and `git diff --check` passed.
 - `cargo check --locked` and `cargo test --locked` passed (181 Rust tests).
 
 ## v0.6.9-dev.12 — 2026-10-27
