@@ -48,6 +48,7 @@ export function SidebarNavigation({ items, currentPage, collapsed, mobileOpen, d
           <img src="/arg/brand/arg-logo-compact.png" alt="ARG" className="arg-brand-full arg-brand-full-dark" />
           <img src="/arg/brand/arg-logo-compact-light.png" alt="" aria-hidden="true" className="arg-brand-full arg-brand-full-light" />
           <img src="/arg/brand/arg-logo-mark.png" alt="" aria-hidden="true" className="arg-brand-mark" />
+          <img src="/arg/brand/arg-logo-mark-light.png" alt="" aria-hidden="true" className="arg-brand-mark arg-brand-mark-light" />
         </div>
         <Button variant="ghost" size="icon" className="arg-collapse hidden h-8 w-8 shrink-0 lg:inline-flex" onClick={onToggleCollapsed} aria-label={collapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'} aria-expanded={!collapsed} title={collapsed ? 'باز کردن سایدبار' : 'جمع کردن سایدبار'}>{collapsed ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}</Button>
         <Button ref={mobileCloseButton} variant="ghost" size="icon" className="arg-mobile-close h-8 w-8 shrink-0 lg:hidden" onClick={onCloseMobile} aria-label="بستن منو"><X size={18}/></Button>
