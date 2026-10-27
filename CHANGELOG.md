@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.6.9-dev.4 — 2026-10-27
+
+### Development
+- Development prerelease based on the next patch after main.
+
 ## Unreleased
 
 ### Phase 08 — Static delivery and SSR
