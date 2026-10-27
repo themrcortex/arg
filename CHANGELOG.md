@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.6.9-dev.7 — 2026-10-27
+
+### Development
+- Add bounded, non-executing build-plan analysis for active releases and a read-only source browser that blocks hidden files and escape paths.
+- Add content-addressed application metadata snapshots without secret values, plus display-only links from Docker applications to existing containers.
+- Add a Cloudflare DNS page with encrypted local credentials, zone verification, bounded record validation, confirmation for changes, and audit events. Provider propagation checks and DNS-01 are not included.
+- Record the Phase 23–27 scope and outstanding host/provider validation in the bilingual roadmap and architecture status.
+- Repository checks: 155 Rust tests, frontend type-check/build, documentation check/build (192 pages, 384 localized articles), and optimized Rust release build passed. Live Cloudflare and disposable-host tests remain pending.
+
 ## v0.6.9-dev.6 — 2026-10-27
 
 ### Development
