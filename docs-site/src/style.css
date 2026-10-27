@@ -2,10 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face { font-family: Peyda; src: url('/arg/fonts/peyda-regular.woff2') format('woff2'); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: Peyda; src: url('/arg/fonts/peyda-medium.woff2') format('woff2'); font-style: normal; font-weight: 500; font-display: swap; }
+@font-face { font-family: Peyda; src: url('/arg/fonts/peyda-bold.woff2') format('woff2'); font-style: normal; font-weight: 700 900; font-display: swap; }
+@font-face { font-family: Abar; src: url('/arg/fonts/abar-variable.woff2') format('woff2'); font-style: normal; font-weight: 100 900; font-display: swap; }
+@font-face { font-family: Oxanium; src: url('/arg/fonts/oxanium-extrabold.woff2') format('woff2'); font-style: normal; font-weight: 800; font-display: swap; }
+
 
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; scroll-padding-top: 86px; }
-body { min-width: 320px; margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, Arial, sans-serif; font-size: 14px; }
+body { min-width: 320px; margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: Inter, Peyda, "Noto Sans Arabic", "Segoe UI", Tahoma, Arial, sans-serif; font-size: 14px; }
 button, input { font: inherit; }
 a { color: inherit; text-decoration: none; }
 ::selection { color: hsl(var(--foreground)); background: hsl(var(--primary) / .28); }
@@ -20,9 +26,9 @@ a { color: inherit; text-decoration: none; }
 .docs-app[dir='rtl'] .page-progress.is-active span { animation-name: page-progress-rtl; }
 .topbar-brand, .topbar-actions, .brand-lockup { display: flex; min-width: 0; align-items: center; gap: 12px; }
 .brand-lockup { gap: 10px; }
-.brand-mark { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid hsl(var(--primary) / .27); border-radius: 11px; background: linear-gradient(145deg, hsl(var(--primary) / .16), transparent); color: hsl(var(--primary)); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 20px; font-weight: 800; }
+.brand-mark { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid hsl(var(--primary) / .27); border-radius: 11px; background: linear-gradient(145deg, hsl(var(--primary) / .16), transparent); color: hsl(var(--primary)); font-family: Oxanium, ui-monospace, sans-serif; font-size: 20px; font-weight: 800; }
 .brand-lockup strong, .brand-lockup small { display: block; }
-.brand-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .16em; font-size: 17px; line-height: 1; }
+.brand-name { font-family: Oxanium, ui-monospace, sans-serif; letter-spacing: .16em; font-size: 17px; line-height: 1; }
 .brand-lockup small { margin-top: 4px; color: hsl(var(--muted-foreground)); font-size: 10px; }
 .top-divider { width: 1px; height: 24px; background: var(--docs-line); }
 .topbar .top-search { display: flex; width: min(320px, 32vw); height: 38px; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid hsl(var(--border)); border-radius: 10px; background: var(--docs-soft); color: hsl(var(--muted-foreground)); }
@@ -70,7 +76,7 @@ kbd { border: 1px solid hsl(var(--border)); border-radius: 5px; padding: 1px 5px
 .article-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin: 24px 0 30px; padding-bottom: 22px; border-bottom: 1px solid var(--docs-line); }
 .eyebrow { display: flex; align-items: center; gap: 7px; margin: 0 0 9px; color: hsl(var(--primary)); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
 .eyebrow-dot, .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #53c992; box-shadow: 0 0 9px rgba(83,201,146,.55); }
-.article-heading h1 { margin: 0; font-family: Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, sans-serif; font-size: clamp(26px, 3vw, 38px); font-weight: 750; line-height: 1.2; letter-spacing: -.02em; }
+.article-heading h1 { margin: 0; font-family: Abar, Peyda, Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, sans-serif; font-size: clamp(26px, 3vw, 38px); font-weight: 750; line-height: 1.2; letter-spacing: -.02em; }
 .article-summary { max-width: 620px; margin: 10px 0 0; color: hsl(var(--muted-foreground)); font-size: 13px; line-height: 1.9; }
 .article-index { flex: 0 0 auto; padding-bottom: 4px; color: hsl(var(--muted-foreground)); font-family: Oxanium, monospace; font-size: 11px; }
 .article-index i { padding: 0 3px; color: hsl(var(--border)); font-style: normal; }
@@ -84,7 +90,7 @@ kbd { border: 1px solid hsl(var(--border)); border-radius: 5px; padding: 1px 5px
 .skeleton-block { height: 160px; margin: 12px 0; border-radius: 11px; }
 .article-load-error { display: grid; justify-items: start; gap: 8px; padding: 20px; border: 1px solid hsl(var(--border)); border-radius: 12px; background: var(--docs-soft); color: hsl(var(--muted-foreground)); animation: article-arrive .3s ease both; }
 .article-load-error p { margin: 0; }
-.article-content h2, .article-content h3, .article-content h4 { scroll-margin-top: 90px; font-family: Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, sans-serif; font-weight: 700; letter-spacing: -.015em; }
+.article-content h2, .article-content h3, .article-content h4 { scroll-margin-top: 90px; font-family: Abar, Peyda, Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, sans-serif; font-weight: 700; letter-spacing: -.015em; }
 .article-content h2 { margin: 42px 0 13px; padding-bottom: 10px; border-bottom: 1px solid var(--docs-line); font-size: 22px; }
 .article-content h3 { margin: 28px 0 10px; font-size: 17px; }
 .article-content h4 { margin: 22px 0 7px; font-size: 15px; }
@@ -138,7 +144,7 @@ kbd { border: 1px solid hsl(var(--border)); border-radius: 5px; padding: 1px 5px
 .hero-copy, .hero-art, .hero-meta { position: relative; z-index: 1; }
 .hero-copy > .inline-flex { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
 .hero-copy .status-dot { margin-inline-end: 7px; }
-.hero-copy h1 { margin: 17px 0 10px; font-family: Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, sans-serif; font-size: clamp(32px, 4.6vw, 54px); font-weight: 800; line-height: 1.05; letter-spacing: -.03em; }
+.hero-copy h1 { margin: 17px 0 10px; font-family: Abar, Peyda, Inter, "Segoe UI", "Noto Sans Arabic", Tahoma, sans-serif; font-size: clamp(32px, 4.6vw, 54px); font-weight: 800; line-height: 1.05; letter-spacing: -.03em; }
 .hero-copy h1 span { color: hsl(var(--primary)); }
 .hero-copy > p { max-width: 470px; margin: 0; color: hsl(var(--muted-foreground)); font-size: 13px; line-height: 1.9; }
 .hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 19px; }
