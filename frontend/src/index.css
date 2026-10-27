@@ -524,3 +524,44 @@
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
   .arg-button:hover:not(:disabled), .arg-button:active:not(:disabled) { transform: none; }
 }
+
+/* Dashboard and system metrics share the same theme-aware surface and status tones. */
+.arg-metric-card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-color: var(--arg-glass-edge);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--arg-glass-highlight) 52%, transparent), transparent 58%), var(--arg-glass);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--arg-glass-highlight) 62%, transparent), var(--arg-glass-shadow);
+  transition: border-color 180ms ease, transform 180ms ease, box-shadow 180ms ease;
+}
+.arg-metric-card::after {
+  position: absolute;
+  z-index: 0;
+  inset: 0 0 auto auto;
+  width: 88px;
+  height: 58px;
+  background: url('/arg/patterns/arg-card-corner.svg') right top / contain no-repeat;
+  opacity: .075;
+  pointer-events: none;
+  content: '';
+}
+.arg-metric-card > * { position: relative; z-index: 1; }
+.arg-metric-card:hover { border-color: color-mix(in srgb, var(--arg-accent) 30%, var(--arg-border)); transform: translateY(-1px); }
+.arg-metric-icon { color: var(--arg-accent); border-color: color-mix(in srgb, var(--arg-accent) 18%, transparent); background: color-mix(in srgb, var(--arg-accent) 8%, transparent); }
+.arg-metric-track { background: color-mix(in srgb, var(--arg-border) 84%, transparent); }
+.arg-metric-fill { background: var(--arg-accent); }
+.arg-metric-card[data-tone='green'] .arg-metric-icon { color: var(--arg-success); border-color: color-mix(in srgb, var(--arg-success) 22%, transparent); background: color-mix(in srgb, var(--arg-success) 9%, transparent); }
+.arg-metric-card[data-tone='green'] .arg-metric-fill { background: var(--arg-success); }
+.arg-metric-card[data-tone='teal'] .arg-metric-icon { color: var(--arg-viz-disk); border-color: color-mix(in srgb, var(--arg-viz-disk) 22%, transparent); background: color-mix(in srgb, var(--arg-viz-disk) 9%, transparent); }
+.arg-metric-card[data-tone='teal'] .arg-metric-fill { background: var(--arg-viz-disk); }
+.arg-metric-card[data-tone='blue'] .arg-metric-icon { color: var(--arg-info); border-color: color-mix(in srgb, var(--arg-info) 22%, transparent); background: color-mix(in srgb, var(--arg-info) 9%, transparent); }
+.arg-metric-card[data-tone='blue'] .arg-metric-fill { background: var(--arg-info); }
+.arg-metric-card[data-tone='warning'] .arg-metric-icon { color: var(--arg-warning); border-color: color-mix(in srgb, var(--arg-warning) 22%, transparent); background: color-mix(in srgb, var(--arg-warning) 9%, transparent); }
+.arg-metric-card[data-tone='warning'] .arg-metric-fill { background: var(--arg-warning); }
+.arg-kpi-card { background: linear-gradient(145deg, color-mix(in srgb, var(--arg-glass-highlight) 50%, transparent), transparent 60%), var(--arg-glass); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--arg-glass-highlight) 45%, transparent), var(--arg-glass-shadow); }
+.arg-dashboard-panel, .arg-chart-surface { box-shadow: inset 0 1px 0 color-mix(in srgb, var(--arg-glass-highlight) 48%, transparent), var(--arg-glass-shadow); }
+@media (prefers-reduced-motion: reduce) {
+  .arg-metric-card { transition: none; }
+  .arg-metric-card:hover { transform: none; }
+}

@@ -70,7 +70,7 @@ import {
 } from './components/ui/dialog'
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
-import { Progress } from './components/ui/progress'
+import { MetricCard } from './components/ui/metric-card'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select'
 import { Skeleton } from './components/ui/skeleton'
 import { Switch } from './components/ui/switch'
@@ -215,30 +215,16 @@ function Metric({
   value,
   detail,
   progress,
+  tone = 'copper',
 }: {
   icon: typeof Cpu
   label: string
   value: string
   detail: string
   progress?: number
+  tone?: 'copper' | 'green' | 'teal' | 'blue' | 'warning'
 }) {
-  return (
-    <Card className="metric-card min-w-0">
-      <CardContent className="p-5">
-        <div className="flex items-start justify-between gap-2">
-          <span className="text-xs font-medium text-muted-foreground">{label}</span>
-          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-primary/15 text-primary">
-            <Icon size={19} strokeWidth={1.8} />
-          </span>
-        </div>
-        <div className="mt-5 truncate text-[26px] font-extrabold tracking-tight text-white" title={value}>
-          {value}
-        </div>
-        <div className="mt-1.5 truncate text-xs text-muted-foreground">{detail}</div>
-        {progress !== undefined && <Progress className="mt-4" value={progress} />}
-      </CardContent>
-    </Card>
-  )
+  return <MetricCard label={label} value={value} detail={detail} icon={<Icon size={19} strokeWidth={1.8} />} progress={progress} tone={tone} />
 }
 function LoadingCards() {
   return (
@@ -305,12 +291,16 @@ function ArgKpi({ icon, label, value, detail, progress, tone = 'copper', ltr = t
   tone?: 'copper' | 'green' | 'teal' | 'blue'
   ltr?: boolean
 }) {
-  return <div className="arg-kpi min-w-0 rounded-[14px] border p-4" data-tone={tone}>
-    <div className="flex items-center justify-between gap-2"><span className="truncate text-xs text-muted-foreground">{label}</span><img src={`/arg/icons/${icon}.svg`} alt="" aria-hidden="true" className="h-5 w-5 shrink-0"/></div>
-    <div className="mt-4 truncate text-[25px] font-bold leading-none tabular-nums text-foreground" dir={ltr ? 'ltr' : 'rtl'} title={value}>{value}</div>
-    {progress !== undefined && <div className="arg-kpi-track mt-4 h-1 overflow-hidden rounded-full"><div className="arg-kpi-fill h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}/></div>}
-    <div className="mt-3 truncate text-xs text-muted-foreground" title={detail}>{detail}</div>
-  </div>
+  return <MetricCard
+    className="arg-kpi"
+    tone={tone}
+    label={label}
+    value={value}
+    detail={detail}
+    direction={ltr ? 'ltr' : 'rtl'}
+    progress={progress}
+    icon={<img src={`/arg/icons/${icon}.svg`} alt="" aria-hidden="true" className="h-5 w-5" />}
+  />
 }
 
 function DashboardMiniStat({ icon, label, value, detail, tone = 'copper', ltr = true }: { icon: string; label: string; value: string; detail: string; tone?: 'copper' | 'green' | 'blue'; ltr?: boolean }) {
@@ -409,8 +399,8 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
     <div className="flex flex-wrap items-center justify-between gap-3 pt-2"><h2 className="text-base font-bold text-foreground">تاریخچهٔ منابع</h2><TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/></div>
     {!historyEnabled && <HistoryPaused/>}
     <div className="arg-chart-grid grid gap-4 lg:grid-cols-2">
-      <ArgChartPanel icon="metric-cpu" title="استفاده از پردازنده" description="درصد مصرف CPU در بازهٔ انتخاب‌شده"><TimeSeriesChart samples={resourceHistory} series={[{ key: 'cpu', label: 'پردازنده', color: '#53C992' }]} max={100} unit="%"/></ArgChartPanel>
-      <ArgChartPanel icon="metric-memory" title="مصرف حافظه" description="درصد RAM استفاده‌شده در بازهٔ انتخاب‌شده"><TimeSeriesChart samples={resourceHistory} series={[{ key: 'memory', label: 'حافظه', color: '#DDA46F' }]} max={100} unit="%"/></ArgChartPanel>
+      <ArgChartPanel icon="metric-cpu" title="استفاده از پردازنده" description="درصد مصرف CPU در بازهٔ انتخاب‌شده"><TimeSeriesChart samples={resourceHistory} series={[{ key: 'cpu', label: 'پردازنده', color: 'var(--arg-viz-cpu)' }]} max={100} unit="%"/></ArgChartPanel>
+      <ArgChartPanel icon="metric-memory" title="مصرف حافظه" description="درصد RAM استفاده‌شده در بازهٔ انتخاب‌شده"><TimeSeriesChart samples={resourceHistory} series={[{ key: 'memory', label: 'حافظه', color: 'var(--arg-viz-memory)' }]} max={100} unit="%"/></ArgChartPanel>
       <ArgChartPanel className="lg:col-span-2" icon="metric-network" title="ترافیک شبکه" description="نرخ دریافت و ارسال بر حسب بایت بر ثانیه"><TrafficChart history={history}/></ArgChartPanel>
     </div>
     </div>
@@ -433,23 +423,23 @@ export function SystemPage({ Heading, notify }: Common) {
   const { data, resourceHistory, diskCapacityHistory, diskIoHistory, cpu, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, loading, refresh, historyEnabled } = useDashboard(notify)
   const totalMemory = (data?.memory_kib || 0) * 1024
   const availableMemory = (data?.available_kib || 0) * 1024
-  const memoryPercent = totalMemory ? Math.round((1 - availableMemory / totalMemory) * 100) : 0
+  const memoryPercent = totalMemory > 0 ? Math.max(0, Math.min(100, Math.round((1 - availableMemory / totalMemory) * 100))) : null
   const rootVolume = data?.storage?.volumes.find((volume) => volume.mount_point === '/')
-  const totalDisk = rootVolume?.total_bytes ?? data?.disk_total_bytes ?? 0
-  const usedDisk = rootVolume?.used_bytes ?? data?.disk_used_bytes ?? Math.max(0, totalDisk - (data?.disk_free_bytes || 0))
-  const freeDisk = rootVolume?.available_bytes ?? data?.disk_free_bytes ?? 0
-  const diskPercent = rootVolume?.use_percent != null ? rootVolume.use_percent : totalDisk ? usedDisk / totalDisk * 100 : 0
+  const totalDisk = rootVolume?.total_bytes ?? data?.disk_total_bytes ?? null
+  const usedDisk = rootVolume?.used_bytes ?? data?.disk_used_bytes ?? (totalDisk !== null && data?.disk_free_bytes != null ? Math.max(0, totalDisk - data.disk_free_bytes) : null)
+  const freeDisk = rootVolume?.available_bytes ?? data?.disk_free_bytes ?? null
+  const diskPercent = rootVolume?.use_percent ?? (totalDisk && totalDisk > 0 && usedDisk !== null ? usedDisk / totalDisk * 100 : null)
   const load = (data?.load || '').split(' ')
   const memoryDetail = data?.memory_details
   return <>
     <Heading title="سیستم و منابع" description="پردازنده، حافظه و دیسک را با جزئیات واقعی سرور بررسی کن." action={<RefreshButton onRefresh={refresh}/>}/>
     {loading && !data ? <LoadingCards/> : <>
-      <div className="grid gap-4 md:grid-cols-3"><Metric icon={Cpu} label="CPU" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={`بار 1/5/15 دقیقه: ${data?.load || '—'}`} progress={cpu || 0}/><Metric icon={Database} label="حافظه" value={`${formatNumber(memoryPercent)}%`} detail={`${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}`} progress={memoryPercent}/><Metric icon={HardDrive} label="دیسک ریشه /" value={`${formatNumber(Math.round(diskPercent * 10) / 10)}%`} detail={`${formatBytes(usedDisk)} مصرف‌شده · ${formatBytes(totalDisk)} ظرفیت`} progress={diskPercent}/></div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"><Metric icon={Cpu} tone="green" label="پردازنده" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={data ? `بار 1/5/15 دقیقه: ${data.load || '—'}` : 'داده در دسترس نیست'} progress={cpu ?? undefined}/><Metric icon={Database} tone="copper" label="حافظهٔ RAM" value={memoryPercent === null ? '—' : `${formatNumber(memoryPercent)}%`} detail={totalMemory > 0 ? `${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}` : 'داده در دسترس نیست'} progress={memoryPercent ?? undefined}/><Metric icon={HardDrive} tone="teal" label="دیسک ریشه /" value={diskPercent === null ? '—' : `${formatNumber(Math.round(diskPercent * 10) / 10)}%`} detail={usedDisk !== null && totalDisk !== null ? `${formatBytes(usedDisk)} مصرف‌شده · ${formatBytes(totalDisk)} ظرفیت` : 'داده در دسترس نیست'} progress={diskPercent ?? undefined}/></div>
       <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
-      <div className="mt-5 grid gap-4 xl:grid-cols-2"><ArgChartPanel icon="metric-disk" title="ظرفیت دیسک ریشه /" description="درصد مصرف؛ مقدار کل و مصرف‌شده در جدول پایین آمده است."><TimeSeriesChart samples={diskCapacityHistory} series={[{ key: 'capacity', label: 'مصرف فضای ریشه', color: '#dda46f' }]} max={100} unit="%"/></ArgChartPanel><ArgChartPanel icon="metric-disk" title="Disk Read / Write ریشه /" description="سرعت خواندن و نوشتن بلاک‌دیوایس ریشه بر حسب بایت بر ثانیه"><TimeSeriesChart samples={diskIoHistory} series={[{ key: 'read', label: 'Read', color: '#69acde' }, { key: 'write', label: 'Write', color: '#dda46f' }]} max={Math.max(1024, ...diskIoHistory.flatMap((sample) => [sample.read, sample.write])) * 1.12} unit="bytes"/></ArgChartPanel></div>
+      <div className="mt-5 grid gap-4 xl:grid-cols-2"><ArgChartPanel icon="metric-disk" title="ظرفیت دیسک ریشه /" description="درصد مصرف؛ مقدار کل و مصرف‌شده در جدول پایین آمده است."><TimeSeriesChart samples={diskCapacityHistory} series={[{ key: 'capacity', label: 'مصرف فضای ریشه', color: 'var(--arg-viz-memory)' }]} max={100} unit="%"/></ArgChartPanel><ArgChartPanel icon="metric-disk" title="Disk Read / Write ریشه /" description="سرعت خواندن و نوشتن بلاک‌دیوایس ریشه بر حسب بایت بر ثانیه"><TimeSeriesChart samples={diskIoHistory} series={[{ key: 'read', label: 'Read', color: 'var(--arg-viz-rx)' }, { key: 'write', label: 'Write', color: 'var(--arg-viz-memory)' }]} max={Math.max(1024, ...diskIoHistory.flatMap((sample) => [sample.read, sample.write])) * 1.12} unit="bytes"/></ArgChartPanel></div>
       <div className="mt-5"><StorageInventorySection inventory={data?.storage} loading={loading && !data} onRefresh={refresh}/></div>
-      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: formatNumber(data?.cpu_cores || 0) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: `${formatNumber(Math.floor((data?.uptime_seconds || 0) / 86400))}d ${formatNumber(Math.floor(((data?.uptime_seconds || 0) % 86400) / 3600))}h` }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: formatBytes(totalMemory) }, { label: 'مصرف‌شده', value: formatBytes(totalMemory - availableMemory), detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: formatBytes(availableMemory) }, { label: 'Cache', value: formatBytes((memoryDetail?.cached_kib || 0) * 1024) }, { label: 'Buffer', value: formatBytes((memoryDetail?.buffers_kib || 0) * 1024) }, { label: 'Swap کل', value: formatBytes((data?.swap_total_kib || 0) * 1024) }, { label: 'Swap مصرف‌شده', value: formatBytes(((data?.swap_total_kib || 0) - (data?.swap_free_kib || 0)) * 1024) }]}/></SectionCard></div>
-      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="این اعداد از همان Mount Point ریشه در فهرست فضای ذخیره‌سازی آمده‌اند."><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk ? formatBytes(totalDisk) : '—' }, { label: 'مصرف‌شده', value: totalDisk ? formatBytes(usedDisk) : '—' }, { label: 'در دسترس', value: totalDisk ? formatBytes(freeDisk) : '—' }, { label: 'رزرو سیستم‌فایل', value: rootVolume?.reserved_bytes == null ? '—' : formatBytes(rootVolume.reserved_bytes) }, { label: 'درصد مصرف', value: totalDisk ? `${formatNumber(Math.round(diskPercent * 10) / 10)}%` : '—' }, { label: 'Read / Write فعلی', value: rootVolume?.read_bytes_per_sec == null || rootVolume?.write_bytes_per_sec == null ? 'در انتظار نمونه' : `${formatBytes(rootVolume.read_bytes_per_sec)}/s · ${formatBytes(rootVolume.write_bytes_per_sec)}/s`, detail: 'بلاک‌دیوایس ریشه' }]}/></SectionCard><SectionCard title="مصرف پنل ARG" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: `${formatNumber(Math.round((data?.process_cpu_percent || 0) * 10) / 10)}%` }, { label: 'RAM پنل', value: formatBytes(data?.process_rss_bytes || 0), detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
+      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: data?.cpu_cores == null ? '—' : formatNumber(data.cpu_cores) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: data ? `${formatNumber(Math.floor(data.uptime_seconds / 86400))}d ${formatNumber(Math.floor((data.uptime_seconds % 86400) / 3600))}h` : '—' }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: data ? formatBytes(totalMemory) : '—' }, { label: 'مصرف‌شده', value: data ? formatBytes(totalMemory - availableMemory) : '—', detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: data ? formatBytes(availableMemory) : '—' }, { label: 'Cache', value: memoryDetail?.cached_kib == null ? '—' : formatBytes(memoryDetail.cached_kib * 1024) }, { label: 'Buffer', value: memoryDetail?.buffers_kib == null ? '—' : formatBytes(memoryDetail.buffers_kib * 1024) }, { label: 'Swap کل', value: data?.swap_total_kib == null ? '—' : formatBytes(data.swap_total_kib * 1024) }, { label: 'Swap مصرف‌شده', value: data?.swap_total_kib == null || data.swap_free_kib == null ? '—' : formatBytes((data.swap_total_kib - data.swap_free_kib) * 1024) }]}/></SectionCard></div>
+      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="این اعداد از همان Mount Point ریشه در فهرست فضای ذخیره‌سازی آمده‌اند."><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk === null ? '—' : formatBytes(totalDisk) }, { label: 'مصرف‌شده', value: usedDisk === null ? '—' : formatBytes(usedDisk) }, { label: 'در دسترس', value: freeDisk === null ? '—' : formatBytes(freeDisk) }, { label: 'رزرو سیستم‌فایل', value: rootVolume?.reserved_bytes == null ? '—' : formatBytes(rootVolume.reserved_bytes) }, { label: 'درصد مصرف', value: diskPercent === null ? '—' : `${formatNumber(Math.round(diskPercent * 10) / 10)}%` }, { label: 'Read / Write فعلی', value: rootVolume?.read_bytes_per_sec == null || rootVolume?.write_bytes_per_sec == null ? 'در انتظار نمونه' : `${formatBytes(rootVolume.read_bytes_per_sec)}/s · ${formatBytes(rootVolume.write_bytes_per_sec)}/s`, detail: 'بلاک‌دیوایس ریشه' }]}/></SectionCard><SectionCard title="مصرف پنل ARG" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: data ? `${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}%` : '—' }, { label: 'RAM پنل', value: data ? formatBytes(data.process_rss_bytes) : '—', detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
     </>}
   </>
 }
@@ -478,7 +468,7 @@ export function PortsPage({ Heading, notify }: Common) {
 function HistoryPaused() { return <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-400/20 bg-amber-400/[.06] px-4 py-3 text-xs text-amber-200"><span className="h-2 w-2 rounded-full bg-amber-400"/> ثبت تاریخچه متوقف است. برای ادامه، از تنظیمات پنل آن را فعال کن.</div> }
 
 function ResourceChart({ samples }: { samples: ResourceSample[] }) {
-  return <TimeSeriesChart samples={samples} series={[{ key: 'cpu', label: 'پردازنده', color: '#53c992' }, { key: 'memory', label: 'حافظه', color: '#dda46f' }, { key: 'disk', label: 'دیسک ریشه /', color: '#49b8a8' }]} max={100} unit="%" />
+  return <TimeSeriesChart samples={samples} series={[{ key: 'cpu', label: 'پردازنده', color: 'var(--arg-viz-cpu)' }, { key: 'memory', label: 'حافظه', color: 'var(--arg-viz-memory)' }, { key: 'disk', label: 'دیسک ریشه /', color: 'var(--arg-viz-disk)' }]} max={100} unit="%" />
 }
 
 type ChartSeries = { key: string; label: string; color: string }
@@ -550,7 +540,7 @@ function DistributionBars({ title, description, items }: {
 }
 
 function TrafficChart({ history }: { history: Sample[] }) {
-  return <TimeSeriesChart samples={history} series={[{ key: 'rx', label: 'دریافت', color: '#69acde' }, { key: 'tx', label: 'ارسال', color: '#e3b15d' }]} max={Math.max(1024, ...history.flatMap((sample) => [sample.rx, sample.tx])) * 1.12} unit="bytes" />
+  return <TimeSeriesChart samples={history} series={[{ key: 'rx', label: 'دریافت', color: 'var(--arg-viz-rx)' }, { key: 'tx', label: 'ارسال', color: 'var(--arg-viz-tx)' }]} max={Math.max(1024, ...history.flatMap((sample) => [sample.rx, sample.tx])) * 1.12} unit="bytes" />
 }
 
 function PortsTable({ ports }: { ports: Dashboard['ports'] }) {
