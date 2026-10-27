@@ -39,15 +39,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
-import { AccountPage, AuditPage, DashboardPage, FirewallPage, NetworkPage, NginxPage, PortsPage, SettingsPage, SystemPage, UsersPage } from './pages'
-import { AptPage, ServicesPage } from './AdminOpsPage'
-import { DockerPage } from './DockerPage'
-import { FileManagerPage } from './FileManagerPage'
-import { MaintenancePage } from './MaintenancePage'
-import { MysqlPage } from './MysqlPage'
-import { NodesPage } from './NodesPage'
-import { AllServersPage } from './AllServersPage'
-import { BugReportPage } from './BugReportPage'
 import { navigation, pageFromHash, type PageId } from './navigation'
 import { toast } from 'sonner'
 import { Toaster } from './components/ui/sonner'
@@ -56,11 +47,29 @@ import { SidebarNavigation } from './components/shell/SidebarNavigation'
 import { TopNavigation } from './components/shell/TopNavigation'
 import { ThemeToggle } from './components/shell/ThemeToggle'
 import { UnifiedStepper } from './components/ui/stepper'
-import changelog from '../../CHANGELOG.md?raw'
 const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
 const DnsPage = lazy(() => import('./DnsPage').then((module) => ({ default: module.DnsPage })))
 const ApplicationsPage = lazy(() => import('./ApplicationsPage').then((module) => ({ default: module.ApplicationsPage })))
+const DashboardPage = lazy(() => import('./pages').then((module) => ({ default: module.DashboardPage })))
+const SystemPage = lazy(() => import('./pages').then((module) => ({ default: module.SystemPage })))
+const NetworkPage = lazy(() => import('./pages').then((module) => ({ default: module.NetworkPage })))
+const PortsPage = lazy(() => import('./pages').then((module) => ({ default: module.PortsPage })))
+const FirewallPage = lazy(() => import('./pages').then((module) => ({ default: module.FirewallPage })))
+const NginxPage = lazy(() => import('./pages').then((module) => ({ default: module.NginxPage })))
+const UsersPage = lazy(() => import('./pages').then((module) => ({ default: module.UsersPage })))
+const AuditPage = lazy(() => import('./pages').then((module) => ({ default: module.AuditPage })))
+const SettingsPage = lazy(() => import('./pages').then((module) => ({ default: module.SettingsPage })))
+const AccountPage = lazy(() => import('./pages').then((module) => ({ default: module.AccountPage })))
+const AptPage = lazy(() => import('./AdminOpsPage').then((module) => ({ default: module.AptPage })))
+const ServicesPage = lazy(() => import('./AdminOpsPage').then((module) => ({ default: module.ServicesPage })))
+const DockerPage = lazy(() => import('./DockerPage').then((module) => ({ default: module.DockerPage })))
+const FileManagerPage = lazy(() => import('./FileManagerPage').then((module) => ({ default: module.FileManagerPage })))
+const MaintenancePage = lazy(() => import('./MaintenancePage').then((module) => ({ default: module.MaintenancePage })))
+const MysqlPage = lazy(() => import('./MysqlPage').then((module) => ({ default: module.MysqlPage })))
+const NodesPage = lazy(() => import('./NodesPage').then((module) => ({ default: module.NodesPage })))
+const AllServersPage = lazy(() => import('./AllServersPage').then((module) => ({ default: module.AllServersPage })))
+const BugReportPage = lazy(() => import('./BugReportPage').then((module) => ({ default: module.BugReportPage })))
 const notifyUser = (message: string) => {
   if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد|نپذیرفت|failed|error|invalid|could not|unable/i.test(message)) toast.error(message)
   else toast.success(message)
@@ -592,9 +601,18 @@ export default function App() {
   const reloadScheduled = useRef(false)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
+  const [latestChangelog, setLatestChangelog] = useState('')
   const [updateConfirmAction, setUpdateConfirmAction] = useState<'cancel' | 'rollback' | null>(null)
   const [reloadQueued, setReloadQueued] = useState(false)
   const [updateFinished, setUpdateFinished] = useState(false)
+  useEffect(() => {
+    if (!updateDialogOpen || !updateFinished || latestChangelog) return
+    let active = true
+    void import('../../CHANGELOG.md?raw').then(({ default: content }) => {
+      if (active) setLatestChangelog(content.match(/^## v[^\n]*(?:\n(?!## v)[^\n]*)*/m)?.[0] || content)
+    }).catch(() => { if (active) setLatestChangelog('فهرست تغییرات نسخه بارگذاری نشد.') })
+    return () => { active = false }
+  }, [updateDialogOpen, updateFinished, latestChangelog])
   const postReloadShown = useRef(false)
   const [updateReloadNotice] = useState(() => {
     try { const done = window.sessionStorage.getItem('arg-update-finished') === 'true'; window.sessionStorage.removeItem('arg-update-finished'); return done } catch { return false }
@@ -1004,7 +1022,6 @@ export default function App() {
       </div>
     )
   if (!installed || !user) return <Auth installer={!installed} onSuccess={refresh} />
-  const latestChangelog = changelog.match(/^## v[^\n]*(?:\n(?!## v)[^\n]*)*/m)?.[0] || changelog
   const allowedPages = navigation.filter((item) => !item.admin || user.role === 'admin')
   const currentPage = allowedPages.some((item) => item.id === page) ? page : 'dashboard'
   const currentPageLabel = allowedPages.find((item) => item.id === currentPage)?.label || 'نمای کلی'
@@ -1087,7 +1104,7 @@ export default function App() {
             {workspaceNodeId !== 'all' && <ResourceAlertNotice />}
             {terminalMounted && workspaceNodeId !== 'all' && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
             <div key={currentPage}>
-            {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <div className="arg-page-enter">
+            {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <Suspense fallback={<PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/>}><div className="arg-page-enter">
             {currentPage === 'apps' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="اپلیکیشن‌ها"/>}><ApplicationsPage Heading={PageHeading} notify={notifyUser} allServers={workspaceNodeId === 'all'} workspaceKey={workspaceNodeId} onOpenWorkspace={openWorkspace}/></Suspense> : workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
               {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
               {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
@@ -1115,14 +1132,14 @@ export default function App() {
               <span>© {new Date().getFullYear()} ARG · Rust + React</span>
               <span>طراحی و توسعه: {developer}</span>
             </footer>
-            </div>}
+            </div></Suspense>}
             </div>
           </main>
         </div>
         <Toaster />
         <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating} rollback={sharedUpdate.operation === 'rollback' || (sharedUpdate.job_id?.startsWith('arg-rollback-') ?? false)} branch={sharedUpdate.branch} buildMode={sharedUpdate.build_mode} refreshing={reloadQueued} canCancel={user.role === 'admin'} canceling={cancelingUpdate} onCancel={() => void cancelUpdate()}/>
         <UpdateActionConfirmation action={updateConfirmAction} busy={cancelingUpdate || rollingBack} onCancel={() => setUpdateConfirmAction(null)} onConfirm={() => void (updateConfirmAction === 'rollback' ? executeRollbackUpdate() : executeCancelUpdate())}/>
-        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} updateBranch={updateBranch} onUpdateBranchChange={changeUpdateBranch} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onRollback={() => void rollbackUpdate()} rollingBack={rollingBack} onForceRefresh={() => void forceFreshPanelReload(false)}/>
+        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog || 'در حال بارگذاری تغییرات نسخه…'} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} updateBranch={updateBranch} onUpdateBranchChange={changeUpdateBranch} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onRollback={() => void rollbackUpdate()} rollingBack={rollingBack} onForceRefresh={() => void forceFreshPanelReload(false)}/>
       </AppShell>
     </PanelTimeZoneContext.Provider>
   )

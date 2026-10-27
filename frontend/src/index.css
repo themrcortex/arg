@@ -147,6 +147,22 @@
   :root[data-theme='light'] [class*='text-sky-300'] { color: #285f96 !important; }
   :root[data-theme='light'] [class*='border-white/'] { border-color: color-mix(in srgb, var(--arg-border) 80%, transparent) !important; }
   :root[data-theme='light'] [class*='bg-white/'] { background-color: color-mix(in srgb, var(--arg-text) 4%, transparent) !important; }
+  :root[data-theme='light'] [class*='bg-[#090d12]'],
+  :root[data-theme='light'] [class*='bg-[#080d12]'] { color: #e8edf2; color-scheme: dark; }
+  :root[data-theme='light'] [class*='bg-[#090d12]'] .text-white,
+  :root[data-theme='light'] [class*='bg-[#080d12]'] .text-white,
+  :root[data-theme='light'] [class*='bg-[#090d12]'] [class*='text-slate-'],
+  :root[data-theme='light'] [class*='bg-[#080d12]'] [class*='text-slate-'] { color: #e8edf2 !important; }
+  :root[data-theme='light'] [class*='bg-[#090d12]'] [class*='text-emerald-'],
+  :root[data-theme='light'] [class*='bg-[#080d12]'] [class*='text-emerald-'] { color: #70e0a9 !important; }
+  :root[data-theme='light'] [class*='bg-[#090d12]'] [class*='text-amber-'],
+  :root[data-theme='light'] [class*='bg-[#080d12]'] [class*='text-amber-'] { color: #f0bf85 !important; }
+  :root[data-theme='light'] [class*='bg-[#090d12]'] [class*='text-rose-'],
+  :root[data-theme='light'] [class*='bg-[#080d12]'] [class*='text-rose-'] { color: #ff9292 !important; }
+  :root[data-theme='light'] [class*='bg-[#090d12]'] [class*='text-sky-'],
+  :root[data-theme='light'] [class*='bg-[#080d12]'] [class*='text-sky-'] { color: #8bc1f5 !important; }
+  :root[data-theme='light'] [class*='bg-[#090d12]'] .text-muted-foreground,
+  :root[data-theme='light'] [class*='bg-[#080d12]'] .text-muted-foreground { color: #aab4bc !important; }
   * {
     @apply border-border;
   }
@@ -293,6 +309,7 @@
   content: '';
 }
 .arg-card-surface { position: relative; isolation: isolate; background: linear-gradient(145deg, var(--arg-glass-highlight), transparent 48%), var(--arg-glass); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--arg-glass-highlight) 55%, transparent), var(--arg-glass-shadow); backdrop-filter: blur(var(--arg-glass-blur)) saturate(118%); -webkit-backdrop-filter: blur(var(--arg-glass-blur)) saturate(118%); transition: border-color 220ms ease, box-shadow 220ms ease; }
+.arg-card-surface .arg-card-surface { background: color-mix(in srgb, var(--arg-surface) 88%, transparent); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--arg-glass-highlight) 28%, transparent); backdrop-filter: none; -webkit-backdrop-filter: none; }
 .arg-card-surface-elevated { background: linear-gradient(145deg, var(--arg-glass-highlight), transparent 48%), var(--arg-glass-strong); }
 .arg-card-surface-subtle { background: color-mix(in srgb, var(--arg-glass) 70%, transparent); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--arg-glass-highlight) 45%, transparent); }
 .arg-card-surface-flat { background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
@@ -431,12 +448,12 @@
 }
 .arg-terminal-frame {
   border-color: var(--arg-glass-edge);
-  background: var(--arg-glass);
+  background: var(--arg-surface);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 24px 48px rgba(0,0,0,.18);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
-.arg-terminal-toolbar { background: color-mix(in srgb, var(--arg-surface) 88%, transparent); }
+.arg-terminal-toolbar { background: var(--arg-surface); }
 .arg-glass-popover {
   border-color: var(--arg-glass-edge);
   background: linear-gradient(150deg, color-mix(in srgb, var(--arg-glass-highlight) 50%, transparent), transparent 55%), var(--arg-glass-strong);
