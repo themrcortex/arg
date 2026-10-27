@@ -45,7 +45,7 @@ pub(super) struct RetryRequest {
     idempotency_key: String,
 }
 
-fn deployment_root() -> PathBuf {
+pub(super) fn deployment_root() -> PathBuf {
     env::var_os("ARG_DEPLOY_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/lib/arg/deployments"))

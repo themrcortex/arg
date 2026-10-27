@@ -84,7 +84,12 @@ Existing pairings migrate additively without changing their node IDs or revoking
 | 20 — Workspaces, projects, environments | Initial metadata implementation | Default workspace/project/production records, CRUD APIs, and app assignment/UI exist. Runtime/config/secret isolation and production promotion locks remain open. |
 | 21 — Service bindings | Partial, S3 adapter only | Existing S3 bindings remain metadata and do not enforce provider ACLs. Generic database/cache/SMTP bindings and environment-aware secret delivery remain open. |
 | 22 — App templates | Draft catalog only | Versioned Laravel, React/Vite, and Node presets create draft app records; source acquisition, dependency installation, and deployment are not implemented by this catalog. |
-| 23–48 — Remaining platform roadmap | Planned | See the complete roadmap; optional phases remain off by default and host/fleet gates are mandatory for production claims. |
+| 23 — Buildpacks | Analysis and immutable plans | Analyze the active release with bounded manifest scanning, confidence/candidates, warnings, and stored plans. Plans never run commands; build isolation and monorepo overrides remain open. |
+| 24 — Git sources and code | Partial, read-only | Browse bounded text files in the active release with path/symlink and secret-file guards. Private repository credentials, editing, commits, webhooks, and source mirror management remain open. |
+| 25 — Preview and snapshots | Metadata snapshots only | App/environment configuration snapshots are content-addressed and exclude secret values. Preview lifecycle, approvals, restore/promotion, and live data isolation remain open. |
+| 26 — Compose orchestration | Metadata links only | Admins may link an existing Docker container to a Docker app for measured status; unlinking leaves Docker untouched. Compose reconciliation, controls, and safe rollbacks remain open. |
+| 27 — DNS providers | Cloudflare adapter, partial | Encrypted service-user credentials, zone validation, and guarded A/AAAA/CNAME/MX/TXT/CAA/SRV APIs are implemented. Route 53/DO, propagation checks, DNS-01, and disposable-provider tests remain open. |
+| 28–48 — Remaining platform roadmap | Planned | See the complete roadmap; optional phases remain off by default and host/fleet gates are mandatory for production claims. |
 
 “Complete” here means the repository implementation and its automated phase checks are present. It does not claim that external multi-VPS, certificate-authority, APT, MySQL, or systemd integration has been exercised on a production VPS.
 

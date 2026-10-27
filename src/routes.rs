@@ -173,6 +173,16 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/app-templates/{id}/draft", post(app_templates::create_draft))
         .route("/api/app-platform/workspaces/{id}/projects", get(app_workspaces::list_projects).post(app_workspaces::create_project))
         .route("/api/app-platform/projects/{id}/environments", get(app_workspaces::list_environments).post(app_workspaces::create_environment))
+        .route("/api/apps/{id}/build-plans", get(buildpacks::list).post(buildpacks::analyze))
+        .route("/api/apps/{id}/source/tree", get(app_code::tree))
+        .route("/api/apps/{id}/source/file", get(app_code::file))
+        .route("/api/apps/{id}/snapshots", get(app_snapshots::list).post(app_snapshots::create))
+        .route("/api/apps/{id}/containers", get(app_compose::list).post(app_compose::link))
+        .route("/api/apps/{id}/containers/{container_id}", axum::routing::delete(app_compose::unlink))
+        .route("/api/dns/connections", get(dns::list_connections).post(dns::connect))
+        .route("/api/dns/connections/{id}", axum::routing::delete(dns::disconnect))
+        .route("/api/dns/connections/{id}/records", get(dns::list_records).post(dns::create_record))
+        .route("/api/dns/connections/{id}/records/{record_id}", put(dns::update_record).delete(dns::delete_record))
         .route("/api/apps/{id}/environment", put(app_workspaces::assign_environment))
         .route("/api/app-networks", get(app_networks::list).post(app_networks::create))
         .route("/api/app-networks/{id}/members", get(app_networks::list_members).post(app_networks::attach))
@@ -427,4 +437,15 @@ pub(super) fn router(state: AppState) -> Router {
         ))
         .layer(middleware::from_fn(update_guard))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::*;
+
+    #[test]
+    fn application_and_dns_routes_build_without_collisions() {
+        let state = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let _router = router(state);
+    }
 }

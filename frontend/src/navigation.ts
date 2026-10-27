@@ -1,6 +1,6 @@
-import { AppWindow, Bug, Cloud, Container, Cpu, Files, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, type LucideIcon } from 'lucide-react'
+import { AppWindow, Bug, Cloud, Container, Cpu, Files, Globe2, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, type LucideIcon } from 'lucide-react'
 
-export type PageId = 'dashboard' | 'system' | 'nodes' | 'apps' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account' | 'bug-report'
+export type PageId = 'dashboard' | 'system' | 'nodes' | 'apps' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'dns' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account' | 'bug-report'
 export type NavigationItem = { id: PageId; label: string; icon: LucideIcon; admin?: boolean }
 
 export const navigation: NavigationItem[] = [
@@ -15,6 +15,7 @@ export const navigation: NavigationItem[] = [
   { id: 'docker', label: 'مدیریت Docker', icon: Container, admin: true },
   { id: 'files', label: 'فایل‌های سرور', icon: Files, admin: true },
   { id: 's3', label: 'فضای ابری S3', icon: Cloud, admin: true },
+  { id: 'dns', label: 'مدیریت DNS', icon: Globe2, admin: true },
   { id: 'terminal', label: 'ترمینال سرور', icon: Terminal, admin: true },
   { id: 'packages', label: 'مدیریت APT', icon: Package, admin: true },
   { id: 'services', label: 'سرویس‌های سیستم', icon: ServerCog, admin: true },

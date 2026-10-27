@@ -55,6 +55,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './comp
 import changelog from '../../CHANGELOG.md?raw'
 const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ default: module.TerminalPage })))
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
+const DnsPage = lazy(() => import('./DnsPage').then((module) => ({ default: module.DnsPage })))
 const ApplicationsPage = lazy(() => import('./ApplicationsPage').then((module) => ({ default: module.ApplicationsPage })))
 const notifyUser = (message: string) => {
   if (/ناموفق|خطا|نامعتبر|نشد|مشخص نشد|نپذیرفت|failed|error|invalid|could not|unable/i.test(message)) toast.error(message)
@@ -1034,7 +1035,7 @@ export default function App() {
             {[
               { title: 'نمای کلی', pages: allowedPages.filter((item) => item.id === 'dashboard') },
               { title: 'سرور و شبکه', pages: allowedPages.filter((item) => ['system', 'network', 'ports', 'firewall', 'nodes'].includes(item.id)) },
-              { title: 'اپلیکیشن‌ها و سرویس‌ها', pages: allowedPages.filter((item) => ['apps', 'nginx', 'docker', 'files', 's3'].includes(item.id)) },
+              { title: 'اپلیکیشن‌ها و سرویس‌ها', pages: allowedPages.filter((item) => ['apps', 'nginx', 'docker', 'files', 's3', 'dns'].includes(item.id)) },
               { title: 'عملیات سرور', pages: allowedPages.filter((item) => ['terminal', 'packages', 'services', 'mysql', 'maintenance'].includes(item.id)) },
               { title: 'مدیریت ARG', pages: allowedPages.filter((item) => ['users', 'audit', 'settings', 'account', 'bug-report'].includes(item.id)) },
             ].map((section) => <nav key={section.title} aria-label={section.title}><div className="arg-section-label mb-1.5 px-3">{section.title}</div><TooltipProvider delayDuration={220}><div className="space-y-1">{section.pages.map((item) => {
@@ -1078,6 +1079,7 @@ export default function App() {
               {currentPage === 'docker' && user.role === 'admin' && <DockerPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'files' && user.role === 'admin' && <FileManagerPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 's3' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="فضای ابری S3"/>}><S3StoragePage Heading={PageHeading} notify={notifyUser}/></Suspense>}
+              {currentPage === 'dns' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="مدیریت DNS"/>}><DnsPage Heading={PageHeading} notify={notifyUser}/></Suspense>}
               {currentPage === 'terminal' && null}
               {currentPage === 'packages' && user.role === 'admin' && <AptPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'services' && user.role === 'admin' && <ServicesPage Heading={PageHeading} notify={notifyUser} />}
