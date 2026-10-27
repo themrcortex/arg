@@ -1091,8 +1091,13 @@ async fn remote_node_request(
         let connection_state = if status == StatusCode::UPGRADE_REQUIRED { "incompatible" } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN { "untrusted" } else { "degraded" };
         let detail = value["error"].as_str().unwrap_or("Node عملیات را نپذیرفت.").chars().take(240).collect::<String>();
         mark_node_connection(state, id, connection_state, Some(&detail));
+        let outward_status = match status {
+            StatusCode::UNAUTHORIZED => StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN => StatusCode::FORBIDDEN,
+            _ => StatusCode::BAD_GATEWAY,
+        };
         return Err(error(
-            StatusCode::BAD_GATEWAY,
+            outward_status,
             value["error"].as_str().unwrap_or("Node عملیات را نپذیرفت."),
         ));
     }
@@ -1109,6 +1114,13 @@ fn mark_node_connection(state: &AppState, id: i64, connection_state: &str, last_
     if !["healthy", "degraded", "offline", "untrusted", "incompatible"].contains(&connection_state) { return; }
     let db = state.lock().unwrap();
     let _ = db.execute("UPDATE federated_nodes SET connection_state=?1,last_check=?2,last_error=?3 WHERE id=?4", params![connection_state, now(), last_error, id]);
+}
+
+fn should_forget_node_after_revoke_failure(status: StatusCode, connection_state: &str) -> bool {
+    // A rejected credential (401) cannot revoke the peer-side grant, but it is
+    // safe to remove the unusable local pairing. A 403 may still represent an
+    // active credential without the revoke scope, so keep that pairing visible.
+    status == StatusCode::UNAUTHORIZED && connection_state == "untrusted"
 }
 
 async fn ensure_workspace_session(state: &AppState, id: i64) -> Result<String, (StatusCode, Json<Value>)> {
@@ -1618,7 +1630,7 @@ pub(super) async fn remove_node(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
     };
-    let _: Value = remote_node_request(
+    let remote_revoked = match remote_node_request(
         &state,
         id,
         "controller.self_revoke",
@@ -1626,7 +1638,25 @@ pub(super) async fn remove_node(
         "api/federation/controller",
         None,
     )
-    .await?;
+    .await {
+        Ok(_) => true,
+        Err((status, response)) => {
+            let connection_state: Option<String> = {
+                let db = state.lock().unwrap();
+                db.query_row(
+                    "SELECT connection_state FROM federated_nodes WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db_error)?
+            };
+            if !should_forget_node_after_revoke_failure(status, connection_state.as_deref().unwrap_or_default()) {
+                return Err((status, response));
+            }
+            false
+        }
+    };
     let db = state.lock().unwrap();
     let path = token_path(&db, id)?;
     let workspace_path = workspace_token_path(&db, id)?;
@@ -1638,9 +1668,14 @@ pub(super) async fn remove_node(
         &db,
         &actor,
         "federation.node.remove",
-        &format!("node_id={id}"),
+        &format!("node_id={id}; remote_revoked={remote_revoked}"),
     );
-    Ok(Json(json!({"removed":true})))
+    let message = if remote_revoked {
+        "اتصال Node از این پنل و پنل مقصد لغو شد."
+    } else {
+        "اعتبارنامهٔ مقصد پذیرفته نشد؛ رکورد و کلید محلی حذف شد، اما لغو سمت مقصد قابل تأیید نبود."
+    };
+    Ok(Json(json!({"removed":true,"remote_revoked":remote_revoked,"message":message})))
 }
 
 pub(super) async fn revoke_controller(
@@ -1832,7 +1867,12 @@ pub(super) async fn sync_controller_public_name(
 
 #[cfg(test)]
 mod tests {
-    use super::{address_is_private, resolve_workspace_node_id, role_valid, scopes_for_mode, session_scope_for, valid_server_uuid, valid_workspace_api_path, validate_endpoint, validate_public_name, workspace_key};
+    use super::{
+        address_is_private, resolve_workspace_node_id, role_valid, scopes_for_mode,
+        session_scope_for, should_forget_node_after_revoke_failure, valid_server_uuid,
+        valid_workspace_api_path, validate_endpoint, validate_public_name, workspace_key,
+    };
+    use axum::http::StatusCode;
     use rusqlite::Connection;
     #[test]
     fn server_identity_and_public_names_are_validated() {
@@ -1913,5 +1953,29 @@ mod tests {
         assert!(!valid_workspace_api_path("nodes/1/proxy/dashboard"));
         assert!(!valid_workspace_api_path("federation/pair"));
         assert!(!valid_workspace_api_path("files//list"));
+    }
+
+    #[test]
+    fn only_untrusted_remote_revoke_failures_allow_local_node_cleanup() {
+        assert!(should_forget_node_after_revoke_failure(
+            StatusCode::UNAUTHORIZED,
+            "untrusted"
+        ));
+        assert!(!should_forget_node_after_revoke_failure(
+            StatusCode::BAD_GATEWAY,
+            "untrusted"
+        ));
+        assert!(!should_forget_node_after_revoke_failure(
+            StatusCode::BAD_GATEWAY,
+            "offline"
+        ));
+        assert!(!should_forget_node_after_revoke_failure(
+            StatusCode::BAD_GATEWAY,
+            "degraded"
+        ));
+        assert!(!should_forget_node_after_revoke_failure(
+            StatusCode::FORBIDDEN,
+            "untrusted"
+        ));
     }
 }

@@ -5,6 +5,7 @@
 ### Changed
 - Complete the Phase 48 audit of Phases 18–48 in Persian and English, recording implementation evidence and open acceptance gates for every phase.
 - Keep the release gate blocked: tenant isolation, multi-host/restore drills, independent security review, artifact signing, and several live provider/host acceptance tests remain incomplete. No stable release or `main` promotion is claimed.
+- Allow removal of an ARG Node pairing from the local panel when the remote Node rejects its credential (401); report that remote revocation could not be confirmed, while preserving the pairing after insufficient permission (403) or network/TLS failures.
 
 ### Validation
 - 178 Rust tests, `cargo check --locked`, and `cargo build --locked --release` passed.
