@@ -258,6 +258,28 @@ fn insert_job(
                 "برای همین اپلیکیشن یک Job فعال است؛ ابتدا آن را بررسی یا لغو کن.",
             ));
         }
+        let laravel_table_exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='laravel_operations')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if laravel_table_exists {
+            let laravel_active: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM laravel_operations WHERE application_id=?1 AND state IN ('queued','running'))",
+                    [app_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(true);
+            if laravel_active {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    "برای این اپلیکیشن یک عملیات Laravel فعال است؛ پس از پایان آن دوباره deploy کن.",
+                ));
+            }
+        }
         (actor, owner)
     };
     let job_id = id();
@@ -409,6 +431,7 @@ pub(super) async fn create(
     Path(app_id): Path<String>,
     Json(input): Json<DeployRequest>,
 ) -> ApiResult {
+    let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
     Ok(Json(insert_job(
         &state,
         &headers,
@@ -559,6 +582,7 @@ pub(super) async fn upload_archive(
     let source = Source::Archive {
         sha256: hex::encode(hasher.finalize()),
     };
+    let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
     match insert_job(
         &state,
         &headers,
@@ -612,6 +636,7 @@ pub(super) async fn cancel(
     Path(job_id): Path<String>,
 ) -> ApiResult {
     check_origin(&headers)?;
+    let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?.username;
     let owner = federation::local_server_uuid(&db).map_err(db_error)?;
@@ -681,37 +706,19 @@ pub(super) async fn rollback(
             "شناسهٔ release معتبر نیست.",
         ));
     }
-    let db = state.lock().unwrap();
-    let actor = require_admin(&db, &headers)?.username;
-    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-    ensure_app(&db, &app_id, &owner)?;
-    let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM deployment_jobs WHERE application_id=?1 AND state IN ('queued','validating','running','verifying'))",[&app_id],|row|row.get(0)).map_err(db_error)?;
-    if active {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "تا پایان یا لغو Job فعال، Rollback هم‌زمان انجام نمی‌شود.",
-        ));
-    }
-    let row: Option<(String, String)> = db
-        .query_row(
-            "SELECT path,state FROM deployment_releases WHERE id=?1 AND application_id=?2",
-            params![input.release_id, app_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(db_error)?;
-    let Some((release_path, release_state)) = row else {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "release برای این اپلیکیشن پیدا نشد.",
-        ));
+    let (actor, runtime, row) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?.username;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        ensure_app(&db, &app_id, &owner)?;
+        let active: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM deployment_jobs WHERE application_id=?1 AND state IN ('queued','validating','running','verifying'))", [&app_id], |row| row.get(0)).map_err(db_error)?;
+        if active { return Err(api_error(StatusCode::CONFLICT, "تا پایان یا لغو Job فعال، Rollback هم‌زمان انجام نمی‌شود.")); }
+        let row: Option<(String, String)> = db.query_row("SELECT path,state FROM deployment_releases WHERE id=?1 AND application_id=?2", params![input.release_id, app_id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(db_error)?;
+        let runtime = db.query_row("SELECT a.framework,a.runtime_version,s.domain,s.enabled FROM applications a LEFT JOIN laravel_app_sites s ON s.application_id=a.id WHERE a.id=?1", [&app_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<bool>>(3)?.unwrap_or(false)))).optional().map_err(db_error)?;
+        (actor, runtime, row)
     };
-    if release_state != "previous" {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "فقط release قبلی قابل Rollback است.",
-        ));
-    }
+    let Some((release_path, release_state)) = row else { return Err(api_error(StatusCode::NOT_FOUND,"release برای این اپلیکیشن پیدا نشد.")); };
+    if release_state != "previous" { return Err(api_error(StatusCode::CONFLICT,"فقط release قبلی قابل Rollback است.")); }
     let root = deployment_root().join("apps").join(&app_id);
     let releases = root
         .join("releases")
@@ -734,9 +741,8 @@ pub(super) async fn rollback(
             "current symlink نیست؛ Rollback برای جلوگیری از جایگزینی فایل واقعی متوقف شد.",
         ));
     }
-    let old = fs::read_link(&current)
-        .ok()
-        .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()));
+    let old_link = fs::read_link(&current).ok();
+    let old = old_link.as_ref().and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()));
     let temp = root.join(format!(".rollback-{}", id()));
     std::os::unix::fs::symlink(FsPath::new("releases").join(&input.release_id), &temp)
         .and_then(|_| fs::rename(&temp, &current))
@@ -746,17 +752,105 @@ pub(super) async fn rollback(
                 &format!("تغییر اتمی release ناموفق بود: {e}"),
             )
         })?;
+    let mut nginx_snapshot: Option<(String, String)> = None;
+    if let Some((_framework, runtime_version, domain, web_enabled)) =
+        runtime.filter(|row| row.0 == "laravel")
+    {
+        let mut failure = None;
+        if web_enabled {
+            let result = privileged_request_async(json!({"action":"laravel-web","app_id":app_id,"domain":domain.clone().unwrap_or_default(),"runtime_version":runtime_version,"enabled":true})).await;
+            match result {
+                Ok(value) if value["ok"] == true => {
+                    let data = &value["data"];
+                    if let (Some(name), Some(content)) = (data["site_name"].as_str(), data["nginx_content"].as_str()) {
+                        nginx_snapshot = Some((name.to_owned(), content.to_owned()));
+                    }
+                }
+                Ok(value) => failure = Some(value["error"].as_str().unwrap_or("کانفیگ وب پس از rollback آماده نشد.").to_owned()),
+                Err(_) => failure = Some("ارتباط با helper برای بازآماده‌سازی وب Laravel برقرار نشد.".into()),
+            }
+        }
+        if failure.is_none() {
+            let result = privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id})).await;
+            match result {
+                Ok(value) if value["ok"] == true => {}
+                Ok(value) => failure = Some(value["error"].as_str().unwrap_or("سرویس‌های پس‌زمینه پس از rollback راه‌اندازی نشدند.").to_owned()),
+                Err(_) => failure = Some("ارتباط با helper برای راه‌اندازی مجدد سرویس‌های Laravel برقرار نشد.".into()),
+            }
+        }
+        if let Some(message) = failure {
+            let previous = old_link.as_deref().map(|path| path.to_string_lossy().to_string());
+            let restored = restore_current_pointer(&root, previous.as_deref(), &id());
+            let recovery_note = if restored.is_ok() {
+                let recovered_snapshot = if web_enabled {
+                    match privileged_request_async(json!({"action":"laravel-web","app_id":app_id,"domain":domain.clone().unwrap_or_default(),"runtime_version":runtime_version,"enabled":true})).await {
+                        Ok(value) if value["ok"] == true => {
+                            let data = &value["data"];
+                            match (data["site_name"].as_str(), data["nginx_content"].as_str()) {
+                                (Some(name), Some(content)) => Some((name.to_owned(), content.to_owned())),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let services_recovered = matches!(
+                    privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id})).await,
+                    Ok(value) if value["ok"] == true
+                );
+                let snapshot_recovered = recovered_snapshot.is_some();
+                let snapshot_saved = recovered_snapshot.is_some_and(|(name, content)| {
+                    let db = state.lock().unwrap();
+                    nginx::store_nginx_snapshot(&db, &name, &content, None).is_ok()
+                });
+                match (services_recovered, snapshot_recovered, snapshot_saved) {
+                    (true, _, true) => "اشاره‌گر release به نسخهٔ قبلی بازگشت؛ کانفیگ Nginx و سرویس‌های قبلی دوباره آماده شدند.",
+                    (true, false, _) if !web_enabled => "اشاره‌گر release به نسخهٔ قبلی بازگشت و سرویس‌های قبلی دوباره آماده شدند.",
+                    (true, _, _) => "اشاره‌گر release به نسخهٔ قبلی بازگشت و سرویس‌ها دوباره اجرا شدند، اما snapshot کانفیگ Nginx ذخیره نشد.",
+                    (false, _, _) => "اشاره‌گر release به نسخهٔ قبلی بازگشت، اما آماده‌سازی دوبارهٔ سرویس‌ها کامل نشد.",
+                }
+            } else {
+                "بازگرداندن خودکار اشاره‌گر هم شکست خورد؛ مسیر current را فوراً بررسی کن."
+            };
+            return Err(api_error(StatusCode::BAD_GATEWAY, &format!("{message} {recovery_note}")));
+        }
+    }
+    let db = state.lock().unwrap();
     let at = now();
     db.execute("UPDATE deployment_releases SET state=CASE WHEN id=?1 THEN 'active' WHEN id=?2 THEN 'previous' ELSE state END,activated_at=CASE WHEN id=?1 THEN ?3 ELSE activated_at END WHERE application_id=?4 AND state IN ('active','previous')",params![input.release_id,old,at,app_id]).map_err(db_error)?;
+    let snapshot_warning = nginx_snapshot.and_then(|(name, content)| {
+        nginx::store_nginx_snapshot(&db, &name, &content, None)
+            .err()
+            .map(|problem| problem.to_string())
+    });
     audit(
         &db,
         &actor,
         "deployment.rollback",
         &format!("app={app_id}; release={}", input.release_id),
     );
-    Ok(Json(
-        json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old,"message":"اشاره‌گر release به‌صورت اتمی تغییر کرد؛ اجرای runtime یا healthcheck HTTP انجام نشد."}),
-    ))
+    let message = snapshot_warning.map_or_else(
+        || "release قبلی فعال شد و سرویس‌های Laravel بررسی شدند. دیتابیس rollback نشد.".to_owned(),
+        |warning| format!("release قبلی فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
+    );
+    Ok(Json(json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old,"message":message})))
+}
+
+#[cfg(test)]
+#[test]
+fn rollback_route_future_is_send() {
+    fn assert_send<F: std::future::Future + Send>(_: F) {}
+    let state = State(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())));
+    assert_send(rollback(
+        state,
+        HeaderMap::new(),
+        Path(String::new()),
+        Json(RollbackRequest {
+            release_id: String::new(),
+        }),
+    ));
 }
 
 pub(super) async fn retry(
@@ -766,38 +860,48 @@ pub(super) async fn retry(
     Json(input): Json<RetryRequest>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    let db = state.lock().unwrap();
-    let actor = require_admin(&db, &headers)?.username;
     if !valid_key(&input.idempotency_key) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "Idempotency key نامعتبر است.",
         ));
     }
-    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-    let old: (String,String,String,Option<String>,String,Option<String>)=db.query_row("SELECT application_id,owner_server_uuid,source_json,healthcheck_file,state,source_commit FROM deployment_jobs WHERE id=?1",[job_id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(db_error)?.ok_or_else(||api_error(StatusCode::NOT_FOUND,"Job پیدا نشد."))?;
-    if old.1 != owner {
-        return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
-    }
-    if JOB_ACTIVE.contains(&old.4.as_str()) {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "Job فعال را نمی‌توان دوباره اجرا کرد.",
-        ));
-    }
-    let mut source: Source = serde_json::from_str(&old.2).map_err(|_| {
-        api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "تنظیمات منبع Job قابل بازیابی نیست.",
-        )
-    })?;
-    if let (Source::Git { repository, .. }, Some(commit)) = (&source, old.5.as_ref()) {
-        source = Source::Git {
-            repository: repository.clone(),
-            reference: commit.clone(),
-        };
-    }
-    drop(db);
+    let (actor, old, source) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?.username;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        let old: (String, String, String, Option<String>, String, Option<String>) = db
+            .query_row(
+                "SELECT application_id,owner_server_uuid,source_json,healthcheck_file,state,source_commit FROM deployment_jobs WHERE id=?1",
+                [job_id.as_str()],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."))?;
+        if old.1 != owner {
+            return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
+        }
+        if JOB_ACTIVE.contains(&old.4.as_str()) {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "Job فعال را نمی‌توان دوباره اجرا کرد.",
+            ));
+        }
+        let mut source: Source = serde_json::from_str(&old.2).map_err(|_| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "تنظیمات منبع Job قابل بازیابی نیست.",
+            )
+        })?;
+        if let (Source::Git { repository, .. }, Some(commit)) = (&source, old.5.as_ref()) {
+            source = Source::Git {
+                repository: repository.clone(),
+                reference: commit.clone(),
+            };
+        }
+        (actor, old, source)
+    };
     let archive_file = if matches!(&source, Source::Archive { .. }) {
         let path = deployment_root()
             .join("uploads")
@@ -815,6 +919,7 @@ pub(super) async fn retry(
     } else {
         None
     };
+    let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
     let result = insert_job(
         &state,
         &headers,
@@ -1103,6 +1208,44 @@ fn finish(state: &AppState, job_id: &str, final_state: &str, message: &str) {
     let _ = add_step(&db, job_id, final_state, final_state, message);
 }
 
+async fn refresh_laravel_runtime(
+    app_id: &str,
+    runtime_version: &str,
+    domain: Option<&str>,
+    web_enabled: bool,
+) -> Result<Option<(String, String)>, String> {
+    let mut nginx_snapshot = None;
+    if web_enabled {
+        let domain = domain.ok_or("دامنهٔ سایت Laravel پس از فعال‌سازی پیدا نشد.")?;
+        let response = privileged_request_async(json!({
+            "action":"laravel-web", "app_id":app_id, "domain":domain,
+            "runtime_version":runtime_version, "enabled":true
+        }))
+        .await
+        .map_err(|_| "ارتباط با helper برای بازآماده‌سازی Nginx/PHP-FPM برقرار نشد.".to_owned())?;
+        if response["ok"] != true {
+            return Err(response["error"].as_str().unwrap_or("Nginx و PHP-FPM پس از تغییر release آماده نشدند.").to_owned());
+        }
+        let data = &response["data"];
+        if let (Some(name), Some(content)) = (data["site_name"].as_str(), data["nginx_content"].as_str()) {
+            nginx_snapshot = Some((name.to_owned(), content.to_owned()));
+        }
+    }
+    let response = privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id}))
+        .await
+        .map_err(|_| "ارتباط با helper برای راه‌اندازی مجدد سرویس‌های Laravel برقرار نشد.".to_owned())?;
+    if response["ok"] != true {
+        return Err(response["error"].as_str().unwrap_or("سرویس‌های Laravel پس از تغییر release راه‌اندازی نشدند.").to_owned());
+    }
+    Ok(nginx_snapshot)
+}
+
+fn persist_laravel_nginx_snapshot(state: &AppState, snapshot: &(String, String)) -> Result<(), String> {
+    let db = state.lock().unwrap();
+    nginx::store_nginx_snapshot(&db, &snapshot.0, &snapshot.1, None)
+        .map_err(|error| error.to_string())
+}
+
 async fn process_job(state: AppState, job_id: String) {
     let record = {
         let db = state.lock().unwrap();
@@ -1252,6 +1395,32 @@ async fn process_job(state: AppState, job_id: String) {
         );
         return;
     }
+    let framework = {
+        let db = state.lock().unwrap();
+        db.query_row(
+            "SELECT framework FROM applications WHERE id=?1",
+            [&app_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    };
+    if framework == "laravel" {
+        progress(
+            &state,
+            &job_id,
+            "verifying",
+            "laravel-persistent-data",
+            "پوشهٔ storage و .env را برای ماندگاری میان releaseها آماده می‌کند؛ هیچ دستور پروژه‌ای اجرا نمی‌شود.",
+        );
+        if let Err(message) = laravel::prepare_release(&app_id, &stage) {
+            let _ = fs::remove_dir_all(&stage);
+            finish(&state, &job_id, "failed", &message);
+            return;
+        }
+    }
     progress(
         &state,
         &job_id,
@@ -1319,6 +1488,39 @@ async fn process_job(state: AppState, job_id: String) {
         let _ = fs::remove_dir_all(&final_release);
         return;
     }
+    let laravel_runtime = {
+        let db = state.lock().unwrap();
+        db.query_row(
+            "SELECT a.framework,a.runtime_version,s.domain,s.enabled FROM applications a LEFT JOIN laravel_app_sites s ON s.application_id=a.id WHERE a.id=?1",
+            [&app_id],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,Option<bool>>(3)?.unwrap_or(false))),
+        ).optional().ok().flatten()
+    };
+    let mut nginx_snapshot = None;
+    if let Some((_framework, runtime_version, domain, web_enabled)) =
+        laravel_runtime.filter(|(framework, _, _, _)| framework == "laravel")
+    {
+        match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled).await {
+            Ok(snapshot) => nginx_snapshot = snapshot,
+            Err(message) => {
+                let recovery = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                let detail = match recovery {
+                    Ok(()) => match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled).await {
+                        Ok(snapshot) => {
+                            if let Some(snapshot) = snapshot.as_ref() {
+                                let _ = persist_laravel_nginx_snapshot(&state, snapshot);
+                            }
+                            format!("{message} اشاره‌گر به release قبلی برگشت و سرویس‌های قبلی دوباره بررسی شدند؛ دیتابیس تغییر نکرد.")
+                        }
+                        Err(recovery_error) => format!("{message} کد به release قبلی برگشت، اما آماده‌سازی دوبارهٔ سرویس هم شکست خورد: {recovery_error}. وضعیت Nginx و systemd را بررسی کن."),
+                    },
+                    Err(rollback_error) => format!("{message} بازگرداندن اشاره‌گر هم شکست خورد: {rollback_error}. مسیر current را فوراً بررسی کن."),
+                };
+                finish(&state, &job_id, "failed", &detail);
+                return;
+            }
+        }
+    }
     let db = state.lock().unwrap();
     let at = now();
     let _=db.execute("INSERT OR REPLACE INTO deployment_releases(id,application_id,job_id,path,state,source_commit,created_at,activated_at) VALUES (?1,?2,?1,?3,'active',?4,?5,?5)",params![job_id,app_id,final_release.to_string_lossy(),commit,at]);
@@ -1328,14 +1530,59 @@ async fn process_job(state: AppState, job_id: String) {
         "UPDATE deployment_jobs SET release_path=?1,previous_release=?2 WHERE id=?3",
         params![final_release.to_string_lossy(), previous, job_id],
     );
+    let snapshot_warning = nginx_snapshot.as_ref().and_then(|snapshot| {
+        nginx::store_nginx_snapshot(&db, &snapshot.0, &snapshot.1, None)
+            .err()
+            .map(|problem| problem.to_string())
+    });
     drop(db);
-    finish(&state,&job_id,"succeeded","release با بررسی ساختار و تغییر اشاره‌گر اتمی آماده شد. اجرای runtime، ساخت framework و اتصال خودکار به Nginx در فازهای بعدی انجام می‌شود.");
+    let success_message = snapshot_warning.map_or_else(
+        || "release فعال شد؛ کانفیگ وب و سرویس‌های Laravel بررسی شدند. Migration دیتابیس خودکار اجرا نمی‌شود.".to_owned(),
+        |warning| format!("release فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
+    );
+    finish(&state, &job_id, "succeeded", &success_message);
     prune_releases(&state, &app_id);
     let _ = fs::remove_file(
         deployment_root()
             .join("uploads")
             .join(format!("{job_id}.zip")),
     );
+}
+
+fn restore_current_pointer(
+    app_root: &FsPath,
+    previous: Option<&str>,
+    job_id: &str,
+) -> Result<(), String> {
+    let current = app_root.join("current");
+    if !fs::symlink_metadata(&current)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("current بعد از فعال‌سازی symlink معتبر نیست.".into());
+    }
+    let Some(previous) = previous else {
+        fs::remove_file(current)
+            .map_err(|error| format!("حذف اشاره‌گر نسخهٔ ناموفق نشد: {error}"))?;
+        return Ok(());
+    };
+    let releases = app_root
+        .join("releases")
+        .canonicalize()
+        .map_err(|error| format!("پوشهٔ releaseها قابل بررسی نیست: {error}"))?;
+    let candidate = app_root
+        .join(previous)
+        .canonicalize()
+        .map_err(|error| format!("release قبلی پیدا نشد: {error}"))?;
+    if !candidate.starts_with(&releases) || !candidate.is_dir() {
+        return Err("release قبلی خارج از محدودهٔ مجاز است.".into());
+    }
+    let temp = app_root.join(format!(".restore-{job_id}"));
+    let _ = fs::remove_file(&temp);
+    std::os::unix::fs::symlink(previous, &temp)
+        .map_err(|error| format!("ساخت symlink بازگردانی ناموفق بود: {error}"))?;
+    fs::rename(&temp, current)
+        .map_err(|error| format!("جابه‌جایی اتمی به release قبلی ناموفق بود: {error}"))
 }
 
 fn prune_releases(state: &AppState, app_id: &str) {
@@ -1812,6 +2059,27 @@ mod tests {
         migrate(&db).unwrap();
         let tables:i64=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'deployment_%'",[],|r|r.get(0)).unwrap();
         assert_eq!(tables, 3);
+    }
+
+    #[test]
+    fn failed_runtime_activation_restores_only_a_release_inside_the_app_root() {
+        let root = std::env::temp_dir().join(format!("arg-deploy-restore-{}", id()));
+        let releases = root.join("releases");
+        fs::create_dir_all(releases.join("old")).unwrap();
+        fs::create_dir_all(releases.join("new")).unwrap();
+        std::os::unix::fs::symlink("releases/new", root.join("current")).unwrap();
+        restore_current_pointer(&root, Some("releases/old"), "job-safe").unwrap();
+        assert_eq!(fs::read_link(root.join("current")).unwrap(), FsPath::new("releases/old"));
+
+        std::os::unix::fs::symlink("releases/new", root.join("current")).unwrap_or_else(|_| {
+            fs::remove_file(root.join("current")).unwrap();
+            std::os::unix::fs::symlink("releases/new", root.join("current")).unwrap();
+        });
+        assert!(restore_current_pointer(&root, Some("../../etc"), "job-unsafe").is_err());
+        assert_eq!(fs::read_link(root.join("current")).unwrap(), FsPath::new("releases/new"));
+        restore_current_pointer(&root, None, "job-first").unwrap();
+        assert!(!root.join("current").exists());
+        let _ = fs::remove_dir_all(root);
     }
     #[test]
     fn zip_extraction_rejects_traversal_and_tree_copy_excludes_secrets() {

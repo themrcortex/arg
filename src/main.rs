@@ -61,6 +61,7 @@ mod docker;
 mod fast_actions;
 mod federation;
 mod files;
+mod laravel;
 mod maintenance;
 mod metrics;
 mod mysql;
@@ -3638,6 +3639,10 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("nginx-site-traffic") => "nginx-site-traffic",
         Some("nginx-site-repository") => "nginx-site-repository",
         Some("nginx-browse") => "nginx-browse",
+        Some("laravel-web") => "laravel-web",
+        Some("laravel-web-status") => "laravel-web-status",
+        Some("laravel-service") => "laravel-service",
+        Some("laravel-refresh-services") => "laravel-refresh-services",
         Some("apt-list") => "apt-list",
         Some("apt-runtime-catalog") => "apt-runtime-catalog",
         Some("apt-preview") => "apt-preview",
@@ -3779,6 +3784,9 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     if action.starts_with("nginx-") {
         return nginx::execute_privileged_request(action, request);
+    }
+    if action.starts_with("laravel-") {
+        return laravel::execute_privileged_request(action, request);
     }
     if action.starts_with("s3-") {
         return s3::execute_privileged_request(action, request);
@@ -4633,6 +4641,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ensure_metric_storage_columns(&db)?;
     apps::migrate(&db)?;
     deploy::migrate(&db)?;
+    laravel::migrate(&db)?;
     s3::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;

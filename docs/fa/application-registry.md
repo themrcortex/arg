@@ -39,7 +39,7 @@
 
 ## وضعیت استقرار
 
-Jobهای پایدار دریافت منبع از کارت محلی اپلیکیشن در دسترس‌اند. وضعیت و تاریخچهٔ مرحله، مدیر، کلید idempotency و سرور مقصد ذخیره می‌شوند؛ لغو، retry، SSE و Rollback release پشتیبانی می‌شود. فایل‌ها در release جدا قرار می‌گیرند و اشاره‌گر `current` اتمی جابه‌جا می‌شود. جزئیات محدودیت‌ها در [استقرار منبع و Jobهای پایدار](./deployment-jobs.md) آمده است. رکورد اپلیکیشن می‌تواند نسخهٔ درخواستی PHP/Node/Python و نسخهٔ جداگانهٔ Node زمان build را از inventory نصب‌شده ذخیره کند؛ راهنما در [مدیریت Runtimeها](./runtime-manager.md) است. این انتخاب هنوز build framework یا فرایند برنامه را اجرا نمی‌کند. Secretهای محیط، HTTP health check، فعال‌سازی Nginx، کنترل منابع، Storage plan و reconciliation غیرفعال‌اند؛ Registry ادعای روشن‌بودن سایت نمی‌کند.
+Jobهای پایدار دریافت منبع از کارت محلی اپلیکیشن در دسترس‌اند. وضعیت و تاریخچهٔ مرحله، مدیر، کلید idempotency و سرور مقصد ذخیره می‌شوند؛ لغو، retry، SSE و Rollback release پشتیبانی می‌شود. فایل‌ها در release جدا قرار می‌گیرند و اشاره‌گر `current` اتمی جابه‌جا می‌شود. جزئیات محدودیت‌ها در [استقرار منبع و Jobهای پایدار](./deployment-jobs.md) آمده است. رکورد اپلیکیشن می‌تواند نسخهٔ درخواستی PHP/Node/Python و نسخهٔ جداگانهٔ Node زمان build را از inventory نصب‌شده ذخیره کند؛ راهنما در [مدیریت Runtimeها](./runtime-manager.md) است. برای قالب Laravel، Runner محدود موجود در کارت اپلیکیشن ساختار release را بررسی می‌کند، فایل محیط خصوصی را تنظیم می‌کند و با تأیید مدیر برخی فرمان‌های Artisan را اجرا می‌کند؛ راهنما در [مدیریت Laravel](./laravel-runner.md) است. سرویس PHP-FPM اختصاصی، Queue systemd، HTTP health check و فعال‌سازی خودکار Nginx در این مرحله ساخته نمی‌شوند؛ Registry ادعای روشن‌بودن سایت نمی‌کند.
 
 ## API و داده
 
@@ -51,5 +51,8 @@ Jobهای پایدار دریافت منبع از کارت محلی اپلیکی
 - `POST /api/apps/{id}/deploy` برای Git/پوشه Job می‌سازد؛ `/deploy/archive` ZIP محدود می‌پذیرد.
 - `GET /api/apps/{id}/deploy/jobs` تاریخچهٔ پایدار را می‌خواند.
 - `GET /api/runtimes` inventory مدیرمحور Runtimeها و ابزارهای نصب‌شده را برمی‌گرداند.
+- `GET /api/apps/{id}/laravel` وضعیت Laravel و نام کلیدهای محیط را بدون مقدارشان می‌خواند.
+- `PUT /api/apps/{id}/laravel/environment` متغیرهای محیط را در فایل خصوصی VPS ذخیره می‌کند؛ `POST` روی همین مسیر فقط APP_KEY خالی را یک‌بار تولید می‌کند.
+- `GET /api/apps/{id}/laravel/operations` تاریخچهٔ عملیات و خروجی پالایش‌شده را می‌خواند؛ `POST` یک Composer install یا Artisan مجاز را در صف می‌گذارد.
 
 جدول‌های `applications` و `application_services` با migration افزایشی و idempotent ایجاد می‌شوند؛ ستون‌های `runtime_version` و `build_runtime_version` نیز به دیتابیس قدیمی اضافه می‌شوند و پیش‌فرض هر دو `system` است. رکوردها `owner_server_uuid` دارند؛ `observed_state` پیش‌فرض `unknown`، `reconcile_policy` برابر `manual`، و بازبینی هم‌زمانی بر پایهٔ `version` است.

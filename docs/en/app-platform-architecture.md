@@ -2,13 +2,13 @@
 
 This document records the Phase 00 baseline and architecture decisions for extending ARG from host administration to application lifecycle management. It describes the current repository, the intended ownership model, and constraints that later phases must preserve. Planned capabilities are not claims about features already shipped.
 
-## Current baseline
+## Repository baseline and additions
 
 ARG is a single installable Rust/Axum service with a React/TypeScript/Vite interface embedded in its release binary. SQLite stores panel accounts, sessions, settings, audit records, metrics, and feature-specific metadata. Host operations that need elevated privileges cross a restricted Unix-socket helper boundary.
 
-Existing modules include `src/federation.rs`, `src/nginx.rs`, `src/docker.rs`, `src/s3/`, `src/files.rs`, `src/metrics.rs`, and `src/maintenance.rs`. Federation can pair ARG instances, read remote status and services, and proxy an authenticated workspace to a selected remote node. Nginx sites, Docker resources, and S3 buckets remain resources of their hosting server. They are not yet represented by a unified Application record. The current route table has no `/api/apps` lifecycle API or persistent application deployment job engine.
+The original Phase 00 inventory covered `src/federation.rs`, `src/nginx.rs`, `src/docker.rs`, `src/s3/`, `src/files.rs`, `src/metrics.rs`, and `src/maintenance.rs`. Federation can pair ARG instances, read remote status and services, and proxy an authenticated workspace to a selected remote node. Nginx sites, Docker resources, and S3 buckets remain resources of their hosting server. Phases 03–06 have since added the Application registry, durable deployment engine, runtime manager, and Laravel runner; the detailed shipped boundary is recorded in the phase status below.
 
-The frontend build is embedded from `frontend/dist`. SQLite schema creation and incremental compatibility work currently live in `src/main.rs`; new application schemas must use additive, idempotent migrations and must preserve existing user, session, node, S3, Nginx, and Docker data. The current Node protocol is `arg-node/2`; protocol compatibility must be explicitly reviewed before changing it.
+The frontend build is embedded from `frontend/dist`. SQLite bootstrap remains in `src/main.rs`; application, deployment, runtime, and Laravel domain code is separated into `src/apps.rs`, `src/deploy.rs`, `src/runtimes.rs`, and `src/laravel.rs`. Future schema changes must use additive, idempotent migrations and preserve existing user, session, node, S3, Nginx, Docker, and application data. The current Node protocol is `arg-node/2`; protocol compatibility must be explicitly reviewed before changing it.
 
 The panel remains useful on one VPS with no paired node and no Docker daemon. Optional dependencies must remain optional. Missing Docker, PHP, Node.js, S3, or network capabilities must produce an accurate unavailable state, not a fabricated healthy state.
 
@@ -57,6 +57,43 @@ Existing pairings migrate additively without changing their node IDs or revoking
 - Registry records do not fetch source, build code, install runtimes, create secrets, or claim a process is running. `observed_state` remains `unknown` until a real adapter is implemented.
 - Additive migration and validation tests pass with `cargo test --locked`; frontend type checking/build and documentation checks pass. A real multi-VPS integration test remains outstanding.
 
+## Phase progress (2026-10-27)
+
+| Phase | Status in `development` | Verification boundary |
+| --- | --- | --- |
+| 00 — Baseline and architecture | Complete | Inventory, ADR, compatibility rules, and test matrix are documented. |
+| 01 — Server identity and workspace switcher | Complete | Automated migration/routing tests exist; a real multi-VPS run remains external validation. |
+| 02 — Federation roles and security | Implemented | Automated scope, endpoint, migration, and authorization checks exist; two-VPS TLS/replay integration remains outstanding. |
+| 03 — Application registry | Complete | CRUD, ownership, collision checks, migrations, and frontend checks are implemented; live multi-VPS aggregation still needs a paired-server run. |
+| 04 — Durable deployment jobs | Complete | Persistent jobs, bounded source acquisition, release activation, cancellation, retry, retention, and rollback are implemented and covered by repository tests. |
+| 05 — Runtime manager | Complete | Runtime inventory, safe APT previews, per-app preferences, and frontend controls are implemented; package installation still needs a disposable Debian/Ubuntu host test. |
+| 06 — Laravel runner | Automated phase gate passed; host integration remains | Web/PHP-FPM, database provisioning, Artisan, optional services, and release refresh/rollback are implemented. Rust tests, release build, frontend type check, and frontend build pass. A disposable-host Nginx/MySQL/systemd integration run remains outstanding. |
+| 07–48 | Planned | Do not expose these as shipped until their phase gates pass. |
+
+“Complete” here means the repository implementation and its automated phase checks are present. It does not claim that external multi-VPS, certificate-authority, APT, MySQL, or systemd integration has been exercised on a production VPS.
+
+### Phase 04 implementation status
+
+- Deployment jobs persist state and step history, use leases/heartbeats for recovery, and expose bounded progress/history rather than relying on a browser request lifetime.
+- Git, ZIP, and approved directory sources have explicit validation and bounds. Releases are staged separately, activated through an atomic `current` pointer, and retained with the active/previous releases.
+- Cancellation, retry, restart recovery, rollback, source pinning, and cleanup are guarded by job/application ownership and audited APIs.
+- Repository tests cover interrupted work and release-pointer behavior. Low-disk/crash behavior on an actual host remains an integration gate.
+
+### Phase 05 implementation status
+
+- Runtime inventory reports installed PHP CLI/FPM, Composer, Node.js and package managers, Nginx, and Docker with host preflight context.
+- APT package operations show a simulation before changes. ARG does not add an unverified third-party repository or run a remote shell installer.
+- Application runtime/build preferences are stored separately and validated against installed versions; missing optional runtimes remain explicit.
+- Tests cover inventory parsing and preference validation. Installing/removing packages needs an isolated Debian/Ubuntu host test before general availability.
+
+### Phase 06 implementation status
+
+- Laravel source inspection, PHP requirement checks, persistent `.env`/`storage`, lockfile-only Composer install, redacted environment handling, and an allowlisted Artisan runner are implemented.
+- Web activation creates a dedicated PHP-FPM pool and managed Nginx site, validates both configurations, and restores prior configuration on failure. MySQL provisioning creates a per-app database user with database-scoped grants and stores its random password only in the app's private environment file.
+- Queue, Scheduler, Horizon, Reverb, and Octane use fixed systemd unit templates. Reverb/Octane use loopback ports; Octane switches the site's Nginx upstream and restores PHP-FPM mode when disabled.
+- Deploy and manual rollback refresh active Laravel web/services and attempt to restore the prior release/runtime on failure. This does not roll back database migrations.
+- The current change set adds PHP-FPM `system` resolution, service/port conflict checks, MySQL account cleanup, and safer release recovery. The workspace passed 105 Rust tests, `cargo build --locked --release`, frontend type checking, and frontend production build. Actual Nginx, MySQL and systemd behavior still requires a disposable host.
+
 ### Vocabulary and ownership
 
 | Term | Meaning |
@@ -100,7 +137,7 @@ Application identity and deployment state are owned by the server where the app 
 
 ## Phase gates and test matrix
 
-Before adding application execution, keep an executable baseline for frontend checks/build, Rust tests/build, shell syntax, docs validation, and version consistency. In the 2026-10-26 workspace, `cargo test --locked`, frontend type checking/build, documentation type checking/build, and bilingual documentation validation were run successfully. These results do not replace a real two-VPS integration test.
+At every phase gate, run an executable baseline for frontend checks/build, Rust tests/build, shell syntax, docs validation, and version consistency. The phase-by-phase results and the remaining host-integration limits are recorded in the status table above. Automated tests do not replace a real two-VPS integration test.
 
 | Environment | Required coverage |
 | --- | --- |
@@ -120,7 +157,7 @@ Every phase must add the tests for the behavior it changes. The final release ma
 - **Persistence:** SQLite bootstrap is in `src/main.rs`; the Application schema migration is isolated in `src/apps.rs` and invoked at startup.
 - **Privileged operations:** ARG service communicates with `arg-privileged.service` over a private Unix socket. No feature may turn this into a generic root command runner.
 - **Federation:** protocol v2 and remote workspace API/terminal proxy are implemented. Phase 02 adds server roles, destination-checked scopes, capability negotiation v1, workspace renewal, credential rotation, and health states; a real two-VPS integration test is still required.
-- **Application platform:** Phase 03 adds an ownership-aware metadata registry. Phase 04 adds a durable single-worker job engine, bounded Git/ZIP/directory acquisition, release staging, atomic `current` pointer changes, progress history, cancellation, retry, and rollback. Framework builds, app runtimes, HTTP health checks, Nginx cutover, and per-app isolation remain future phases.
+- **Application platform:** Phase 03 adds an ownership-aware metadata registry. Phase 04 adds durable jobs, bounded Git/ZIP/directory acquisition, release staging, atomic `current` changes, progress history, cancellation, retry, and rollback. Phase 05 adds runtime inventory and safe APT previews. Phase 06 adds Laravel inspection, private environment storage, allowlisted Artisan actions, dedicated PHP-FPM/Nginx configuration, database provisioning, and optional systemd services. Node, static/SSR, app networking, volumes, cross-server migration, and later plan phases remain future work.
 - **CI:** GitHub Actions workflows exist for CI and documentation publishing. Local required checks are documented in `docs/en/development.md`.
 - **Versioning:** Rust and frontend versions are synchronized; stable and prerelease updates use `scripts/bump-version.sh`, `scripts/bump-development-version.sh`, and `scripts/check-versioning.sh`.
 

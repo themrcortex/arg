@@ -559,7 +559,7 @@ fn mysql_create_user_sql(input: &CreateUserRequest) -> Result<String, String> {
     let db = input.database.replace('`', "``");
     let username = input.username.replace('\'', "''");
     let host = input.host.replace('\'', "''");
-    Ok(format!("CREATE USER IF NOT EXISTS '{username}'@'{host}' IDENTIFIED BY {password}; GRANT {grants} ON `{db}`.* TO '{username}'@'{host}'; FLUSH PRIVILEGES;"))
+    Ok(format!("CREATE USER '{username}'@'{host}' IDENTIFIED BY {password}; GRANT {grants} ON `{db}`.* TO '{username}'@'{host}'; FLUSH PRIVILEGES;"))
 }
 fn read_bounded<R: Read>(
     mut reader: R,
@@ -878,6 +878,73 @@ pub(super) async fn create_database(
     let db = state.lock().unwrap();
     audit(&db, &actor.username, "mysql.database.create", &input.name);
     Ok(Json(json!({"created":true,"message":format!("دیتابیس {} ساخته شد.", input.name)})))
+}
+
+pub(super) async fn provision_laravel_database(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id: &str,
+) -> Result<(String, String, String), (StatusCode, Json<Value>)> {
+    let short = app_id.get(..8).filter(|prefix| prefix.bytes().all(|byte| byte.is_ascii_hexdigit())).ok_or_else(|| error(StatusCode::BAD_REQUEST, "شناسهٔ اپلیکیشن برای ساخت دیتابیس معتبر نیست."))?;
+    let database = format!("argapp_{short}_db").to_ascii_lowercase();
+    let username = format!("argapp_{short}").to_ascii_lowercase();
+    let actor = {
+        let db = state.lock().unwrap();
+        require_mysql_access(&db, headers)?
+    };
+    if !valid_application_database(&database) || !valid_identifier(&username, 32) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام تولیدشدهٔ دیتابیس Laravel معتبر نیست."));
+    }
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    let password = hex::encode(secret);
+    let create_database_sql = format!("CREATE DATABASE `{database}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+    let created = privileged_request_async(json!({"action":"mysql-query","sql":create_database_sql})).await?;
+    if created["ok"] != true {
+        return Err(error(StatusCode::BAD_GATEWAY, created["error"].as_str().unwrap_or("ساخت دیتابیس اپلیکیشن ناموفق بود.")));
+    }
+    let create_user = match privileged_request_async(json!({"action":"mysql-create-user","database":database,"username":username,"host":"127.0.0.1","password":password,"privileges":"full"})).await {
+        Ok(response) => response,
+        Err(problem) => {
+            let detail = problem.1["error"].as_str().unwrap_or("ارتباط با سرویس MySQL قطع شد.");
+            return Err(error(StatusCode::BAD_GATEWAY, &format!("دیتابیس {database} ساخته شد، اما نتیجهٔ ساخت کاربر نامشخص است؛ پیش از تلاش دوباره صفحهٔ MySQL را بررسی کن. {detail}")));
+        }
+    };
+    if create_user["ok"] != true {
+        let _ = privileged_request_async(json!({"action":"mysql-query","sql":format!("DROP DATABASE `{database}`")})).await;
+        return Err(error(StatusCode::BAD_GATEWAY, create_user["error"].as_str().unwrap_or("ساخت حساب محدود Laravel ناموفق بود.")));
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "mysql.laravel.provision", &format!("database={database}; user={username}@127.0.0.1; privileges=database-scoped"));
+    Ok((database, username, password))
+}
+
+pub(super) async fn rollback_laravel_database(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let short = app_id.get(..8).filter(|prefix| prefix.bytes().all(|byte| byte.is_ascii_hexdigit())).ok_or_else(|| error(StatusCode::BAD_REQUEST, "شناسهٔ اپلیکیشن نامعتبر است."))?;
+    let database = format!("argapp_{}_db", short).to_ascii_lowercase();
+    let username = format!("argapp_{}", short).to_ascii_lowercase();
+    let actor = {
+        let db = state.lock().unwrap();
+        require_mysql_access(&db, headers)?
+    };
+    if !valid_application_database(&database) || !valid_identifier(&username, 32) {
+        return Err(error(StatusCode::BAD_REQUEST, "نام تولیدشدهٔ دیتابیس Laravel معتبر نیست."));
+    }
+    let user = format!("DROP USER IF EXISTS '{username}'@'127.0.0.1'");
+    let database_sql = format!("DROP DATABASE IF EXISTS `{database}`");
+    for sql in [user, database_sql] {
+        let result = privileged_request_async(json!({"action":"mysql-query","sql":sql})).await?;
+        if result["ok"] != true {
+            return Err(error(StatusCode::BAD_GATEWAY, result["error"].as_str().unwrap_or("Rollback دیتابیس Laravel ناموفق بود.")));
+        }
+    }
+    let db = state.lock().unwrap();
+    audit(&db, &actor.username, "mysql.laravel.rollback", &format!("database={database}; user={username}@127.0.0.1"));
+    Ok(())
 }
 
 pub(super) async fn delete_database(
@@ -1324,7 +1391,21 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
             }
             match run_mysql_with_config(&sql, None, true, MANAGER_CONFIG) {
                 Ok(_) => json!({"ok":true}),
-                Err(error) => json!({"ok":false,"error":error}),
+                Err(error) => {
+                    // MySQL DDL is not transactional: CREATE USER can succeed before GRANT fails.
+                    // Remove only the exact validated account we just attempted to create.
+                    let cleanup = format!(
+                        "DROP USER IF EXISTS '{}'@'{}'; FLUSH PRIVILEGES;",
+                        parsed.username.replace('\'', "''"),
+                        parsed.host.replace('\'', "''")
+                    );
+                    let cleanup_result = run_mysql_with_config(&cleanup, None, true, MANAGER_CONFIG);
+                    if cleanup_result.is_err() {
+                        json!({"ok":false,"error":format!("{error}; پاک‌سازی کاربر ناقص هم ناموفق بود؛ حساب {}@{} را بررسی کن.", parsed.username, parsed.host)})
+                    } else {
+                        json!({"ok":false,"error":error})
+                    }
+                }
             }
         }
         _ => json!({"ok":false,"error":"Unsupported MySQL operation"}),

@@ -39,7 +39,7 @@ Edits use an optimistic version. If another administrator has changed the record
 
 ## Deployment status
 
-Durable source jobs are now available from a local application card. They record state, steps, actor, idempotency key, and server target; they support cancellation, retry, SSE, and release rollback. They stage files and atomically move a `current` pointer. See [Source deployments & durable jobs](./deployment-jobs.md) for limits and operations. Application records can also save a requested PHP/Node/Python runtime version and a separate Node build version from the installed inventory; see [Runtime manager](./runtime-manager.md). These preferences do not execute a framework build or start a process. Environment secrets, health-check HTTP, Nginx activation, resource controls, storage plans, and automatic reconciliation remain disabled; the registry does not claim a site is running.
+Durable source jobs are now available from a local application card. They record state, steps, actor, idempotency key, and server target; they support cancellation, retry, SSE, and release rollback. They stage files and atomically move a `current` pointer. See [Source deployments & durable jobs](./deployment-jobs.md) for limits and operations. Application records can also save a requested PHP/Node/Python runtime version and a separate Node build version from the installed inventory; see [Runtime manager](./runtime-manager.md). Laravel apps have a limited runner in their card: it checks the active release, stores a private environment file, and runs selected Artisan commands after administrator confirmation; see [Laravel management](./laravel-runner.md). A dedicated PHP-FPM pool, Queue systemd service, HTTP health check, and automatic Nginx activation are not created in this phase; the registry does not claim a site is running.
 
 ## API and schema
 
@@ -51,5 +51,8 @@ Durable source jobs are now available from a local application card. They record
 - `POST /api/apps/{id}/deploy` enqueues Git/directory source; `/deploy/archive` accepts a bounded ZIP.
 - `GET /api/apps/{id}/deploy/jobs` reads persisted job history.
 - `GET /api/runtimes` returns the administrator-only installed runtime and tool inventory.
+- `GET /api/apps/{id}/laravel` reads Laravel readiness and environment key names without values.
+- `PUT /api/apps/{id}/laravel/environment` stores environment variables in a private VPS file; `POST` on the same path generates an empty APP_KEY once.
+- `GET /api/apps/{id}/laravel/operations` reads operation history and sanitized output; `POST` queues a Composer install or allowlisted Artisan action.
 
 The additive, idempotent migration creates `applications` and `application_services`, and adds `runtime_version` and `build_runtime_version` to older application tables. Both version fields default to `system`. Records are scoped by `owner_server_uuid`; `observed_state` defaults to `unknown`, `reconcile_policy` to `manual`, and concurrent edits are guarded by `version`.

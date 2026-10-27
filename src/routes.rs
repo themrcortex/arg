@@ -172,6 +172,27 @@ pub(super) fn router(state: AppState) -> Router {
             get(apps::get).put(apps::update).delete(apps::delete),
         )
         .route("/api/apps/{id}/restore", post(apps::restore))
+        .route("/api/apps/{id}/laravel", get(laravel::inspect))
+        .route(
+            "/api/apps/{id}/laravel/operations",
+            get(laravel::operations).post(laravel::start_operation),
+        )
+        .route(
+            "/api/apps/{id}/laravel/web",
+            get(laravel::web_status).post(laravel::configure_web),
+        )
+        .route(
+            "/api/apps/{id}/laravel/services",
+            post(laravel::configure_service),
+        )
+        .route(
+            "/api/apps/{id}/laravel/database",
+            post(laravel::provision_database),
+        )
+        .route(
+            "/api/apps/{id}/laravel/environment",
+            put(laravel::save_environment).post(laravel::generate_key),
+        )
         .route("/api/apps/{id}/deploy", post(deploy::create))
         .route(
             "/api/apps/{id}/deploy/archive",

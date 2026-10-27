@@ -1,5 +1,18 @@
 # ARG Change Log
 
+## v0.6.9-dev.2 — 2026-10-27
+
+### Development
+- Development prerelease based on the next patch after main.
+
+### Phase 06 — Laravel runner
+- Configure a Laravel site's Nginx and PHP-FPM pool through the application workspace, with config validation and restoration on failed activation.
+- Manage Queue, Scheduler, Horizon, Reverb, and Octane using fixed, app-scoped systemd units; keep Reverb and Octane on loopback and switch the Nginx upstream safely for Octane.
+- Provision a database and least-privilege MySQL account for an app; keep the generated password only in its private `.env` file and remove partially created accounts when provisioning fails.
+- Refresh active web and background services after deployment or rollback, and restore the previous release/runtime when activation fails.
+- Resolve the `system` PHP-FPM choice from installed versions, check service ports for conflicts, and keep database/file configuration aligned during rollback recovery.
+- Document the implemented scope and remaining VPS-only integration checks in Persian and English.
+
 ## v0.6.9-dev.1 — 2026-10-26
 
 ### Development
