@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.6.9-dev.3 — 2026-10-27
+
+- Add a managed Node.js runner with isolated dependency installation/builds, per-app systemd services, private runtime environment, loopback health checks, and guarded Nginx proxying.
+- Add bilingual Node runner documentation and update application/deployment phase status to match implemented behavior and remaining VPS integration checks.
+- Pass the phase gate with 115 Rust tests, Rust release build, frontend production build, and documentation production build; disposable Debian/Ubuntu systemd/Nginx integration remains to be tested.
+
 ## v0.6.9-dev.2 — 2026-10-27
 
 ### Development
@@ -12,12 +18,6 @@
 - Refresh active web and background services after deployment or rollback, and restore the previous release/runtime when activation fails.
 - Resolve the `system` PHP-FPM choice from installed versions, check service ports for conflicts, and keep database/file configuration aligned during rollback recovery.
 - Document the implemented scope and remaining VPS-only integration checks in Persian and English.
-
-### Phase 07 — Node.js runner
-- Inspect Node manifests and supported npm/pnpm/Yarn Classic lockfiles; run reproducible dependency installation and optional build in bounded transient systemd sandboxes.
-- Add per-application DynamicUser services with private runtime environment, read-only releases, loopback-only binding, resource limits, restart policy, logs, and service health verification.
-- Generate a separate ARG-managed Nginx reverse proxy only after domain conflict checks; preserve unrelated/manual sites and keep TLS issuance explicit.
-- Reconcile Node deploy and rollback with service state, restoring the previous release when activation or health verification fails; add bilingual operator documentation and test the automated phase gate.
 
 ## v0.6.9-dev.1 — 2026-10-26
 
