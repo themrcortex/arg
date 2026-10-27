@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "arg"
-version = "0.6.9-dev.7"
+version = "0.6.9-dev.8"
 dependencies = [
  "argon2",
  "axum",

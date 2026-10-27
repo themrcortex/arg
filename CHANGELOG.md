@@ -1,5 +1,21 @@
 # ARG Change Log
 
+## v0.6.9-dev.8 — 2026-10-27
+
+### Added
+- Add an audited application-to-Nginx ownership link that verifies the app domain against the site's `server_name` without changing Nginx configuration.
+- Add bounded, read-only PostgreSQL service/version/readiness inventory; SQL and database mutations remain unavailable.
+- Add local, checksummed active-release source archives with file/count/storage caps, sensitive-path exclusions, explicit deletion, and download. These archives exclude database/runtime data, are not secret-scanned, and are not restorable backups.
+- Add node tags and persisted canary rollout previews; previews do not run builds or updates on remote nodes.
+- Add private-network policy drafts with explicit `enforced=false`; no WireGuard, route, or firewall changes are made.
+
+### Changed
+- Add per-app Nginx link, source-archive, PostgreSQL inventory, fleet-preview, and network-draft controls with their limitations shown in the UI.
+- Update the bilingual Phase 28–32 status and record remaining host/fleet acceptance work.
+
+### Validation
+- 161 Rust tests, `cargo check --locked`, frontend TypeScript and production build, bilingual documentation check and production build, and `git diff --check` passed. The optimized Rust Release build passed after the version bump. Live VPS/Nginx/PostgreSQL/WireGuard tests remain pending.
+
 ## v0.6.9-dev.7 — 2026-10-27
 
 ### Development
