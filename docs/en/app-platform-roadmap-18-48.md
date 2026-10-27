@@ -28,6 +28,48 @@ These are bounded repository changes, not a claim that Phases 18–22 have passe
 
 **Phase 48 release gate:** after this batch, inventory every Phase 18–47 acceptance criterion against code and tests, rerun full repository checks, check migrations/secret handling/auth boundaries, confirm version and changelog alignment, and publish only a development prerelease if external gates remain. Stable release and main-branch promotion are not implied by a passing local build.
 
+### Phase 48 audit result — 2026-10-27
+
+**Gate: BLOCKED for stable release.** Local repository checks pass at `0.6.9-dev.11`, but the roadmap’s feature-level acceptance is not complete. This audit records each phase as `experimental` when only a vertical slice exists, `not planned (optional)` when an optional phase was deliberately deferred, and `blocked` when a required acceptance gate is still open. No phase is labeled fully implemented/tested unless its acceptance criteria have evidence.
+
+| Phase | Status | Evidence in current repository / remaining gate |
+| --- | --- | --- |
+| 18 | blocked | No reproducible old-install upgrade/restore drill, multi-host partition/soak matrix, or independent threat review. |
+| 19 | experimental | S3 and DNS secret stores exist; no provider-neutral connection hub/reuse lifecycle across all services. |
+| 20 | experimental | Workspace/project/environment records and selectors exist; runtime/config/secret isolation and production promotion are incomplete. |
+| 21 | experimental | App S3 binding metadata exists; generic service bindings and enforced provider ACLs do not. |
+| 22 | experimental | App template drafts exist; the full one-click catalog and install/rollback acceptance are absent. |
+| 23 | experimental | Build analysis and command-free plans exist; complete isolated buildpacks and deployment matrix are pending. |
+| 24 | experimental | Read-only active-release source browsing exists; private Git/registry workflows and credential-bound source checkout are incomplete. |
+| 25 | experimental | Secret-free metadata snapshots exist; preview lifecycle, diff/restore and promotion are incomplete. |
+| 26 | experimental | Existing Docker container status can be linked; full Compose lifecycle and ownership handoff are incomplete. |
+| 27 | experimental | Cloudflare DNS CRUD is wired; other providers, live-provider acceptance and DNS-01 are absent. |
+| 28 | experimental | Domain-verified app/Nginx links and current site/TLS controls exist; complete performance and multi-site acceptance is open. |
+| 29 | experimental | PostgreSQL inventory is read-only; managed database provisioning/backup/restore is absent. |
+| 30 | experimental | Bounded source archives and ARG database backups exist; a unified backup catalog, retention and restore drills are incomplete. |
+| 31 | experimental | Node tags and persisted rollout previews exist; remote canary update execution and offline-node recovery are absent. |
+| 32 | experimental | Private-network policy drafts exist; no tunnel, route, or firewall enforcement is implemented. |
+| 33 | experimental | Bounded Nginx traffic snapshots and app resource alert events exist; full APM, network telemetry and capacity forecasts do not. |
+| 34 | experimental | In-app alert events exist; delivery providers, incident lifecycle and public status page are absent. |
+| 35 | experimental | Admin-only role capability is explicit; granular RBAC, passkeys and 2FA are not implemented. |
+| 36 | experimental | Selected scanner executable presence is reported; WAF enforcement, CVE/SBOM scan and remediation are absent. |
+| 37 | experimental | Trust keys and declared-digest manifest signatures are checked; package verification/install and extension sandbox/marketplace are absent. |
+| 38 | experimental | Typed app workflow drafts are validated; execution, triggers, retries, approvals and rollback are absent. |
+| 39 | not planned (optional) | No cloud account/credential or disposable provider environment was available; no cloud inventory, costs or provisioning are claimed. |
+| 40 | not planned (optional) | No isolated mail host was available; no MTA/IMAP installation or network exposure was attempted. |
+| 41 | experimental | Python/WordPress application-record templates exist; environment setup, package install, service creation and ownership checks are absent. |
+| 42 | experimental | Per-user ordering/visibility presets exist; themes, branding, widget SDK and hidden-tab poll suspension are open. |
+| 43 | experimental | Shell-only PWA caching and offline notice are tested; no stale read-only metrics, push delivery, or real mobile-browser acceptance. |
+| 44 | blocked | No teams, membership roles, tenant isolation, invitation flow, or enforced quotas. The admin-only model remains. |
+| 45 | experimental | Hashed expiring read keys, fixed scopes, rate limit and OpenAPI exist; no write scopes, webhooks or tenant-bound keys. |
+| 46 | experimental | Read-only Doctor exists; installer profiles, full compatibility probes, staged health preflight and rollback integration remain open. |
+| 47 | not planned (optional) | No AI provider or isolated prompt-injection test environment; no log/metric content is sent externally. |
+| 48 | blocked | Local tests and version alignment pass; multi-host/old-version restore drills, independent security review, artifact signing and selected incomplete phase gates remain. |
+
+**Observed checks:** 178 Rust tests, two Service Worker policy tests, Rust check, frontend type-check/build, bilingual documentation check/build, optimized Release build, migration/route/API-key tests, and version gate passed. No live VPS, mobile browser, cloud provider, mail host, or multi-tenant E2E environment was available. `development` was pushed at `467718b`; `main` remains `v0.6.8` and was not promoted.
+
+**Decision:** keep the result as a development prerelease. Do not describe Phases 18–48 as complete and do not create a stable release until the blocked gates are resolved or the release target is explicitly narrowed.
+
 ## Phase 18 — Hardening checkpoint
 
 **Goal:** establish a reliable release-candidate baseline for what is implemented so far. Run the single-host, two-host, and three-host-with-one-offline matrices; review remote routing, terminals, code/file access, secrets, hooks, uploads, and build execution; stress app/job/log workloads and SQLite; verify migrations, upgrades, backups, restores, RTL/mobile/accessibility, and compatibility. Keep cross-server networking or migration behind a feature gate unless live tests pass.
