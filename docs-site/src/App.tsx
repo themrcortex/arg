@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Server, Settings2, Shield, Sun, ChartNoAxesCombined, Code2, X } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Settings2, Shield, Sun, ChartNoAxesCombined, Code2, X } from 'lucide-react'
 import { groups, navigation, pages, readingOrder, pageNeighbors, pageTrail, type DocPage, type Locale } from './catalog'
 import { Badge } from './components/ui/badge'
 import { ARG_VERSION } from './version'
@@ -268,7 +268,15 @@ export default function App() {
     setExpandedGroups((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next })
   }
 
+  function focusDocsSearch() {
+    if (window.matchMedia('(max-width: 760px)').matches) {
+      setMobileNav(true)
+      requestAnimationFrame(() => mobileSearchRef.current?.focus())
+    } else searchRef.current?.focus()
+  }
+
   function renderSidebar(mobile = false) {
+    const idPrefix = mobile ? 'mobile-' : 'desktop-'
     const activeTrail = pageTrail(page.id)
     const activeCategory = activeTrail[0]?.id
     const activeSection = activeTrail[1]?.id
@@ -287,17 +295,19 @@ export default function App() {
           const categoryPageCount = category.children.reduce((count, section) => count + section.pages.length, 0)
           const iconMap = { gettingStarted: BookOpen, dashboard: ChartNoAxesCombined, network: Network, docker: Container, data: Database, applications: Boxes, system: Settings2, security: Shield, reference: Code2 }
           const CategoryIcon = iconMap[category.id as keyof typeof iconMap] || BookOpen
+          const categoryContentId = `${idPrefix}category-${category.id}`
           return <section key={category.id} className="nav-group">
-            <button className={`nav-category ${activeCategory === category.id ? 'is-current' : ''}`} aria-expanded={categoryOpen} onClick={() => toggleExpanded(category.id)}><span className="nav-category-label"><span className="nav-category-icon"><CategoryIcon size={16}/></span><span className="nav-category-title">{category.title[locale]}</span></span><span className="nav-category-meta"><small>{categoryPageCount}</small><ChevronDown size={14}/></span></button>
-            {categoryOpen && <div className="nav-category-children">{visibleSections.map((section) => {
+            <button className={`nav-category ${activeCategory === category.id ? 'is-current' : ''}`} aria-expanded={categoryOpen} aria-controls={categoryContentId} onClick={() => toggleExpanded(category.id)}><span className="nav-category-label"><span className="nav-category-icon"><CategoryIcon size={16}/></span><span className="nav-category-title">{category.title[locale]}</span></span><span className="nav-category-meta"><small>{categoryPageCount}</small><ChevronDown size={14}/></span></button>
+            <div className="nav-category-children" id={categoryContentId} hidden={!categoryOpen}>{visibleSections.map((section) => {
               const key = `${category.id}:${section.id}`
               const open = expandedGroups.has(key)
               const sectionIsCurrent = activeCategory === category.id && activeSection === section.id
+              const sectionContentId = `${idPrefix}section-${category.id}-${section.id}`
               return <details key={key} className={`nav-subgroup ${sectionIsCurrent ? 'is-current' : ''}`} open={open}>
-                <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open}><span className="nav-subgroup-title">{section.title[locale]}</span><span className="nav-subgroup-meta"><small>{section.pages.length}</small><ChevronDown size={13}/></span></summary>
-                <div className="nav-group-pages">{section.pages.map((item) => <button key={item.id} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={() => navigate(item)} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</button>)}</div>
+                <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open} aria-controls={sectionContentId}><span className="nav-subgroup-title">{section.title[locale]}</span><span className="nav-subgroup-meta"><small>{section.pages.length}</small><ChevronDown size={13}/></span></summary>
+                <div className="nav-group-pages" id={sectionContentId}>{section.pages.map((item) => <a key={item.id} href={`?page=${item.id}`} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(item) }} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</a>)}</div>
               </details>
-            })}</div>}
+            })}</div>
           </section>
         })}
         {!visiblePages.length && <p className="empty-search">{texts.empty}</p>}
@@ -325,12 +335,14 @@ export default function App() {
     }).filter((item) => item.score > 0 && pages.some((doc) => doc.id === item.id)).sort((a, b) => b.score - a.score).slice(0, 8)
   }, [deferredQuery, searchIndex, locale])
 
+  const homeSteps = ['install', 'guide-settings-04', 'dashboard'].map((id) => pages.find((item) => item.id === id)).filter((item): item is DocPage => !!item)
+
 
 
   return <div className="docs-app" dir={isFa ? 'rtl' : 'ltr'}>
     <a className="skip-link" href="#article">{isFa ? 'رفتن به محتوای اصلی' : 'Skip to content'}</a>
     <header className="topbar" id="top">
-      <div className="topbar-brand"><button className="mobile-menu" onClick={() => setMobileNav(true)} aria-label={texts.menu}><Menu size={19}/></button><a href="?page=overview" onClick={(event) => { event.preventDefault(); navigate(pages[0]) }} className="brand-lockup"><span className="brand-mark">A</span><span><strong className="brand-name">ARG</strong><small>{texts.title}</small></span></a><span className="top-divider"/><Badge>v{ARG_VERSION}</Badge></div>
+      <div className="topbar-brand"><button className="mobile-menu" onClick={() => setMobileNav(true)} aria-label={texts.menu} aria-haspopup="dialog" aria-expanded={mobileNav}><Menu size={19}/></button><a href="?page=overview" onClick={(event) => { event.preventDefault(); navigate(pages[0]) }} className="brand-lockup"><span className="brand-mark">A</span><span><strong className="brand-name">ARG</strong><small>{texts.title}</small></span></a><span className="top-divider"/><Badge>v{ARG_VERSION}</Badge></div>
       <div className="topbar-actions"><label className="top-search"><Search size={16}/><input ref={searchRef} aria-label={texts.search} placeholder={texts.search} value={query} onChange={(event) => setQuery(event.target.value)}/><kbd>/</kbd></label><Button variant="outline" size="sm" onClick={() => setLanguage(isFa ? 'en' : 'fa')} aria-label="Change language"><Globe2 size={15}/>{texts.language}</Button><Button variant="ghost" size="icon" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}>{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</Button><a className="icon-link" href="https://github.com/themrcortex/arg" target="_blank" rel="noreferrer" aria-label={texts.github}><Github size={17}/></a></div>
     </header>
     {query.trim().length >= 2 && !mobileNav && <div className="search-results" role="region" aria-label={isFa ? 'نتایج جست‌وجو' : 'Search results'}>{!searchIndex ? <p>{isFa ? 'در حال آماده‌سازی جست‌وجو…' : 'Preparing search…'}</p> : rankedSearchResults.length ? rankedSearchResults.map((result) => {
@@ -342,8 +354,20 @@ export default function App() {
       <aside className="desktop-sidebar">{renderSidebar()}</aside>
       <main id="article" className={`article-column ${pageLoading ? 'is-transitioning' : ''}`} key={`${locale}-${page.id}`}>
         <div className="breadcrumbs"><span>{trail[0]?.title[locale] || groupsList[page.group]}</span><ChevronLeft size={13}/><span>{trail[1]?.title[locale] || page.title[locale]}</span><ChevronLeft size={13}/><span>{page.title[locale]}</span></div>
-        {page.id === 'overview' && <section className="hero-card"><div className="hero-grid"/><div className="hero-copy"><Badge><span className="status-dot"/>{isFa ? 'راهنمای رسمی' : 'OFFICIAL DOCUMENTATION'}</Badge><h1>{isFa ? 'سرور را روشن ببین.' : 'See your server clearly.'}<br/><span>{isFa ? 'با ARG.' : 'With ARG.'}</span></h1><p>{isFa ? 'راهنمای عملی و دقیق برای نصب، ایمن‌سازی و مدیریت سرور لینوکسی با ARG.' : 'A practical, detailed guide to installing, securing, and operating a Linux server with ARG.'}</p><div className="hero-actions"><Button onClick={() => navigate(pages[1])}>{texts.start}<ArrowDown size={15}/></Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noreferrer" className="hero-github"><Github size={15}/>{texts.github}<ExternalLink size={12}/></a></div></div><div className="hero-art" aria-hidden="true"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="server-glyph"><Server size={54} strokeWidth={1.2}/><i/><i/></div><div className="hero-art-label">YOUR SERVER · CLEARLY</div></div><div className="hero-meta"><span><code>Rust</code><small>{isFa ? 'Backend' : 'Backend'}</small></span><span><code>React</code><small>Web panel</small></span><span><code>systemd</code><small>{isFa ? 'سرویس' : 'Service'}</small></span></div></section>}
-        <div className="article-heading"><div><p className="eyebrow"><span className="eyebrow-dot"/>{trail[0]?.title[locale] || groupsList[page.group]}</p><h1>{page.title[locale]}</h1><p className="article-summary">{page.summary[locale]}</p></div><span className="article-index">{String(index + 1).padStart(2, '0')} <i>/</i> {String(pages.length).padStart(2, '0')}</span></div>
+        {page.id === 'overview' && <section className="hero-card" aria-labelledby="home-title">
+          <div className="hero-copy">
+            <p className="hero-kicker"><span className="hero-kicker-mark"><BookOpen size={14}/></span>{isFa ? 'مستندات رسمی ARG' : 'ARG DOCUMENTATION'}</p>
+            <h1 id="home-title">{isFa ? <>مدیریت VPS،<br/><span>ساده و روشن.</span></> : <>A clearer way<br/><span>to manage your VPS.</span></>}</h1>
+            <p>{isFa ? 'راهنمای دوزبانه برای نصب، ایمن‌سازی و مدیریت VPS لینوکسی با ARG؛ بر پایهٔ قابلیت‌های موجود در همین نسخه.' : 'A bilingual guide to installing, securing, and managing a Linux VPS with ARG, grounded in the features available in this release.'}</p>
+            <div className="hero-actions"><Button onClick={() => { const install = pages.find((item) => item.id === 'install'); if (install) navigate(install) }}>{texts.start}<ArrowDown size={15}/></Button><Button variant="outline" onClick={focusDocsSearch}><Search size={15}/>{isFa ? 'جست‌وجو در راهنماها' : 'Search the docs'}<kbd>/</kbd></Button></div>
+            <div className="hero-facts"><span><code>Rust</code>{isFa ? 'هستهٔ سرور' : 'server backend'}</span><span><code>React</code>{isFa ? 'پنل وب' : 'web panel'}</span><span><code>systemd</code>{isFa ? 'مدیریت سرویس' : 'service manager'}</span></div>
+          </div>
+          <div className="hero-start"><p className="hero-start-heading">{isFa ? 'از اینجا شروع کنید' : 'A good place to start'}<span>{isFa ? 'راهنماهای پیشنهادی' : 'Recommended guides'}</span></p>
+            <div className="hero-start-list">{homeSteps.map((item, step) => <a key={item.id} href={`?page=${item.id}`} className="hero-start-link" onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(item) }}><span className="hero-start-number">{String(step + 1).padStart(2, '0')}</span><span className="hero-start-copy"><strong>{item.title[locale]}</strong><small>{item.summary[locale]}</small></span>{isFa ? <ArrowLeft className="hero-start-arrow" size={16}/> : <ArrowRight className="hero-start-arrow" size={16}/>}</a>)}</div>
+            <a className="hero-github" href="https://github.com/themrcortex/arg" target="_blank" rel="noreferrer"><Github size={15}/>{texts.github}<ExternalLink size={12}/></a>
+          </div>
+        </section>}
+        {page.id !== 'overview' && <div className="article-heading"><div><p className="eyebrow"><span className="eyebrow-dot"/>{trail[0]?.title[locale] || groupsList[page.group]}</p><h1>{page.title[locale]}</h1><p className="article-summary">{page.summary[locale]}</p></div><span className="article-index">{String(index + 1).padStart(2, '0')} <i>/</i> {String(pages.length).padStart(2, '0')}</span></div>}
         {article.toc.length > 0 && <details className="mobile-toc"><summary>{texts.toc}<ChevronLeft size={14}/></summary><nav>{article.toc.map((item) => <a key={item.id} className={item.depth === 3 ? 'toc-sub' : ''} href={`#${item.id}`} onClick={() => setMobileNav(false)}>{item.text}</a>)}</nav></details>}
         {articleLoading ? <section className="article-skeleton" role="status" aria-label={texts.loadingPage}><span className="skeleton-line w-4/5"/><span className="skeleton-line w-full"/><span className="skeleton-line w-11/12"/><span className="skeleton-line w-3/5"/><div className="skeleton-block"/><span className="skeleton-line w-full"/><span className="skeleton-line w-5/6"/></section> : articleError ? <section className="article-load-error" role="alert"><p>{texts.articleError}</p><Button variant="outline" size="sm" onClick={() => setArticleReload((value) => value + 1)}>{texts.retry}</Button></section> : <div className="article-content" dangerouslySetInnerHTML={{ __html: article.html }} onClick={async (event) => {
           const target = event.target as HTMLElement
@@ -374,7 +398,7 @@ export default function App() {
     </div>
     {mobileNav && <div className="mobile-overlay" role="presentation" onPointerDown={(event) => { if (event.target === event.currentTarget) setMobileNav(false) }}><aside className="mobile-sidebar" role="dialog" aria-modal="true" aria-label={texts.menu} onKeyDown={(event) => {
       if (event.key !== 'Tab') return
-      const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), a[href], summary'))
+      const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), a[href], summary')).filter((element) => element.getClientRects().length > 0)
       if (!focusable.length) return
       const first = focusable[0], last = focusable[focusable.length - 1]
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
