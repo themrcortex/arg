@@ -30,7 +30,7 @@ These are bounded repository changes, not a claim that Phases 18–22 have passe
 
 ### Phase 48 audit result — 2026-10-27
 
-**Gate: BLOCKED for stable release.** Local repository checks pass at `0.6.9-dev.11`, but the roadmap’s feature-level acceptance is not complete. This audit records each phase as `experimental` when only a vertical slice exists, `not planned (optional)` when an optional phase was deliberately deferred, and `blocked` when a required acceptance gate is still open. No phase is labeled fully implemented/tested unless its acceptance criteria have evidence.
+**Gate: BLOCKED for stable release.** Local repository checks pass at `0.6.9-dev.12`, but the roadmap’s feature-level acceptance is not complete. This audit records each phase as `experimental` when only a vertical slice exists, `not planned (optional)` when an optional phase was deliberately deferred, and `blocked` when a required acceptance gate is still open. No phase is labeled fully implemented/tested unless its acceptance criteria have evidence.
 
 | Phase | Status | Evidence in current repository / remaining gate |
 | --- | --- | --- |
@@ -66,7 +66,7 @@ These are bounded repository changes, not a claim that Phases 18–22 have passe
 | 47 | not planned (optional) | No AI provider or isolated prompt-injection test environment; no log/metric content is sent externally. |
 | 48 | blocked | Local tests and version alignment pass; multi-host/old-version restore drills, independent security review, artifact signing and selected incomplete phase gates remain. |
 
-**Observed checks:** 178 Rust tests, two Service Worker policy tests, Rust check, frontend type-check/build, bilingual documentation check/build, optimized Release build, migration/route/API-key tests, and version gate passed. No live VPS, mobile browser, cloud provider, mail host, or multi-tenant E2E environment was available. `development` was pushed at `467718b`; `main` remains `v0.6.8` and was not promoted.
+**Observed checks:** the previous prerelease passed 178 Rust tests, two Service Worker policy tests, Rust check, frontend type-check/build, bilingual documentation check/build, optimized Release build, migration/route/API-key tests, and version gate. The Phase 48 audit documentation passed its type-check and production build. Final `0.6.9-dev.12` checks are recorded in the matching Change Log entry. No live VPS, mobile browser, cloud provider, mail host, or multi-tenant E2E environment was available. `main` remains `v0.6.8` and was not promoted.
 
 **Decision:** keep the result as a development prerelease. Do not describe Phases 18–48 as complete and do not create a stable release until the blocked gates are resolved or the release target is explicitly narrowed.
 

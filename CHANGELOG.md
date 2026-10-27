@@ -1,5 +1,16 @@
 # ARG Change Log
 
+## v0.6.9-dev.12 — 2026-10-27
+
+### Changed
+- Complete the Phase 48 audit of Phases 18–48 in Persian and English, recording implementation evidence and open acceptance gates for every phase.
+- Keep the release gate blocked: tenant isolation, multi-host/restore drills, independent security review, artifact signing, and several live provider/host acceptance tests remain incomplete. No stable release or `main` promotion is claimed.
+
+### Validation
+- 178 Rust tests, `cargo check --locked`, and `cargo build --locked --release` passed.
+- Frontend type-check/build and both offline Service Worker policy tests passed; documentation type-check/build passed in Persian and English.
+- `git diff --check` passed. Live multi-tenant, mobile-browser, provider, mail-host, and VPS upgrade/restore acceptance was not available and remains open.
+
 ## v0.6.9-dev.11 — 2026-10-27
 
 ### Added
