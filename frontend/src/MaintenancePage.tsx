@@ -10,6 +10,7 @@ import { Skeleton } from './components/ui/skeleton'
 import { HostSecurityPanel } from './HostSecurityPanel'
 import { ExtensionSecurityPanel } from './ExtensionSecurityPanel'
 import { ApiKeysPanel, DoctorPanel } from './PlatformReadinessPanels'
+import { UnifiedStepper } from './components/ui/stepper'
 
 type Common = { Heading: (props: { title: string; description: string; action?: ReactNode }) => ReactNode; notify: (message: string) => void }
 type Backup = { id: string; size_bytes: number; modified_at?: number | null }
@@ -32,6 +33,7 @@ export function MaintenancePage({ Heading, notify }: Common) {
   const [actionPhrase, setActionPhrase] = useState('')
   const [restoreTarget, setRestoreTarget] = useState<Backup | null>(null)
   const [restorePhrase, setRestorePhrase] = useState('')
+  const [restoreStep, setRestoreStep] = useState(0)
   const backupUploadRef = useRef<HTMLInputElement>(null)
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -117,11 +119,12 @@ export function MaintenancePage({ Heading, notify }: Common) {
 
   function restoreBackup(backup: Backup) {
     setRestorePhrase('')
+    setRestoreStep(0)
     setRestoreTarget(backup)
   }
 
   async function confirmRestore() {
-    if (!restoreTarget) return
+    if (!restoreTarget || restoreStep !== 1) return
     if (restorePhrase.trim() !== 'RESTORE ARG') { notify('عبارت تأیید مطابقت ندارد.'); return }
     const id = restoreTarget.id
     setBusy(`restore:${id}`)
@@ -175,10 +178,17 @@ export function MaintenancePage({ Heading, notify }: Common) {
     </CardContent></Card>
 
     <Card className="mt-5 rounded-2xl border-rose-400/20 bg-rose-400/[.025]"><CardHeader><CardTitle className="flex items-center gap-2 text-base text-rose-100"><Trash2 size={17}/>حذف کامل ARG</CardTitle><CardDescription>سرویس، فایل‌های نصب، تنظیمات و دیتابیس ARG پاک می‌شوند. این کار روی سایت‌ها و سرویس‌های دیگر سرور اثری ندارد.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">پیش از حذف، بکاپ بساز و آن را دانلود کن؛ بکاپ‌های محلی هم با حذف کامل پاک می‌شوند.</p><Button variant="destructive" onClick={() => void action('uninstall')} disabled={!!busy}><Trash2 size={15}/>{busy === 'uninstall' ? 'در حال حذف…' : 'حذف کامل ARG'}</Button></CardContent></Card>
-    <Dialog open={!!restoreTarget} onOpenChange={(open) => { if (!open && !busy) { setRestoreTarget(null); setRestorePhrase('') } }}>
-      <DialogContent>
+    <Dialog open={!!restoreTarget} onOpenChange={(open) => { if (!open && !busy) { setRestoreTarget(null); setRestorePhrase(''); setRestoreStep(0) } }}>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader><DialogTitle className="flex items-center gap-2"><AlertTriangle size={18} className="text-amber-300"/>بازیابی بکاپ ARG</DialogTitle><DialogDescription>دیتابیس فعلی با نسخهٔ بکاپ جایگزین می‌شود. ARG پیش از جایگزینی یک بکاپ محافظتی خودکار می‌سازد.</DialogDescription></DialogHeader>
-        {restoreTarget && <div className="space-y-4"><div className="rounded-lg border border-border bg-background/40 p-3 text-xs"><span className="text-muted-foreground">فایل انتخاب‌شده</span><code dir="ltr" className="mt-1 block break-all font-mono">{restoreTarget.id}</code><span className="mt-2 block text-muted-foreground">حجم: {formatBytes(restoreTarget.size_bytes)}</span></div><div className="space-y-2"><Label htmlFor="restore-backup-confirmation">برای تأیید عبارت زیر را وارد کن</Label><code dir="ltr" className="block font-mono text-sm text-amber-200">RESTORE ARG</code><Input id="restore-backup-confirmation" dir="ltr" autoComplete="off" value={restorePhrase} onChange={(event) => setRestorePhrase(event.target.value)} placeholder="RESTORE ARG"/></div><div className="flex justify-end gap-2"><Button variant="outline" disabled={!!busy} onClick={() => setRestoreTarget(null)}>انصراف</Button><Button variant="destructive" disabled={!!busy || restorePhrase.trim() !== 'RESTORE ARG'} onClick={() => void confirmRestore()}>{busy === `restore:${restoreTarget.id}` ? <><RefreshCw size={14} className="animate-spin"/>در حال بازیابی…</> : <><RotateCcw size={14}/>بازیابی و جایگزینی دیتابیس</>}</Button></div></div>}
+        {restoreTarget && <div className="space-y-5">
+          <UnifiedStepper currentStep={restoreStep} steps={[
+            { id: 'review', title: 'بازبینی بکاپ', description: 'شناسه و اندازه را بررسی کن' },
+            { id: 'confirm', title: 'تأیید بازیابی', description: 'عبارت تأیید را وارد کن' },
+          ]}/>
+          <div className="rounded-xl border border-border bg-background/40 p-3 text-xs"><span className="text-muted-foreground">فایل انتخاب‌شده</span><code dir="ltr" className="mt-1 block break-all font-mono">{restoreTarget.id}</code><span className="mt-2 block text-muted-foreground">حجم: {formatBytes(restoreTarget.size_bytes)}</span></div>
+          {restoreStep === 0 ? <div className="space-y-4"><p className="text-sm leading-6 text-muted-foreground">این بکاپ جایگزین پایگاه‌دادهٔ فعال ARG می‌شود. پیش از جایگزینی، سیستم یک بکاپ محافظتی خودکار می‌سازد؛ بعد از موفقیت، صفحه دوباره بارگذاری می‌شود.</p><div className="flex flex-wrap justify-between gap-2"><Button variant="outline" disabled={!!busy} onClick={() => { setRestoreTarget(null); setRestorePhrase('') }}>انصراف</Button><Button disabled={!!busy} onClick={() => setRestoreStep(1)}>ادامه به تأیید<RotateCcw size={14}/></Button></div></div> : <div className="space-y-4"><div className="space-y-2"><Label htmlFor="restore-backup-confirmation">برای تأیید عبارت زیر را دقیق وارد کن</Label><code dir="ltr" className="block font-mono text-sm text-amber-200">RESTORE ARG</code><Input id="restore-backup-confirmation" dir="ltr" autoComplete="off" value={restorePhrase} onChange={(event) => setRestorePhrase(event.target.value)} placeholder="RESTORE ARG"/></div><div className="flex flex-wrap justify-between gap-2"><Button variant="outline" disabled={!!busy} onClick={() => setRestoreStep(0)}>بازگشت</Button><Button variant="destructive" disabled={!!busy || restorePhrase.trim() !== 'RESTORE ARG'} onClick={() => void confirmRestore()}>{busy === `restore:${restoreTarget.id}` ? <><RefreshCw size={14} className="animate-spin"/>در حال بازیابی…</> : <><RotateCcw size={14}/>جایگزینی پایگاه‌داده</>}</Button></div></div>}
+        </div>}
       </DialogContent>
     </Dialog>
     <Dialog open={!!actionTarget} onOpenChange={(open) => { if (!open && !busy) { setActionTarget(null); setActionPhrase('') } }}>
