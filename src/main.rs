@@ -56,6 +56,9 @@ type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 mod apps;
+mod app_networks;
+mod app_storage;
+mod app_s3;
 mod deploy;
 mod docker;
 mod fast_actions;
@@ -3654,6 +3657,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("node-environment-keys") => "node-environment-keys",
         Some("node-environment-permissions") => "node-environment-permissions",
         Some("node-nginx-proxy") => "node-nginx-proxy",
+        Some("node-nginx-static") => "node-nginx-static",
         Some("apt-list") => "apt-list",
         Some("apt-runtime-catalog") => "apt-runtime-catalog",
         Some("apt-preview") => "apt-preview",
@@ -3665,6 +3669,8 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("service-limits") => "service-limits",
         Some("docker-status") => "docker-status",
         Some("docker-operation") => "docker-operation",
+        Some("app-network-operation") => "app-network-operation",
+        Some("app-volume-operation") => "app-volume-operation",
         Some("file-list") => "file-list",
         Some("file-disk-scan") => "file-disk-scan",
         Some("file-read") => "file-read",
@@ -3783,6 +3789,12 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     if action == "docker-operation" {
         return docker::execute_docker_operation(request);
+    }
+    if action == "app-network-operation" {
+        return app_networks::execute_privileged_request(request);
+    }
+    if action == "app-volume-operation" {
+        return app_storage::execute_privileged_request(request);
     }
     if action.starts_with("file-") {
         return files::execute_privileged_request(action, request);
@@ -4654,9 +4666,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ensure_federation_identity_columns(&db)?;
     ensure_metric_storage_columns(&db)?;
     apps::migrate(&db)?;
+    app_networks::migrate(&db)?;
+    app_storage::migrate(&db)?;
     deploy::migrate(&db)?;
     laravel::migrate(&db)?;
     s3::migrate(&db)?;
+    app_s3::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
     db.execute(

@@ -1,5 +1,32 @@
 # ARG Change Log
 
+## Unreleased
+
+### Phase 08 — Static delivery and SSR
+- Add automatic/manual React, Vue, Vite, Next.js, Nuxt, and generic Node delivery selection, including prebuilt static output and safe custom paths.
+- Publish validated static releases through app-owned Nginx sites with SPA fallback, immutable hashed-asset caching, sensitive-file denial, and release-aware rollback.
+- Support standard Next and Nuxt SSR entrypoints, loopback health checks, and separate private runtime versus public build-time environment settings.
+- Add responsive controls and bilingual guidance for static output paths, SPA behavior, SSR entrypoints, and the public visibility of build variables.
+
+### Phase 09 — Application networks
+- Add ARG-owned private Docker bridge networks with internal routing, generated names, ownership labels, member tracking, and delete-in-use protection.
+- Allow Docker app containers created with an ARG application link to join only their own managed network; add loopback-only endpoint records for Node SSR services and state clearly that these do not provide network isolation.
+- Add an app workspace panel for creating networks, connecting eligible services, reviewing members, and detaching them.
+
+### Phase 10 — Persistent application volumes
+- Add per-app persistent data directories under the deployment shared-data root, with an app-specific system group, safe paths, usage scans bounded to 100,000 entries, and explicit detach-versus-purge actions.
+- Keep volume data outside release directories so a deploy or rollback does not replace it. Display quota as informational only because filesystem quota enforcement is not configured.
+
+### Phase 11 — Application S3 bindings
+- Add per-app Bucket/prefix bindings for object storage, backups, assets, artifacts, and existing mounts, while keeping credentials out of the app API and frontend.
+- Protect connected Buckets from detach/delete until app bindings are removed. Show provider ACL requirements and the fact that ARG metadata does not itself restrict S3 permissions.
+
+### Phase 12 — Persistent and resumable application logs
+- Add bounded Node service journal reads (1–500 entries) with resume cursors and identify journald as the persistent source.
+- Let the app panel request newer log entries without losing the current output. Retention continues to follow the host-wide journald policy; ARG does not claim per-app retention controls.
+- Add bilingual app resource guidance and automated validation for network names, volume names, S3 prefixes, and allowed binding purposes.
+- Validate the five-phase batch with 132 Rust tests, Rust checks, frontend typecheck/production build, documentation production build, and whitespace checks. Live Docker, systemd, S3-provider, and Debian/Ubuntu integration still requires a disposable host.
+
 ## v0.6.9-dev.3 — 2026-10-27
 
 - Add a managed Node.js runner with isolated dependency installation/builds, per-app systemd services, private runtime environment, loopback health checks, and guarded Nginx proxying.

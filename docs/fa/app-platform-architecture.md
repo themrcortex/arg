@@ -6,7 +6,7 @@
 
 ARG یک سرویس مستقل Rust/Axum با رابط React/TypeScript/Vite است. خروجی Frontend داخل باینری Release قرار می‌گیرد. SQLite حساب‌های پنل، نشست‌ها، تنظیمات، Audit، نمونه‌های مانیتورینگ و metadata قابلیت‌ها را نگه می‌دارد. عملیات نیازمند دسترسی بالاتر از مرز Unix socket خصوصی به Helper محدودشده عبور می‌کنند.
 
-موجودی اولیهٔ فاز ۰۰ ماژول‌های `src/federation.rs`، `src/nginx.rs`، `src/docker.rs`، `src/s3/`، `src/files.rs`، `src/metrics.rs` و `src/maintenance.rs` را پوشش می‌داد. Federation امکان جفت‌کردن ARGها، خواندن وضعیت و سرویس‌های راه‌دور و proxy کردن فضای‌کار احراز‌شده به Node انتخاب‌شده را دارد. سایت‌های Nginx، منابع Docker و Bucketهای S3 همچنان منابع همان سروری هستند که روی آن قرار دارند. فازهای ۰۳ تا ۰۷ از آن زمان Registry اپلیکیشن، موتور Deploy پایدار، مدیریت Runtime، Runner لاراول و Runner مربوط به Node.js را افزوده‌اند؛ مرز دقیق قابلیت‌های موجود در جدول وضعیت فازها آمده است.
+موجودی اولیهٔ فاز ۰۰ ماژول‌های `src/federation.rs`، `src/nginx.rs`، `src/docker.rs`، `src/s3/`، `src/files.rs`، `src/metrics.rs` و `src/maintenance.rs` را پوشش می‌داد. Federation امکان جفت‌کردن ARGها، خواندن وضعیت و سرویس‌های راه‌دور و proxy کردن فضای‌کار احراز‌شده به Node انتخاب‌شده را دارد. سایت‌های Nginx، منابع Docker و Bucketهای S3 همچنان منابع همان سروری هستند که روی آن قرار دارند. فازهای ۰۳ تا ۰۸ از آن زمان Registry اپلیکیشن، موتور Deploy پایدار، مدیریت Runtime، Runner لاراول، Runner مربوط به Node.js و انتشار Static/SSR را افزوده‌اند؛ مرز دقیق قابلیت‌های موجود در جدول وضعیت فازها آمده است.
 
 bootstrap دیتابیس SQLite در `src/main.rs` باقی است؛ کد دامنهٔ اپ، Deploy، Runtime، Laravel و Node به‌ترتیب در `src/apps.rs`، `src/deploy.rs`، `src/runtimes.rs`، `src/laravel.rs` و `src/node.rs` تفکیک شده است. تغییرات schema آینده باید migration افزایشی و idempotent باشند و داده‌های کاربران، نشست‌ها، Nodeها، S3، Nginx، Docker و اپلیکیشن‌ها را حفظ کنند. نسخهٔ پروتکل Federation Node فعلی `arg-node/2` است؛ هر تغییر سازگاری پروتکل باید جداگانه بررسی شود.
 
@@ -69,7 +69,12 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 | ۰۵ — مدیریت Runtime | کامل | inventory، پیش‌نمایش امن APT، ترجیح نسخهٔ هر اپ و کنترل‌های فرانت‌اند پیاده شده؛ نصب واقعی بسته‌ها به VPS آزمایشی Debian/Ubuntu نیاز دارد. |
 | ۰۶ — Runner لاراول | دروازهٔ خودکار فاز گذشت؛ تست میزبان باقی است | وب/PHP-FPM، ساخت دیتابیس، Artisan، سرویس‌های اختیاری و refresh/rollback پیاده شده‌اند. تست Rust، build انتشار، type-check و build فرانت‌اند موفق‌اند. اجرای یکپارچگی Nginx/MySQL/systemd روی میزبان آزمایشی هنوز انجام نشده است. |
 | ۰۷ — Runner مربوط به Node.js | دروازهٔ خودکار فاز گذشت؛ تست میزبان باقی است | build بر اساس lockfile، unit موقت systemd، محیط خصوصی Runtime، سرویس مستقل DynamicUser، بررسی loopback/HTTP، reverse proxy کنترل‌شدهٔ Nginx و بازیابی Deploy پیاده شده‌اند. تست و build مخزن موفق‌اند؛ آزمایش Node/systemd/Nginx روی VPS جداگانه باقی است. |
-| ۰۸ تا ۴۸ | برنامه‌ریزی‌شده | تا عبور از تست هر فاز، قابلیت آن منتشرشده محسوب نمی‌شود. |
+| ۰۸ — انتشار Static و SSR | دروازهٔ خودکار فاز گذشت؛ تست میزبان باقی است | تشخیص خودکار/دستی React، Vue، Vite، Next و Nuxt، خروجی Static با Nginx، fallback و cache امن، اجرای SSR محدود و همگام‌سازی rollback پیاده شده؛ تست‌های مخزن و buildها موفق‌اند. اجرای Nginx/systemd روی VPS آزمایشی باقی است. |
+| ۰۹ — شبکه اپلیکیشن | پیاده‌سازی مخزن انجام شد؛ تست میزبان باقی است | ساخت شبکهٔ داخلی Docker، عضویت کانتینر دارای برچسب مالکیت ARG، endpoint loopback برای Node و جلوگیری از حذف شبکهٔ درحال استفاده پیاده شده است. تست جداسازی واقعی Docker باقی است. |
+| ۱۰ — دادهٔ پایدار اپ | پیاده‌سازی مخزن انجام شد؛ تست میزبان باقی است | مسیر پایدار دادهٔ Node، اسکن محدود و دستی، جداکردن رکورد بدون حذف فایل و پاک‌سازی با تأیید مستقل اضافه شده‌اند. سقف حجم فقط اطلاع‌رسانی است و quota فایل‌سیستمی اعمال نمی‌شود. |
+| ۱۱ — اتصال S3 اپ | ثبت Binding و ارجاع Mount پیاده شد | اتصال Bucket/prefix/purpose به اپ ثبت می‌شود و حذف Bucket متصل مسدود است. credential به اپ منتقل نمی‌شود و ARG مجوز Provider را محدود نمی‌کند؛ ACL محدود باید در خود سرویس S3 تنظیم شود. |
+| ۱۲ — لاگ اپلیکیشن | خواندن journal پایدار و cursor پیاده شد | لاگ سرویس Node با سقف تعداد خط و cursor ادامه‌پذیر خوانده می‌شود. retention تابع journald کل میزبان است و تنظیم جداگانه برای هر اپ نداریم. |
+| ۱۳ تا ۴۸ | برنامه‌ریزی‌شده | تا عبور از تست هر فاز، قابلیت آن منتشرشده محسوب نمی‌شود. |
 
 «کامل» یعنی پیاده‌سازی مخزن و تست خودکار همان فاز موجود است؛ به معنی آزمون واقعی Federation چند VPS، مرجع صدور گواهی، APT، MySQL یا systemd روی VPS عملیاتی نیست.
 
@@ -103,6 +108,23 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 - پیش از موفقیت، listener واقعی فقط روی loopback بررسی و درخواست HTTP فرستاده می‌شود. با ثبت دامنه، reverse proxy جداگانهٔ تحت مالکیت ARG تنها پس از بررسی تعارض ساخته می‌شود؛ سایت نامرتبط یا دستی‌تغییریافته بازنویسی نمی‌شود. صدور گواهی یک اقدام جدا در صفحهٔ Nginx است.
 - Deploy و rollback فقط سرویسی را restart می‌کنند که قبلاً فعال بوده است. شکست فعال‌سازی تلاش می‌کند اشاره‌گر و وضعیت سرویس قبلی را بازگرداند. این عملیات اثر خارجی یا migration دیتابیس اپ را برعکس نمی‌کند.
 - دروازهٔ خودکار فاز شامل ۱۱۵ تست Rust و type-check/build فرانت‌اند بود. build انتشار و مستندات نیز در بررسی نهایی همین فاز اجرا می‌شوند. اجرای واقعی npm، lifecycle پردازش systemd و Nginx به VPS آزمایشی Debian/Ubuntu نیاز دارد و با تست واحد ادعا نمی‌شود.
+
+### وضعیت فاز ۰۸ — انتشار سایت‌های Static و SSR
+
+- قالب‌های `auto`, `static`, `react`, `vue`, `vite`, `node`, `next` و `nuxt` در Registry ذخیره می‌شوند. تشخیص خودکار از manifest استفاده می‌کند؛ انتخاب دستی نوع انتشار را override می‌کند.
+- React/Vue/Vite و فایل‌های آماده خروجی دارای `index.html` را بدون process وب Node از طریق Nginx منتشر می‌کند. مسیر خروجی، SPA fallback و پیکربندی cache در مشخصات اپ ذخیره می‌شوند. خروجی build محدود و پیش از انتشار بررسی می‌شود.
+- متغیرهای Build فقط با پیشوند عمومی framework در SQLite ذخیره و فقط به مرحلهٔ build می‌رسند؛ محدودیت ۱۶ KiB و منع نام‌های secret-like اعمال می‌شود. UI هشدار می‌دهد مقدارها ممکن است به bundle عمومی راه پیدا کنند. متغیرهای Runtime در فایل خصوصی جدا باقی می‌مانند.
+- Next.js/Nuxt و Node عمومی به مسیر SSR می‌روند. Next CLI استاندارد و Nuxt `.output/server/index.mjs` پشتیبانی می‌شوند؛ متغیرهای NITRO به loopback تنظیم شده و سرویس systemd محدود و وابسته به enable صریح باقی می‌ماند.
+- فایل سایت Static با نام مختص اپ ساخته می‌شود؛ دامنهٔ موجود متعلق به سایت دیگر overwrite نمی‌شود. شکست تنظیم Nginx باعث بازگرداندن pointer می‌شود. Deploy و rollback مسیر root Nginx را با خروجی Release منتخب همگام می‌کنند.
+- تست خودکار پوشش تشخیص Static در برابر SSR، خروجی آماده در ریشه/پوشه، path traversal، Nuxt entrypoint، تنظیمات SPA fallback و ruleهای Nginx را دارد. اجرای واقعی Debian/Ubuntu با Nginx و systemd جداگانه لازم است.
+
+### مرز پیاده‌سازی فازهای ۰۹ تا ۱۲
+
+- شبکه‌ها محلی همین سرورند. Docker bridge با `--internal` ساخته و با شناسهٔ ARG برچسب‌گذاری می‌شود. Helper فقط کانتینری را وصل می‌کند که برچسب `com.arg.application_id` آن با اپ انتخابی برابر باشد. سرویس native Node تنها endpoint پورت loopback ثبت‌شده را دریافت می‌کند؛ این metadata کشف سرویس است، نه جداسازی شبکه.
+- دادهٔ پایدار Node در `/var/lib/arg/deployments/apps/<app-id>/shared/data/volumes/<name>` می‌ماند و داخل sandbox سرویس در `/shared/data/volumes/<name>` دیده می‌شود. اسکن فقط با درخواست کاربر و با سقف ۱۰۰هزار ورودی انجام می‌شود. جداکردن رکورد فایل را نگه می‌دارد؛ پاک‌سازی تأیید جدا می‌خواهد و فایل‌سیستم mount‌شده را رد می‌کند. سقف ثبت‌شده توسط kernel enforce نمی‌شود.
+- S3 Binding به Bucket و prefix موجود در ARG اشاره می‌کند و secret را بازنمی‌گرداند. Prefix و سطح دسترسی metadata هستند؛ مرز واقعی مجوز باید در کلید یا policy ارائه‌دهنده تنظیم شود. Bucket تا وقتی اپ به آن متصل است قطع نمی‌شود.
+- خروجی پردازش Node در journal سیستم‌عامل ثبت می‌شود. API حداکثر ۵۰۰ خط می‌خواند و با cursor ادامه می‌دهد. retention از سیاست سراسری میزبان می‌آید و ARG سوییچ per-app ساختگی ارائه نمی‌کند. این فاز برای Docker، Nginx، Jobها یا انتقال S3 collector جداگانه نمی‌سازد.
+- تست‌های مخزن کد و migration را اعتبارسنجی می‌کنند. جداسازی شبکه Docker، permission گروه، رفتار cursor و چرخهٔ واقعی فایل باید روی میزبان آزمایشی Debian/Ubuntu هم بررسی شود.
 
 ### واژگان و مالکیت
 
@@ -167,7 +189,7 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 - **Persistence:** bootstrap دیتابیس SQLite در `src/main.rs` است؛ migration اپلیکیشن در `src/apps.rs` جدا شده و هنگام راه‌اندازی فراخوانی می‌شود.
 - **دسترسی privileged:** سرویس ARG از Unix socket خصوصی با `arg-privileged.service` حرف می‌زند. هیچ قابلیتی نباید آن را به runner عمومی root تبدیل کند.
 - **Federation:** پروتکل v2 و proxy فضای‌کار API/Terminal دارد. نقش سرور، scopeهای مقصد، مذاکرهٔ capability نسخهٔ ۱، تمدید نشست، چرخش کلید و وضعیت سلامت در فاز ۰۲ افزوده شده‌اند؛ تست واقعی دو VPS همچنان لازم است.
-- **پلتفرم اپ:** فاز ۰۳ Registry مالکیت را اضافه می‌کند. فاز ۰۴ Job پایدار، دریافت محدود Git/ZIP/پوشه، staging Release، تغییر اتمی `current`، پیشرفت، لغو، retry و rollback را اضافه می‌کند. فاز ۰۵ inventory Runtime و پیش‌نمایش امن APT را دارد. فاز ۰۶ Laravel، فایل محیط خصوصی، Artisan محدود، PHP-FPM/Nginx، دیتابیس و سرویس‌های systemd را اضافه می‌کند. فاز ۰۷ Runner مربوط به Node.js، build بر اساس lockfile، unit ایزوله، فایل Runtime خصوصی، health check loopback و reverse proxy کنترل‌شده را اضافه می‌کند. قالب‌های static/SSR، شبکه و Volume اپ، مهاجرت بین سرورها و فازهای بعدی باقی‌اند.
+- **پلتفرم اپ:** فاز ۰۳ Registry مالکیت را اضافه می‌کند. فاز ۰۴ Job پایدار، دریافت محدود Git/ZIP/پوشه، staging Release، تغییر اتمی `current`، پیشرفت، لغو، retry و rollback را اضافه می‌کند. فاز ۰۵ inventory Runtime و پیش‌نمایش امن APT را دارد. فاز ۰۶ Laravel، فایل محیط خصوصی، Artisan محدود، PHP-FPM/Nginx، دیتابیس و سرویس‌های systemd را اضافه می‌کند. فاز ۰۷ Runner مربوط به Node.js، build بر اساس lockfile، unit ایزوله، فایل Runtime خصوصی، health check loopback و reverse proxy کنترل‌شده را اضافه می‌کند. فاز ۰۸ سایت‌های React/Vue/Vite را بدون process وب، و Next/Nuxt/Node را با SSR و release rollback مدیریت می‌کند. شبکهٔ محلی اپ، دادهٔ پایدار Node، Bindingهای S3 و خواندن لاگ journald در فازهای ۰۹ تا ۱۲ اضافه شده‌اند. اتصال اپ بین سرورها و فازهای بعدی باقی‌اند.
 - **CI:** GitHub Actions برای CI و انتشار مستندات وجود دارد. دستورهای تست محلی در `docs/en/development.md` ثبت شده‌اند.
 - **نسخه‌بندی:** نسخه‌های Rust و Frontend هماهنگ‌اند؛ ابزارهای پایدار و prerelease به‌ترتیب `scripts/bump-version.sh`، `scripts/bump-development-version.sh` و `scripts/check-versioning.sh` هستند.
 

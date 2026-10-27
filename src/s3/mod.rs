@@ -1526,6 +1526,12 @@ pub(super) async fn list_connections(
         .collect();
     Ok(Json(json!({"connections":connections})))
 }
+
+pub(super) async fn bucket_catalog(State(state):State<AppState>,headers:HeaderMap)->ApiResult{
+    let db=state.lock().unwrap();require_admin(&db,&headers)?;
+    let mut stmt=db.prepare("SELECT b.id,b.bucket_name,b.display_name,c.display_name,c.provider_type,c.status,b.enabled FROM s3_buckets b JOIN s3_connections c ON c.id=b.connection_id ORDER BY c.display_name COLLATE NOCASE,b.display_name COLLATE NOCASE").map_err(db_error)?;
+    let buckets=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"bucket_name":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?,"connection_name":r.get::<_,String>(3)?,"provider":r.get::<_,String>(4)?,"connection_status":r.get::<_,String>(5)?,"enabled":r.get::<_,bool>(6)?}))).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();Ok(Json(json!({"buckets":buckets})))
+}
 pub(super) async fn get_connection(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -1683,6 +1689,8 @@ pub(super) async fn delete_connection(
         if active_mounts > 0 {
             return Err(error(StatusCode::CONFLICT,"پیش از حذف اتصال، Mountهای فعال آن را Unmount کن."));
         }
+        let app_bindings:i64=db.query_row("SELECT COUNT(*) FROM application_s3_bindings x JOIN s3_buckets b ON b.id=x.bucket_id WHERE b.connection_id=?1",[id],|row|row.get(0)).map_err(db_error)?;
+        if app_bindings>0{return Err(error(StatusCode::CONFLICT,"این اتصال در تنظیمات اپلیکیشن‌ها استفاده می‌شود؛ ابتدا Bindingهای اپ را جدا کن."));}
         db.execute("DELETE FROM s3_buckets WHERE connection_id=?1", [id])
             .map_err(db_error)?;
         db.execute("DELETE FROM s3_connections WHERE id=?1", [id])
@@ -2037,6 +2045,8 @@ pub(super) async fn detach_bucket(
     if active_mount {
         return Err(error(StatusCode::CONFLICT,"پیش از قطع Bucket از ARG، Mount فعال آن را Unmount کن."));
     }
+    let app_bindings:i64=db.query_row("SELECT COUNT(*) FROM application_s3_bindings WHERE bucket_id=?1",[id],|row|row.get(0)).map_err(db_error)?;
+    if app_bindings>0{return Err(error(StatusCode::CONFLICT,"این Bucket به یک یا چند اپ متصل است؛ ابتدا Bindingهای اپ را جدا کن."));}
     db.execute("DELETE FROM s3_buckets WHERE id=?1", [id])
         .map_err(db_error)?;
     audit(

@@ -25,6 +25,8 @@ pub(super) struct DockerOperation {
     command: Vec<String>,
     #[serde(default)]
     confirmed: bool,
+    #[serde(default)]
+    application_id: Option<String>,
 }
 
 pub(super) async fn docker_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -53,6 +55,12 @@ pub(super) async fn docker_operation(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
     };
+    if let Some(application_id)=input.application_id.as_deref() {
+        if input.action!="container-run" || !apps::valid_uuid(application_id) { return Err(error(StatusCode::BAD_REQUEST,"اتصال کانتینر فقط با شناسهٔ معتبر اپ مجاز است.")); }
+        let db=state.lock().unwrap();let owner=federation::local_server_uuid(&db).map_err(db_error)?;
+        let owned:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND source_type='docker' AND deleted_at IS NULL)",params![application_id,owner],|r|r.get(0)).map_err(db_error)?;
+        if !owned{return Err(error(StatusCode::NOT_FOUND,"اپلیکیشن Docker متعلق به این میزبان پیدا نشد."));}
+    }
     let allowed = [
         "install",
         "uninstall",
@@ -117,7 +125,7 @@ pub(super) async fn docker_operation(
         ));
     }
     let _update_guard = UPDATE_OPERATION_GATE.read().await;
-    let result = privileged_request_async(json!({"action":"docker-operation","operation":input.action,"target":input.target,"name":input.name,"image":input.image,"ports":input.ports,"env":input.env,"network":input.network,"restart":input.restart,"compose_file":input.compose_file,"context_path":input.context_path,"command":input.command,"confirmed":input.confirmed})).await?;
+    let result = privileged_request_async(json!({"action":"docker-operation","operation":input.action,"target":input.target,"name":input.name,"image":input.image,"ports":input.ports,"env":input.env,"network":input.network,"restart":input.restart,"compose_file":input.compose_file,"context_path":input.context_path,"command":input.command,"confirmed":input.confirmed,"application_id":input.application_id})).await?;
     if result["ok"] != true {
         return Err(error(
             StatusCode::BAD_GATEWAY,
@@ -312,6 +320,7 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
     let target = request["target"].as_str().unwrap_or_default();
     let name = request["name"].as_str().unwrap_or_default();
     let image = request["image"].as_str().unwrap_or_default();
+    let application_id = request["application_id"].as_str();
     let mut args: Vec<String> = Vec::new();
     match operation {
         "install" => {
@@ -432,6 +441,10 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
                 "--restart".into(),
                 restart.into(),
             ]);
+            if let Some(application_id)=application_id {
+                if !apps::valid_uuid(application_id) { return json!({"ok":false,"error":"Invalid ARG application id"}); }
+                args.extend(["--label".into(),format!("com.arg.application_id={application_id}")]);
+            }
             for port in ports {
                 args.extend(["-p".into(), port.into()]);
             }

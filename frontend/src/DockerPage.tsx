@@ -15,6 +15,7 @@ type DockerNetwork = { id: string; name: string; driver: string; scope: string }
 type DockerVolume = { name: string; driver: string; mountpoint: string }
 type DockerData = { installed: boolean; active: boolean; version: string; server_version?: string; compose_version?: string; compose_projects?: Array<{ Name?: string; Status?: string; ConfigFiles?: string }>; containers: DockerContainer[]; images: DockerImage[]; networks: DockerNetwork[]; volumes: DockerVolume[]; error?: string }
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
+type DockerApp = { id: string; name: string; source_type: string }
 
 const tabs = [
   { id: 'containers', label: 'کانتینرها', icon: Box },
@@ -33,6 +34,8 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
   const [error, setError] = useState('')
   const [output, setOutput] = useState('')
   const [containerName, setContainerName] = useState('')
+  const [applicationId, setApplicationId] = useState('')
+  const [dockerApps, setDockerApps] = useState<DockerApp[]>([])
   const [image, setImage] = useState('')
   const [ports, setPorts] = useState('')
   const [env, setEnv] = useState('')
@@ -55,6 +58,7 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
     finally { setLoading(false); setRefreshing(false) }
   }, [])
   useEffect(() => { void load() }, [load])
+  useEffect(() => { void api<{ apps: DockerApp[] }>('apps').then((result) => setDockerApps(result.apps.filter((app) => app.source_type === 'docker'))).catch(() => setDockerApps([])) }, [])
 
   async function run(action: string, payload: Record<string, unknown> = {}, confirmation?: string) {
     if (busy) return
@@ -95,12 +99,13 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
       <div className="mb-4 flex flex-wrap gap-2" role="tablist" aria-label="بخش‌های Docker">{tabs.map((item) => <Button key={item.id} role="tab" aria-selected={tab === item.id} size="sm" variant={tab === item.id ? 'default' : 'outline'} onClick={() => setTab(item.id)}><item.icon size={14}/>{item.label}</Button>)}</div>
 
       {tab === 'containers' && <div className="space-y-5">
-        <Card><CardHeader><CardTitle className="flex items-center gap-2"><Plus size={17} className="text-primary"/>ساخت و اجرای کانتینر</CardTitle><CardDescription>کانتینر detached با نگاشت پورت، متغیر محیطی، شبکه و سیاست restart ساخته می‌شود.</CardDescription></CardHeader><CardContent><form className="grid gap-3 md:grid-cols-2 xl:grid-cols-3" onSubmit={(event) => { event.preventDefault(); void run('container-run', { name: containerName, image, ports: ports.split(/[\s,]+/).filter(Boolean), env: env.split('\n').map((line) => line.trim()).filter(Boolean), network, restart }); }}>
+        <Card><CardHeader><CardTitle className="flex items-center gap-2"><Plus size={17} className="text-primary"/>ساخت و اجرای کانتینر</CardTitle><CardDescription>کانتینر detached با نگاشت پورت، متغیر محیطی، شبکه و سیاست restart ساخته می‌شود.</CardDescription></CardHeader><CardContent><form className="grid gap-3 md:grid-cols-2 xl:grid-cols-3" onSubmit={(event) => { event.preventDefault(); void run('container-run', { name: containerName, image, ports: ports.split(/[\s,]+/).filter(Boolean), env: env.split('\n').map((line) => line.trim()).filter(Boolean), network, restart, application_id: applicationId || undefined }); }}>
           <label className="space-y-1.5 text-xs"><span>نام کانتینر</span><Input required value={containerName} onChange={(event) => setContainerName(event.target.value)} placeholder="web-app" dir="ltr"/></label>
           <label className="space-y-1.5 text-xs"><span>Image</span><Input required value={image} onChange={(event) => setImage(event.target.value)} placeholder="nginx:alpine" dir="ltr"/></label>
           <label className="space-y-1.5 text-xs"><span>نگاشت پورت</span><Input value={ports} onChange={(event) => setPorts(event.target.value)} placeholder="8080:80/tcp, 5353:53/udp" dir="ltr"/><span className="block text-[10px] text-muted-foreground">هر نگاشت را با فاصله یا کاما جدا کن.</span></label>
           <label className="space-y-1.5 text-xs"><span>شبکه (اختیاری)</span><Input value={network} onChange={(event) => setNetwork(event.target.value)} placeholder="bridge" dir="ltr"/></label>
           <label className="space-y-1.5 text-xs"><span>سیاست راه‌اندازی مجدد</span><select className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm" value={restart} onChange={(event) => setRestart(event.target.value)}><option value="unless-stopped">unless-stopped</option><option value="always">always</option><option value="on-failure">on-failure</option><option value="no">no</option></select></label>
+          <label className="space-y-1.5 text-xs"><span>اپ ARG (اختیاری)</span><select className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm" value={applicationId} onChange={(event) => setApplicationId(event.target.value)}><option value="">بدون پیوند به اپ</option>{dockerApps.map((app) => <option key={app.id} value={app.id}>{app.name}</option>)}</select><span className="block text-[10px] text-muted-foreground">پیوند مالکیت برای عضویت کنترل‌شده در شبکهٔ خصوصی اپ.</span></label>
           <label className="space-y-1.5 text-xs md:col-span-2 xl:col-span-3"><span>متغیرهای محیطی (هر خط KEY=VALUE)</span><textarea value={env} onChange={(event) => setEnv(event.target.value)} dir="ltr" className="min-h-20 w-full rounded-lg border border-input bg-background p-3 text-left font-mono text-xs outline-none focus:ring-2 focus:ring-ring" placeholder={'NODE_ENV=production\nPORT=3000'}/></label>
           <div className="md:col-span-2 xl:col-span-3"><Button type="submit" disabled={disabled}><Play size={14}/>{busy === 'container-run' ? 'در حال ساخت…' : 'ساخت و اجرا'}</Button></div>
         </form></CardContent></Card>

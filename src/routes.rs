@@ -108,6 +108,7 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/s3/providers", get(s3::list_providers))
         .route("/api/s3/summary", get(s3::summary))
+        .route("/api/s3/buckets/catalog", get(s3::bucket_catalog))
         .route(
             "/api/s3/connections",
             get(s3::list_connections).post(s3::create_connection),
@@ -167,6 +168,16 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/s3/mounts/{id}/stop", post(s3::stop_bucket_mount))
         .route("/api/history", get(history))
         .route("/api/apps", get(apps::list).post(apps::create))
+        .route("/api/app-networks", get(app_networks::list).post(app_networks::create))
+        .route("/api/app-networks/{id}/members", get(app_networks::list_members).post(app_networks::attach))
+        .route("/api/app-networks/{id}/members/{app_id}", axum::routing::delete(app_networks::detach))
+        .route("/api/app-networks/{id}", axum::routing::delete(app_networks::remove))
+        .route("/api/apps/{id}/volumes", get(app_storage::list).post(app_storage::create))
+        .route("/api/apps/{id}/s3-bindings", get(app_s3::list).post(app_s3::create))
+        .route("/api/app-s3-bindings/{id}", axum::routing::delete(app_s3::remove))
+        .route("/api/app-volumes/{id}/scan", post(app_storage::scan))
+        .route("/api/app-volumes/{id}", axum::routing::delete(app_storage::detach))
+        .route("/api/app-volumes/{id}/purge", post(app_storage::purge))
         .route(
             "/api/apps/{id}",
             get(apps::get).put(apps::update).delete(apps::delete),
@@ -201,6 +212,10 @@ pub(super) fn router(state: AppState) -> Router {
         .route(
             "/api/apps/{id}/node/environment",
             put(node::save_environment),
+        )
+        .route(
+            "/api/apps/{id}/node/build-environment",
+            get(node::get_build_environment).put(node::save_build_environment),
         )
         .route("/api/apps/{id}/node/service/logs", get(node::logs))
         .route("/api/apps/{id}/deploy", post(deploy::create))

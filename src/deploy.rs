@@ -707,7 +707,7 @@ pub(super) async fn rollback(
         ));
     }
     let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
-    let (actor, runtime, row) = {
+    let (actor, runtime, static_config, row) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
@@ -748,7 +748,12 @@ pub(super) async fn rollback(
             )
             .optional()
             .map_err(db_error)?;
-        (actor, runtime, row)
+        let static_config = db.query_row(
+            "SELECT domain,static_output_path,static_spa_fallback FROM applications WHERE id=?1",
+            [&app_id],
+            |query| Ok((query.get::<_,Option<String>>(0)?,query.get::<_,String>(1)?,query.get::<_,bool>(2)?)),
+        ).optional().map_err(db_error)?;
+        (actor, runtime, static_config, row)
     };
     let Some((release_path, release_state)) = row else {
         return Err(api_error(
@@ -803,28 +808,30 @@ pub(super) async fn rollback(
 
     let framework = runtime.as_ref().map(|runtime| runtime.0.as_str()).unwrap_or_default();
     let mut nginx_snapshot: Option<(String, String)> = None;
-    let refresh_result = if framework == "laravel" {
-        let (_, runtime_version, domain, web_enabled) = runtime.as_ref().unwrap();
-        match refresh_laravel_runtime(
-            &app_id,
-            runtime_version,
-            domain.as_deref(),
-            *web_enabled,
-        )
-        .await
-        {
-            Ok(snapshot) => {
-                nginx_snapshot = snapshot;
-                Ok(())
-            }
-            Err(message) => Err(message),
+    let static_refresh = if apps::is_static_framework(framework) || apps::is_auto_framework(framework) {
+        match static_config.as_ref() {
+            Some((Some(domain), output, spa)) => refresh_static_runtime(&app_id, framework, domain, output, *spa).await,
+            Some((None, _, _)) if apps::is_static_framework(framework) => Err("دامنهٔ سایت Static برای انتشار ثبت نشده است.".to_owned()),
+            _ => Ok(None),
         }
-    } else if framework == "node" {
-        node::refresh_after_deploy(&app_id, old_pointer.as_deref())
-            .await
-            .map(|_| ())
-    } else {
-        Ok(())
+    } else { Ok(None) };
+    let refresh_result = match static_refresh {
+        Ok(Some(snapshot)) => {
+            nginx_snapshot = Some(snapshot);
+            Ok(())
+        }
+        Err(message) => Err(message),
+        Ok(None) if framework == "laravel" => {
+            let (_, runtime_version, domain, web_enabled) = runtime.as_ref().unwrap();
+            match refresh_laravel_runtime(&app_id, runtime_version, domain.as_deref(), *web_enabled).await {
+                Ok(snapshot) => { nginx_snapshot = snapshot; Ok(()) }
+                Err(message) => Err(message),
+            }
+        }
+        Ok(None) if apps::is_node_runtime_framework(framework) || apps::is_auto_framework(framework) => {
+            node::refresh_after_deploy(&app_id, old_pointer.as_deref()).await.map(|_| ())
+        }
+        Ok(None) => Ok(()),
     };
 
     if let Err(message) = refresh_result {
@@ -854,7 +861,24 @@ pub(super) async fn rollback(
                         ));
                     }
                 }
-            } else if framework == "node" {
+            } else if apps::is_static_framework(framework) || apps::is_auto_framework(framework) {
+                let static_recovery = if let Some((Some(domain), output, spa)) = static_config.as_ref() {
+                    refresh_static_runtime(&app_id, framework, domain, output, *spa).await
+                } else { Ok(None) };
+                match static_recovery {
+                    Ok(Some((name, content))) => {
+                        let db = state.lock().unwrap();
+                        let _ = nginx::store_nginx_snapshot(&db, &name, &content, None);
+                        "کانفیگ Nginx سایت Static با release قبلی همگام شد."
+                    }
+                    Ok(None) if apps::is_auto_framework(framework) => match node::refresh_after_deploy(&app_id, old_pointer.as_deref()).await {
+                        Ok(_) => "سرویس Node با release قبلی دوباره بررسی شد.",
+                        Err(error) => return Err(api_error(StatusCode::BAD_GATEWAY, &format!("{message} اشاره‌گر قبلی برگشت، اما سرویس Node بازیابی نشد: {error}"))),
+                    },
+                    Ok(None) => "اشاره‌گر release قبلی بازگردانده شد.",
+                    Err(error) => return Err(api_error(StatusCode::BAD_GATEWAY, &format!("{message} اشاره‌گر قبلی برگشت، اما بازیابی سایت Static ناموفق بود: {error}"))),
+                }
+            } else if apps::is_node_runtime_framework(framework) {
                 match node::refresh_after_deploy(&app_id, old_pointer.as_deref()).await {
                     Ok(_) => "سرویس Node با release قبلی دوباره بررسی شد.",
                     Err(error) => {
@@ -898,7 +922,7 @@ pub(super) async fn rollback(
         &format!("app={app_id}; release={}", input.release_id),
     );
     let message = snapshot_warning.map_or_else(
-        || format!("release قبلی فعال شد؛ سرویس {} بررسی شد. دیتابیس rollback نشد.", if framework == "node" { "Node" } else if framework == "laravel" { "Laravel" } else { "اپلیکیشن" }),
+        || format!("release قبلی فعال شد؛ {} بررسی شد. دیتابیس rollback نشد.", if apps::is_node_runtime_framework(framework) { "سرویس Node" } else if apps::is_static_framework(framework) { "سایت Static" } else if apps::is_auto_framework(framework) { "سایت یا Runner تشخیص‌داده‌شده" } else if framework == "laravel" { "سرویس Laravel" } else { "اپلیکیشن" }),
         |warning| format!("release قبلی فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
     );
     Ok(Json(json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old_id,"message":message})))
@@ -1461,18 +1485,42 @@ async fn process_job(state: AppState, job_id: String) {
         );
         return;
     }
-    let (framework, build_runtime_version) = {
+    let (framework, build_runtime_version, domain, static_output_path, static_spa_fallback, build_environment_json) = {
         let db = state.lock().unwrap();
         db.query_row(
-            "SELECT framework,build_runtime_version FROM applications WHERE id=?1",
+            "SELECT framework,build_runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json FROM applications WHERE id=?1",
             [&app_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, String>(5)?)),
         )
         .optional()
         .ok()
         .flatten()
-        .unwrap_or_default()
+        .unwrap_or_else(|| ("custom".to_owned(), "system".to_owned(), None, "auto".to_owned(), true, "{}".to_owned()))
     };
+    let build_environment = match node::parse_public_build_environment(&build_environment_json) {
+        Ok(variables) => variables,
+        Err(message) => {
+            let _ = fs::remove_dir_all(&stage);
+            finish(&state, &job_id, "failed", &message);
+            return;
+        }
+    };
+    let static_site = match node::is_static_deployment(&framework, &stage, &static_output_path) {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = fs::remove_dir_all(&stage);
+            finish(&state, &job_id, "failed", &message);
+            return;
+        }
+    };
+    if static_site && domain.as_deref().map_or(true, str::is_empty) {
+        let _ = fs::remove_dir_all(&stage);
+        finish(&state, &job_id, "failed", "برای انتشار سایت استاتیک، دامنه را در مشخصات اپ ثبت کن تا Nginx همان سایت را بسازد.");
+        return;
+    }
+    let node_project = apps::is_node_runtime_framework(&framework)
+        || apps::is_static_framework(&framework)
+        || apps::is_auto_framework(&framework);
     if framework == "laravel" {
         progress(
             &state,
@@ -1487,27 +1535,61 @@ async fn process_job(state: AppState, job_id: String) {
             return;
         }
     }
-    if framework == "node" {
+    if node_project {
+        let has_manifest = node::has_package_manifest(&stage);
         progress(
             &state,
             &job_id,
             "running",
             "node-build",
-            "lockfile بررسی می‌شود؛ وابستگی‌ها و اسکریپت build در محیط موقت systemd اجرا می‌شوند.",
+            if static_site { "lockfile و خروجی React/Vue/Vite بررسی می‌شوند؛ build در محیط موقت systemd اجرا می‌شود." } else { "lockfile و scripts.start بررسی می‌شوند؛ وابستگی‌ها و build در محیط موقت systemd اجرا می‌شوند." },
         );
-        if let Err(message) = node::prepare_release(&app_id, &stage) {
+        if has_manifest {
+            let should_build = if static_site {
+                match node::static_build_available(&stage) {
+                    Ok(available) => available,
+                    Err(message) => {
+                        let _ = fs::remove_dir_all(&stage);
+                        finish(&state, &job_id, "failed", &message);
+                        return;
+                    }
+                }
+            } else {
+                true
+            };
+            if should_build {
+                if let Err(message) = node::prepare_release(&app_id, &stage) {
+                    let _ = fs::remove_dir_all(&stage);
+                    finish(&state, &job_id, "failed", &message);
+                    return;
+                }
+                let build = if static_site {
+                    node::prepare_static_build(&app_id, &job_id, &stage, &build_runtime_version, &build_environment).await
+                } else {
+                    node::prepare_build(&app_id, &job_id, &stage, &build_runtime_version, &build_environment).await
+                };
+                if let Err(message) = build {
+                    let _ = fs::remove_dir_all(&stage);
+                    finish(&state, &job_id, "failed", &message);
+                    return;
+                }
+            }
+        } else if !static_site {
             let _ = fs::remove_dir_all(&stage);
-            finish(&state, &job_id, "failed", &message);
-            return;
-        }
-        if let Err(message) =
-            node::prepare_build(&app_id, &job_id, &stage, &build_runtime_version).await
-        {
-            let _ = fs::remove_dir_all(&stage);
-            finish(&state, &job_id, "failed", &message);
+            finish(&state, &job_id, "failed", "برای اجرای Node.js/SSR باید package.json و lockfile پشتیبانی‌شده وجود داشته باشد.");
             return;
         }
     }
+    let resolved_static_output = if static_site {
+        match node::resolve_static_output_path(&stage, &static_output_path) {
+            Ok(path) => Some(path),
+            Err(message) => {
+                let _ = fs::remove_dir_all(&stage);
+                finish(&state, &job_id, "failed", &message);
+                return;
+            }
+        }
+    } else { None };
     progress(
         &state,
         &job_id,
@@ -1515,7 +1597,7 @@ async fn process_job(state: AppState, job_id: String) {
         "verifying",
         "ساختار release، فایل Health check و symlinkها بررسی می‌شوند.",
     );
-    if let Err(message) = verify_release(&stage, healthcheck.as_deref()) {
+    if let Err(message) = verify_release(&stage, if static_site { None } else { healthcheck.as_deref() }) {
         let _ = fs::remove_dir_all(&stage);
         finish(&state, &job_id, "failed", &message);
         return;
@@ -1539,7 +1621,7 @@ async fn process_job(state: AppState, job_id: String) {
         );
         return;
     }
-    if framework == "node" {
+    if node_project && !static_site && node::has_package_manifest(&final_release) {
         if let Err(message) = node::activate_release(&final_release) {
             let _ = fs::remove_dir_all(&final_release);
             finish(&state, &job_id, "failed", &format!("فایل محیط پایدار به release متصل نشد: {message}"));
@@ -1583,6 +1665,29 @@ async fn process_job(state: AppState, job_id: String) {
         return;
     }
     let mut nginx_snapshot = None;
+    if static_site {
+        let output_path = resolved_static_output.as_deref().unwrap_or(".");
+        let configured = privileged_request_async(json!({"action":"node-nginx-static","application_id":app_id,"domain":domain.as_deref().unwrap_or_default(),"output_path":output_path,"spa_fallback":static_spa_fallback})).await;
+        let config_result = match configured {
+            Ok(value) if value["ok"] == true => {
+                let name = value["data"]["site_name"].as_str();
+                let content = value["data"]["content"].as_str();
+                name.zip(content).map(|(name, content)| (name.to_owned(), content.to_owned()))
+                    .ok_or_else(|| "اطلاعات سایت ساخته‌شده از Nginx کامل نیست.".to_owned())
+            }
+            Ok(value) => Err(value["error"].as_str().unwrap_or("پیکربندی Static در Nginx انجام نشد.").to_owned()),
+            Err((_, body)) => Err(body["error"].as_str().unwrap_or("ارتباط helper برای پیکربندی Static برقرار نشد.").to_owned()),
+        };
+        match config_result {
+            Ok(snapshot) => nginx_snapshot = Some(snapshot),
+            Err(message) => {
+                let recovery = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                let detail = recovery.map(|_| format!("{message}؛ release قبلی حفظ شد.")).unwrap_or_else(|error| format!("{message}؛ بازگرداندن release قبلی هم ناموفق بود: {error}"));
+                finish(&state, &job_id, "failed", &detail);
+                return;
+            }
+        }
+    }
     if framework == "laravel" {
         let laravel_runtime = {
             let db = state.lock().unwrap();
@@ -1615,7 +1720,7 @@ async fn process_job(state: AppState, job_id: String) {
             }
         }
     }
-    if framework == "node" {
+    if apps::is_node_runtime_framework(&framework) || (apps::is_auto_framework(&framework) && !static_site) {
         if let Err(message) = node::refresh_after_deploy(&app_id, previous.as_deref()).await {
             finish(&state, &job_id, "failed", &message);
             return;
@@ -1639,7 +1744,10 @@ async fn process_job(state: AppState, job_id: String) {
     let success_message = snapshot_warning.map_or_else(
         || match framework.as_str() {
             "laravel" => "release فعال شد؛ کانفیگ وب و سرویس‌های Laravel بررسی شدند. Migration دیتابیس خودکار اجرا نمی‌شود.".to_owned(),
-            "node" => "release فعال شد؛ سرویس Node در صورت فعال‌بودن restart و سلامت loopback آن بررسی شد.".to_owned(),
+            "node" | "next" | "nuxt" => "release SSR فعال شد؛ سرویس Node در صورت فعال‌بودن restart و سلامت loopback آن بررسی شد.".to_owned(),
+            "static" | "react" | "vue" | "vite" => "خروجی سایت Static ساخته و از طریق Nginx منتشر شد؛ برای این سایت process جداگانه اجرا نمی‌شود.".to_owned(),
+            "auto" if static_site => "چارچوب از manifest تشخیص داده شد؛ خروجی Static از طریق Nginx منتشر شد و process جداگانه‌ای اجرا نمی‌شود.".to_owned(),
+            "auto" => "چارچوب از manifest تشخیص داده شد؛ release SSR فعال و سرویس Node بررسی شد.".to_owned(),
             _ => "release فعال شد و اشاره‌گر جاری به‌صورت اتمی جابه‌جا شد.".to_owned(),
         },
         |warning| format!("release فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
@@ -1651,6 +1759,34 @@ async fn process_job(state: AppState, job_id: String) {
             .join("uploads")
             .join(format!("{job_id}.zip")),
     );
+}
+
+async fn refresh_static_runtime(
+    app_id: &str,
+    framework: &str,
+    domain: &str,
+    configured_output: &str,
+    spa_fallback: bool,
+) -> Result<Option<(String, String)>, String> {
+    let app_root = deployment_root().join("apps").join(app_id);
+    let releases = app_root.join("releases").canonicalize().map_err(|error| format!("پوشهٔ releaseها پیدا نشد: {error}"))?;
+    let release = app_root.join("current").canonicalize().map_err(|error| format!("release جاری پیدا نشد: {error}"))?;
+    if !release.starts_with(&releases) || !release.is_dir() {
+        return Err("release جاری خارج از مسیر مدیریت‌شده است.".to_owned());
+    }
+    if !node::is_static_deployment(framework, &release, configured_output)? {
+        return Ok(None);
+    }
+    let output = node::resolve_static_output_path(&release, configured_output)?;
+    let response = privileged_request_async(json!({"action":"node-nginx-static","application_id":app_id,"domain":domain,"output_path":output,"spa_fallback":spa_fallback}))
+        .await
+        .map_err(|(_, body)| body["error"].as_str().unwrap_or("ارتباط helper برای تنظیم Nginx برقرار نشد.").to_owned())?;
+    if response["ok"] != true {
+        return Err(response["error"].as_str().unwrap_or("تنظیم Nginx سایت Static ناموفق بود.").to_owned());
+    }
+    let name = response["data"]["site_name"].as_str().ok_or("نام سایت Nginx از helper دریافت نشد.")?;
+    let content = response["data"]["content"].as_str().ok_or("متن کانفیگ Nginx از helper دریافت نشد.")?;
+    Ok(Some((name.to_owned(), content.to_owned())))
 }
 
 fn restore_current_pointer(

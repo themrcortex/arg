@@ -1,6 +1,9 @@
 use super::*;
 
-const APP_FRAMEWORKS: &[&str] = &["laravel", "node", "python", "wordpress", "static", "custom"];
+const APP_FRAMEWORKS: &[&str] = &[
+    "auto", "laravel", "node", "next", "nuxt", "python", "wordpress", "static", "react", "vue",
+    "vite", "custom",
+];
 const APP_SOURCES: &[&str] = &[
     "manual",
     "git",
@@ -39,6 +42,10 @@ pub(super) struct AppInput {
     labels: Vec<String>,
     #[serde(default = "default_desired_state")]
     desired_state: String,
+    #[serde(default = "default_static_output_path")]
+    static_output_path: String,
+    #[serde(default = "default_spa_fallback")]
+    static_spa_fallback: bool,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +71,40 @@ fn default_runtime_version() -> String {
 }
 fn default_desired_state() -> String {
     "none".to_owned()
+}
+fn default_static_output_path() -> String {
+    "auto".to_owned()
+}
+fn default_spa_fallback() -> bool {
+    true
+}
+
+pub(super) fn is_static_framework(framework: &str) -> bool {
+    matches!(framework, "static" | "react" | "vue" | "vite")
+}
+
+pub(super) fn is_node_runtime_framework(framework: &str) -> bool {
+    matches!(framework, "node" | "next" | "nuxt")
+}
+
+pub(super) fn is_auto_framework(framework: &str) -> bool {
+    framework == "auto"
+}
+
+pub(super) fn valid_static_output_path(value: &str) -> bool {
+    value == "auto"
+        || value == "."
+        || (!value.is_empty()
+            && value.len() <= 128
+            && !value.starts_with('/')
+            && value.split('/').all(|part| {
+                !part.is_empty()
+                    && part != "."
+                    && part != ".."
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            }))
 }
 
 fn valid_name(value: &str) -> bool {
@@ -142,6 +183,12 @@ fn validate_input(input: &AppInput) -> Result<(String, Option<String>), (StatusC
             "نسخهٔ Runtime زمان ساخت باید system یا شماره نسخهٔ عددی باشد.",
         ));
     }
+    if !valid_static_output_path(&input.static_output_path) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "مسیر خروجی Static باید auto یا مسیر نسبی امن باشد.",
+        ));
+    }
     if !["none", "running", "stopped"].contains(&input.desired_state.as_str()) {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -210,7 +257,7 @@ fn domain_patterns_overlap(left: &str, right: &str) -> bool {
     matches(left, right) || matches(right, left)
 }
 
-fn random_uuid() -> String {
+pub(super) fn random_uuid() -> String {
     let mut bytes = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
@@ -226,15 +273,21 @@ fn random_uuid() -> String {
     )
 }
 
+pub(super) fn valid_uuid(value: &str) -> bool {
+    value.len() == 36 && value.chars().enumerate().all(|(index, character)| {
+        if [8, 13, 18, 23].contains(&index) { character == '-' } else { character.is_ascii_hexdigit() }
+    })
+}
+
 fn read_apps(
     db: &Connection,
     owner: &str,
     include_deleted: bool,
 ) -> Result<Vec<Value>, rusqlite::Error> {
     let sql = if include_deleted {
-        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at FROM applications WHERE owner_server_uuid=?1 ORDER BY deleted_at IS NOT NULL,name COLLATE NOCASE"
+        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at,static_output_path,static_spa_fallback FROM applications WHERE owner_server_uuid=?1 ORDER BY deleted_at IS NOT NULL,name COLLATE NOCASE"
     } else {
-        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at FROM applications WHERE owner_server_uuid=?1 AND deleted_at IS NULL ORDER BY name COLLATE NOCASE"
+        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at,static_output_path,static_spa_fallback FROM applications WHERE owner_server_uuid=?1 AND deleted_at IS NULL ORDER BY name COLLATE NOCASE"
     };
     let mut statement = db.prepare(sql)?;
     let rows = statement.query_map([owner], |row| {
@@ -252,6 +305,8 @@ fn read_apps(
             "reconcile_policy": row.get::<_,String>(14)?, "version": row.get::<_,i64>(15)?,
             "created_by": row.get::<_,String>(16)?, "created_at": row.get::<_,i64>(17)?,
             "updated_at": row.get::<_,i64>(18)?, "deleted_at": row.get::<_,Option<i64>>(19)?,
+            "static_output_path": row.get::<_,String>(20)?,
+            "static_spa_fallback": row.get::<_,bool>(21)?,
         }))
     })?;
     rows.collect()
@@ -368,6 +423,19 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+    for (name, declaration) in [
+        ("static_output_path", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("static_spa_fallback", "INTEGER NOT NULL DEFAULT 1"),
+        ("build_environment_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ] {
+        let mut statement = db.prepare("PRAGMA table_info(applications)")?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|column| column == name) {
+            db.execute(&format!("ALTER TABLE applications ADD COLUMN {name} {declaration}"), [])?;
+        }
+    }
     Ok(())
 }
 
@@ -455,7 +523,7 @@ pub(super) async fn create(
         .map(|label| label.trim())
         .collect::<Vec<_>>();
     let db = state.lock().unwrap();
-    db.execute("INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown','active','manual','manual',?13,?14,?14)", params![id,owner,name,input.description.trim(),input.framework,input.runtime_version,input.build_runtime_version,input.source_type,domain,input.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),input.desired_state,actor,at]).map_err(|error_value| if error_value.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.") } else { db_error(error_value) })?;
+    db.execute("INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at,static_output_path,static_spa_fallback) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown','active','manual','manual',?13,?14,?14,?15,?16)", params![id,owner,name,input.description.trim(),input.framework,input.runtime_version,input.build_runtime_version,input.source_type,domain,input.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),input.desired_state,actor,at,input.static_output_path,input.static_spa_fallback]).map_err(|error_value| if error_value.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.") } else { db_error(error_value) })?;
     audit(
         &db,
         &actor,
@@ -584,7 +652,7 @@ pub(super) async fn update(
         .map(|label| label.trim())
         .collect::<Vec<_>>();
     let db = state.lock().unwrap();
-    let changed = db.execute("UPDATE applications SET name=?1,description=?2,framework=?3,runtime_version=?4,build_runtime_version=?5,source_type=?6,domain=?7,listen_port=?8,labels_json=?9,desired_state=?10,version=version+1,updated_at=?11 WHERE id=?12 AND owner_server_uuid=?13 AND version=?14 AND deleted_at IS NULL", params![name,input.app.description.trim(),input.app.framework,input.app.runtime_version,input.app.build_runtime_version,input.app.source_type,domain,input.app.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_|"[]".to_owned()),input.app.desired_state,at,id,owner,input.expected_version]).map_err(db_error)?;
+    let changed = db.execute("UPDATE applications SET name=?1,description=?2,framework=?3,runtime_version=?4,build_runtime_version=?5,source_type=?6,domain=?7,listen_port=?8,labels_json=?9,desired_state=?10,static_output_path=?11,static_spa_fallback=?12,version=version+1,updated_at=?13 WHERE id=?14 AND owner_server_uuid=?15 AND version=?16 AND deleted_at IS NULL", params![name,input.app.description.trim(),input.app.framework,input.app.runtime_version,input.app.build_runtime_version,input.app.source_type,domain,input.app.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_|"[]".to_owned()),input.app.desired_state,input.app.static_output_path,input.app.static_spa_fallback,at,id,owner,input.expected_version]).map_err(db_error)?;
     if changed == 0 {
         return Err(error(
             StatusCode::CONFLICT,
@@ -669,8 +737,9 @@ pub(super) async fn restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        domain_patterns_overlap, listening_tcp_ports, migrate, normalized_domain, valid_domain,
-        valid_runtime_version, AppInput, AppUpdate,
+        domain_patterns_overlap, is_auto_framework, is_static_framework, is_node_runtime_framework,
+        listening_tcp_ports, migrate, normalized_domain, valid_domain, valid_runtime_version,
+        valid_static_output_path, AppInput, AppUpdate,
     };
 
     #[test]
@@ -696,6 +765,8 @@ mod tests {
         assert_eq!(create.runtime_version, "system");
         assert_eq!(create.source_type, "manual");
         assert_eq!(create.desired_state, "none");
+        assert_eq!(create.static_output_path, "auto");
+        assert!(create.static_spa_fallback);
         let update: AppUpdate = serde_json::from_value(serde_json::json!({
             "expected_version":3, "name":"Shop", "framework":"laravel",
             "source_type":"git", "domain":"", "labels":[], "desired_state":"running"
@@ -750,6 +821,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(values, ("system".into(), "system".into()));
+        let static_defaults: (String, bool) = db.query_row(
+            "SELECT static_output_path,static_spa_fallback FROM applications WHERE id='old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(static_defaults, ("auto".into(), true));
+        let build_environment: String = db
+            .query_row(
+                "SELECT build_environment_json FROM applications WHERE id='old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(build_environment, "{}");
     }
 
     #[test]
@@ -760,6 +845,23 @@ mod tests {
         assert!(!valid_runtime_version("8..5"));
         assert!(!valid_runtime_version("$(id)"));
         assert!(!valid_runtime_version("8.5; touch /tmp/x"));
+    }
+
+    #[test]
+    fn static_and_ssr_frameworks_are_distinct_and_output_paths_are_safe() {
+        assert!(is_auto_framework("auto"));
+        assert!(is_static_framework("react"));
+        assert!(is_static_framework("vue"));
+        assert!(is_static_framework("vite"));
+        assert!(!is_static_framework("next"));
+        assert!(is_node_runtime_framework("next"));
+        assert!(is_node_runtime_framework("nuxt"));
+        assert!(valid_static_output_path("auto"));
+        assert!(valid_static_output_path(".output/public"));
+        assert!(valid_static_output_path("."));
+        assert!(!valid_static_output_path("../etc"));
+        assert!(!valid_static_output_path("/var/www"));
+        assert!(!valid_static_output_path("dist;id"));
     }
 
     #[test]

@@ -20,8 +20,29 @@ pub(super) struct EnvironmentRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct BuildEnvironmentRequest {
+    variables: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ServiceRequest {
     enabled: bool,
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct NodeLogsQuery {
+    limit: Option<usize>,
+    after: Option<String>,
+}
+
+fn valid_journal_cursor(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b":=;_-".contains(&byte))
 }
 
 fn deployment_root() -> PathBuf {
@@ -89,6 +110,13 @@ enum PackageManager {
     YarnClassic,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeEntrypoint {
+    PackageStart,
+    NextCli,
+    NuxtOutput,
+}
+
 impl PackageManager {
     fn label(self) -> &'static str {
         match self {
@@ -128,6 +156,7 @@ struct Manifest {
     node_engine: Option<String>,
     scripts: Vec<String>,
     manager: Option<PackageManager>,
+    detected_framework: String,
 }
 
 fn inspect_manifest(root: &FsPath) -> Result<Manifest, String> {
@@ -155,6 +184,24 @@ fn inspect_manifest(root: &FsPath) -> Result<Manifest, String> {
         })
         .unwrap_or_default();
     let manager = choose_package_manager(root, value["packageManager"].as_str())?;
+    let has_package = |name: &str| {
+        value["dependencies"][name].is_string()
+            || value["devDependencies"][name].is_string()
+            || value["optionalDependencies"][name].is_string()
+    };
+    let detected_framework = if has_package("next") {
+        "next"
+    } else if has_package("nuxt") || has_package("nitropack") {
+        "nuxt"
+    } else if has_package("vite") {
+        "vite"
+    } else if has_package("vue") {
+        "vue"
+    } else if has_package("react") {
+        "react"
+    } else {
+        "node"
+    };
     Ok(Manifest {
         name: safe_manifest_text(value["name"].as_str()),
         version: safe_manifest_text(value["version"].as_str()),
@@ -162,7 +209,89 @@ fn inspect_manifest(root: &FsPath) -> Result<Manifest, String> {
         node_engine: safe_manifest_text(value["engines"]["node"].as_str()),
         scripts,
         manager,
+        detected_framework: detected_framework.to_owned(),
     })
+}
+
+pub(super) fn is_static_deployment(
+    framework: &str,
+    release: &FsPath,
+    configured_output: &str,
+) -> Result<bool, String> {
+    if apps::is_static_framework(framework) {
+        return Ok(true);
+    }
+    if !apps::is_auto_framework(framework) {
+        return Ok(false);
+    }
+    if has_package_manifest(release) {
+        let manifest = inspect_manifest(release)?;
+        return Ok(matches!(manifest.detected_framework.as_str(), "react" | "vue" | "vite"));
+    }
+    Ok(resolve_static_output_path(release, configured_output).is_ok())
+}
+
+pub(super) fn has_package_manifest(release: &FsPath) -> bool {
+    fs::symlink_metadata(release.join("package.json")).is_ok_and(|metadata| {
+        metadata.is_file() && !metadata.file_type().is_symlink()
+    })
+}
+
+pub(super) fn static_build_available(release: &FsPath) -> Result<bool, String> {
+    if !has_package_manifest(release) {
+        return Ok(false);
+    }
+    let manifest = inspect_manifest(release)?;
+    Ok(manifest.manager.is_some() && manifest.scripts.iter().any(|script| script == "build"))
+}
+
+fn valid_public_build_name(name: &str) -> bool {
+    let allowed_prefix = ["VITE_", "NEXT_PUBLIC_", "NUXT_PUBLIC_", "REACT_APP_", "PUBLIC_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix));
+    allowed_prefix
+        && name.len() <= 120
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && !["SECRET", "PASSWORD", "TOKEN", "PRIVATE", "CREDENTIAL", "API_KEY", "APIKEY", "ACCESS_KEY"]
+            .iter()
+            .any(|marker| name.contains(marker))
+}
+
+fn validate_public_build_environment(variables: &BTreeMap<String, String>) -> Result<(), String> {
+    if variables.len() > 64 {
+        return Err("حداکثر ۶۴ متغیر عمومی Build مجاز است.".into());
+    }
+    let mut total_bytes = 0usize;
+    for (name, value) in variables {
+        if !valid_public_build_name(name) {
+            return Err(format!("نام متغیر Build «{name}» عمومی یا معتبر نیست."));
+        }
+        if value.len() > 4096 || value.chars().any(char::is_control) {
+            return Err(format!("مقدار متغیر «{name}» نامعتبر است یا از ۴ KiB بیشتر است."));
+        }
+        total_bytes = total_bytes.saturating_add(name.len()).saturating_add(value.len());
+    }
+    if total_bytes > 16 * 1024 {
+        return Err("مجموع متغیرهای عمومی Build نباید از ۱۶ KiB بیشتر شود.".into());
+    }
+    Ok(())
+}
+
+fn build_environment_from_value(value: &Value) -> Result<BTreeMap<String, String>, String> {
+    let variables: BTreeMap<String, String> = serde_json::from_value(value.clone())
+        .map_err(|_| "متغیرهای Build باید یک شیء از نام و مقدار متنی باشند.".to_owned())?;
+    validate_public_build_environment(&variables)?;
+    Ok(variables)
+}
+
+pub(super) fn parse_public_build_environment(
+    value: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let value: Value = serde_json::from_str(value)
+        .map_err(|_| "ساختار متغیرهای عمومی Build در پایگاه داده معتبر نیست.".to_owned())?;
+    build_environment_from_value(&value)
 }
 
 fn safe_manifest_text(value: Option<&str>) -> Option<String> {
@@ -177,6 +306,32 @@ fn valid_script_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
+fn has_nuxt_server_entrypoint(release: &FsPath) -> bool {
+    let entry = release.join(".output/server/index.mjs");
+    let Ok(metadata) = fs::symlink_metadata(&entry) else { return false };
+    if !metadata.is_file() || metadata.file_type().is_symlink() { return false; }
+    let (Ok(root), Ok(real_entry)) = (release.canonicalize(), entry.canonicalize()) else { return false };
+    real_entry.starts_with(root)
+}
+
+fn has_next_cli_entrypoint(release: &FsPath) -> bool {
+    let entry = release.join("node_modules/next/dist/bin/next");
+    let (Ok(root), Ok(real_entry)) = (release.canonicalize(), entry.canonicalize()) else { return false };
+    real_entry.starts_with(root) && real_entry.is_file()
+}
+
+fn runtime_entrypoint(manifest: &Manifest, release: &FsPath, allow_prebuild: bool) -> Option<RuntimeEntrypoint> {
+    if manifest.scripts.iter().any(|script| script == "start") {
+        Some(RuntimeEntrypoint::PackageStart)
+    } else if manifest.detected_framework == "next" && (allow_prebuild || has_next_cli_entrypoint(release)) {
+        Some(RuntimeEntrypoint::NextCli)
+    } else if manifest.detected_framework == "nuxt" && (allow_prebuild || has_nuxt_server_entrypoint(release)) {
+        Some(RuntimeEntrypoint::NuxtOutput)
+    } else {
+        None
+    }
 }
 
 fn choose_package_manager(
@@ -237,7 +392,15 @@ fn inspection_json(
     app_id: &str,
     runtime_version: &str,
     environment_keys: Vec<String>,
+    static_site: bool,
+    configured_output: &str,
 ) -> Value {
+    if static_site {
+        return match resolve_static_output_path(root, configured_output) {
+            Ok(output) => json!({"framework":"static","detected_framework":inspect_manifest(root).map(|manifest| manifest.detected_framework).unwrap_or_else(|_|"static".to_owned()),"state":"ready","release_path":root,"static_output_path":output,"environment_keys":[],"scripts":[],"message":"خروجی استاتیک معتبر است؛ Nginx آن را از current منتشر می‌کند و سرویس Runtime جداگانه‌ای اجرا نمی‌شود."}),
+            Err(message) => json!({"framework":"static","detected_framework":inspect_manifest(root).map(|manifest| manifest.detected_framework).unwrap_or_else(|_|"static".to_owned()),"state":"static_output_missing","release_path":root,"static_output_path":configured_output,"environment_keys":[],"scripts":[],"message":message}),
+        };
+    }
     let Ok(manifest) = inspect_manifest(root) else {
         return json!({"framework":"node","state":"manifest_missing_or_invalid","release_path":root,"message":"package.json پیدا نشد یا ساختار آن معتبر نیست.","scripts":[],"environment_keys":[]});
     };
@@ -255,14 +418,17 @@ fn inspection_json(
         "package_manager_missing"
     } else if !dependencies_installed {
         "dependencies_missing"
-    } else if !manifest.scripts.iter().any(|script| script == "start") {
-        "start_script_missing"
+    } else if static_site && !manifest.scripts.iter().any(|script| script == "build") {
+        "build_script_missing"
+    } else if !static_site && runtime_entrypoint(&manifest, root, false).is_none() {
+        "start_entrypoint_missing"
     } else {
         "ready"
     };
     let service_unit = node_unit_name(app_id);
     json!({
         "framework":"node",
+        "detected_framework":manifest.detected_framework,
         "state":state,
         "release_path":root,
         "node_version":node.map(|(_, version)| version),
@@ -282,8 +448,9 @@ fn inspection_json(
             "runtime_missing_or_mismatched" => "نسخهٔ Node درخواستی نصب نیست یا با Runtime این VPS تطبیق ندارد.",
             "package_manager_missing" => "مدیر بستهٔ انتخابی نصب نیست؛ Runtime Manager را بررسی کن.",
             "dependencies_missing" => "node_modules در release جاری موجود نیست؛ ابتدا deploy را اجرا کن تا وابستگی‌ها با lockfile نصب شوند.",
-            "start_script_missing" => "برای اجرای سرویس باید scripts.start در package.json تعریف شود.",
-            _ => "Manifest، lockfile، Runtime و اسکریپت start پیدا شدند.",
+            "start_entrypoint_missing" => "برای اجرای SSR باید scripts.start یا entrypoint استاندارد Next/Nuxt پس از build در release موجود باشد.",
+            "build_script_missing" => "برای انتشار استاتیک، scripts.build در package.json تعریف شود.",
+            _ => "Manifest، lockfile، Runtime و entrypoint اجرایی پیدا شدند.",
         }
     })
 }
@@ -548,11 +715,80 @@ pub(super) async fn prepare_build(
     job_id: &str,
     release: &FsPath,
     build_runtime: &str,
+    build_environment: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    prepare_project_build(app_id, job_id, release, build_runtime, build_environment, true).await
+}
+
+pub(super) async fn prepare_static_build(
+    app_id: &str,
+    job_id: &str,
+    release: &FsPath,
+    build_runtime: &str,
+    build_environment: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    prepare_project_build(app_id, job_id, release, build_runtime, build_environment, false).await
+}
+
+pub(super) fn resolve_static_output_path(
+    release: &FsPath,
+    configured: &str,
+) -> Result<String, String> {
+    let manifest = if has_package_manifest(release) {
+        Some(inspect_manifest(release)?)
+    } else {
+        None
+    };
+    let candidates: Vec<&str> = if configured != "auto" {
+        vec![configured]
+    } else if let Some(manifest) = manifest.as_ref() {
+        match manifest.detected_framework.as_str() {
+            "next" => vec!["out", "dist"],
+            "nuxt" => vec![".output/public", "dist"],
+            "react" => vec!["build", "dist", "out"],
+            "vue" | "vite" => vec!["dist", "build", "out"],
+            _ => vec!["dist", "build", "out", "public"],
+        }
+    } else {
+        vec!["dist", "build", "out", "public", "."]
+    };
+    for relative in candidates {
+        if !apps::valid_static_output_path(relative) || relative == "auto" { continue; }
+        let candidate = if relative == "." { release.to_path_buf() } else { release.join(relative) };
+        let metadata = match fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() { continue; }
+        let canonical_release = release.canonicalize().map_err(|error| error.to_string())?;
+        let canonical_output = candidate.canonicalize().map_err(|error| error.to_string())?;
+        if !canonical_output.starts_with(&canonical_release) { continue; }
+        let index = canonical_output.join("index.html");
+        if !fs::symlink_metadata(&index).is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink()) { continue; }
+        return Ok(relative.to_owned());
+    }
+    Err(if configured == "auto" {
+        "خروجی خودکار پیدا نشد؛ انتظار می‌رود dist، build، out یا .output/public شامل index.html باشد. مسیر خروجی را در مشخصات اپ تنظیم کن.".into()
+    } else {
+        format!("مسیر خروجی «{configured}» زیر release جاری پیدا نشد یا index.html ندارد.")
+    })
+}
+
+async fn prepare_project_build(
+    app_id: &str,
+    job_id: &str,
+    release: &FsPath,
+    build_runtime: &str,
+    build_environment: &BTreeMap<String, String>,
+    require_start: bool,
 ) -> Result<(), String> {
     let manifest = inspect_manifest(release)?;
     let manager = manifest.manager.ok_or("lockfile انتخابی پیدا نشد.")?;
-    if !manifest.scripts.iter().any(|script| script == "start") {
+    if require_start && runtime_entrypoint(&manifest, release, true).is_none() {
         return Err("برای برنامهٔ Node.js، scripts.start در package.json تعریف نشده است.".into());
+    }
+    if !require_start && !manifest.scripts.iter().any(|script| script == "build") {
+        return Err("برای انتشار استاتیک، scripts.build در package.json تعریف نشده است.".into());
     }
     if find_node_binary(build_runtime).is_none() {
         return Err(format!(
@@ -570,7 +806,8 @@ pub(super) async fn prepare_build(
         if step == "build" && !manifest.scripts.iter().any(|script| script == "build") {
             continue;
         }
-        let result = privileged_request_async(json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"node_version":build_runtime,"package_manager":manager.label()})).await.map_err(|(_, body)| body["error"].as_str().unwrap_or("Node build helper unavailable").to_owned())?;
+        let environment = if step == "build" { json!(build_environment) } else { json!({}) };
+        let result = privileged_request_async(json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"node_version":build_runtime,"package_manager":manager.label(),"build_environment":environment})).await.map_err(|(_, body)| body["error"].as_str().unwrap_or("Node build helper unavailable").to_owned())?;
         if result["ok"] != true {
             return Err(result["error"]
                 .as_str()
@@ -605,39 +842,123 @@ pub(super) async fn inspect(
     headers: HeaderMap,
     Path(app_id): Path<String>,
 ) -> ApiResult {
-    let runtime_version = {
+    let (framework, runtime_version, output_path, spa_fallback) = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-        let (framework, runtime_version): (String, String) = db
+        let (framework, runtime_version, output_path, spa_fallback): (String, String, String, bool) = db
             .query_row(
-                "SELECT framework,runtime_version FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+                "SELECT framework,build_runtime_version,static_output_path,static_spa_fallback FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
                 params![app_id, owner],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(db_error)?
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
-        if framework != "node" {
-            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Node.js نیست."));
+        if !apps::is_node_runtime_framework(&framework) && !apps::is_static_framework(&framework) && !apps::is_auto_framework(&framework) {
+            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Runner وب پشتیبانی‌شده ندارد."));
         }
-        runtime_version
+        (framework, runtime_version, output_path, spa_fallback)
     };
     let release = active_release(&app_id)?;
-    let environment = privileged_request_async(
-        json!({"action":"node-environment-keys","application_id":app_id}),
-    )
-    .await?;
-    if environment["ok"] != true {
-        return Err(error(StatusCode::BAD_GATEWAY, environment["error"].as_str().unwrap_or("کلیدهای فایل محیط خوانده نشد.")));
-    }
-    let environment_keys = environment["data"]["keys"]
-        .as_array()
-        .map(|keys| keys.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-        .unwrap_or_default();
+    let static_site = is_static_deployment(&framework, &release, &output_path)
+        .map_err(|message| error(StatusCode::CONFLICT, &message))?;
+    let environment_keys = if static_site {
+        Vec::new()
+    } else {
+        let environment = privileged_request_async(
+            json!({"action":"node-environment-keys","application_id":app_id}),
+        )
+        .await?;
+        if environment["ok"] != true {
+            return Err(error(StatusCode::BAD_GATEWAY, environment["error"].as_str().unwrap_or("کلیدهای فایل محیط خوانده نشد.")));
+        }
+        environment["data"]["keys"]
+            .as_array()
+            .map(|keys| keys.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
     Ok(Json(
-        json!({"inspection":inspection_json(&release,&app_id,&runtime_version,environment_keys)}),
+        json!({"inspection":inspection_json(&release,&app_id,&runtime_version,environment_keys,static_site,&output_path),"static_output_path":output_path,"static_spa_fallback":spa_fallback}),
     ))
+}
+
+pub(super) async fn get_build_environment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let raw: String = db
+        .query_row(
+            "SELECT build_environment_json FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+            params![app_id, owner],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
+    let variables = parse_public_build_environment(&raw)
+        .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
+    Ok(Json(json!({"variables":variables,"values_are_public":true})))
+}
+
+pub(super) async fn save_build_environment(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    Json(input): Json<BuildEnvironmentRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    validate_public_build_environment(&input.variables)
+        .map_err(|message| error(StatusCode::BAD_REQUEST, &message))?;
+    let _guard = laravel::APP_EXECUTION_LOCK.lock().await;
+    let (actor, owner) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?.username;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        let framework: String = db
+            .query_row(
+                "SELECT framework FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+                params![app_id, owner],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
+        if !apps::is_node_runtime_framework(&framework)
+            && !apps::is_static_framework(&framework)
+            && !apps::is_auto_framework(&framework)
+        {
+            return Err(error(StatusCode::CONFLICT, "این قالب از Buildهای Node پشتیبانی نمی‌کند."));
+        }
+        if deployment_in_progress(&db, &app_id) {
+            return Err(error(StatusCode::CONFLICT, "تا پایان Deploy نمی‌توان متغیرهای Build را تغییر داد."));
+        }
+        (actor, owner)
+    };
+    let encoded = serde_json::to_string(&input.variables)
+        .map_err(|error_value| error(StatusCode::INTERNAL_SERVER_ERROR, &error_value.to_string()))?;
+    let db = state.lock().unwrap();
+    let changed = db
+        .execute(
+            "UPDATE applications SET build_environment_json=?1,version=version+1,updated_at=?2 WHERE id=?3 AND owner_server_uuid=?4 AND deleted_at IS NULL",
+            params![encoded, now(), app_id, owner],
+        )
+        .map_err(db_error)?;
+    if changed == 0 {
+        return Err(error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."));
+    }
+    let keys = input.variables.keys().cloned().collect::<Vec<_>>();
+    audit(
+        &db,
+        &actor,
+        "node.build_environment.update",
+        &format!("app={app_id}; keys={}", keys.join(",")),
+    );
+    Ok(Json(json!({"saved":true,"keys":keys,"values_are_public":true})))
 }
 
 pub(super) async fn service(
@@ -645,24 +966,34 @@ pub(super) async fn service(
     headers: HeaderMap,
     Path(app_id): Path<String>,
 ) -> ApiResult {
-    let port = {
+    let (port, framework, output_path) = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-        let (framework, port): (String, Option<u16>) = db
+        let (framework, port, output_path): (String, Option<u16>, String) = db
             .query_row(
-                "SELECT framework,listen_port FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+                "SELECT framework,listen_port,static_output_path FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
                 params![app_id,owner],
-                |row| Ok((row.get(0)?,row.get::<_,Option<i64>>(1)?.map(|v|v as u16))),
+                |row| Ok((row.get(0)?,row.get::<_,Option<i64>>(1)?.map(|v|v as u16),row.get(2)?)),
             )
             .optional()
             .map_err(db_error)?
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
-        if framework != "node" {
-            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Node.js نیست."));
+        if apps::is_static_framework(&framework) {
+            return Ok(Json(json!({"service":{"unit":null,"state":"static","enabled":true},"port":null})));
         }
-        port
+        if !apps::is_node_runtime_framework(&framework) && !apps::is_auto_framework(&framework) {
+            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Runner وب ندارد."));
+        }
+        (port, framework, output_path)
     };
+    if apps::is_auto_framework(&framework) {
+        if let Ok(release) = active_release(&app_id) {
+            if is_static_deployment(&framework, &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
+                return Ok(Json(json!({"service":{"unit":null,"state":"static","enabled":true},"port":null})));
+            }
+        }
+    }
     let status =
         privileged_request_async(json!({"action":"node-service-status","application_id":app_id}))
             .await?;
@@ -685,13 +1016,13 @@ pub(super) async fn set_service(
 ) -> ApiResult {
     check_origin(&headers)?;
     let _guard = laravel::APP_EXECUTION_LOCK.lock().await;
-    let (actor, runtime, port, domain) = {
+    let (actor, framework, runtime, port, domain, output_path) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-        let row:(String,String,Option<u16>,Option<String>)=db.query_row("SELECT framework,runtime_version,listen_port,domain FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",params![app_id,owner],|row|Ok((row.get(0)?,row.get(1)?,row.get::<_,Option<i64>>(2)?.map(|v|v as u16),row.get::<_,Option<String>>(3)?))).optional().map_err(db_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
-        if row.0 != "node" {
-            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Node.js نیست."));
+        let row:(String,String,Option<u16>,Option<String>,String)=db.query_row("SELECT framework,runtime_version,listen_port,domain,static_output_path FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",params![app_id,owner],|row|Ok((row.get(0)?,row.get(1)?,row.get::<_,Option<i64>>(2)?.map(|v|v as u16),row.get::<_,Option<String>>(3)?,row.get(4)?))).optional().map_err(db_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
+        if !apps::is_node_runtime_framework(&row.0) && !apps::is_auto_framework(&row.0) {
+            return Err(error(StatusCode::CONFLICT, "فقط اپ SSR دارای سرویس Node قابل روشن/خاموش‌کردن است."));
         }
         if deployment_in_progress(&db, &app_id) {
             return Err(error(
@@ -699,8 +1030,14 @@ pub(super) async fn set_service(
                 "تا پایان deploy نمی‌توان وضعیت سرویس Node را تغییر داد.",
             ));
         }
-        (actor, row.1, row.2, row.3)
+        (actor, row.0, row.1, row.2, row.3, row.4)
     };
+    if apps::is_auto_framework(&framework) {
+        let release = active_release(&app_id)?;
+        if is_static_deployment("auto", &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
+            return Err(error(StatusCode::CONFLICT, "این پروژه به‌صورت Static منتشر شده و سرویس Node ندارد."));
+        }
+    }
     let previously_active = if input.enabled {
         let previous = privileged_request_async(
             json!({"action":"node-service-status","application_id":app_id}),
@@ -720,13 +1057,14 @@ pub(super) async fn set_service(
         let release = active_release(&app_id)?;
         let manifest =
             inspect_manifest(&release).map_err(|message| error(StatusCode::CONFLICT, &message))?;
+        let entrypoint = runtime_entrypoint(&manifest, &release, false);
         if manifest.manager.is_none()
-            || !manifest.scripts.iter().any(|script| script == "start")
+            || entrypoint.is_none()
             || !release.join("node_modules").is_dir()
         {
             return Err(error(
                 StatusCode::CONFLICT,
-                "release جاری باید lockfile، node_modules و scripts.start داشته باشد.",
+                "release جاری باید lockfile، وابستگی نصب‌شده و نقطهٔ ورود SSR معتبر داشته باشد؛ Next و Nuxt از entrypoint استاندارد خود نیز پشتیبانی می‌شوند.",
             ));
         }
         let port = port.filter(|port| *port >= 1024).ok_or_else(|| {
@@ -810,13 +1148,13 @@ pub(super) async fn save_environment(
         ));
     }
     let _guard = laravel::APP_EXECUTION_LOCK.lock().await;
-    let actor = {
+    let (actor, framework, output_path) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-        let framework:String=db.query_row("SELECT framework FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",params![app_id,owner],|row|row.get(0)).optional().map_err(db_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
-        if framework != "node" {
-            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Node.js نیست."));
+        let (framework, output_path):(String,String)=db.query_row("SELECT framework,static_output_path FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",params![app_id,owner],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(db_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
+        if !apps::is_node_runtime_framework(&framework) && !apps::is_auto_framework(&framework) {
+            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن سرویس Runtime Node ندارد."));
         }
         if deployment_in_progress(&db, &app_id) {
             return Err(error(
@@ -824,8 +1162,14 @@ pub(super) async fn save_environment(
                 "تا پایان deploy فایل محیط را تغییر نده.",
             ));
         }
-        actor
+        (actor, framework, output_path)
     };
+    if apps::is_auto_framework(&framework) {
+        let release = active_release(&app_id)?;
+        if is_static_deployment("auto", &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
+            return Err(error(StatusCode::CONFLICT, "این پروژه Static است و متغیر Runtime ندارد."));
+        }
+    }
     let result = privileged_request_async(json!({
         "action":"node-environment-save",
         "application_id":app_id,
@@ -970,25 +1314,36 @@ pub(super) async fn logs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(app_id): Path<String>,
+    Query(query): Query<NodeLogsQuery>,
 ) -> ApiResult {
-    {
+    if query.after.as_deref().is_some_and(|cursor| !valid_journal_cursor(cursor)) {
+        return Err(error(StatusCode::BAD_REQUEST, "شناسهٔ ادامهٔ لاگ معتبر نیست."));
+    }
+    let (framework, output_path) = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-        let framework: Option<String> = db
+        let record: Option<(String, String)> = db
             .query_row(
-                "SELECT framework FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+                "SELECT framework,static_output_path FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
                 params![app_id, owner],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(db_error)?;
-        if framework.as_deref() != Some("node") {
+        if !record.as_ref().is_some_and(|(value, _)| apps::is_node_runtime_framework(value) || apps::is_auto_framework(value)) {
             return Err(error(StatusCode::NOT_FOUND, "اپلیکیشن Node.js پیدا نشد."));
+        }
+        record.unwrap_or_default()
+    };
+    if apps::is_auto_framework(&framework) {
+        let release = active_release(&app_id)?;
+        if is_static_deployment("auto", &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
+            return Err(error(StatusCode::CONFLICT, "این پروژه Static است و سرویس اجرایی ندارد."));
         }
     }
     let result = privileged_request_async(
-        json!({"action":"node-service-logs","application_id":app_id}),
+        json!({"action":"node-service-logs","application_id":app_id,"limit":query.limit.unwrap_or(100).clamp(1,500),"after":query.after}),
     )
     .await?;
     if result["ok"] != true {
@@ -1012,6 +1367,7 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
         "node-environment-keys" => helper_environment_keys(request),
         "node-environment-permissions" => helper_environment_permissions(request),
         "node-nginx-proxy" => helper_node_nginx_proxy(request),
+        "node-nginx-static" => helper_node_nginx_static(request),
         _ => json!({"ok":false,"error":"Node helper operation is not allowlisted"}),
     }
 }
@@ -1027,6 +1383,23 @@ fn helper_node_nginx_proxy(request: &Value) -> Value {
         return json!({"ok":false,"error":"Node port is invalid"});
     };
     match nginx::configure_node_proxy(app_id, domain, port as u16) {
+        Ok(data) => json!({"ok":true,"data":data}),
+        Err(message) => json!({"ok":false,"error":message}),
+    }
+}
+
+fn helper_node_nginx_static(request: &Value) -> Value {
+    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+        return json!({"ok":false,"error":"Application ID is invalid"});
+    };
+    let (Some(domain), Some(output_path), Some(spa_fallback)) = (
+        request["domain"].as_str(),
+        request["output_path"].as_str(),
+        request["spa_fallback"].as_bool(),
+    ) else {
+        return json!({"ok":false,"error":"Static site configuration is incomplete"});
+    };
+    match nginx::configure_static_site(app_id, domain, output_path, spa_fallback) {
         Ok(data) => json!({"ok":true,"data":data}),
         Err(message) => json!({"ok":false,"error":message}),
     }
@@ -1089,6 +1462,14 @@ fn helper_build_step(request: &Value) -> Value {
     if step == "build" && !manifest.scripts.iter().any(|script| script == "build") {
         return json!({"ok":false,"error":"The source has no allowlisted build script"});
     }
+    let build_environment = if step == "build" {
+        match build_environment_from_value(&request["build_environment"]) {
+            Ok(values) => values,
+            Err(message) => return json!({"ok":false,"error":message}),
+        }
+    } else {
+        BTreeMap::new()
+    };
     let group = app_group(app_id);
     let build_cache = root.join("build-cache");
     if let Err(message) = ensure_group(&group)
@@ -1113,6 +1494,7 @@ fn helper_build_step(request: &Value) -> Value {
         &node_binary,
         &binary,
         args,
+        &build_environment,
         app_id,
         job_id,
         step,
@@ -1162,7 +1544,8 @@ fn helper_service_enable(request: &Value) -> Value {
         Ok(value) => value,
         Err(message) => return json!({"ok":false,"error":message}),
     };
-    if !manifest.scripts.iter().any(|script| script == "start")
+        let entrypoint = runtime_entrypoint(&manifest, &release, false);
+        if entrypoint.is_none()
         || !release.join("node_modules").is_dir()
     {
         return json!({"ok":false,"error":"A start script and installed dependencies are required"});
@@ -1189,6 +1572,7 @@ fn helper_service_enable(request: &Value) -> Value {
         &node,
         &package_manager,
         port,
+        entrypoint.unwrap(),
     ) {
         Ok(content) => content,
         Err(message) => return json!({"ok":false,"error":message}),
@@ -1435,9 +1819,12 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
     let active = systemctl_output(&["is-active", &unit]).unwrap_or_else(|_| "inactive".into());
     let enabled = systemctl_output(&["is-enabled", &unit]).is_ok_and(|value| value == "enabled");
     if logs {
+        let limit = request["limit"].as_u64().unwrap_or(100).clamp(1, 500);
+        let cursor = request["after"].as_str().filter(|value| valid_journal_cursor(value));
         let mut command = Command::new("/usr/bin/journalctl");
+        command.args(["-u", &unit, "-n", &limit.to_string(), "--no-pager", "--show-cursor", "-o", "cat"]);
+        if let Some(cursor) = cursor { command.arg(format!("--after-cursor={cursor}")); }
         command
-            .args(["-u", &unit, "-n", "100", "--no-pager", "-o", "cat"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -1449,7 +1836,10 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
                 let reader = thread::spawn(move || read_capped_sync(stdout));
                 let _ = child.wait();
                 let output = reader.join().unwrap_or_default();
-                json!({"ok":true,"data":{"unit":unit,"logs":String::from_utf8_lossy(&output).into_owned()}})
+                let text=String::from_utf8_lossy(&output).into_owned();
+                let next_cursor=text.lines().find_map(|line|line.strip_prefix("-- cursor: ").map(str::to_owned));
+                let logs=text.lines().filter(|line|!line.starts_with("-- cursor: ")).collect::<Vec<_>>().join("\n");
+                json!({"ok":true,"data":{"unit":unit,"logs":logs,"next_cursor":next_cursor,"source":"systemd-journal","persistent":true,"retention_scope":"host-journald"}})
             }
             Err(error_value) => json!({"ok":false,"error":format!("Could not read unit logs: {error_value}")}),
         };
@@ -1457,7 +1847,7 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
     json!({"ok":true,"data":{"unit":unit,"state":active,"enabled":enabled}})
 }
 
-fn ensure_group(group: &str) -> Result<(), String> {
+pub(super) fn ensure_group(group: &str) -> Result<(), String> {
     if !group.starts_with("argapp-")
         || group.len() != 19
         || !group
@@ -1613,6 +2003,7 @@ fn run_sandboxed(
     node_binary: &FsPath,
     binary: &FsPath,
     args: &[&str],
+    build_environment: &BTreeMap<String, String>,
     app_id: &str,
     job_id: &str,
     step: &str,
@@ -1677,6 +2068,9 @@ fn run_sandboxed(
         &format!("Environment=PATH={}:{}", node_dir.display(), "/usr/local/bin:/usr/bin:/bin"),
     ] {
         command.arg(format!("--property={property}"));
+    }
+    for (name, value) in build_environment {
+        command.arg(format!("--setenv={name}={value}"));
     }
     command
         .arg("--")
@@ -1765,6 +2159,7 @@ fn render_node_unit(
     node: &FsPath,
     package_manager: &FsPath,
     port: u64,
+    entrypoint: RuntimeEntrypoint,
 ) -> Result<String, String> {
     let current = current.to_string_lossy().into_owned();
     let shared = shared.to_string_lossy().into_owned();
@@ -1774,6 +2169,11 @@ fn render_node_unit(
         .unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
     let package_manager = package_manager.to_string_lossy().into_owned();
     let env_file = shared.to_string();
+    let start_command = match entrypoint {
+        RuntimeEntrypoint::PackageStart => format!("{package_manager} run start"),
+        RuntimeEntrypoint::NextCli => format!("{} /workspace/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port {port}", node.display()),
+        RuntimeEntrypoint::NuxtOutput => format!("{} /workspace/.output/server/index.mjs", node.display()),
+    };
     if ![current.as_str(), env_file.as_str(), package_manager.as_str()]
         .iter()
         .all(|value| safe_systemd_path(value))
@@ -1781,7 +2181,7 @@ fn render_node_unit(
     {
         return Err("Application paths cannot be safely represented in a systemd unit".into());
     }
-    Ok(format!("# Managed by ARG Node runner; edits are replaced from the panel.\n[Unit]\nDescription=ARG Node application {unit}\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\nType=simple\nDynamicUser=yes\nGroup={group}\nWorkingDirectory=/workspace\nBindReadOnlyPaths={current}:/workspace\nBindReadOnlyPaths={shared}/.env:/shared/.env\nBindPaths={shared}/data:/shared/data\nEnvironmentFile=-{env_file}/.env\nInaccessiblePaths=/var/lib/arg\nInaccessiblePaths=/etc/arg\nInaccessiblePaths=/usr/local/lib/arg\nProtectSystem=strict\nProtectHome=true\nPrivateTmp=true\nPrivateDevices=true\nNoNewPrivileges=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nCapabilityBoundingSet=\nUMask=0027\nEnvironment=HOME=/tmp\nEnvironment=NODE_ENV=production\nEnvironment=HOST=127.0.0.1\nEnvironment=PORT={port}\nEnvironment=PATH={path}\nExecStart={package_manager} run start\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=30\nKillMode=control-group\nMemoryMax=1G\nCPUQuota=200%\nTasksMax=256\n\n[Install]\nWantedBy=multi-user.target\n"))
+    Ok(format!("# Managed by ARG Node runner; edits are replaced from the panel.\n[Unit]\nDescription=ARG Node application {unit}\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\nType=simple\nDynamicUser=yes\nGroup={group}\nWorkingDirectory=/workspace\nBindReadOnlyPaths={current}:/workspace\nBindReadOnlyPaths={shared}/.env:/shared/.env\nBindPaths={shared}/data:/shared/data\nEnvironmentFile=-{env_file}/.env\nInaccessiblePaths=/var/lib/arg\nInaccessiblePaths=/etc/arg\nInaccessiblePaths=/usr/local/lib/arg\nProtectSystem=strict\nProtectHome=true\nPrivateTmp=true\nPrivateDevices=true\nNoNewPrivileges=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nCapabilityBoundingSet=\nUMask=0027\nEnvironment=HOME=/tmp\nEnvironment=NODE_ENV=production\nEnvironment=HOST=127.0.0.1\nEnvironment=PORT={port}\nEnvironment=NITRO_HOST=127.0.0.1\nEnvironment=NITRO_PORT={port}\nEnvironment=PATH={path}\nExecStart={start_command}\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=30\nKillMode=control-group\nMemoryMax=1G\nCPUQuota=200%\nTasksMax=256\n\n[Install]\nWantedBy=multi-user.target\n"))
 }
 
 fn safe_systemd_path(path: &str) -> bool {
@@ -1944,6 +2344,67 @@ fn parse_node_http_status(response: &[u8]) -> Option<u16> {
 mod tests {
     use super::*;
     #[test]
+    fn static_framework_detection_and_output_resolution_cover_spa_and_ssr() {
+        let root = std::env::temp_dir().join(format!("arg-static-test-{}", rand::random::<u64>()));
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::write(root.join("dist/index.html"), "<!doctype html>").unwrap();
+        assert_eq!(resolve_static_output_path(&root, "auto").unwrap(), "dist");
+        assert!(is_static_deployment("auto", &root, "auto").unwrap());
+        fs::write(root.join("package.json"), r#"{"dependencies":{"next":"15"},"scripts":{"start":"next start","build":"next build"}}"#).unwrap();
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
+        assert!(!is_static_deployment("auto", &root, "auto").unwrap());
+        assert!(!is_static_deployment("next", &root, "auto").unwrap());
+        assert!(static_build_available(&root).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prebuilt_static_root_and_custom_output_are_resolved_without_node_manifest() {
+        let root = std::env::temp_dir().join(format!("arg-static-root-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("index.html"), "ok").unwrap();
+        assert_eq!(resolve_static_output_path(&root, "auto").unwrap(), ".");
+        assert_eq!(resolve_static_output_path(&root, ".").unwrap(), ".");
+        assert!(is_static_deployment("auto", &root, "auto").unwrap());
+        assert!(!static_build_available(&root).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn auto_detect_accepts_custom_prebuilt_static_path_without_manifest() {
+        let root = std::env::temp_dir().join(format!("arg-static-custom-{}", rand::random::<u64>()));
+        fs::create_dir_all(root.join("customer/site")).unwrap();
+        fs::write(root.join("customer/site/index.html"), "ok").unwrap();
+        assert!(is_static_deployment("auto", &root, "customer/site").unwrap());
+        assert!(!is_static_deployment("auto", &root, "auto").unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nuxt_entrypoint_must_be_a_regular_file_inside_the_release() {
+        let root = std::env::temp_dir().join(format!("arg-nuxt-entry-{}", rand::random::<u64>()));
+        fs::create_dir_all(root.join(".output/server")).unwrap();
+        fs::write(root.join(".output/server/index.mjs"), "export {};").unwrap();
+        assert!(has_nuxt_server_entrypoint(&root));
+        fs::remove_file(root.join(".output/server/index.mjs")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join(".output/server/index.mjs")).unwrap();
+        assert!(!has_nuxt_server_entrypoint(&root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn next_cli_entrypoint_must_resolve_inside_the_release() {
+        let root = std::env::temp_dir().join(format!("arg-next-entry-{}", rand::random::<u64>()));
+        fs::create_dir_all(root.join("node_modules/next/dist/bin")).unwrap();
+        fs::write(root.join("node_modules/next/dist/bin/next"), "#!/usr/bin/env node").unwrap();
+        assert!(has_next_cli_entrypoint(&root));
+        fs::remove_file(root.join("node_modules/next/dist/bin/next")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join("node_modules/next/dist/bin/next")).unwrap();
+        assert!(!has_next_cli_entrypoint(&root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn package_manager_is_selected_from_one_matching_lockfile() {
         let root = std::env::temp_dir().join(format!("arg-node-test-{}", now()));
         fs::create_dir_all(&root).unwrap();
@@ -1979,6 +2440,25 @@ mod tests {
         assert!(write_environment(&root, &values, "unused-test-group").is_err());
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn build_environment_allows_public_prefixes_and_rejects_secret_names() {
+        let allowed = BTreeMap::from([
+            ("VITE_API_ORIGIN".to_owned(), "https://example.test".to_owned()),
+            ("NEXT_PUBLIC_MAP_ID".to_owned(), "public-map".to_owned()),
+            ("NUXT_PUBLIC_TITLE".to_owned(), "ARG".to_owned()),
+            ("REACT_APP_ORIGIN".to_owned(), "https://example.test".to_owned()),
+            ("PUBLIC_ASSET_HOST".to_owned(), "cdn.example.test".to_owned()),
+        ]);
+        assert!(validate_public_build_environment(&allowed).is_ok());
+        assert!(valid_public_build_name("VITE_API_ORIGIN"));
+        assert!(!valid_public_build_name("VITE_SECRET_TOKEN"));
+        assert!(!valid_public_build_name("DB_PASSWORD"));
+        let invalid = BTreeMap::from([("VITE_LABEL".to_owned(), "first\nsecond".to_owned())]);
+        assert!(validate_public_build_environment(&invalid).is_err());
+        assert!(parse_public_build_environment(r#"{"VITE_REGION":"eu"}"#).is_ok());
+        assert!(parse_public_build_environment(r#"{"VITE_SECRET":"no"}"#).is_err());
+    }
     #[test]
     fn unit_and_service_group_names_are_uuid_derived() {
         let id = "12345678-1234-4234-8234-123456789abc";
@@ -2006,6 +2486,7 @@ mod tests {
             FsPath::new("/usr/bin/node"),
             FsPath::new("/usr/bin/pnpm"),
             31234,
+            RuntimeEntrypoint::PackageStart,
         )
         .unwrap();
         assert!(unit.contains("BindReadOnlyPaths=/var/lib/arg/deployments/apps/app/shared/.env:/shared/.env"));
@@ -2013,6 +2494,31 @@ mod tests {
         assert!(!unit.contains("BindPaths=/var/lib/arg/deployments/apps/app/shared:/shared"));
         assert!(unit.contains("ExecStart=/usr/bin/pnpm run start"));
         assert!(unit.contains("TimeoutStopSec=30"));
+        let nuxt = render_node_unit(
+            "arg-node-12345678-123.service",
+            FsPath::new("/var/lib/arg/deployments/apps/app/current"),
+            FsPath::new("/var/lib/arg/deployments/apps/app/shared"),
+            "argapp-12345678-123",
+            FsPath::new("/usr/bin/node"),
+            FsPath::new("/usr/bin/npm"),
+            31234,
+            RuntimeEntrypoint::NuxtOutput,
+        ).unwrap();
+        assert!(nuxt.contains("ExecStart=/usr/bin/node /workspace/.output/server/index.mjs"));
+        assert!(nuxt.contains("Environment=NITRO_HOST=127.0.0.1"));
+        assert!(nuxt.contains("Environment=NITRO_PORT=31234"));
+        assert!(!nuxt.contains("run start"));
+        let next = render_node_unit(
+            "arg-node-12345678-123.service",
+            FsPath::new("/var/lib/arg/deployments/apps/app/current"),
+            FsPath::new("/var/lib/arg/deployments/apps/app/shared"),
+            "argapp-12345678-123",
+            FsPath::new("/usr/bin/node"),
+            FsPath::new("/usr/bin/npm"),
+            31234,
+            RuntimeEntrypoint::NextCli,
+        ).unwrap();
+        assert!(next.contains("ExecStart=/usr/bin/node /workspace/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 31234"));
     }
     #[test]
     fn loopback_verifier_rejects_public_addresses() {
@@ -2029,5 +2535,12 @@ mod tests {
         assert_eq!(parse_node_http_status(b"not HTTP\r\n\r\n"), None);
         assert!((200..500).contains(&parse_node_http_status(response).unwrap()));
         assert!(!(200..500).contains(&parse_node_http_status(b"HTTP/1.1 503 Error\r\n\r\n").unwrap()));
+    }
+
+    #[test]
+    fn journal_cursor_is_bounded_and_argument_safe() {
+        assert!(valid_journal_cursor("s=abc123;i=4;b=ef01;m=2;t=5;x=9"));
+        assert!(!valid_journal_cursor("--output=json"));
+        assert!(!valid_journal_cursor("x".repeat(513).as_str()));
     }
 }

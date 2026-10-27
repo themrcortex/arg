@@ -2795,6 +2795,168 @@ pub(super) fn configure_node_proxy(
     Ok(json!({"site_name":name,"content":actual["content"].as_str().unwrap_or_default()}))
 }
 
+/// Publish a built static release through Nginx without exposing its source tree.
+/// Nginx receives traversal ACLs on the private deployment path and read access
+/// only to the selected build output directory.
+pub(super) fn configure_static_site(
+    app_id: &str,
+    domain: &str,
+    output_path: &str,
+    spa_fallback: bool,
+) -> Result<Value, String> {
+    let _guard = NGINX_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if app_id.len() != 36
+        || app_id.chars().enumerate().any(|(index, value)| {
+            if [8, 13, 18, 23].contains(&index) { value != '-' } else { !value.is_ascii_hexdigit() }
+        })
+        || !valid_domain_name(domain)
+        || domain.contains('*')
+        || !safe_static_relative_path(output_path)
+    {
+        return Err("شناسه، دامنه یا مسیر خروجی سایت استاتیک معتبر نیست.".into());
+    }
+    let deployment_root = std::env::var_os("ARG_DEPLOY_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/arg/deployments"));
+    let app_root = deployment_root.join("apps").join(app_id);
+    let releases = app_root.join("releases").canonicalize()
+        .map_err(|_| "پوشهٔ releaseهای اپ پیدا نشد.".to_owned())?;
+    let current_link = app_root.join("current");
+    if !std::fs::symlink_metadata(&current_link).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err("اشاره‌گر current اپ، symlink مدیریت‌شده نیست.".into());
+    }
+    let active = current_link.canonicalize().map_err(|_| "release جاری پیدا نشد.".to_owned())?;
+    if !active.starts_with(&releases) || !active.is_dir() {
+        return Err("release جاری خارج از پوشهٔ مجاز است.".into());
+    }
+    let selected = active.join(output_path);
+    let output = selected.canonicalize().map_err(|_| format!("پوشهٔ خروجی {output_path} پیدا نشد."))?;
+    if !output.starts_with(&active) || !output.is_dir() || !output.join("index.html").is_file() {
+        return Err("پوشهٔ خروجی باید زیر release جاری باشد و index.html عادی داشته باشد.".into());
+    }
+    validate_static_tree(&output)?;
+    grant_static_web_access(&deployment_root, &app_root, &releases, &output)?;
+
+    let domain = domain.to_ascii_lowercase();
+    let name = format!("arg-static-{}", &app_id[..12]);
+    let (available, _) = nginx_site_paths(&name)?;
+    let expected_marker = format!("# Managed by ARG Static runner app={app_id}");
+    let root = current_link.join(output_path);
+    if !safe_static_root_path(&root) {
+        return Err("مسیر انتشار شامل نویسه‌ای است که در دستور root مربوط به Nginx ایمن نیست.".into());
+    }
+    let content = static_site_config(app_id, &domain, &root, spa_fallback);
+    let previous = match std::fs::symlink_metadata(&available) {
+        Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= 512 * 1024 => {
+            let existing = std::fs::read_to_string(&available).map_err(|error| error.to_string())?;
+            if !existing.starts_with(&expected_marker) {
+                return Err(format!("فایل رزروشدهٔ {name} متعلق به پیکربندی دیگری است؛ تغییرش ندادم."));
+            }
+            Some(existing)
+        }
+        Ok(_) => return Err("فایل سایت Static فایل عادی نیست.".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if previous.is_none() && nginx_domain_is_claimed(&domain, &name)? {
+        return Err(format!("دامنهٔ {domain} از قبل در Nginx استفاده شده است؛ سایت موجود تغییر نکرد."));
+    }
+    if let Some(previous_content) = previous.as_ref() {
+        if previous_content != &content {
+            nginx_atomic_write(&available, content.as_bytes(), 0o644)?;
+            if let Err(problem) = nginx_config_test().and_then(|_| nginx_reload_if_active()) {
+                let _ = nginx_atomic_write(&available, previous_content.as_bytes(), 0o644);
+                let _ = nginx_config_test().and_then(|_| nginx_reload_if_active());
+                return Err(format!("تغییر سایت Static معتبر نشد؛ کانفیگ قبلی بازیابی شد: {problem}"));
+            }
+        }
+    } else {
+        nginx_create_site(&name, &content)?;
+        if let Err(problem) = nginx_set_site_enabled(&name, true) {
+            let _ = nginx_delete_site(&name);
+            return Err(problem);
+        }
+    }
+    let enabled = nginx_site_enabled(&name)?;
+    if !enabled {
+        nginx_set_site_enabled(&name, true)?;
+    }
+    let site = nginx_get_site(&name)?;
+    Ok(json!({"site_name":name,"content":site["content"].as_str().unwrap_or_default(),"root":current_link.join(output_path),"enabled":true}))
+}
+
+fn safe_static_relative_path(value: &str) -> bool {
+    value == "." || (!value.is_empty() && value.len() <= 128 && !value.starts_with('/')
+        && value.split('/').all(|part| !part.is_empty() && part != "." && part != ".."
+            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))))
+}
+
+fn safe_static_root_path(path: &std::path::Path) -> bool {
+    let Some(value) = path.to_str() else { return false };
+    value.starts_with('/')
+        && !value.contains("..")
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+}
+
+fn validate_static_tree(root: &std::path::Path) -> Result<(), String> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut total = 0u64;
+    let mut entries = 0usize;
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
+            entries += 1;
+            if entries > 100_000 { return Err("خروجی استاتیک بیش از ۱۰۰ هزار فایل دارد.".into()); }
+            if metadata.file_type().is_symlink() { return Err("خروجی build دارای symlink است و برای انتشار رد شد.".into()); }
+            if metadata.is_dir() { pending.push(entry.path()); }
+            else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+                if total > 2 * 1024 * 1024 * 1024 { return Err("حجم خروجی استاتیک از ۲ GiB بیشتر است.".into()); }
+            } else { return Err("خروجی build شامل فایل خاص است.".into()); }
+        }
+    }
+    Ok(())
+}
+
+fn grant_static_web_access(
+    deployment_root: &std::path::Path,
+    app_root: &std::path::Path,
+    releases: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<(), String> {
+    let setfacl = std::process::Command::new("setfacl").arg("--version").output();
+    if setfacl.is_err() {
+        let install = std::process::Command::new("apt-get").args(["-y", "install", "acl"]).output()
+            .map_err(|error| format!("ابزار ACL نصب نشد: {error}"))?;
+        if !install.status.success() { return Err(format!("نصب ACL ناموفق بود: {}", String::from_utf8_lossy(&install.stderr).trim())); }
+    }
+    let canonical_app = app_root.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_deployment = deployment_root.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_releases = releases.canonicalize().map_err(|error| error.to_string())?;
+    if !canonical_app.starts_with(&canonical_deployment) || !output.starts_with(&canonical_releases) {
+        return Err("مسیر سایت خارج از محدودهٔ اپلیکیشن است.".into());
+    }
+    let mut parents = vec![canonical_deployment.parent().unwrap_or(&canonical_deployment).to_path_buf(), canonical_deployment.clone(), canonical_deployment.join("apps"), canonical_app, canonical_releases, output.parent().unwrap_or(output).to_path_buf()];
+    parents.sort(); parents.dedup();
+    for parent in parents {
+        let result = std::process::Command::new("setfacl").args(["-m", "u:www-data:--x", "--"]).arg(&parent).output()
+            .map_err(|error| format!("دسترسی عبور Nginx تنظیم نشد: {error}"))?;
+        if !result.status.success() { return Err(format!("دسترسی عبور Nginx تنظیم نشد: {}", String::from_utf8_lossy(&result.stderr).trim())); }
+    }
+    let result = std::process::Command::new("setfacl").args(["-R", "-m", "u:www-data:rX", "--"]).arg(output).output()
+        .map_err(|error| format!("دسترسی خواندن خروجی تنظیم نشد: {error}"))?;
+    if !result.status.success() { return Err(format!("دسترسی خواندن خروجی تنظیم نشد: {}", String::from_utf8_lossy(&result.stderr).trim())); }
+    Ok(())
+}
+
+fn static_site_config(app_id: &str, domain: &str, root: &std::path::Path, spa_fallback: bool) -> String {
+    let fallback = if spa_fallback { "try_files $uri $uri/ /index.html;" } else { "try_files $uri $uri/ =404;" };
+    format!("# Managed by ARG Static runner app={app_id} domain={domain} spa={spa_fallback}\nserver {{\n    listen 80;\n    server_name {domain};\n    root {};\n    index index.html;\n    server_tokens off;\n    add_header X-Content-Type-Options nosniff always;\n    add_header X-Frame-Options SAMEORIGIN always;\n\n    location / {{ {fallback} }}\n    location ~* \\.[a-f0-9]{{8,}}\\.(?:css|js|svg|png|jpg|webp|woff2?)$ {{ expires 1y; add_header Cache-Control \"public, immutable\"; }}\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n    location ~* \\.(?:env|ini|log|sql|sqlite|bak|zip|gz|tar)$ {{ deny all; }}\n}}\n", root.display())
+}
+
 fn node_proxy_config(app_id: &str, domain: &str, port: u16) -> String {
     format!("# Managed by ARG Node runner app={app_id} domain={domain} port={port}\nserver {{\n    listen 80;\n    server_name {domain};\n    server_tokens off;\n    client_max_body_size 32m;\n\n    location / {{\n        proxy_pass http://127.0.0.1:{port};\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_read_timeout 3600s;\n        proxy_send_timeout 3600s;\n    }}\n\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n    location ~* \\.(?:env|ini|log|sql|sqlite|bak|zip|gz|tar)$ {{ deny all; }}\n}}\n")
 }
@@ -2832,7 +2994,24 @@ fn nginx_domain_is_claimed(domain: &str, own_site: &str) -> Result<bool, String>
 
 #[cfg(test)]
 mod node_proxy_tests {
-    use super::{node_proxy_config, server_name_overlaps};
+    use super::{node_proxy_config, safe_static_root_path, server_name_overlaps, static_site_config};
+    #[test]
+    fn static_site_config_has_spa_fallback_and_safe_asset_headers() {
+        let spa = static_site_config("12345678-1234-4234-8234-123456789abc", "site.example", std::path::Path::new("/var/lib/arg/current/dist"), true);
+        assert!(spa.contains("try_files $uri $uri/ /index.html;"));
+        assert!(spa.contains("public, immutable"));
+        assert!(spa.contains("deny all;"));
+        let multipage = static_site_config("12345678-1234-4234-8234-123456789abc", "site.example", std::path::Path::new("/var/lib/arg/current/out"), false);
+        assert!(multipage.contains("try_files $uri $uri/ =404;"));
+    }
+
+    #[test]
+    fn static_document_root_rejects_nginx_directive_injection() {
+        assert!(safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/id/current/dist")));
+        assert!(!safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/id;include evil/current")));
+        assert!(!safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/$host/current")));
+    }
+
 
     #[test]
     fn node_proxy_has_loopback_upstream_websocket_and_safe_file_rules() {
