@@ -8,12 +8,14 @@ import { Badge } from './components/ui/badge'
 
 type Sample = { at: number; service_state: string; cpu_percent: number | null; memory_bytes: number | null; volume_bytes: number | null; volume_status: string }
 type Alert = { metric: string; state: string; current_value: number | null; threshold: number | null; first_seen: number; last_seen: number; resolved_at: number | null }
+type MonitoringEvent = { id: number; metric: string; event_type: 'triggered' | 'resolved'; lifecycle_started_at: number; created_at: number; current_value: number | null; threshold: number | null; acknowledged_at: number | null; acknowledged_by: string | null }
 type Rules = { cpu_percent: number | null; memory_bytes: number | null; alert_when_inactive: boolean; enabled: boolean }
 type Monitoring = {
   latest: (Sample & { measured_at: number; systemd_unit: string; error_code: string | null }) | null
   samples: Sample[]
   rules: Rules
   alerts: Alert[]
+  events: MonitoringEvent[]
   sampling: { interval_seconds: number; retention_days: number; scope: string; network_bytes: number | null; http_latency_ms: number | null }
 }
 
@@ -64,6 +66,14 @@ export function ApplicationMonitoringPanel({ app }: { app: { id: string } }) {
     finally { setSaving(false) }
   }
 
+  async function acknowledge(eventId: number) {
+    setError('')
+    try {
+      await api(`apps/${encodeURIComponent(app.id)}/monitoring/events/${eventId}/ack`, { method: 'POST' })
+      await load()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'تأیید اعلان انجام نشد.') }
+  }
+
   const openAlerts = data?.alerts.filter((item) => item.state === 'open') ?? []
   return <section className="mt-3 rounded-xl border border-border/70 bg-background/25">
     <Button type="button" variant="ghost" aria-expanded={open} className="h-auto w-full justify-between px-3 py-3 text-right" onClick={() => setOpen((value) => !value)}>
@@ -82,6 +92,7 @@ export function ApplicationMonitoringPanel({ app }: { app: { id: string } }) {
         </div>
         <p className="text-[10px] text-muted-foreground">{data.latest ? `آخرین نمونه: ${dateTime(data.latest.measured_at)} · ${data.latest.systemd_unit}` : 'هنوز نمونه‌ای ثبت نشده؛ جمع‌آوری پس‌زمینه برای سرویس‌های پشتیبانی‌شده انجام می‌شود.'} · CPU برحسب یک هسته است و ممکن است از ۱۰۰٪ بیشتر شود.</p>
         {openAlerts.length > 0 && <div className="space-y-1 rounded-lg border border-amber-300/25 bg-amber-300/[.04] p-2">{openAlerts.map((item) => <p key={item.metric} className="flex items-center gap-2 text-xs text-amber-100"><AlertTriangle size={13}/>{item.metric === 'service_inactive' ? 'سرویس در حال اجرا نیست' : item.metric === 'cpu_high' ? `مصرف CPU از ${item.threshold ?? '—'}٪ گذشته` : `مصرف RAM از ${bytes(item.threshold)} گذشته`}</p>)}</div>}
+        {data.events.length > 0 && <div className="space-y-2 rounded-lg border border-border/60 p-3"><p className="text-xs font-medium">رویدادهای پایدار پایش</p><div className="max-h-48 space-y-1 overflow-y-auto">{data.events.slice(0, 12).map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/20 px-2 py-2 text-[10px]"><span className="min-w-0 flex-1 leading-5">{item.event_type === 'triggered' ? 'هشدار فعال شد' : 'هشدار برطرف شد'} · {item.metric} · {dateTime(item.created_at)}</span>{item.acknowledged_at ? <Badge variant="outline">تأییدشده · {item.acknowledged_by}</Badge> : <Button size="sm" variant="outline" className="h-7" onClick={() => void acknowledge(item.id)}>تأیید</Button>}</div>)}</div><p className="text-[10px] text-muted-foreground">رویدادهای تغییر وضعیت در دیتابیس ذخیره می‌شوند؛ این نسخه اعلان بیرونی ارسال نمی‌کند.</p></div>}
         <form onSubmit={(event) => void saveRules(event)} className="space-y-3 rounded-lg border border-border/60 p-3">
           <div><p className="text-xs font-medium">آستانه‌های هشدار</p><p className="mt-1 text-[10px] text-muted-foreground">خالی‌گذاشتن آستانهٔ CPU یا RAM آن هشدار را غیرفعال می‌کند.</p></div>
           <div className="grid gap-3 sm:grid-cols-2">

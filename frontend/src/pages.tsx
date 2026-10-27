@@ -1564,9 +1564,9 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="viewer">ناظر — فقط مشاهده</SelectItem>
-                      <SelectItem value="operator">اپراتور — آمادهٔ قابلیت‌های عملیاتی</SelectItem>
-                      <SelectItem value="admin">مدیر — مدیریت کاربران</SelectItem>
+                      <SelectItem value="viewer">ناظر — بدون دسترسی مدیریتی</SelectItem>
+                      <SelectItem value="operator">اپراتور — بدون دسترسی مدیریتی</SelectItem>
+                      <SelectItem value="admin">مدیر — دسترسی به عملیات مدیریتی</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -1578,6 +1578,7 @@ export function UsersPage({ current, Heading, notify }: { current: User } & Comm
           </Dialog>
         }
       />
+      <div className="mb-4 mt-4 rounded-xl border border-amber-300/15 bg-amber-300/[.035] p-3 text-xs leading-5 text-muted-foreground">در حال حاضر فقط نقش مدیر به APIهای مدیریتی دسترسی دارد. نقش‌های «اپراتور» و «ناظر» به endpointهای admin-only دسترسی ندارند؛ تفکیک مجوزهای عملیاتی هر دو نقش هنوز پیاده‌سازی نشده است.</div>
       <div className="grid gap-4 sm:grid-cols-3">
         <Metric
           icon={Users}

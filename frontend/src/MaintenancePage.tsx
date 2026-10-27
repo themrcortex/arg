@@ -7,6 +7,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Skeleton } from './components/ui/skeleton'
+import { HostSecurityPanel } from './HostSecurityPanel'
+import { ExtensionSecurityPanel } from './ExtensionSecurityPanel'
 
 type Common = { Heading: (props: { title: string; description: string; action?: ReactNode }) => ReactNode; notify: (message: string) => void }
 type Backup = { id: string; size_bytes: number; modified_at?: number | null }
@@ -154,6 +156,9 @@ export function MaintenancePage({ Heading, notify }: Common) {
     <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-label="مشخصات سیستم">
       {loading && !dashboard ? Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-[96px] rounded-2xl"/>) : specs.map(({ icon: Icon, label, value, dir }) => <Card key={label} className="min-w-0 rounded-2xl border-border/80 bg-card/80"><CardContent className="flex items-center gap-3 p-4"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-primary/15 bg-primary/[.08] text-primary"><Icon size={18}/></span><span className="min-w-0"><span className="block text-xs text-muted-foreground">{label}</span><b className="mt-1 block text-sm font-semibold text-foreground" dir={dir || 'rtl'} title={typeof value === 'string' ? value : undefined}>{value}</b></span></CardContent></Card>)}
     </section>
+
+    <HostSecurityPanel/>
+    <ExtensionSecurityPanel notify={notify}/>
 
     <div className="mt-5 grid gap-4 xl:grid-cols-2">
       <Card className="rounded-2xl border-border/80 bg-card/80"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Wrench size={18} className="text-primary"/>تعمیر فایل‌های ARG</CardTitle><CardDescription>نسخهٔ نصب‌شده با آپدیتر امن و ساخت کامل بازسازی می‌شود؛ در صورت خطا، نسخهٔ قبلی برمی‌گردد.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-3"><div className="text-xs text-muted-foreground">این عملیات ممکن است چند دقیقه طول بکشد و پنل موقتاً در دسترس نباشد.</div><Button onClick={() => void action('repair')} disabled={!!busy}><Wrench size={15}/>{busy === 'repair' ? 'در حال تعمیر…' : 'تعمیر و بازسازی ARG'}</Button></CardContent></Card>

@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 
 type Site = { name: string; server_names?: string[]; enabled?: boolean; ssl_enabled?: boolean }
 type LinkState = { site: { name: string } | null; domain?: string | null }
+type Traffic = { available: boolean; sample_requests?: number; sample_body_bytes?: number; status_groups?: number[]; sample_limit?: number; message?: string }
 
 export function ApplicationNginxLinkPanel({ app, notify }: { app: { id: string; name: string; domain?: string | null }; notify: (message: string) => void }) {
   const [open, setOpen] = useState(false)
@@ -18,6 +19,9 @@ export function ApplicationNginxLinkPanel({ app, notify }: { app: { id: string; 
   const [selected, setSelected] = useState('')
   const [confirm, setConfirm] = useState<'link' | 'unlink' | null>(null)
   const [error, setError] = useState('')
+  const [traffic, setTraffic] = useState<Traffic | null>(null)
+  const [trafficLoading, setTrafficLoading] = useState(false)
+  const [trafficRefresh, setTrafficRefresh] = useState(0)
   const matching = sites.filter((site) => app.domain && site.server_names?.includes(app.domain))
 
   useEffect(() => {
@@ -30,6 +34,17 @@ export function ApplicationNginxLinkPanel({ app, notify }: { app: { id: string; 
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [open, app.id, app.domain])
+
+  useEffect(() => {
+    if (!open || !link?.site?.name) { setTraffic(null); return }
+    let active = true
+    setTrafficLoading(true)
+    api<Traffic>(`nginx/sites/${encodeURIComponent(link.site.name)}/traffic`)
+      .then((result) => { if (active) setTraffic(result) })
+      .catch((cause) => { if (active) setTraffic({ available: false, message: cause instanceof Error ? cause.message : 'خواندن آمار Nginx ناموفق بود.' }) })
+      .finally(() => { if (active) setTrafficLoading(false) })
+    return () => { active = false }
+  }, [open, link?.site?.name, trafficRefresh])
 
   async function apply() {
     if (!confirm) return
@@ -52,9 +67,17 @@ export function ApplicationNginxLinkPanel({ app, notify }: { app: { id: string; 
     <CardHeader className="flex-row items-center justify-between gap-3 py-3"><div><CardTitle className="flex items-center gap-2 text-sm"><Globe2 size={15} className="text-primary"/>دامنه و Nginx</CardTitle><CardDescription className="mt-1 text-[10px]">اتصال فقط بعد از تطبیق دامنهٔ اپ با server_name ثبت می‌شود؛ فایل کانفیگ تغییر نمی‌کند.</CardDescription></div><Button variant="outline" size="sm" onClick={() => setOpen((value) => !value)}>{open ? 'بستن' : 'مدیریت لینک'}</Button></CardHeader>
     {open && <CardContent className="space-y-3 pt-1">{error && <p role="alert" className="rounded-lg border border-rose-300/20 p-2 text-xs text-rose-200">{error}</p>}{loading ? <LoaderCircle className="mx-auto animate-spin text-primary" size={18}/> : <>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 p-3 text-xs"><span>دامنهٔ اپ:</span><code dir="ltr" className="font-mono">{app.domain || 'ثبت نشده'}</code>{link?.site && <><Badge variant="success">متصل به {link.site.name}</Badge><Button size="sm" variant="outline" onClick={() => setConfirm('unlink')}><Unlink size={13}/>قطع لینک</Button></>}</div>
+      {link?.site && <div className="space-y-2 rounded-lg border border-border/70 bg-background/35 p-3"><div className="flex items-center justify-between gap-2"><div><p className="text-xs font-medium">ترافیک درخواست‌های سایت</p><p className="mt-1 text-[10px] text-muted-foreground">نمونهٔ محدود لاگ دسترسی Nginx؛ آمار تجمعی شبکه یا latency نیست.</p></div><Button size="icon" variant="outline" aria-label="تازه‌سازی ترافیک سایت" title="تازه‌سازی" disabled={trafficLoading} onClick={() => setTrafficRefresh((value) => value + 1)}><LoaderCircle size={14} className={trafficLoading ? 'animate-spin' : ''}/></Button></div>{trafficLoading && !traffic ? <div className="h-12 animate-pulse rounded-md bg-muted/40"/> : traffic?.available ? <><div className="grid grid-cols-2 gap-2 text-xs"><div className="rounded-md bg-background/50 p-2">درخواست در نمونه<strong className="mt-1 block font-mono" dir="ltr">{new Intl.NumberFormat('fa-IR').format(traffic.sample_requests || 0)}</strong></div><div className="rounded-md bg-background/50 p-2">حجم پاسخ ثبت‌شده<strong className="mt-1 block font-mono" dir="ltr">{formatBytes(traffic.sample_body_bytes || 0)}</strong></div></div><div className="flex flex-wrap gap-1">{(traffic.status_groups || []).map((count, index) => <Badge key={index} variant="outline" dir="ltr">{index + 1}xx · {new Intl.NumberFormat('fa-IR').format(count)}</Badge>)}</div><p className="text-[10px] text-muted-foreground">از حداکثر {new Intl.NumberFormat('fa-IR').format(traffic.sample_limit || 5000)} خط آخر لاگ خوانده شده است؛ زمان آخرین درخواست یا تاریخچهٔ کامل از این نمونه قابل استنتاج نیست.</p></> : <p className="text-[11px] leading-5 text-muted-foreground">{traffic?.message || 'آمار در دسترس نیست؛ برای این سایت باید access_log اختصاصی تنظیم شده باشد.'}</p>}</div>}
       {!link?.site && <div className="flex flex-wrap items-center gap-2"><select value={selected} onChange={(event) => setSelected(event.target.value)} disabled={!app.domain || !matching.length} className="h-10 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-xs"><option value="">{!app.domain ? 'ابتدا دامنهٔ اپ را ثبت کن' : matching.length ? 'سایت هم‌دامنه را انتخاب کن' : 'سایت Nginx با این دامنه پیدا نشد'}</option>{matching.map((site) => <option key={site.name} value={site.name}>{site.name}{site.ssl_enabled ? ' · HTTPS' : ''}</option>)}</select><Button size="sm" onClick={() => setConfirm('link')} disabled={!selected}><Link2 size={13}/>اتصال سایت</Button></div>}
       <p className="text-[10px] leading-5 text-muted-foreground">این لینک مالکیت و ناوبری اپ را ثبت می‌کند. صدور SSL، reload، تغییر فایروال یا ویرایش کانفیگ در این دکمه انجام نمی‌شود.</p>
     </>}</CardContent>}
     <Dialog open={!!confirm} onOpenChange={(value) => { if (!value && !busy) setConfirm(null) }}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>{confirm === 'link' ? 'اتصال سایت Nginx به اپ' : 'قطع لینک مدیریتی'}</DialogTitle><DialogDescription>{confirm === 'link' ? `سایت «${selected}» به اپ «${app.name}» وصل می‌شود. سرور Nginx، فایل‌ها و SSL تغییر نمی‌کنند.` : `فقط لینک سایت «${link?.site?.name}» به اپ برداشته می‌شود. فایل و سرویس سایت باقی می‌مانند.`}</DialogDescription></DialogHeader><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setConfirm(null)} disabled={busy}>انصراف</Button><Button variant={confirm === 'unlink' ? 'destructive' : 'default'} onClick={() => void apply()} disabled={busy}>{busy && <LoaderCircle size={14} className="animate-spin"/>}{confirm === 'link' ? 'تأیید اتصال' : 'تأیید قطع لینک'}</Button></div></DialogContent></Dialog>
   </Card>
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value < 0) return '—'
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let size = value; let index = 0
+  while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1 }
+  return `${new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(size)} ${units[index]}`
 }

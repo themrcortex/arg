@@ -1,5 +1,6 @@
 use super::*;
 use std::os::unix::fs::FileTypeExt;
+use std::io::{Seek, SeekFrom};
 
 const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
@@ -3216,6 +3217,22 @@ fn nginx_site_repository(name: &str) -> Result<Value, String> {
     )
 }
 
+fn bounded_access_log_tail(mut file: fs::File, max_bytes: u64, max_lines: usize) -> Result<(Vec<String>, usize), String> {
+    let file_bytes = file.metadata().map_err(|error| error.to_string())?.len();
+    let offset = file_bytes.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(offset)).map_err(|error| error.to_string())?;
+    let mut sample = Vec::with_capacity(file_bytes.min(max_bytes) as usize);
+    file.take(max_bytes).read_to_end(&mut sample).map_err(|error| error.to_string())?;
+    let sample_len = sample.len();
+    let mut text = String::from_utf8_lossy(&sample).into_owned();
+    if offset > 0 {
+        if let Some(newline) = text.find('\n') { text.drain(..=newline); }
+    }
+    let mut lines = text.lines().rev().take(max_lines).map(str::to_owned).collect::<Vec<_>>();
+    lines.reverse();
+    Ok((lines, sample_len))
+}
+
 fn nginx_site_traffic(name: &str) -> Result<Value, String> {
     let (available, _) = nginx_site_paths(name)?;
     let config = fs::read_to_string(available).map_err(|_| "فایل سایت پیدا نشد.")?;
@@ -3240,18 +3257,14 @@ fn nginx_site_traffic(name: &str) -> Result<Value, String> {
     if !resolved.starts_with(&allowed) || !resolved.is_file() {
         return Err("فایل access_log معتبر نیست.".into());
     }
-    let output = std::process::Command::new("tail")
-        .args(["-n", "5000", "--", resolved.to_string_lossy().as_ref()])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        return Err("خواندن access_log ناموفق بود.".into());
-    }
+    const SAMPLE_BYTES: u64 = 4 * 1024 * 1024;
+    let (lines, sample_bytes_read) = bounded_access_log_tail(fs::File::open(&resolved).map_err(|error| error.to_string())?, SAMPLE_BYTES, 5000)?;
+    let sample_lines = lines.len();
     let mut requests = 0_u64;
     let mut bytes = 0_u64;
     let mut statuses = [0_u64; 5];
     let mut hourly: Vec<(String, u64, u64)> = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in lines {
         // Combined log format: request is quoted; status and body bytes follow.
         if let Some(after_request) = line.split('"').nth(2) {
             let mut fields = after_request.split_whitespace();
@@ -3280,7 +3293,7 @@ fn nginx_site_traffic(name: &str) -> Result<Value, String> {
     }
     let hourly = hourly.into_iter().rev().take(24).collect::<Vec<_>>().into_iter().rev().map(|(hour, requests, body_bytes)| json!({"hour":hour,"requests":requests,"body_bytes":body_bytes})).collect::<Vec<_>>();
     Ok(
-        json!({"available":true,"path":path,"sample_requests":requests,"sample_body_bytes":bytes,"status_groups":statuses,"sample_limit":5000,"hourly":hourly}),
+        json!({"available":true,"path":path,"sample_requests":requests,"sample_body_bytes":bytes,"status_groups":statuses,"sample_limit":5000,"sample_lines":sample_lines,"sample_bytes_read":sample_bytes_read,"measured_at":now(),"hourly":hourly}),
     )
 }
 
@@ -3598,10 +3611,24 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 #[cfg(test)]
 mod maintenance_tests {
     use super::{
-        nginx_maintenance_block, nginx_maintenance_cookie_name, nginx_maintenance_secret_config,
+        bounded_access_log_tail, nginx_maintenance_block, nginx_maintenance_cookie_name, nginx_maintenance_secret_config,
         nginx_remove_maintenance_block, nginx_server_names, nginx_server_open_offsets,
         nginx_ssl_certificate_name, nginx_valid_maintenance_token,
     };
+
+    #[test]
+    fn access_log_sampling_is_bounded_by_bytes_and_lines() {
+        use std::{fs, io::Write, time::{SystemTime, UNIX_EPOCH}};
+        let path = std::env::temp_dir().join(format!("arg-nginx-access-{}.log", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let mut file = fs::File::create(&path).unwrap();
+        for index in 0..6000 { writeln!(file, "{index:05} {}", "x".repeat(1024)).unwrap(); }
+        drop(file);
+        let (lines, bytes) = bounded_access_log_tail(fs::File::open(&path).unwrap(), 4 * 1024 * 1024, 5000).unwrap();
+        assert!(bytes <= 4 * 1024 * 1024);
+        assert!(lines.len() <= 5000);
+        assert!(lines.last().unwrap().starts_with("05999 "));
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn lists_literal_and_wildcard_server_names_without_comments() {

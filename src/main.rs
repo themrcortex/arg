@@ -71,6 +71,7 @@ mod buildpacks;
 mod deploy;
 mod dns;
 mod dns_vault;
+mod extensions;
 mod docker;
 mod fast_actions;
 mod federation;
@@ -87,6 +88,7 @@ mod private_networks;
 mod routes;
 mod runtimes;
 mod s3;
+mod security_posture;
 mod secret_vault;
 mod storage_mounts;
 
@@ -390,12 +392,28 @@ fn require_user(db: &Connection, headers: &HeaderMap) -> Result<User, (StatusCod
     let _ = db.execute("UPDATE sessions SET last_seen=?1 WHERE token_hash=?2 AND (last_seen IS NULL OR last_seen<?3)", params![current, hash, current - 60]);
     Ok(user)
 }
+fn role_has_admin_access(role: &str) -> bool {
+    role == "admin"
+}
 fn require_admin(db: &Connection, headers: &HeaderMap) -> Result<User, (StatusCode, Json<Value>)> {
     let user = require_user(db, headers)?;
-    if user.role != "admin" {
+    if !role_has_admin_access(&user.role) {
         return Err(error(StatusCode::FORBIDDEN, "Admin role required"));
     }
     Ok(user)
+}
+
+async fn account_capabilities(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let db = state.lock().unwrap();
+    let user = require_user(&db, &headers)?;
+    let admin_api = role_has_admin_access(&user.role);
+    Ok(Json(json!({
+        "role": user.role,
+        "admin_api": admin_api,
+        "role_model": "admin-only-management-v1",
+        "capabilities": if admin_api { vec!["authenticated_api", "admin_management"] } else { vec!["authenticated_api"] },
+        "notice": if admin_api { "این نقش به عملیات مدیریتی ادمین دسترسی دارد." } else { "نقش‌های operator و viewer هنوز مجوزهای مدیریتی جداگانه ندارند؛ endpointهای admin-only برای هر دو رد می‌شوند." }
+    })))
 }
 fn check_origin(headers: &HeaderMap) -> Result<(), (StatusCode, Json<Value>)> {
     let origin = headers
@@ -4698,6 +4716,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     private_networks::migrate(&db)?;
     dns::migrate(&db)?;
     app_monitoring::migrate(&db)?;
+    extensions::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
     db.execute(
@@ -4800,7 +4819,7 @@ mod update_progress_tests {
     use super::{
         backup_database, default_update_build_mode, ensure_federation_identity_columns,
         ensure_metric_storage_columns, firewall_rule_validation_error, update_progress_payload,
-        valid_apt_install_spec, valid_tls_source_path, valid_update_build_mode, Connection,
+        valid_apt_install_spec, valid_tls_source_path, valid_update_build_mode, role_has_admin_access, Connection,
         FirewallRuleInput,
     };
 
@@ -4810,6 +4829,14 @@ mod update_progress_tests {
         assert!(valid_apt_install_spec("nodejs=1:22.18.0-1nodesource1"));
         assert!(!valid_apt_install_spec("nodejs=22.18;touch /tmp/pwned"));
         assert!(!valid_apt_install_spec("=1.0"));
+    }
+
+    #[test]
+    fn only_admin_role_passes_admin_api_guard() {
+        assert!(role_has_admin_access("admin"));
+        assert!(!role_has_admin_access("operator"));
+        assert!(!role_has_admin_access("viewer"));
+        assert!(!role_has_admin_access("unknown"));
     }
 
     #[test]

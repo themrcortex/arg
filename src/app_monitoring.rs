@@ -71,7 +71,21 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             resolved_at INTEGER,
             UNIQUE(application_id,metric)
          );
-         CREATE INDEX IF NOT EXISTS app_monitoring_open_alerts ON application_monitoring_alerts(application_id,state,last_seen DESC);",
+         CREATE INDEX IF NOT EXISTS app_monitoring_open_alerts ON application_monitoring_alerts(application_id,state,last_seen DESC);
+         CREATE TABLE IF NOT EXISTS application_monitoring_events(
+            id INTEGER PRIMARY KEY,
+            application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+            metric TEXT NOT NULL,
+            event_type TEXT NOT NULL CHECK(event_type IN ('triggered','resolved')),
+            lifecycle_started_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            current_value REAL,
+            threshold REAL,
+            acknowledged_at INTEGER,
+            acknowledged_by TEXT,
+            UNIQUE(application_id,metric,lifecycle_started_at,event_type)
+         );
+         CREATE INDEX IF NOT EXISTS app_monitoring_events_recent ON application_monitoring_events(application_id,created_at DESC);",
     )
 }
 
@@ -107,12 +121,38 @@ pub(super) async fn read(
     let mut statement = db.prepare(
         "SELECT metric,state,current_value,threshold,first_seen,last_seen,resolved_at FROM application_monitoring_alerts WHERE application_id=?1 ORDER BY last_seen DESC LIMIT 50",
     ).map_err(db_error)?;
-    let alerts = statement.query_map([app_id], |row| {
+    let alerts = statement.query_map([app_id.as_str()], |row| {
         Ok(json!({"metric":row.get::<_,String>(0)?,"state":row.get::<_,String>(1)?,"current_value":row.get::<_,Option<f64>>(2)?,"threshold":row.get::<_,Option<f64>>(3)?,"first_seen":row.get::<_,i64>(4)?,"last_seen":row.get::<_,i64>(5)?,"resolved_at":row.get::<_,Option<i64>>(6)?}))
     }).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    let mut statement = db.prepare(
+        "SELECT id,metric,event_type,lifecycle_started_at,created_at,current_value,threshold,acknowledged_at,acknowledged_by FROM application_monitoring_events WHERE application_id=?1 ORDER BY created_at DESC,id DESC LIMIT 50",
+    ).map_err(db_error)?;
+    let events = statement.query_map([app_id.as_str()], |row| {
+        Ok(json!({"id":row.get::<_,i64>(0)?,"metric":row.get::<_,String>(1)?,"event_type":row.get::<_,String>(2)?,"lifecycle_started_at":row.get::<_,i64>(3)?,"created_at":row.get::<_,i64>(4)?,"current_value":row.get::<_,Option<f64>>(5)?,"threshold":row.get::<_,Option<f64>>(6)?,"acknowledged_at":row.get::<_,Option<i64>>(7)?,"acknowledged_by":row.get::<_,Option<String>>(8)?}))
+    }).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
     Ok(Json(
-        json!({"latest":latest,"samples":samples,"rules":rules,"alerts":alerts,"sampling":{"interval_seconds":60,"retention_days":30,"scope":"managed-systemd-services","network_bytes":null,"http_latency_ms":null}}),
+        json!({"latest":latest,"samples":samples,"rules":rules,"alerts":alerts,"events":events,"sampling":{"interval_seconds":60,"retention_days":30,"scope":"managed-systemd-services","network_bytes":null,"http_latency_ms":null}}),
     ))
+}
+
+pub(super) async fn acknowledge_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((app_id, event_id)): Path<(String, i64)>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?.username;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let changed = db.execute(
+        "UPDATE application_monitoring_events SET acknowledged_at=?1,acknowledged_by=?2 WHERE id=?3 AND application_id=?4 AND EXISTS(SELECT 1 FROM applications WHERE id=?4 AND owner_server_uuid=?5 AND deleted_at IS NULL)",
+        params![now(), actor, event_id, app_id, owner],
+    ).map_err(db_error)?;
+    if changed == 0 {
+        return Err(error(StatusCode::NOT_FOUND, "اعلان پایش پیدا نشد."));
+    }
+    audit(&db, &actor, "application.monitoring.event.acknowledge", &format!("app={app_id}; event={event_id}"));
+    Ok(Json(json!({"acknowledged":true,"event_id":event_id})))
 }
 
 pub(super) async fn save_rules(
@@ -230,6 +270,10 @@ async fn collect_batch(state: &AppState) {
                     "DELETE FROM application_monitoring_samples WHERE at<?1",
                     [at - SAMPLE_RETENTION_SECONDS],
                 );
+                let _ = db.execute(
+                    "DELETE FROM application_monitoring_events WHERE created_at<?1",
+                    [at - 365 * 24 * 60 * 60],
+                );
             }
         }
     }
@@ -315,19 +359,24 @@ fn update_alerts(
     ];
     for (metric, condition, value, threshold) in checks {
         let Some(open) = condition else { continue };
-        if !open {
-            let existing_open: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM application_monitoring_alerts WHERE application_id=?1 AND metric=?2 AND state='open')",
-                params![app_id,metric],
-                |row| row.get(0),
-            ).unwrap_or(false);
-            if !existing_open {
-                continue;
-            }
-        }
+        let previous: Option<(String, i64)> = db.query_row(
+            "SELECT state,first_seen FROM application_monitoring_alerts WHERE application_id=?1 AND metric=?2",
+            params![app_id,metric],
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional().unwrap_or(None);
+        let was_open = previous.as_ref().is_some_and(|(state, _)| state == "open");
+        if !open && !was_open { continue; }
+        let lifecycle_started_at = if open && !was_open { at } else { previous.map(|(_, first_seen)| first_seen).unwrap_or(at) };
         let state = if open { "open" } else { "resolved" };
         let resolved_at = if open { None } else { Some(at) };
         let _ = db.execute("INSERT INTO application_monitoring_alerts(application_id,metric,state,current_value,threshold,first_seen,last_seen,resolved_at) VALUES(?1,?2,?3,?4,?5,?6,?6,?7) ON CONFLICT(application_id,metric) DO UPDATE SET state=excluded.state,current_value=excluded.current_value,threshold=excluded.threshold,last_seen=excluded.last_seen,resolved_at=CASE WHEN excluded.state='open' THEN NULL ELSE COALESCE(application_monitoring_alerts.resolved_at,excluded.resolved_at) END,first_seen=CASE WHEN excluded.state='open' AND application_monitoring_alerts.state<>'open' THEN excluded.first_seen ELSE application_monitoring_alerts.first_seen END",params![app_id,metric,state,value,threshold,at,resolved_at]);
+        if open != was_open {
+            let event_type = if open { "triggered" } else { "resolved" };
+            let _ = db.execute(
+                "INSERT OR IGNORE INTO application_monitoring_events(application_id,metric,event_type,lifecycle_started_at,created_at,current_value,threshold) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![app_id,metric,event_type,lifecycle_started_at,at,value,threshold],
+            );
+        }
     }
 }
 
@@ -427,5 +476,17 @@ mod tests {
         ).unwrap();
         assert_eq!(state, "resolved");
         assert_eq!(resolved_at, Some(30));
+        update_alerts(&db, "app", "running", "active", Some(80.0), Some(2048), 40);
+        update_alerts(&db, "app", "running", "active", Some(20.0), Some(512), 50);
+        let transitions: i64 = db.query_row(
+            "SELECT COUNT(*) FROM application_monitoring_events WHERE application_id='app' AND metric='cpu_high'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(transitions, 4, "two threshold cycles each produce trigger and resolution events");
+        let duplicate_triggers: i64 = db.query_row(
+            "SELECT COUNT(*) FROM application_monitoring_events WHERE application_id='app' AND metric='cpu_high' AND event_type='triggered'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(duplicate_triggers, 2);
     }
 }

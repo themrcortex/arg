@@ -17,6 +17,7 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/account/sessions/revoke-others",
             post(revoke_other_account_sessions),
         )
+        .route("/api/account/capabilities", get(account_capabilities))
         .route("/api/terminal", get(terminal_socket))
         .route(
             "/api/terminal/root/authorize",
@@ -25,6 +26,10 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/dashboard", get(dashboard))
         .route("/api/storage/volumes", get(storage_volumes))
         .route("/api/maintenance/system", get(maintenance::system_info))
+        .route("/api/security/posture", get(security_posture::inventory))
+        .route("/api/extensions/trust-keys", get(extensions::list_trust_keys).post(extensions::add_trust_key))
+        .route("/api/extensions/trust-keys/{id}", axum::routing::delete(extensions::revoke_trust_key))
+        .route("/api/extensions/validate", post(extensions::validate_manifest).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
         .route(
             "/api/maintenance/backups",
             get(maintenance::list_backups).post(maintenance::create_backup),
@@ -247,6 +252,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/apps/{id}/node/service/logs", get(node::logs))
         .route("/api/apps/{id}/monitoring", get(app_monitoring::read))
         .route("/api/apps/{id}/monitoring/rules", put(app_monitoring::save_rules))
+        .route("/api/apps/{id}/monitoring/events/{event_id}/ack", post(app_monitoring::acknowledge_event))
         .route("/api/apps/{id}/deploy", post(deploy::create))
         .route(
             "/api/apps/{id}/deploy/archive",
