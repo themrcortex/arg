@@ -7,6 +7,9 @@
 
 ## Unreleased
 
+### Changed
+- Make the desktop sidebar a full-height navigation rail flush with the right edge, removing the floating inset, rounded shell, and backdrop blur.
+
 ## v0.7.0 — 2026-10-27
 
 ### Added

@@ -36,7 +36,7 @@ export function SidebarNavigation({ items, currentPage, collapsed, mobileOpen, d
       aria-label="ناوبری اصلی"
       tabIndex={-1}
       className={cn(
-        'arg-sidebar fixed inset-y-3 right-3 z-40 flex w-[min(80vw,280px)] max-w-[calc(100vw-1.5rem)] flex-col rounded-2xl border px-3 py-3 transition-transform lg:sticky lg:top-3 lg:m-3 lg:h-[calc(100dvh-1.5rem)] lg:translate-x-0',
+        'arg-sidebar fixed inset-y-0 right-0 z-40 flex w-[min(80vw,280px)] max-w-[100vw] flex-col border-l px-3 py-3 transition-transform lg:sticky lg:inset-x-auto lg:top-0 lg:right-auto lg:bottom-auto lg:m-0 lg:h-dvh lg:translate-x-0',
         collapsed ? 'arg-sidebar-collapsed lg:w-[56px]' : 'lg:w-[224px]',
         mobileOpen ? 'translate-x-0' : 'translate-x-[calc(100%+1rem)]',
       )}
