@@ -529,16 +529,14 @@ function PageHeading({
   action?: ReactNode
 }) {
   return (
-        <div className="arg-page-heading mb-7 flex flex-wrap items-end justify-between gap-4" dir="rtl">
+    <header className="arg-page-heading mb-6 flex flex-wrap items-end justify-between gap-4" dir="rtl">
       <div className="min-w-0 text-right" dir="rtl">
-        <div className="mb-4 flex min-h-5 items-center justify-start text-xs font-bold tracking-[.12em] text-primary">
-          <span className="arg-page-eyebrow inline-flex items-center gap-2 leading-5" dir="ltr" style={{ unicodeBidi: 'isolate' }}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"/>SERVER CONTROL</span>
-        </div>
-        <h1 dir="rtl" className="mt-0 block text-3xl font-extrabold leading-[1.4] tracking-tight text-white md:text-[34px]">{title}</h1>
-        <p dir="rtl" className="mt-2 text-sm leading-7 text-muted-foreground">{description}</p>
+        <span className="arg-page-eyebrow inline-flex items-center gap-2 leading-5" dir="ltr" style={{ unicodeBidi: 'isolate' }}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"/>SERVER / MANAGEMENT</span>
+        <h1 dir="rtl" className="mt-2 block text-2xl font-bold leading-[1.4] tracking-tight text-foreground md:text-[30px]">{title}</h1>
+        <p dir="rtl" className="mt-1.5 max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
       </div>
-      {action}
-    </div>
+      {action && <div className="flex flex-wrap items-center gap-2 sm:pb-1">{action}</div>}
+    </header>
   )
 }
 

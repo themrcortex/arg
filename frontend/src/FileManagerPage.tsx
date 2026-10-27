@@ -10,6 +10,7 @@ import { Alert, AlertDescription } from './components/ui/alert'
 import { Skeleton } from './components/ui/skeleton'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
 import { FileManagerBrowser, type FileManagerEntry } from './components/file-manager/FileManagerBrowser'
+import { useConfirmDialog } from './hooks/useConfirmDialog'
 
 type Entry = { name: string; path: string; kind: 'directory' | 'file' | 'symlink' | 'other'; size: number; modified: number | null; permissions: string; read_only: boolean; link_target?: string | null }
 type Listing = { path: string; parent: string | null; entries: Entry[]; truncated: boolean }
@@ -72,6 +73,7 @@ export function FileManagerPage({ Heading, notify }: { Heading: Heading; notify:
   const [diskVolumesLoading, setDiskVolumesLoading] = useState(false)
   const [diskVolumesError, setDiskVolumesError] = useState('')
   const uploadRef = useRef<HTMLInputElement>(null)
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const load = useCallback(async (nextPath = path) => {
     setLoading(true); setError('')
@@ -188,12 +190,12 @@ export function FileManagerPage({ Heading, notify }: { Heading: Heading; notify:
   const parentDiskPath = diskPath === '/' ? null : diskPath.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/'
   const paste = async () => {
     if (!clipboard || !listing) return
-    if (clipboard.mode === 'move' && !window.confirm(`«${clipboard.name}» به این پوشه منتقل شود؟`)) return
+    if (clipboard.mode === 'move' && !await confirm({ title: 'تأیید انتقال', description: `«${clipboard.name}» به این پوشه منتقل شود؟`, confirmLabel: 'انتقال فایل' })) return
     const ok = await perform('paste', { source: clipboard.path, destination: listing.path, mode: clipboard.mode, confirmed: clipboard.mode === 'move' }, clipboard.mode === 'move' ? 'فایل یا پوشه منتقل شد.' : 'کپی فایل یا پوشه انجام شد.')
     if (ok) setClipboard(null)
   }
   const remove = async (entry: Entry) => {
-    if (!window.confirm(`«${entry.name}» و تمام محتوای داخل آن حذف شود؟ این عملیات قابل بازگشت نیست.`)) return
+    if (!await confirm({ title: 'حذف فایل یا پوشه', description: `«${entry.name}» و تمام محتوای داخل آن حذف شود؟ این عملیات قابل بازگشت نیست.`, confirmLabel: 'حذف دائمی', destructive: true })) return
     await perform('delete', { path: entry.path, confirmed: true }, 'فایل یا پوشه حذف شد.')
   }
   const zipFolder = async (entry: Entry) => {
@@ -204,7 +206,7 @@ export function FileManagerPage({ Heading, notify }: { Heading: Heading; notify:
   }
   const unzipFile = async (entry: Entry) => {
     if (entry.kind !== 'file' || !entry.name.toLowerCase().endsWith('.zip')) return
-    if (!window.confirm(`محتوای «${entry.name}» در پوشه‌ای تازه در همین مسیر استخراج شود؟ فایل‌های موجود بازنویسی نمی‌شوند.`)) return
+    if (!await confirm({ title: 'استخراج فایل ZIP', description: `محتوای «${entry.name}» در پوشه‌ای تازه در همین مسیر استخراج شود؟ فایل‌های موجود بازنویسی نمی‌شوند.`, confirmLabel: 'استخراج فایل' })) return
     await perform('unzip', { path: entry.path, destination: path, confirmed: true }, `محتوای «${entry.name}» در پوشه‌ای جدا استخراج شد.`)
   }
   const renderFileActions = (item: FileManagerEntry) => {
@@ -275,5 +277,6 @@ export function FileManagerPage({ Heading, notify }: { Heading: Heading; notify:
     <Dialog open={dialog === 'symlink'} onOpenChange={(open) => { if (!busy) { setDialog(open ? 'symlink' : null); if (!open) setReviewLinkTarget(false) } }}><DialogContent><DialogHeader><DialogTitle>ویرایش مقصد پیوند نمادین</DialogTitle><DialogDescription>فقط خود پیوند <code dir="ltr">{selected?.path}</code> جایگزین می‌شود؛ فایل یا پوشهٔ مقصد بازنویسی نمی‌شود. مقصد می‌تواند مسیر مطلق یا نسبی باشد.</DialogDescription></DialogHeader><form onSubmit={submitSymlinkTarget} className="space-y-4"><div className="space-y-2"><label htmlFor="symlink-target" className="text-sm font-medium">مقصد فعلی / جدید</label><Input id="symlink-target" autoFocus dir="ltr" className="font-mono text-left" value={linkTarget} onChange={(event) => { setLinkTarget(event.target.value); setReviewLinkTarget(false) }} placeholder="مثلاً ../releases/current" required maxLength={4096}/></div>{reviewLinkTarget ? <div className="space-y-2 rounded-xl border border-amber-400/25 bg-amber-400/[.05] p-3 text-xs"><p className="font-semibold text-amber-100">تغییر مقصد را تأیید کن</p><p className="text-muted-foreground">از:</p><code dir="ltr" className="block break-all text-left">{selected?.link_target || 'مقصد قبلی قابل خواندن نیست'}</code><p className="text-muted-foreground">به:</p><code dir="ltr" className="block break-all text-left">{linkTarget}</code></div> : null}<div className="flex gap-2">{reviewLinkTarget && <Button type="button" variant="outline" className="flex-1" onClick={() => setReviewLinkTarget(false)}>بازگشت و ویرایش</Button>}<Button type="submit" className="flex-1" disabled={!!busy || !linkTarget.trim()}>{busy ? <LoaderCircle size={15} className="animate-spin"/> : <Check size={15}/>}{reviewLinkTarget ? 'تأیید و ثبت مقصد' : 'بررسی تغییر'}</Button></div></form></DialogContent></Dialog>
     <Dialog open={dialog === 'permissions'} onOpenChange={(open) => !busy && setDialog(open ? 'permissions' : null)}><DialogContent><DialogHeader><DialogTitle>دسترسی فایل</DialogTitle><DialogDescription>مجوزهای Unix را با عدد اکتال وارد کن؛ مثل <code dir="ltr">0644</code> برای فایل معمولی یا <code dir="ltr">0755</code> برای اسکریپت و پوشه.</DialogDescription></DialogHeader><form onSubmit={submitPermissions} className="space-y-4"><Input autoFocus inputMode="numeric" maxLength={4} pattern="[0-7]{3,4}" value={permissions} onChange={(event) => setPermissions(event.target.value)} dir="ltr" required/><Button className="w-full" disabled={!!busy}>{busy ? <LoaderCircle size={15} className="animate-spin"/> : <Check size={15}/>}اعمال دسترسی</Button></form></DialogContent></Dialog>
     <Dialog open={dialog === 'edit'} onOpenChange={(open) => !busy && setDialog(open ? 'edit' : null)}><DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>ویرایش فایل</DialogTitle><DialogDescription dir="ltr" className="break-all text-left font-mono">{selected?.path}</DialogDescription></DialogHeader><textarea className="min-h-[55vh] w-full resize-y rounded-xl border border-border bg-background p-4 text-left font-mono text-xs leading-6 outline-none focus:ring-2 focus:ring-ring" dir="auto" spellCheck={false} value={editor} onChange={(event) => setEditor(event.target.value)}/><div className="flex flex-wrap justify-between gap-2"><span className="self-center text-[11px] text-muted-foreground">UTF-8 · محدودیت ویرایش 1 MiB</span><div className="flex gap-2"><Button variant="outline" onClick={() => selected && void download(selected)}><ArrowDownToLine size={14}/>دانلود اصلی</Button><Button onClick={() => void saveEditor()} disabled={!!busy}>{busy === 'save' ? <LoaderCircle size={14} className="animate-spin"/> : <Check size={14}/>}ذخیره</Button></div></div></DialogContent></Dialog>
+    {confirmDialog}
   </>
 }

@@ -11,6 +11,7 @@ import { Label } from './components/ui/label'
 import { Skeleton } from './components/ui/skeleton'
 import { Switch } from './components/ui/switch'
 import { FileManagerBrowser, type FileManagerEntry } from './components/file-manager/FileManagerBrowser'
+import { useConfirmDialog } from './hooks/useConfirmDialog'
 
 type Provider = { id: string; label: string; rclone_provider: string; endpoint_required: boolean; region_required: boolean; region_default?: string; create_bucket: boolean; docs: string; endpoints?: { id: string; label: string; endpoint: string; region?: string }[] }
 type S3Connection = { id: number; display_name: string; description: string; provider_type: string; endpoint: string; region: string; address_style: string; allow_private_endpoint: boolean; credential_present: boolean; last_rotated_at: number; status: string; last_test_at: number | null; last_error: string | null; created_at: number; updated_at: number }
@@ -32,6 +33,7 @@ const statusText: Record<string, string> = { unverified: 'تأییدنشده', c
 const statusVariant = (status: string) => status === 'connected' ? 'success' as const : status === 'degraded' ? 'warning' as const : status === 'failed' ? 'destructive' as const : 'outline' as const
 
 export function S3StoragePage({ Heading, notify }: Props) {
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [providers, setProviders] = useState<Provider[]>([])
   const [connections, setConnections] = useState<S3Connection[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
@@ -228,7 +230,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
     finally { setWorking('') }
   }
   const detachBucket = async (item: BucketRow) => {
-    if (!window.confirm(`فقط اتصال داخلی ARG به Bucket «${item.bucket_name}» قطع شود؟ فایل‌های ابری حذف نمی‌شوند.`)) return
+    if (!await confirm({ title: 'قطع اتصال Bucket', description: `فقط اتصال داخلی ARG به Bucket «${item.bucket_name}» قطع شود؟ فایل‌های ابری حذف نمی‌شوند.`, confirmLabel: 'قطع اتصال', destructive: true })) return
     setWorking('bucket')
     try { await api(`s3/buckets/${item.id}`, { method: 'DELETE', body: JSON.stringify({ confirm_bucket: item.bucket_name }) }); if (bucketName === item.bucket_name) { setBucketName(''); setPage(null) }; const result = await api<{ provider_buckets: string[]; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`); setBucketData(result); await load(true) }
     catch (error) { notify(error instanceof Error ? error.message : 'قطع اتصال Bucket ناموفق بود.') }
@@ -236,8 +238,8 @@ export function S3StoragePage({ Heading, notify }: Props) {
   }
   const deleteConnection = async () => {
     if (!selected) return
-    const confirmation = window.prompt(`برای حذف اتصال ARG و کلید محلی، نام آن را وارد کن: ${selected.display_name}`)
-    if (confirmation !== selected.display_name) return
+    if (!await confirm({ title: 'حذف اتصال و کلید محلی', description: `این کار فقط اتصال و اعتبارنامهٔ محلی ARG را پاک می‌کند؛ Bucketها و فایل‌های ارائه‌دهنده باقی می‌مانند.`, phrase: selected.display_name, confirmLabel: 'حذف اتصال', destructive: true })) return
+    const confirmation = selected.display_name
     setWorking('delete')
     try { await api(`s3/connections/${selected.id}`, { method: 'DELETE', body: JSON.stringify({ confirm_name: confirmation }) }); setSelectedId(null); setBucketName(''); notify('اتصال و کلید محلی حذف شد؛ Bucketها و Objectهای ارائه‌دهنده دست‌نخورده‌اند.'); await load(true) }
     catch (error) { notify(error instanceof Error ? error.message : 'حذف اتصال ناموفق بود.') }
@@ -251,8 +253,8 @@ export function S3StoragePage({ Heading, notify }: Props) {
   }
   const deleteObject = async (key: string) => {
     if (!selected || !bucketName) return
-    const confirmation = window.prompt(`حذف دائمی این Object را با واردکردن کلید تأیید کن:\n${key}`)
-    if (confirmation !== key) return
+    if (!await confirm({ title: 'حذف دائمی Object', description: `این Object از Bucket انتخاب‌شده پاک خواهد شد و این عملیات ممکن است برگشت‌پذیر نباشد.`, phrase: key, confirmLabel: 'حذف Object', destructive: true })) return
+    const confirmation = key
     setWorking('object-delete')
     try { await api(`s3/connections/${selected.id}/objects/delete`, { method: 'POST', body: JSON.stringify({ bucket: bucketName, key, confirm_key: confirmation }) }); notify('درخواست حذف Object به ارائه‌دهنده ارسال شد.'); await refreshObjects(prefix, cursor) }
     catch (error) { notify(error instanceof Error ? error.message : 'حذف Object ناموفق بود.') }
@@ -271,7 +273,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
   }
   const stopMount = async () => {
     if (!mount) return
-    if (!mount.read_only && !window.confirm('پیش از Unmount مطمئن شو برنامه‌ای در حال نوشتن روی Bucket نیست. ادامه می‌دهی؟')) return
+    if (!mount.read_only && !await confirm({ title: 'توقف Mount قابل‌نوشتن', description: 'پیش از Unmount مطمئن شو برنامه‌ای در حال نوشتن روی Bucket نیست؛ نوشتن هم‌زمان ممکن است عملیات فایل را مختل کند.', confirmLabel: 'توقف Mount', destructive: true })) return
     setWorking('mount')
     try { await api(`s3/mounts/${mount.id}/stop`, { method: 'POST' }); setMount({ ...mount, status: 'unmounted' }); notify('Mount متوقف شد؛ داده‌های Bucket حذف نشدند.') }
     catch (error) { notify(error instanceof Error ? error.message : 'توقف Mount ناموفق بود.') }
@@ -450,6 +452,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
         </form>
       </DialogContent>
     </Dialog>
+    {confirmDialog}
   </>
 }
 

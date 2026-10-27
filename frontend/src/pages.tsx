@@ -79,6 +79,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './comp
 import { formatPanelDate, usePanelTimeZone } from './lib/timezone'
 import { cachedRequest, invalidateCached } from './lib/heavy-cache'
 import { S3OverviewKpi, StorageInventorySection, StorageOverviewKpi } from './components/storage/StorageInventory'
+import { useConfirmDialog } from './hooks/useConfirmDialog'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
@@ -690,6 +691,7 @@ export function NetworkPage({ Heading, notify }: Common) {
 }
 
 export function FirewallPage({ Heading, notify, user }: Common & { user: User }) {
+  const { confirm, confirmDialog } = useConfirmDialog()
   const [data, setData] = useState<Firewall | null>(null)
   const [rules, setRules] = useState<ManagedFirewallRule[]>([])
   const [protectedPorts, setProtectedPorts] = useState<number[]>([22, 8282, 8443])
@@ -778,14 +780,14 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
     finally { setBusy(false) }
   }
   async function remove(rule: ManagedFirewallRule) {
-    if (!window.confirm(`قانون ${rule.port}/${rule.protocol} حذف شود؟`)) return
+    if (!await confirm({ title: 'حذف قانون فایروال', description: `قانون ${rule.port}/${rule.protocol} حذف شود؟`, confirmLabel: 'حذف قانون', destructive: true })) return
     setBusy(true)
     try { await api(`firewall/rules/${rule.id}`, { method: 'DELETE' }); notify('قانون حذف شد.'); await refresh() }
     catch (error) { notify(error instanceof Error ? error.message : 'حذف قانون ناموفق بود') }
     finally { setBusy(false) }
   }
   async function removeExternalRule(rule: { number: number; line: string }) {
-    if (!window.confirm(`قانون UFW شمارهٔ ${rule.number} حذف شود؟ وضعیت قانون قبل از حذف دوباره بررسی می‌شود.`)) return
+    if (!await confirm({ title: 'حذف قانون خارجی UFW', description: `قانون UFW شمارهٔ ${rule.number} حذف شود؟ وضعیت قانون قبل از حذف دوباره بررسی می‌شود.`, confirmLabel: 'حذف قانون', destructive: true })) return
     setBusy(true)
     try {
       await api('firewall/rules/external', { method: 'POST', body: JSON.stringify(rule) })
@@ -810,6 +812,7 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
     </SectionCard>
     <Alert className="mt-5"><ShieldCheck size={17} className="mb-2 text-primary"/><AlertTitle>حفاظت دسترسی</AlertTitle><AlertDescription>پورت SSH و پورت‌های پنل برای جلوگیری از قطع دسترسی محافظت می‌شوند. پورت‌های HTTP (80) و HTTPS (443) قابل مدیریت‌اند؛ فعال‌سازی UFW آن‌ها را باز می‌گذارد مگر این‌که برایشان قانون مسدودسازی مشخص کرده باشی.</AlertDescription></Alert>
     <Dialog open={dialogOpen} onOpenChange={setDialogOpen}><DialogContent><DialogHeader><DialogTitle>{editing === null ? 'قانون جدید' : 'ویرایش قانون'}</DialogTitle><DialogDescription>قانون در UFW اعمال می‌شود و می‌توانی بعداً آن را غیرفعال کنی.</DialogDescription></DialogHeader><form onSubmit={save} className="space-y-4"><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="firewall-port">پورت</Label><Input id="firewall-port" type="number" lang="en" dir="ltr" min={1} max={65535} required value={form.port} onChange={(event) => setForm((old) => ({ ...old, port: event.target.value }))}/></div><div className="space-y-2"><Label>پروتکل</Label><div role="group" aria-label="انتخاب پروتکل شبکه" className="grid grid-cols-3 gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1">{([['tcp','TCP'], ['udp','UDP'], ['both','TCP + UDP']] as const).map(([value,label]) => <button key={value} type="button" aria-pressed={form.protocol === value} onClick={() => setForm((old) => ({ ...old, protocol: value }))} className={`rounded-lg px-2 py-2.5 text-xs font-mono font-semibold transition ${form.protocol === value ? 'bg-primary/25 text-white shadow-sm' : 'text-muted-foreground hover:bg-white/[.04] hover:text-white'}`}>{label}</button>)}</div><p className="text-[11px] text-muted-foreground">{form.protocol === 'both' ? 'دو قانون جداگانه برای TCP و UDP ساخته می‌شود.' : `فقط ترافیک ${form.protocol.toUpperCase()} برای این پورت مدیریت می‌شود.`}</p></div></div><div className="space-y-2"><Label htmlFor="firewall-policy">رفتار</Label><Select value={form.policy} onValueChange={(value) => setForm((old) => ({ ...old, policy: value as 'allow' | 'deny' }))}><SelectTrigger id="firewall-policy"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="allow">اجازه</SelectItem><SelectItem value="deny">مسدود</SelectItem></SelectContent></Select></div><label className="flex items-center justify-between rounded-xl border border-white/10 p-3 text-sm"><span>قانون فعال باشد</span><Switch checked={form.enabled} onCheckedChange={(checked) => setForm((old) => ({ ...old, enabled: checked }))}/></label><Button type="submit" disabled={busy || !form.port} className="w-full">{busy ? 'در حال ذخیره…' : 'ذخیرهٔ قانون'}</Button></form></DialogContent></Dialog>
+    {confirmDialog}
   </>
 }
 

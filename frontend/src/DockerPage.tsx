@@ -8,6 +8,8 @@ import { Badge } from './components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Alert, AlertDescription } from './components/ui/alert'
 import { Skeleton } from './components/ui/skeleton'
+import { MetricCard } from './components/ui/metric-card'
+import { useConfirmDialog } from './hooks/useConfirmDialog'
 
 type DockerContainer = { id: string; names: string; image: string; status: string; ports: string; state: string; stats?: { cpu?: string; memory?: string; memory_percent?: string; network_io?: string; block_io?: string } }
 type DockerImage = { id: string; repository: string; tag: string; size: string; created: string }
@@ -50,6 +52,7 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
   const [execCommand, setExecCommand] = useState('')
   const [resourceName, setResourceName] = useState('')
   const [composeFile, setComposeFile] = useState('/opt/arg/compose/docker-compose.yml')
+  const { confirm, confirmDialog } = useConfirmDialog()
 
   const load = useCallback(async (force = false) => {
     setError('')
@@ -62,7 +65,7 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
 
   async function run(action: string, payload: Record<string, unknown> = {}, confirmation?: string) {
     if (busy) return
-    if (confirmation && !window.confirm(confirmation)) return
+    if (confirmation && !await confirm({ title: `تأیید عملیات Docker: ${action}`, description: confirmation, destructive: /remove|prune|down|uninstall/i.test(action), confirmLabel: 'تأیید و اجرا' })) return
     setBusy(action); setError(''); setOutput('')
     try {
       const result = await api<{ output: string }>('docker/action', { method: 'POST', body: JSON.stringify({ action, ...payload, confirmed: !!confirmation }) })
@@ -90,10 +93,10 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
     {!data?.installed ? <Card className="mb-5 overflow-hidden border-primary/20 bg-gradient-to-br from-primary/[.08] to-card"><CardHeader><CardTitle className="flex items-center gap-2"><Box className="text-primary"/>Docker نصب نشده است</CardTitle><CardDescription>نصب Docker Engine از مخازن APT سیستم انجام می‌شود. بعد از نصب، سرویس فعال و هنگام بوت راه‌اندازی خواهد شد.</CardDescription></CardHeader><CardContent><Button disabled={!!busy} onClick={() => void run('install')}><Download size={15}/>{busy === 'install' ? 'در حال نصب Docker…' : 'نصب Docker Engine'}{busy === 'install' && <LoaderCircle size={14} className="animate-spin"/>}</Button></CardContent></Card> : <>
       {data.error && <Alert className="mb-5 border-amber-300/20 bg-amber-300/[.04]"><CircleAlert size={16}/><AlertDescription>بخشی از فهرست منابع دریافت نشد: {data.error}</AlertDescription></Alert>}
       <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Card><CardContent className="flex items-center gap-3 p-4"><Power className={ready ? 'text-emerald-300' : 'text-amber-300'}/><div><div className="text-sm font-semibold">{ready ? 'سرویس فعال' : 'Daemon متوقف'}</div><div className="mt-1 text-xs text-muted-foreground">{data.server_version ? `Engine ${data.server_version}` : 'نیاز به راه‌اندازی سرویس'}</div></div></CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 p-4"><Box className="text-primary"/><div><div className="text-xl font-semibold tabular-nums">{count(data.containers.length)}</div><div className="text-xs text-muted-foreground">کانتینر · {count(data.containers.filter((item) => item.state === 'running').length)} در حال اجرا</div></div></CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 p-4"><Download className="text-sky-300"/><div><div className="text-xl font-semibold tabular-nums">{count(data.images.length)}</div><div className="text-xs text-muted-foreground">ایمیج موجود</div></div></CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 p-4"><HardDrive className="text-violet-300"/><div><div className="text-xl font-semibold tabular-nums">{count(data.volumes.length)}</div><div className="text-xs text-muted-foreground">Volume پایدار</div></div></CardContent></Card>
+        <MetricCard label="سرویس Docker" value={ready ? 'فعال' : 'متوقف'} detail={data.server_version ? `Engine ${data.server_version}` : 'نیاز به راه‌اندازی سرویس'} icon={<Power size={18}/>} tone={ready ? 'green' : 'warning'} direction="rtl"/>
+        <MetricCard label="کانتینرها" value={count(data.containers.length)} detail={`${count(data.containers.filter((item) => item.state === 'running').length)} در حال اجرا`} icon={<Box size={18}/>} tone="copper"/>
+        <MetricCard label="Imageهای محلی" value={count(data.images.length)} detail="آمادهٔ اجرا یا حذف در صورت بلااستفاده بودن" icon={<Download size={18}/>} tone="blue"/>
+        <MetricCard label="Volumeهای پایدار" value={count(data.volumes.length)} detail="داده با حذف کانتینر پاک نمی‌شود" icon={<HardDrive size={18}/>} tone="teal"/>
       </div>
       {!ready && <Card className="mb-5 border-amber-300/20 bg-amber-300/[.04]"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4"><div><p className="font-medium text-amber-100">Docker daemon در دسترس نیست</p><p className="mt-1 text-xs text-muted-foreground">{data.error || 'سرویس را شروع کن تا منابع Docker بارگذاری شوند.'}</p></div><div className="flex gap-2"><Button size="sm" disabled={!!busy} onClick={() => void run('start')}><Play size={14}/>شروع سرویس</Button><Button size="sm" variant="outline" disabled={!!busy} onClick={() => void run('enable')}><Check size={14}/>فعال هنگام بوت</Button></div></CardContent></Card>}
       <div className="mb-4 flex flex-wrap gap-2" role="tablist" aria-label="بخش‌های Docker">{tabs.map((item) => <Button key={item.id} role="tab" aria-selected={tab === item.id} size="sm" variant={tab === item.id ? 'default' : 'outline'} onClick={() => setTab(item.id)}><item.icon size={14}/>{item.label}</Button>)}</div>
@@ -124,5 +127,6 @@ export function DockerPage({ Heading, notify }: { Heading: Heading; notify: (mes
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground"><span>Docker CLI: <code dir="ltr">{data.version || '—'}</code> · Engine: <code dir="ltr">{data.server_version || 'offline'}</code></span>{data.installed && <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void run('uninstall', {}, 'بسته‌های Docker Engine حذف شوند؟ داده‌های /var/lib/docker و volumeها دست‌نخورده می‌مانند.')}><Trash2 size={13}/>حذف بسته‌های Docker</Button>}</div>
     </>}
     {output && <Card className="mt-5"><CardHeader className="pb-2"><CardTitle className="text-sm">گزارش آخرین عملیات</CardTitle></CardHeader><CardContent><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-[#090d12] p-3 text-left font-mono text-xs text-muted-foreground" dir="ltr">{output}</pre></CardContent></Card>}
+    {confirmDialog}
   </>
 }
