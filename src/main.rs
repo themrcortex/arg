@@ -60,6 +60,8 @@ mod app_monitoring;
 mod app_networks;
 mod app_storage;
 mod app_s3;
+mod app_templates;
+mod app_workspaces;
 mod deploy;
 mod docker;
 mod fast_actions;
@@ -74,6 +76,7 @@ mod node;
 mod routes;
 mod runtimes;
 mod s3;
+mod secret_vault;
 mod storage_mounts;
 
 #[derive(RustEmbed)]
@@ -4675,6 +4678,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     laravel::migrate(&db)?;
     s3::migrate(&db)?;
     app_s3::migrate(&db)?;
+    app_workspaces::migrate(&db)?;
     app_monitoring::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;

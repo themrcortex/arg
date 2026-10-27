@@ -19,6 +19,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
       - run: cargo check --locked
+      - run: cargo build --locked --release
 
   frontend:
     name: Frontend checks

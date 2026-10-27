@@ -4,7 +4,7 @@ This roadmap continues the implemented application platform through its release 
 
 ## Current checkpoint
 
-Phases 00–12 are described in [Application platform architecture](app-platform-architecture.md). Phase 13's repository implementation and automated gate are complete in this candidate; a disposable-host check remains. Phases 14–18 below are the design and acceptance plan; they are not shipped functionality until their phase gate passes.
+Phases 00–12 are described in [Application platform architecture](app-platform-architecture.md). This document records earlier application milestones and their boundaries. Phase 18 is a hardening checkpoint, not the end of the overall roadmap. Continue with [Phases 18–48](app-platform-roadmap-18-48.md). A phase description is not evidence of implementation.
 
 ## Phase 13 — Application monitoring and alerts
 
@@ -131,4 +131,4 @@ Mark each feature as `implemented`, `automated tests passed`, `host integration 
 
 ## Batch workflow
 
-The execution plan groups Phases 13–17 as one five-phase batch, followed by Phase 18 as the final release gate. For each batch: inspect current implementation; implement only real, bounded behavior; update this roadmap and the changelog; run the complete local test/build suite; run host or multi-host gates only where the required disposable infrastructure exists; then commit and push to `development`. A blocked external gate is recorded with its evidence and does not get described as passed.
+Execution proceeds from Phase 18 through Phase 48 in five-phase batches. For each batch: inspect current implementation; implement bounded behavior; update both roadmaps, status, and changelog; run local tests and builds; run host/multi-host gates only when disposable infrastructure exists; then commit and push to `development`. External gates that cannot run are recorded as pending, never implied to have passed. Phase 48 is the final release gate.

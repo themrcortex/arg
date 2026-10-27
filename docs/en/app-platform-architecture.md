@@ -79,7 +79,12 @@ Existing pairings migrate additively without changing their node IDs or revoking
 | 15 — App terminal/files/source | Planned | Must use app-scoped non-root identities and rooted file access; global server/root tools do not satisfy this phase. |
 | 16 — App migration | Planned | Requires durable preflight, verified transfer/restore, fencing, explicit cutover, rollback, and two-VPS tests. |
 | 17 — Webhooks and backups | Planned | Requires signed/replay-safe hooks and encrypted backup restore drills; upload-only is not backup verification. |
-| 18 — Release hardening | Planned | Requires host and multi-host matrices, threat review, performance evidence, and operational runbooks. |
+| 18 — Hardening checkpoint | In progress | CI now includes an optimized build. Threat review and disposable one/two/three-host matrices remain pending. |
+| 19 — Connections and secret vault | Partial implementation | S3 helper credentials use authenticated encryption under a root-only local key and migrate legacy JSON lazily. Provider-neutral connections, reuse scopes, explicit rotation/recovery, and remote delivery remain open. |
+| 20 — Workspaces, projects, environments | Initial metadata implementation | Default workspace/project/production records, CRUD APIs, and app assignment/UI exist. Runtime/config/secret isolation and production promotion locks remain open. |
+| 21 — Service bindings | Partial, S3 adapter only | Existing S3 bindings remain metadata and do not enforce provider ACLs. Generic database/cache/SMTP bindings and environment-aware secret delivery remain open. |
+| 22 — App templates | Draft catalog only | Versioned Laravel, React/Vite, and Node presets create draft app records; source acquisition, dependency installation, and deployment are not implemented by this catalog. |
+| 23–48 — Remaining platform roadmap | Planned | See the complete roadmap; optional phases remain off by default and host/fleet gates are mandatory for production claims. |
 
 “Complete” here means the repository implementation and its automated phase checks are present. It does not claim that external multi-VPS, certificate-authority, APT, MySQL, or systemd integration has been exercised on a production VPS.
 
@@ -131,9 +136,9 @@ Existing pairings migrate additively without changing their node IDs or revoking
 - Node process output uses the systemd journal. API reads are capped at 500 lines and can resume after a journal cursor. Journal retention is system-wide and configured by the host; ARG does not expose a misleading per-app retention switch. This phase does not provide a separate log collector for Docker, Nginx, jobs, or S3 transfers.
 - Automated tests and builds validate code paths and schema migrations. Docker isolation, group permissions, journal cursor behavior, and filesystem lifecycle need a disposable Debian/Ubuntu integration host before production claims.
 
-### Phases 13–18 roadmap
+### Phases 13–48 roadmap
 
-Implementation order, API and state boundaries, acceptance gates, and external test requirements for the remaining phases are documented in [Application platform roadmap: Phases 13–18](app-platform-roadmap-13-18.md). The status table distinguishes repository work from host and multi-host validation.
+Implementation order, API and state boundaries, acceptance gates, and external test requirements are documented in [Application platform roadmap: Phases 13–18](app-platform-roadmap-13-18.md) and [Application platform roadmap: Phases 18–48](app-platform-roadmap-18-48.md). The status table distinguishes repository work from host and multi-host validation.
 
 ### Vocabulary and ownership
 
@@ -198,7 +203,7 @@ Every phase must add the tests for the behavior it changes. The final release ma
 - **Persistence:** SQLite bootstrap is in `src/main.rs`; the Application schema migration is isolated in `src/apps.rs` and invoked at startup.
 - **Privileged operations:** ARG service communicates with `arg-privileged.service` over a private Unix socket. No feature may turn this into a generic root command runner.
 - **Federation:** protocol v2 and remote workspace API/terminal proxy are implemented. Phase 02 adds server roles, destination-checked scopes, capability negotiation v1, workspace renewal, credential rotation, and health states; a real two-VPS integration test is still required.
-- **Application platform:** Phases 03–08 add the ownership-aware registry, durable deployments, runtime inventory, Laravel/Node runners, and static/SSR delivery. Phases 09–12 add server-local app networks, persistent Node data, S3 references, and resumable journal reads. Phase 13 monitoring is under implementation. The design and acceptance gates for Phases 13–18 are in the [remaining-phase roadmap](app-platform-roadmap-13-18.md); cross-VPS data networking and migration still require dedicated implementation and real multi-host tests.
+- **Application platform:** Phases 03–13 provide the ownership-aware registry, deployment engine, runtime manager, Laravel/Node.js runners, static/SSR delivery, app resources, and monitoring. Phases 14–48 are in progress/planned with their implemented boundary recorded in the [roadmap status](app-platform-roadmap-18-48.md); cross-VPS networking, migration, and fleet behavior still require dedicated implementation and real multi-host tests.
 - **CI:** GitHub Actions workflows exist for CI and documentation publishing. Local required checks are documented in `docs/en/development.md`.
 - **Versioning:** Rust and frontend versions are synchronized; stable and prerelease updates use `scripts/bump-version.sh`, `scripts/bump-development-version.sh`, and `scripts/check-versioning.sh`.
 

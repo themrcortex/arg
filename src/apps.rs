@@ -39,6 +39,8 @@ pub(super) struct AppInput {
     #[serde(default)]
     listen_port: Option<u16>,
     #[serde(default)]
+    environment_id: Option<String>,
+    #[serde(default)]
     labels: Vec<String>,
     #[serde(default = "default_desired_state")]
     desired_state: String,
@@ -447,7 +449,8 @@ pub(super) async fn list(
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
     let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-    let apps = read_apps(&db, &owner, query.include_deleted).map_err(db_error)?;
+    let mut apps = read_apps(&db, &owner, query.include_deleted).map_err(db_error)?;
+    app_workspaces::add_context(&db, &mut apps).map_err(db_error)?;
     Ok(Json(
         json!({"server_uuid":owner,"apps":apps,"features":{"deploy":true,"environment_secrets":false,"storage_plans":false,"automatic_reconciliation":false}}),
     ))
@@ -467,6 +470,13 @@ pub(super) async fn create(
         let db = state.lock().unwrap();
         actor = require_admin(&db, &headers)?.username;
         owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        if let Some(environment_id) = input.environment_id.as_deref() {
+            if !valid_uuid(environment_id)
+                || !app_workspaces::environment_is_owned_by(&db, environment_id, &owner).map_err(db_error)?
+            {
+                return Err(error(StatusCode::NOT_FOUND, "محیط انتخاب‌شده متعلق به این VPS نیست."));
+            }
+        }
         validate_port_free(&db, input.listen_port, None)?;
         check_domain_conflicts(&db, &owner, domain.as_deref(), None)?;
         let duplicate_name: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM applications WHERE owner_server_uuid=?1 AND name=?2 COLLATE NOCASE AND deleted_at IS NULL)", params![owner,name], |row| row.get(0)).map_err(db_error)?;
@@ -524,6 +534,11 @@ pub(super) async fn create(
         .collect::<Vec<_>>();
     let db = state.lock().unwrap();
     db.execute("INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at,static_output_path,static_spa_fallback) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown','active','manual','manual',?13,?14,?14,?15,?16)", params![id,owner,name,input.description.trim(),input.framework,input.runtime_version,input.build_runtime_version,input.source_type,domain,input.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),input.desired_state,actor,at,input.static_output_path,input.static_spa_fallback]).map_err(|error_value| if error_value.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.") } else { db_error(error_value) })?;
+    if let Some(environment_id) = input.environment_id.as_deref() {
+        app_workspaces::set_application_environment(&db, &id, environment_id, &actor).map_err(db_error)?;
+    } else {
+        app_workspaces::assign_default(&db, &id, &owner, &actor).map_err(db_error)?;
+    }
     audit(
         &db,
         &actor,
@@ -533,7 +548,8 @@ pub(super) async fn create(
             input.framework, input.source_type
         ),
     );
-    let apps = read_apps(&db, &owner, false).map_err(db_error)?;
+    let mut apps = read_apps(&db, &owner, false).map_err(db_error)?;
+    app_workspaces::add_context(&db, &mut apps).map_err(db_error)?;
     let app = apps
         .into_iter()
         .find(|app| app["id"] == id)
@@ -541,6 +557,36 @@ pub(super) async fn create(
     Ok(Json(
         json!({"app":app,"message":"رکورد اپلیکیشن ساخته شد؛ هنوز هیچ کدی دریافت یا سرویسی اجرا نشده است."}),
     ))
+}
+
+pub(super) async fn create_from_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    template_id: String,
+    input: app_templates::TemplateDraftInput,
+) -> ApiResult {
+    let framework = match template_id.as_str() {
+        "laravel-app" => "laravel",
+        "react-vite-static" => "vite",
+        "node-api" => "node",
+        _ => return Err(error(StatusCode::NOT_FOUND, "Preset اپلیکیشن پیدا نشد.")),
+    };
+    let app = AppInput {
+        name: input.name,
+        description: input.description,
+        framework: framework.to_owned(),
+        runtime_version: input.runtime_version,
+        build_runtime_version: input.build_runtime_version,
+        source_type: "manual".to_owned(),
+        domain: input.domain,
+        listen_port: input.listen_port,
+        environment_id: input.environment_id,
+        labels: vec!["template-draft".to_owned()],
+        desired_state: "none".to_owned(),
+        static_output_path: "auto".to_owned(),
+        static_spa_fallback: true,
+    };
+    create(State(state), headers, Json(app)).await
 }
 
 pub(super) async fn get(
@@ -556,6 +602,8 @@ pub(super) async fn get(
         .into_iter()
         .find(|app| app["id"] == id)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
+    let mut app = app;
+    app_workspaces::add_context(&db, std::slice::from_mut(&mut app)).map_err(db_error)?;
     Ok(Json(json!({"app":app})))
 }
 
@@ -580,6 +628,13 @@ pub(super) async fn update(
         let db = state.lock().unwrap();
         actor = require_admin(&db, &headers)?.username;
         owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        if let Some(environment_id) = input.app.environment_id.as_deref() {
+            if !valid_uuid(environment_id)
+                || !app_workspaces::environment_is_owned_by(&db, environment_id, &owner).map_err(db_error)?
+            {
+                return Err(error(StatusCode::NOT_FOUND, "محیط انتخاب‌شده متعلق به این VPS نیست."));
+            }
+        }
         validate_port_free(&db, input.app.listen_port, Some(&id))?;
         check_domain_conflicts(&db, &owner, domain.as_deref(), Some(&id))?;
         let current: Option<(i64, Option<i64>)> = db
@@ -659,17 +714,20 @@ pub(super) async fn update(
             "اپلیکیشن هم‌زمان تغییر کرده است؛ صفحه را تازه کن.",
         ));
     }
+    if let Some(environment_id) = input.app.environment_id.as_deref() {
+        app_workspaces::set_application_environment(&db, &id, environment_id, &actor).map_err(db_error)?;
+    }
     audit(
         &db,
         &actor,
         "application.update",
         &format!("id={id}; version={}", input.expected_version + 1),
     );
-    let app = read_apps(&db, &owner, false)
+    let mut apps = read_apps(&db, &owner, false)
         .map_err(db_error)?
-        .into_iter()
-        .find(|app| app["id"] == id)
-        .unwrap_or(Value::Null);
+        ;
+    app_workspaces::add_context(&db, &mut apps).map_err(db_error)?;
+    let app = apps.into_iter().find(|app| app["id"] == id).unwrap_or(Value::Null);
     Ok(Json(json!({"app":app})))
 }
 

@@ -5,7 +5,7 @@ use std::{
     net::{IpAddr, ToSocketAddrs},
     os::fd::AsRawFd,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
 };
 use url::Url;
 
@@ -335,6 +335,17 @@ fn read_secret_file(id: i64) -> Result<SecretConfig, String> {
     if id <= 0 {
         return Err("شناسهٔ اتصال معتبر نیست.".into());
     }
+    let directory = FsPath::new(SECRET_DIR);
+    let reference = id.to_string();
+    if secret_vault::contains(directory, &reference)? {
+        let contents = secret_vault::read(directory, &reference)?;
+        let secret: SecretConfig = serde_json::from_slice(&contents)
+            .map_err(|_| "مقدار رمز‌شدهٔ اتصال قالب معتبر ندارد.".to_string())?;
+        if !secret.endpoint.is_empty() {
+            validate_endpoint(&secret.endpoint, secret.allow_private_endpoint)?;
+        }
+        return Ok(secret);
+    }
     let path = PathBuf::from(SECRET_DIR).join(format!("{id}.json"));
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -365,6 +376,10 @@ fn read_secret_file(id: i64) -> Result<SecretConfig, String> {
     if !secret.endpoint.is_empty() {
         validate_endpoint(&secret.endpoint, secret.allow_private_endpoint)?;
     }
+    // Existing installations stored root-only JSON files. Convert them on the
+    // first successful read so the S3 UI and old endpoint metadata stay intact.
+    secret_vault::store(directory, &reference, &contents)?;
+    fs::remove_file(path).map_err(|_| "فایل قدیمی کلید پس از رمزنگاری پاک نشد.".to_string())?;
     Ok(secret)
 }
 
@@ -379,29 +394,34 @@ fn write_secret_file(id: i64, secret: &SecretConfig) -> Result<(), String> {
     if !secret.endpoint.is_empty() {
         validate_endpoint(&secret.endpoint, secret.allow_private_endpoint)?;
     }
-    let path = secret_path(id)?;
-    fs::create_dir_all(SECRET_DIR).map_err(|_| "ساخت محل امن کلیدها ناموفق بود.".to_string())?;
-    fs::set_permissions(SECRET_DIR, fs::Permissions::from_mode(0o700))
-        .map_err(|_| "تنظیم دسترسی پوشهٔ کلیدها ناموفق بود.".to_string())?;
-    let temp = PathBuf::from(SECRET_DIR).join(format!(".{id}.tmp-{}", std::process::id()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .map_err(|_| "فایل موقت امن ساخته نشد.".to_string())?;
-    file.write_all(
-        &serde_json::to_vec(secret).map_err(|_| "رمزگذاری اطلاعات اتصال ناموفق بود.".to_string())?,
-    )
-    .map_err(|_| "نوشتن کلید امن ناموفق بود.".to_string())?;
-    file.sync_all()
-        .map_err(|_| "ذخیرهٔ امن کلید ناموفق بود.".to_string())?;
-    fs::rename(&temp, &path).map_err(|_| {
-        let _ = fs::remove_file(&temp);
-        "ثبت امن کلید ناموفق بود.".to_string()
-    })?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|_| "تنظیم دسترسی کلید ناموفق بود.".to_string())?;
+    let directory = FsPath::new(SECRET_DIR);
+    let contents = serde_json::to_vec(secret)
+        .map_err(|_| "رمزگذاری اطلاعات اتصال ناموفق بود.".to_string())?;
+    secret_vault::store(directory, &id.to_string(), &contents)?;
+    let legacy = secret_path(id)?;
+    match fs::remove_file(legacy) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("فایل قدیمی کلید پس از رمزنگاری پاک نشد.".into()),
+    }
+    Ok(())
+}
+
+fn delete_secret_files(id: i64) -> Result<(), String> {
+    let directory = FsPath::new(SECRET_DIR);
+    let reference = id.to_string();
+    if secret_vault::contains(directory, &reference)? {
+        secret_vault::delete(directory, &reference)?;
+    }
+    let legacy = secret_path(id)?;
+    match fs::symlink_metadata(&legacy) {
+        Ok(metadata) if metadata.file_type().is_file() && metadata.uid() == 0 => {
+            fs::remove_file(legacy).map_err(|_| "حذف فایل قدیمی کلید ناموفق بود.".to_string())?;
+        }
+        Ok(_) => return Err("فایل قدیمی کلید، فایل معمولی تحت مالکیت root نیست.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("بررسی فایل قدیمی کلید ناموفق بود.".into()),
+    }
     Ok(())
 }
 
@@ -525,9 +545,7 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
                 Err(error) => json!({"ok":false,"error":error}),
             }
         }
-        "s3-secret-delete" => match secret_path(id).and_then(|path| {
-            fs::remove_file(path).map_err(|_| "حذف کلید امن ناموفق بود.".to_string())
-        }) {
+        "s3-secret-delete" => match delete_secret_files(id) {
             Ok(()) => json!({"ok":true}),
             Err(error) => json!({"ok":false,"error":error}),
         },
