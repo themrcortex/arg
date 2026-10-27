@@ -1,5 +1,19 @@
 # ARG Change Log
 
+## v0.6.9-dev.10 — 2026-10-27
+
+### Added
+- Add persisted, application-scoped workflow drafts with a bounded typed DAG validator. The API rejects duplicate IDs, missing references, invalid step kinds, oversized graphs, and cycles; drafts do not execute jobs, commands, or triggers.
+- Add Python web and WordPress application templates. They create application metadata only and do not install Python packages, WordPress, PHP/MySQL, or system services.
+- Add per-user dashboard widget ordering and visibility with Minimal, DevOps, Hosting, and Fleet layout presets. Preferences are validated and stored separately for each account.
+
+### Changed
+- Clarify the implementation boundary for optional cloud provisioning and mail-server phases: no provider inventory/cost claims are made without a test account, and Postfix/Dovecot are not installed without an isolated host.
+- Document current partial status for Phases 38–42 in both roadmaps, including workflow execution, Python/WordPress runtime setup, dashboard theme tokens, and external host tests that remain open.
+
+### Validation
+- 176 Rust tests, `cargo check --locked`, frontend type-check/build, documentation type-check/build, and `git diff --check` passed. The optimized Rust release build is run for this version before push. Cloud-provider and isolated mail-host tests were not available.
+
 ## v0.6.9-dev.9 — 2026-10-27
 
 ### Added
