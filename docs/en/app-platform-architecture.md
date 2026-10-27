@@ -89,7 +89,12 @@ Existing pairings migrate additively without changing their node IDs or revoking
 | 25 — Preview and snapshots | Metadata snapshots only | App/environment configuration snapshots are content-addressed and exclude secret values. Preview lifecycle, approvals, restore/promotion, and live data isolation remain open. |
 | 26 — Compose orchestration | Metadata links only | Admins may link an existing Docker container to a Docker app for measured status; unlinking leaves Docker untouched. Compose reconciliation, controls, and safe rollbacks remain open. |
 | 27 — DNS providers | Cloudflare adapter, partial | Encrypted service-user credentials, zone validation, and guarded A/AAAA/CNAME/MX/TXT/CAA/SRV APIs are implemented. Route 53/DO, propagation checks, DNS-01, and disposable-provider tests remain open. |
-| 28–48 — Remaining platform roadmap | Planned | See the complete roadmap; optional phases remain off by default and host/fleet gates are mandatory for production claims. |
+| 28 — Domains/SSL/Nginx | Metadata ownership link, partial | An app can link only to an Nginx site whose `server_name` contains its exact domain. The API does not generate or reload config; full SSL/performance/rollback work remains. |
+| 29 — PostgreSQL | Read-only inventory | Bounded checks report `psql` version, unit state, and `pg_isready`; install, SQL, roles, backups, and database management are not implemented. |
+| 30 — Backup/recovery | Bounded source archive | A ZIP of the active release source is created/downloaded with size bounds, hashes, and dotfile/runtime exclusions. It omits databases, secrets, and persistent files and is not restorable. |
+| 31 — Fleet/rollout | Tags and preview | Node tags and canary rollout plans are stored; remote build/update/rollback is not executed. |
+| 32 — Private network | Policy draft | App-to-Node service intent can be stored/deleted as metadata; WireGuard, routes, and firewall are absent and `enforced=false`. |
+| 33–48 — Remaining roadmap | Planned | See the complete roadmap; production claims still require host and fleet tests. |
 
 “Complete” here means the repository implementation and its automated phase checks are present. It does not claim that external multi-VPS, certificate-authority, APT, MySQL, or systemd integration has been exercised on a production VPS.
 

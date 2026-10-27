@@ -57,6 +57,8 @@ type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 mod app_code;
 mod app_compose;
+mod app_backups;
+mod nginx_domains;
 mod app_monitoring;
 mod app_networks;
 mod app_s3;
@@ -79,6 +81,9 @@ mod metrics;
 mod mysql;
 mod nginx;
 mod node;
+mod postgres;
+mod fleet;
+mod private_networks;
 mod routes;
 mod runtimes;
 mod s3;
@@ -4688,6 +4693,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     buildpacks::migrate(&db)?;
     app_snapshots::migrate(&db)?;
     app_compose::migrate(&db)?;
+    nginx_domains::migrate(&db)?;
+    fleet::migrate(&db)?;
+    private_networks::migrate(&db)?;
     dns::migrate(&db)?;
     app_monitoring::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;

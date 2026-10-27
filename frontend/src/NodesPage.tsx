@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Skeleton } from './components/ui/skeleton'
+import { FleetManagementPanels } from './FleetManagementPanels'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Props = { Heading: Heading; notify: (message: string) => void; workspaceMode: 'single' | 'multi'; onWorkspaceModeChange: (mode: 'single' | 'multi') => void }
@@ -120,6 +121,7 @@ export function NodesPage({ Heading, notify, workspaceMode, onWorkspaceModeChang
 
   return <>
     <Heading title="Nodeهای ARG" description="پنل‌های ARG را با پروتکل امن اختصاصی جفت کن و وضعیت سرورها و سرویس‌هایشان را از اینجا مدیریت کن." action={headerAction}/>
+    <FleetManagementPanels nodes={nodes} notify={notify}/>
     <Card className="mt-4"><CardHeader><CardTitle className="text-base">حالت فضای‌کار</CardTitle><CardDescription>این انتخاب فقط شکل مدیریت را عوض می‌کند و هیچ Node یا داده‌ای را حذف نمی‌کند.</CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2"><Button variant={workspaceMode === 'single' ? 'default' : 'outline'} onClick={() => onWorkspaceModeChange('single')}><Server size={14}/>تک‌سرور</Button><Button variant={workspaceMode === 'multi' ? 'default' : 'outline'} onClick={() => onWorkspaceModeChange('multi')}><Activity size={14}/>چندسرور</Button><span className="basis-full text-xs leading-5 text-muted-foreground">در حالت چندسرور، از نوار بالا سرور محلی، یک Node یا نمای همهٔ سرورها را انتخاب کن.</span></CardContent></Card>
     <Card className="mt-4"><CardHeader><CardTitle className="text-base">نقش Federation این سرور</CardTitle><CardDescription>تغییر نقش، اتصال‌های موجود را حذف نمی‌کند. اگر نقش جدید با اتصال‌های فعلی ناسازگار باشد، تغییر متوقف و تعداد وابستگی‌ها گزارش می‌شود.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-end gap-3"><div className="min-w-[220px] flex-1 space-y-1.5"><Label htmlFor="federation-role">نقش</Label><select id="federation-role" value={nextRole} onChange={(event) => setNextRole(event.target.value as FederationRole)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="standalone">Standalone · مستقل</option><option value="member">Member · فقط مقصد مدیریت</option><option value="controller-capable">Controller-capable · فقط مدیریت Nodeها</option><option value="both">Both · کنترل‌کننده و مقصد</option></select></div><Button variant="outline" onClick={() => setRoleConfirmOpen(true)} disabled={!!busy || nextRole === role}>{busy === 'role' ? <LoaderCircle size={14} className="animate-spin"/> : <Save size={14}/>}ذخیرهٔ نقش</Button><p className="basis-full text-[10px] leading-5 text-muted-foreground">نقش فعلی: <strong>{role}</strong>. نقش Federation بر کارکرد مستقل سایر قابلیت‌های ARG اثر ندارد.</p></CardContent></Card>
     {error && <p role="alert" className="mt-4 rounded-xl border border-rose-400/20 bg-rose-400/[.05] p-3 text-xs text-rose-200">{error}</p>}

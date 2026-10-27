@@ -89,7 +89,12 @@ Pairingهای قبلی با migration افزایشی و بدون تغییر Node
 | ۲۵ — Preview و Snapshot | فقط Snapshot متادیتا | Snapshot تنظیمات اپ/محیط hashدار است و مقدار Secret ندارد؛ چرخه Preview، approval، بازیابی/ارتقا و جداسازی داده هنوز باز است. |
 | ۲۶ — Orchestration در Compose | فقط لینک metadata | مدیر می‌تواند کانتینر موجود Docker را برای نمایش وضعیت به اپ Docker وصل کند؛ حذف لینک Docker را تغییر نمی‌دهد. کنترل و reconcile Compose و rollback باز است. |
 | ۲۷ — DNS Provider | adapter جزئی Cloudflare | Credential رمز‌شده، بررسی Zone و API محدود A/AAAA/CNAME/MX/TXT/CAA/SRV اضافه شده؛ Route53/DO، propagation، DNS-01 و تست ارائه‌دهنده باقی است. |
-| ۲۸ تا ۴۸ — ادامهٔ نقشه‌راه | برنامه‌ریزی‌شده | جزئیات در نقشه‌راه کامل است؛ فازهای اختیاری پیش‌فرض خاموش می‌مانند و ادعای تولیدی به تست میزبان/ناوگان نیاز دارد. |
+| ۲۸ — Domain/SSL/Nginx | پیوند مالکیت metadata، جزئی | اپ دارای دامنه می‌تواند فقط به سایتی وصل شود که دامنه‌اش دقیقاً در `server_name` است؛ این API پیکربندی را تولید یا reload نمی‌کند. مدیریت کامل SSL، performance و rollback باز است. |
+| ۲۹ — PostgreSQL | inventory فقط‌خواندنی | نسخهٔ `psql`، unit و `pg_isready` با timeout محدود نمایش داده می‌شود؛ نصب، SQL، نقش‌ها، backup و مدیریت دیتابیس وجود ندارد. |
+| ۳۰ — پشتیبان و بازیابی | آرشیو سورس محدود | آرشیو ZIP از release فعال با سقف حجم، hash و حذف dotfile/runtime ساخته و دانلود می‌شود؛ دیتابیس، secrets و فایل‌های persistent را ندارد و قابل restore نیست. |
+| ۳۱ — ناوگان و rollout | برچسب و پیش‌نمایش | Tagهای Node و طرح rollout با canary ذخیره می‌شوند؛ build/update یا rollback راه‌دور اجرا نمی‌شود. |
+| ۳۲ — شبکهٔ خصوصی | پیش‌نویس policy | metadata اتصال اپ به سرویس Node ثبت و حذف می‌شود؛ WireGuard، route و firewall پیاده نشده‌اند و `enforced=false` می‌ماند. |
+| ۳۳ تا ۴۸ — ادامهٔ نقشه‌راه | برنامه‌ریزی‌شده | جزئیات در نقشه‌راه کامل است؛ ادعای قابلیت تولیدی به تست میزبان/ناوگان نیاز دارد. |
 
 «کامل» یعنی پیاده‌سازی مخزن و تست خودکار همان فاز موجود است؛ به معنی آزمون واقعی Federation چند VPS، مرجع صدور گواهی، APT، MySQL یا systemd روی VPS عملیاتی نیست.
 

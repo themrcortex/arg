@@ -183,6 +183,10 @@
 
 
 
+## دفتر اجرا — فازهای ۲۸ تا ۳۲
+
+پیاده‌سازی این بسته به شکل اجزای محدود و صریح انجام شد: لینک مالکیت Nginx بدون تغییر فایل، inventory فقط‌خواندنی PostgreSQL، آرشیو سورس بدون ادعای restore، tag و پیش‌نمایش rollout بدون اجرای راه‌دور، و پیش‌نویس شبکه بدون اعمال route/firewall. `cargo test --locked` با ۱۶۱ تست، `cargo check --locked`، `npm run check` و build فرانت‌اند، `npm run check` و build مستندات دوزبانه، و `git diff --check` موفق شدند. Build بهینهٔ Release بعد از bump نسخهٔ بسته اجرا می‌شود. آزمون VPS واقعی، PostgreSQL واقعی، Nginx فعال، WireGuard و ناوگان چندسروری در این محیط قابل اجرا نیست و به‌عنوان پذیرش‌شده گزارش نمی‌شود.
+
 ## Phase 28 — Domain/SSL و Nginx Performance پیشرفته
 
 **وابستگی:** 08، 13، 17. **اولویت:** P1.

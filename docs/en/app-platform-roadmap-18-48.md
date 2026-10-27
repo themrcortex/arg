@@ -105,6 +105,10 @@ These are bounded repository changes, not a claim that Phases 18–22 have passe
 
 **Tests / acceptance:** provider mocks, timeout/rate limit, wrong zone, concurrent edits, secret scope, pending propagation. An authorized app domain resolves to the intended server with explicit status.
 
+## Execution log — Phases 28–32
+
+This batch is implemented as bounded, explicit slices: an Nginx ownership link that does not edit config, read-only PostgreSQL inventory, a source-only archive that is not claimed as a restore, fleet tags and a rollout preview that do not execute remotely, and network policy drafts that do not alter routes/firewall. `cargo test --locked` passed 161 tests, `cargo check --locked`, frontend TypeScript/build, bilingual docs TypeScript/build, and `git diff --check` passed. The optimized Release build runs after the batch version bump. A real VPS, PostgreSQL, active Nginx, WireGuard, and multi-node fleet are unavailable in this environment and are not reported as accepted.
+
 ## Phase 28 — Domains, SSL, and advanced Nginx performance
 
 **Depends on:** 08, 13, 17 · **Priority:** P1

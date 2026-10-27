@@ -111,7 +111,7 @@ pub(super) struct NginxBrowseQuery {
     path: Option<String>,
 }
 
-async fn nginx_manager_request_async(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
+pub(super) async fn nginx_manager_request_async(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
     let response = privileged_request_async(request).await?;
     if response["ok"] == true {
         Ok(response["data"].clone())
