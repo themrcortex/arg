@@ -56,6 +56,7 @@ type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 mod apps;
+mod app_monitoring;
 mod app_networks;
 mod app_storage;
 mod app_s3;
@@ -4244,6 +4245,8 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
             "--property=MemoryCurrent",
             "--property=ControlGroup",
             "--property=LoadState",
+            "--property=ActiveState",
+            "--property=SubState",
             unit,
         ]);
         let (show_ok, output) = command_result(&mut command).unwrap_or_else(|error| (false, error));
@@ -4293,7 +4296,7 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         if !show_ok && !output.trim().is_empty() {
             diagnostics.push(json!({"code":"SYSTEMD_SHOW_FAILED","source":"systemctl show","unit":unit,"raw":truncate_diagnostic(&output, 1200),"expected":"systemctl show should return key=value properties for an existing service"}));
         }
-        return json!({"ok":true,"data":{"unit":unit,"cpu_usage_ns":cpu_usage_ns,"memory_current_bytes":memory_current_bytes,"measurement_error":measurement_error,"diagnostics":diagnostics}});
+        return json!({"ok":true,"data":{"unit":unit,"active_state":values.get("ActiveState").map(String::as_str).unwrap_or("unknown"),"sub_state":values.get("SubState").map(String::as_str).unwrap_or("unknown"),"cpu_usage_ns":cpu_usage_ns,"memory_current_bytes":memory_current_bytes,"measurement_error":measurement_error,"diagnostics":diagnostics}});
     }
     if action == "service-limits" {
         let Some(unit) = request["unit"].as_str().filter(|u| valid_service_unit(u)) else {
@@ -4672,6 +4675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     laravel::migrate(&db)?;
     s3::migrate(&db)?;
     app_s3::migrate(&db)?;
+    app_monitoring::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
     db.execute(
@@ -4696,6 +4700,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     db.execute("DELETE FROM sessions WHERE expires_at<=?1", [now()])?;
     let state = Arc::new(Mutex::new(db));
     tokio::spawn(collect_metrics(state.clone()));
+    tokio::spawn(app_monitoring::run(state.clone()));
     deploy::start_worker(state.clone());
     let app = routes::router(state);
     let tls_cert = env::var("ARG_TLS_CERT").ok();

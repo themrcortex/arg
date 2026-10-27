@@ -218,6 +218,8 @@ pub(super) fn router(state: AppState) -> Router {
             get(node::get_build_environment).put(node::save_build_environment),
         )
         .route("/api/apps/{id}/node/service/logs", get(node::logs))
+        .route("/api/apps/{id}/monitoring", get(app_monitoring::read))
+        .route("/api/apps/{id}/monitoring/rules", put(app_monitoring::save_rules))
         .route("/api/apps/{id}/deploy", post(deploy::create))
         .route(
             "/api/apps/{id}/deploy/archive",

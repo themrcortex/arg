@@ -7,6 +7,12 @@
 
 ## Unreleased
 
+### Phase 13 — Application monitoring
+- Add bounded, background sampling for CPU time, memory, systemd state, and the latest measured persistent-volume usage of supported app services.
+- Persist per-app history, alert thresholds, and deduplicated open/resolved alerts; show monitoring lazily in each local application card so page navigation does not start scans.
+- Document Phases 13–18 in Persian and English, with explicit implementation, host, and multi-VPS acceptance gates.
+- Repository gate: 136 Rust tests, Rust release build, frontend type-check/build, and documentation production build. Live systemd workload verification remains a disposable-host check; Phases 14–17 remain planned designs, not shipped features.
+
 ### Phase 08 — Static delivery and SSR
 - Add automatic/manual React, Vue, Vite, Next.js, Nuxt, and generic Node delivery selection, including prebuilt static output and safe custom paths.
 - Publish validated static releases through app-owned Nginx sites with SPA fallback, immutable hashed-asset caching, sensitive-file denial, and release-aware rollback.

@@ -74,7 +74,12 @@ Existing pairings migrate additively without changing their node IDs or revoking
 | 10 — Persistent app data | Repository implementation added; host test remains | Stable per-app Node data directories, bounded on-demand usage scans, retained detach, and explicitly confirmed purge are implemented. Quotas are informational; filesystem enforcement is not configured. |
 | 11 — App S3 bindings | Metadata and mount references implemented | App-scoped Bucket/prefix/purpose records reuse existing S3 connections and block deleting referenced Buckets. ARG does not distribute credentials or enforce provider ACLs; configure least-privilege access at the S3 provider. |
 | 12 — Application logs | Persistent journal reads and cursor resume implemented | Node unit logs can be read in bounded pages and resumed from a journal cursor. Retention follows the host-wide journald policy; per-app retention controls are not implemented. |
-| 13–48 | Planned | Do not expose these as shipped until their phase gates pass. |
+| 13 — Application monitoring | Repository implementation and automated phase gate passed; host test remains | Bounded systemd service sampling, CPU/RAM/state history, per-app rules/alerts, admin APIs, and a collapsed panel are implemented. HTTP/network metrics and disposable-host validation remain open. |
+| 14 — Cross-VPS app network | Design documented; not implemented | Requires a separate overlay data plane and real two-host route/revocation tests. Federation HTTPS alone does not satisfy this phase. |
+| 15 — App terminal/files/source | Planned | Must use app-scoped non-root identities and rooted file access; global server/root tools do not satisfy this phase. |
+| 16 — App migration | Planned | Requires durable preflight, verified transfer/restore, fencing, explicit cutover, rollback, and two-VPS tests. |
+| 17 — Webhooks and backups | Planned | Requires signed/replay-safe hooks and encrypted backup restore drills; upload-only is not backup verification. |
+| 18 — Release hardening | Planned | Requires host and multi-host matrices, threat review, performance evidence, and operational runbooks. |
 
 “Complete” here means the repository implementation and its automated phase checks are present. It does not claim that external multi-VPS, certificate-authority, APT, MySQL, or systemd integration has been exercised on a production VPS.
 
@@ -125,6 +130,10 @@ Existing pairings migrate additively without changing their node IDs or revoking
 - App S3 bindings reference existing ARG Buckets and prefixes. They never return credentials. Prefix and access mode are metadata; actual permission boundaries must be configured in the provider's access key or policy. Referenced Buckets cannot be detached until app bindings are removed.
 - Node process output uses the systemd journal. API reads are capped at 500 lines and can resume after a journal cursor. Journal retention is system-wide and configured by the host; ARG does not expose a misleading per-app retention switch. This phase does not provide a separate log collector for Docker, Nginx, jobs, or S3 transfers.
 - Automated tests and builds validate code paths and schema migrations. Docker isolation, group permissions, journal cursor behavior, and filesystem lifecycle need a disposable Debian/Ubuntu integration host before production claims.
+
+### Phases 13–18 roadmap
+
+Implementation order, API and state boundaries, acceptance gates, and external test requirements for the remaining phases are documented in [Application platform roadmap: Phases 13–18](app-platform-roadmap-13-18.md). The status table distinguishes repository work from host and multi-host validation.
 
 ### Vocabulary and ownership
 
@@ -189,7 +198,7 @@ Every phase must add the tests for the behavior it changes. The final release ma
 - **Persistence:** SQLite bootstrap is in `src/main.rs`; the Application schema migration is isolated in `src/apps.rs` and invoked at startup.
 - **Privileged operations:** ARG service communicates with `arg-privileged.service` over a private Unix socket. No feature may turn this into a generic root command runner.
 - **Federation:** protocol v2 and remote workspace API/terminal proxy are implemented. Phase 02 adds server roles, destination-checked scopes, capability negotiation v1, workspace renewal, credential rotation, and health states; a real two-VPS integration test is still required.
-- **Application platform:** Phase 03 adds an ownership-aware metadata registry. Phase 04 adds durable jobs, bounded Git/ZIP/directory acquisition, release staging, atomic `current` changes, progress history, cancellation, retry, and rollback. Phase 05 adds runtime inventory and safe APT previews. Phase 06 adds Laravel inspection, private environment storage, allowlisted Artisan actions, dedicated PHP-FPM/Nginx configuration, database provisioning, and optional systemd services. Phase 07 adds a lockfile-driven Node.js runner, isolated build/service units, private runtime environment, loopback health checks, and guarded Nginx proxy. Phase 08 publishes React/Vue/Vite output without a web process and manages Next/Nuxt/Node SSR with release-aware Nginx and rollback. Local app networks, persistent Node data, S3 references, and journald log reads are covered in Phases 09–12. Cross-server app connectivity and later plan phases remain future work.
+- **Application platform:** Phases 03–08 add the ownership-aware registry, durable deployments, runtime inventory, Laravel/Node runners, and static/SSR delivery. Phases 09–12 add server-local app networks, persistent Node data, S3 references, and resumable journal reads. Phase 13 monitoring is under implementation. The design and acceptance gates for Phases 13–18 are in the [remaining-phase roadmap](app-platform-roadmap-13-18.md); cross-VPS data networking and migration still require dedicated implementation and real multi-host tests.
 - **CI:** GitHub Actions workflows exist for CI and documentation publishing. Local required checks are documented in `docs/en/development.md`.
 - **Versioning:** Rust and frontend versions are synchronized; stable and prerelease updates use `scripts/bump-version.sh`, `scripts/bump-development-version.sh`, and `scripts/check-versioning.sh`.
 
