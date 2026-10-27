@@ -63,7 +63,10 @@ export function NginxSiteWorkspace({ name, description, enabled, maintenanceEnab
       .nginx-site-tab-panels[data-active-tab="domains"] [data-nginx-site-panel="domains"],
       .nginx-site-tab-panels[data-active-tab="operations"] [data-nginx-site-panel="operations"],
       .nginx-site-tab-panels[data-active-tab="activity"] [data-nginx-site-panel="activity"] { display: block; }
+      /* This wrapper contains panels for several tabs; hide its overview cards, not their parent. */
+      .nginx-site-tab-panels [data-nginx-site-panel="overview-grid"] { display: contents; }
       .nginx-site-tab-panels[data-active-tab="overview"] [data-nginx-site-panel="overview-grid"] { display: grid; }
+      .nginx-site-tab-panels[data-active-tab="overview"] [data-nginx-site-panel="overview-cards"] { display: grid; }
     `}</style>
   </main>
 }
