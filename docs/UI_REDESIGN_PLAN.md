@@ -116,4 +116,7 @@ Each phase gets a focused commit. Keep server/API code unchanged unless an exist
 
 ## 8. Current Result
 
-Phase 1 audit is complete. Phases 2–9 are implementation work and remain open. No UI is described as redesigned until its actual route and interactive states have been migrated and checked.
+- **Phase 1 — Audit & Plan: complete.** Route, component, API and sensitive-flow inventory recorded above.
+- **Phase 2 — Design Foundation: complete.** Added persisted dark/light theme context, semantic light/dark tokens, reusable `GlassPanel`/`GlassDialog`/`GlassDrawer` primitives, card surface variants, and semantic status badge variants. Replaced nested class-inferred blur with explicit glass surfaces and made reduced-transparency surfaces use the active theme. The Topbar theme control is intentionally part of Phase 3.
+- **Phase 2 checks:** `npm run check`, `npm run build`, two offline Service Worker tests, and `git diff --check` passed. The build reports the existing large main-chunk advisory (~1.06 MB); no new dependency was added. No visual browser run is claimed.
+- **Phases 3–9:** still open. No page is described as redesigned until its route and interactive states have been migrated and checked.

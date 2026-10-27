@@ -1,18 +1,18 @@
 import * as React from 'react'
 import { cn } from '../../lib/utils'
-const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
+type CardProps = React.HTMLAttributes<HTMLDivElement> & { surface?: 'standard' | 'elevated' | 'subtle' | 'flat' }
+const Card = React.forwardRef<HTMLDivElement, CardProps>(
+  ({ className, surface = 'standard', ...props }, ref) => (
     <div
       ref={ref}
-      className={cn(
-        'arg-card-surface rounded-[14px] border border-border bg-card text-card-foreground',
-        className,
-      )}
+      data-surface={surface}
+      className={cn('arg-card-surface rounded-2xl border border-border bg-card text-card-foreground', `arg-card-surface-${surface}`, className)}
       {...props}
     />
   ),
 )
 Card.displayName = 'Card'
+const GlassCard = Card
 const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
   ({ className, ...props }, ref) => (
     <div ref={ref} className={cn('flex flex-col space-y-1.5 p-6 pb-4', className)} {...props} />
@@ -35,4 +35,4 @@ const CardContent = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDi
   ({ className, ...props }, ref) => <div ref={ref} className={cn('p-6 pt-0', className)} {...props} />,
 )
 CardContent.displayName = 'CardContent'
-export { Card, CardHeader, CardTitle, CardDescription, CardContent }
+export { Card, GlassCard, CardHeader, CardTitle, CardDescription, CardContent }
