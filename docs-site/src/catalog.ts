@@ -99,10 +99,26 @@ export const navigation: NavCategory[] = categoryOrder.map((id) => ({
 }))
 export const readingOrder = navigation.flatMap((category) => category.children.flatMap((section) => section.pages))
 export const pageNeighbors = (id: string) => {
-  const section = navigation.flatMap((category) => category.children).find((item) => item.pages.some((page) => page.id === id))
-  const sequence = section?.pages ?? []
+  const sequence = readingOrder
   const index = sequence.findIndex((page) => page.id === id)
+  if (index < 0) return { previous: undefined, next: undefined }
   return { previous: sequence[index - 1], next: sequence[index + 1] }
+}
+export const isMarkdownPageLink = (href: string) => /\.md(?:[?#]|$)/i.test(href.split(/[?#]/, 1)[0])
+export const resolveMarkdownPageLink = (href: string, fallbackLocale: Locale) => {
+  const [path = '', fragment = ''] = href.split('#', 2)
+  const pathname = path.split('?', 1)[0]
+  if (!/\.md$/i.test(pathname)) return undefined
+  const segments = pathname.split('/').filter(Boolean)
+  let file = segments.at(-1) || ''
+  try { file = decodeURIComponent(file) } catch { return undefined }
+  const basename = file.replace(/\.md$/i, '')
+  const target = pages.find((page) => page.file === basename)
+  if (!target) return undefined
+  const explicitLocale = segments.find((segment) => segment === 'fa' || segment === 'en') as Locale | undefined
+  let anchor = fragment
+  try { anchor = decodeURIComponent(anchor) } catch { /* Keep malformed fragments inert. */ }
+  return { id: target.id, locale: explicitLocale || fallbackLocale, anchor }
 }
 export const findPage = (id: string) => pages.find((page) => page.id === id)
 export const pageTrail = (id: string) => navigation.flatMap((category) => category.children.filter((section) => section.pages.some((page) => page.id === id)).map((section) => [category, section]))[0] ?? []

@@ -1,8 +1,8 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, ChevronDown, ChevronLeft, Command, ExternalLink, Github, Globe2, Menu, Moon, Search, Sun, X } from 'lucide-react'
-import { groups, navigation, pages, readingOrder, pageNeighbors, pageTrail, resolvePageId, type DocPage, type Locale } from './catalog'
+import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, Code2, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Settings2, Shield, Sun, X } from 'lucide-react'
+import { groups, isMarkdownPageLink, navigation, pages, pageNeighbors, pageTrail, readingOrder, resolveMarkdownPageLink, resolvePageId, type DocPage, type Locale } from './catalog'
 import { Badge } from './components/ui/badge'
 import { ARG_VERSION } from './version'
 import { Button } from './components/ui/button'
@@ -17,14 +17,19 @@ const getInitialPage = () => {
   const requested = new URLSearchParams(window.location.search).get('page')
   return requested ? resolvePageId(requested) || 'overview' : 'overview'
 }
+const getInitialLocale = (): Locale => {
+  const requested = new URLSearchParams(window.location.search).get('lang')
+  if (requested === 'fa' || requested === 'en') return requested
+  return localStorage.getItem('arg-docs-locale') === 'en' ? 'en' : 'fa'
+}
+const getInitialCategory = () => pages.find((page) => page.id === getInitialPage())?.group || navigation[0]?.id || 'gettingStarted'
 const normalizeLegacyPageUrl = () => {
   const url = new URL(window.location.href)
   const requested = url.searchParams.get('page')
   const resolved = requested ? resolvePageId(requested) : undefined
   if (!requested || !resolved || requested === resolved) return
   url.searchParams.set('page', resolved)
-  url.hash = ''
-  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}`)
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
 }
 
 const slugHeading = (text: string) => text.toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'section'
@@ -78,6 +83,18 @@ function parseArticle(source: string, locale: Locale, pageTitle: string) {
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
   })
+  doc.body.querySelectorAll('a[href]').forEach((link) => {
+    const href = link.getAttribute('href') || ''
+    if (!isMarkdownPageLink(href)) return
+    const resolved = resolveMarkdownPageLink(href, locale)
+    if (!resolved) {
+      link.removeAttribute('href')
+      link.setAttribute('aria-disabled', 'true')
+      link.classList.add('unresolved-doc-link')
+      return
+    }
+    link.setAttribute('href', `?page=${encodeURIComponent(resolved.id)}&lang=${resolved.locale}${resolved.anchor ? `#${encodeURIComponent(resolved.anchor)}` : ''}`)
+  })
   return { html: DOMPurify.sanitize(doc.body.innerHTML), toc }
 }
 
@@ -104,9 +121,10 @@ const highlightText = (text: string, query: string) => {
   if (at < 0 || !query) return text
   return <>{text.slice(0, at)}<mark>{text.slice(at, at + query.length)}</mark>{text.slice(at + query.length)}</>
 }
+const categoryIcons = { gettingStarted: BookOpen, dashboard: Activity, network: Network, docker: Container, data: Database, applications: Boxes, system: Settings2, security: Shield, reference: Code2 }
 
 export default function App() {
-  const [locale, setLocale] = useState<Locale>(() => localStorage.getItem('arg-docs-locale') === 'en' ? 'en' : 'fa')
+  const [locale, setLocale] = useState<Locale>(getInitialLocale)
   const [theme, setTheme] = useState<'dark' | 'light'>(() => localStorage.getItem('arg-docs-theme') === 'light' ? 'light' : 'dark')
   const [pageId, setPageId] = useState(getInitialPage)
   const [query, setQuery] = useState('')
@@ -121,6 +139,7 @@ export default function App() {
   const [activeHeading, setActiveHeading] = useState('')
   const [readingProgress, setReadingProgress] = useState(0)
   const [targetAnchor, setTargetAnchor] = useState(() => decodeURIComponent(window.location.hash.slice(1)))
+  const [selectedCategory, setSelectedCategory] = useState<string>(getInitialCategory)
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(initialExpandedGroups)
   const searchRef = useRef<HTMLInputElement>(null)
   const mobileSearchRef = useRef<HTMLInputElement>(null)
@@ -179,6 +198,9 @@ export default function App() {
       normalizeLegacyPageUrl()
       startPageTransition()
       setPageId(getInitialPage())
+      const nextLocale = getInitialLocale()
+      if (nextLocale !== locale) setSearchIndex(null)
+      setLocale(nextLocale)
       setTargetAnchor(decodeURIComponent(window.location.hash.slice(1)))
       setQuery('')
       setMobileNav(false)
@@ -205,7 +227,7 @@ export default function App() {
     window.addEventListener('popstate', onPop)
     window.addEventListener('keydown', onKey)
     return () => { window.removeEventListener('popstate', onPop); window.removeEventListener('keydown', onKey) }
-  }, [])
+  }, [locale])
 
   useEffect(() => {
     if (articleLoading || !article.toc.length) return
@@ -251,7 +273,8 @@ export default function App() {
   useEffect(() => {
     const [category, section] = pageTrail(page.id)
     const categoryId = category?.id || page.group
-    setExpandedGroups(new Set([categoryId, `${categoryId}:${section?.id || ''}`]))
+    setSelectedCategory(categoryId)
+    setExpandedGroups(section ? new Set([`${categoryId}:${section.id}`]) : new Set())
     requestAnimationFrame(() => {
       const sidebar = mobileNav ? '.mobile-sidebar' : '.desktop-sidebar'
       document.querySelector(`${sidebar} .nav-link.active`)?.scrollIntoView({ block: 'nearest' })
@@ -259,6 +282,7 @@ export default function App() {
   }, [page.group, page.id, mobileNav])
 
   useEffect(() => { localStorage.setItem('arg-docs-expanded', JSON.stringify([...expandedGroups])) }, [expandedGroups])
+  useEffect(() => { localStorage.setItem('arg-docs-category', selectedCategory) }, [selectedCategory])
 
   useEffect(() => {
     if (!mobileNav) return
@@ -272,13 +296,19 @@ export default function App() {
     }
   }, [mobileNav])
 
-  function navigate(item: DocPage, anchor?: string) {
+  function navigate(item: DocPage, anchor?: string, targetLocale: Locale = locale) {
     if (item.id !== page.id) startPageTransition()
     setPageId(item.id)
+    if (targetLocale !== locale) setSearchIndex(null)
+    setLocale(targetLocale)
     setTargetAnchor(anchor || '')
     setQuery('')
     setMobileNav(false)
-    history.pushState(null, '', `?page=${item.id}${anchor ? `#${anchor}` : ''}`)
+    const url = new URL(window.location.href)
+    url.searchParams.set('page', item.id)
+    url.searchParams.set('lang', targetLocale)
+    url.hash = anchor ? encodeURIComponent(anchor) : ''
+    history.pushState(null, '', `${url.pathname}${url.search}${url.hash}`)
   }
 
   function setLanguage(next: Locale) {
@@ -287,7 +317,10 @@ export default function App() {
     setSearchIndex(null)
     setTargetAnchor(decodeURIComponent(window.location.hash.slice(1)))
     setQuery('')
-    window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+    const url = new URL(window.location.href)
+    url.searchParams.set('page', page.id)
+    url.searchParams.set('lang', next)
+    history.pushState(null, '', `${url.pathname}${url.search}${url.hash}`)
   }
 
   function startPageTransition() {
@@ -301,14 +334,16 @@ export default function App() {
 
   function toggleExpanded(id: string) {
     setExpandedGroups((current) => {
-      if (!id.includes(':')) {
-        if (current.has(id)) return new Set()
-        return new Set([id])
-      }
-      const category = id.slice(0, id.indexOf(':'))
-      if (current.has(id)) return new Set([category])
-      return new Set([category, id])
+      return current.has(id) ? new Set() : new Set([id])
     })
+  }
+
+  function selectCategory(id: string) {
+    setSelectedCategory(id)
+    setQuery('')
+    const category = navigation.find((item) => item.id === id)
+    const firstSection = category?.children[0]
+    setExpandedGroups(firstSection ? new Set([`${id}:${firstSection.id}`]) : new Set())
   }
 
   function focusDocsSearch() {
@@ -322,34 +357,39 @@ export default function App() {
     const idPrefix = mobile ? 'mobile-' : 'desktop-'
     const searching = query.trim().length >= 2
     const activeTrail = pageTrail(page.id)
-    const activeCategory = activeTrail[0]?.id
     const activeSection = activeTrail[1]?.id
+    const currentCategory = navigation.find((category) => category.id === selectedCategory) || navigation[0]
+    const currentCategoryPages = currentCategory?.children.flatMap((section) => section.pages) || []
     return <>
       <div className="sidebar-heading"><div className="sidebar-heading-icon"><BookOpen size={17}/></div><div className="sidebar-heading-copy min-w-0"><p>{isFa ? 'راهنمای ARG' : 'ARG docs'}</p><span>{texts.menu} · {readingOrder.length} {texts.allDocs}</span></div><button className="mobile-close" onClick={() => setMobileNav(false)} aria-label={texts.close}><X size={18}/></button></div>
       <label className="side-search"><Search size={15}/><input ref={mobile ? mobileSearchRef : undefined} aria-label={texts.search} placeholder={texts.search} value={query} onChange={(event) => setQuery(event.target.value)}/><kbd>/</kbd></label>
-      <nav className="side-nav" aria-label={texts.menu}>
-        {searching && (searchIndex ? rankedSearchResults.length ? <div className="inline-search-results">{rankedSearchResults.map((result) => {
+      <nav className="side-nav sidebar-two-stage" aria-label={texts.menu}>
+        <div className="sidebar-category-rail" role="group" aria-label={isFa ? 'انتخاب دسته‌بندی' : 'Choose a category'}>
+          {navigation.map((category) => {
+            const Icon = categoryIcons[category.id as keyof typeof categoryIcons] || BookOpen
+            const count = category.children.reduce((total, section) => total + section.pages.length, 0)
+            return <button key={category.id} className={`sidebar-category-option ${selectedCategory === category.id ? 'is-selected' : ''}`} type="button" aria-pressed={selectedCategory === category.id} onClick={() => selectCategory(category.id)}>
+              <Icon size={15}/><span>{category.title[locale]}</span><small>{count}</small>
+            </button>
+          })}
+        </div>
+        <div className="sidebar-panel" aria-live="polite">
+          {!searching && currentCategory && <div className="sidebar-panel-heading"><strong>{currentCategory.title[locale]}</strong><span>{currentCategoryPages.length} {texts.allDocs}</span></div>}
+          {searching && (searchIndex ? rankedSearchResults.length ? <div className="inline-search-results">{rankedSearchResults.map((result) => {
           const target = pages.find((item) => item.id === result.id)!
           return <button key={result.id} onClick={() => navigate(target, result.heading?.id)}><small>{groupsList[target.group]}</small><strong>{highlightText(target.title[locale], query.trim())}</strong><span>{highlightText(result.heading?.text || result.excerpt || target.summary[locale], query.trim())}</span></button>
         })}</div> : <p className="empty-search">{isFa ? 'نتیجه‌ای پیدا نشد.' : 'No results found.'}</p> : <p className="empty-search">{isFa ? 'در حال آماده‌سازی جست‌وجو…' : 'Preparing search…'}</p>)}
-        {!searching && navigation.map((category) => {
-          const visibleSections = category.children
-          const categoryOpen = expandedGroups.has(category.id)
-          const categoryContentId = `${idPrefix}category-${category.id}`
-          return <section key={category.id} className="nav-group">
-            <button className={`nav-category ${activeCategory === category.id ? 'is-current' : ''}`} aria-expanded={categoryOpen} aria-controls={categoryContentId} onClick={() => toggleExpanded(category.id)}><span className="nav-category-title">{category.title[locale]}</span><ChevronDown size={14}/></button>
-            <div className="nav-category-children" id={categoryContentId} hidden={!categoryOpen}>{visibleSections.map((section) => {
-              const key = `${category.id}:${section.id}`
+          {!searching && currentCategory?.children.map((section) => {
+              const key = `${currentCategory.id}:${section.id}`
               const open = expandedGroups.has(key)
-              const sectionIsCurrent = activeCategory === category.id && activeSection === section.id
-              const sectionContentId = `${idPrefix}section-${category.id}-${section.id}`
+              const sectionIsCurrent = currentCategory.id === page.group && activeSection === section.id
+              const sectionContentId = `${idPrefix}section-${currentCategory.id}-${section.id}`
               return <details key={key} className={`nav-subgroup ${sectionIsCurrent ? 'is-current' : ''}`} open={open}>
                 <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open} aria-controls={sectionContentId}><span className="nav-subgroup-title">{section.title[locale]}</span><ChevronDown size={13}/></summary>
-                <div className="nav-group-pages" id={sectionContentId}>{section.pages.map((item) => <a key={item.id} href={`?page=${item.id}`} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(item) }} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</a>)}</div>
+                <div className="nav-group-pages" id={sectionContentId} hidden={!open}>{section.pages.map((item) => <a key={item.id} href={`?page=${item.id}&lang=${locale}`} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(item) }} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</a>)}</div>
               </details>
-            })}</div>
-          </section>
-        })}
+            })}
+        </div>
       </nav>
       <div className="sidebar-bottom"><p>{texts.disclaimer}</p></div>
     </>
@@ -374,7 +414,7 @@ export default function App() {
     }).filter((item) => item.score > 0 && pages.some((doc) => doc.id === item.id)).sort((a, b) => b.score - a.score).slice(0, 8)
   }, [deferredQuery, searchIndex, locale])
 
-  const homeSteps = ['install', 'guide-settings-04', 'dashboard'].map((id) => pages.find((item) => item.id === id)).filter((item): item is DocPage => !!item)
+  const homeSteps = ['install', 'accounts-settings', 'dashboard'].map((id) => pages.find((item) => item.id === id)).filter((item): item is DocPage => !!item)
 
 
 
@@ -410,13 +450,17 @@ export default function App() {
         {article.toc.length > 0 && <details className="mobile-toc"><summary>{texts.toc}<ChevronLeft size={14}/></summary><nav>{article.toc.map((item) => <a key={item.id} className={item.depth === 3 ? 'toc-sub' : ''} href={`#${item.id}`} onClick={() => setMobileNav(false)}>{item.text}</a>)}</nav></details>}
         {articleLoading ? <section className="article-skeleton" role="status" aria-label={texts.loadingPage}><span className="skeleton-line w-4/5"/><span className="skeleton-line w-full"/><span className="skeleton-line w-11/12"/><span className="skeleton-line w-3/5"/><div className="skeleton-block"/><span className="skeleton-line w-full"/><span className="skeleton-line w-5/6"/></section> : articleError ? <section className="article-load-error" role="alert"><p>{texts.articleError}</p><Button variant="outline" size="sm" onClick={() => setArticleReload((value) => value + 1)}>{texts.retry}</Button></section> : <div className="article-content" dangerouslySetInnerHTML={{ __html: article.html }} onClick={async (event) => {
           const target = event.target as HTMLElement
-          const pageLink = target.closest<HTMLAnchorElement>('a[href^="?page="]')
+          const pageLink = target.closest<HTMLAnchorElement>('a[href*="page="]')
           if (pageLink) {
-            const targetId = new URL(pageLink.href).searchParams.get('page')
-            const targetPage = pages.find((item) => item.id === targetId)
+            const url = new URL(pageLink.href, window.location.href)
+            const targetId = url.searchParams.get('page')
+            const resolvedId = targetId ? resolvePageId(targetId) : undefined
+            const targetPage = pages.find((item) => item.id === resolvedId)
             if (targetPage) {
               event.preventDefault()
-              navigate(targetPage)
+              const requestedLocale = url.searchParams.get('lang')
+              const targetLocale = requestedLocale === 'fa' || requestedLocale === 'en' ? requestedLocale : locale
+              navigate(targetPage, decodeURIComponent(url.hash.slice(1)), targetLocale)
               return
             }
           }
@@ -428,8 +472,8 @@ export default function App() {
           }
         }}/>}
         <nav className="page-pager" aria-label={isFa ? 'ناوبری صفحات' : 'Page navigation'}>
-          {previous ? <button onClick={() => navigate(previous)}><span><ArrowRight size={15}/>{texts.previous}</span><strong>{previous.title[locale]}</strong></button> : <span/>}
-          {next ? <button className="pager-next" onClick={() => navigate(next)}><span>{texts.next}<ArrowLeft size={15}/></span><strong>{next.title[locale]}</strong></button> : <span/>}
+          <button className={!previous ? 'is-disabled' : ''} disabled={!previous} onClick={() => previous && navigate(previous)}><span>{isFa ? <ArrowRight size={15} /> : <ArrowLeft size={15} />}{texts.previous}</span><strong>{previous?.title[locale] || (isFa ? 'ابتدای مستندات' : 'Start of documentation')}</strong></button>
+          <button className={`pager-next ${!next ? 'is-disabled' : ''}`} disabled={!next} onClick={() => next && navigate(next)}><span>{texts.next}{isFa ? <ArrowLeft size={15} /> : <ArrowRight size={15} />}</span><strong>{next?.title[locale] || (isFa ? 'پایان مستندات' : 'End of documentation')}</strong></button>
         </nav>
         <footer className="article-footer"><span>ARG · VPS CONTROL CENTER</span><span>{isFa ? `مستندات متن‌باز · نسخهٔ ${ARG_VERSION}` : `Open-source docs · v${ARG_VERSION}`}</span></footer>
       </main>
