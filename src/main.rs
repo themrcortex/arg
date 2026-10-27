@@ -3745,6 +3745,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("s3-download-local-file") => "s3-download-local-file",
         Some("s3-mount-start") => "s3-mount-start",
         Some("s3-mount-stop") => "s3-mount-stop",
+        Some("s3-mount-status") => "s3-mount-status",
         _ => return json!({"ok":false,"error":"Unsupported privileged action"}),
     };
     if action == "terminal-root-start" {

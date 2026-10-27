@@ -944,10 +944,11 @@ pub(super) async fn remote_update_check(
     if !valid_update_branch(&query.branch) {
         return Err(error(StatusCode::BAD_REQUEST, "شاخهٔ به‌روزرسانی Node معتبر نیست."));
     }
-    let db = state.lock().unwrap();
-    let identity = authorize_controller(&db, &headers, "node.services.manage")?;
-    audit(&db, &identity.name, "federation.node.update.check", &format!("branch={}", query.branch));
-    drop(db);
+    {
+        let db = state.lock().unwrap();
+        let identity = authorize_controller(&db, &headers, "node.services.manage")?;
+        audit(&db, &identity.name, "federation.node.update.check", &format!("branch={}", query.branch));
+    }
     let _update_guard = UPDATE_OPERATION_GATE.read().await;
     if update_started_at().is_some() {
         return Ok(Json(json!({"status":"unavailable","error":"ARG_UPDATE_IN_PROGRESS","branch":query.branch,"instance":metrics::process_instance_id()})));
@@ -961,9 +962,10 @@ pub(super) async fn remote_update_progress(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult {
-    let db = state.lock().unwrap();
-    authorize_controller(&db, &headers, "node.services.manage")?;
-    drop(db);
+    {
+        let db = state.lock().unwrap();
+        authorize_controller(&db, &headers, "node.services.manage")?;
+    }
     let _update_guard = UPDATE_OPERATION_GATE.read().await;
     let fallback_started = update_started_at();
     let output = privileged_request_async(json!({"action":"update-progress"})).await;
@@ -2268,9 +2270,11 @@ pub(super) async fn sync_controller_public_name(
 #[cfg(test)]
 mod tests {
     use super::{
-        address_is_private, resolve_workspace_node_id, role_valid, scopes_for_mode,
-        session_scope_for, should_forget_node_after_revoke_failure, valid_server_uuid,
+        address_is_private, known_capability, node_identity_matches, node_update_route,
+        resolve_workspace_node_id, role_valid, scopes_for_mode, session_scope_for,
+        should_forget_node_after_revoke_failure, supported_capabilities, valid_server_uuid,
         valid_workspace_api_path, validate_endpoint, validate_public_name, workspace_key,
+        NodeUpdateRoute,
     };
     use axum::http::StatusCode;
     use rusqlite::Connection;

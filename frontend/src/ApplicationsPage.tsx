@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Archive, CircleAlert, CircleHelp, CirclePlus, Code2, Database, Globe2, Layers3, Pencil, RefreshCw, RotateCcw, Search, Server, Upload, X, Terminal, Wrench } from 'lucide-react'
+import { Archive, CircleAlert, CircleHelp, CirclePlus, Globe2, Layers3, Pencil, RefreshCw, RotateCcw, Search, Server, Upload, X, Terminal, Wrench } from 'lucide-react'
 import { api, apiForWorkspace } from './lib/api'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
@@ -73,6 +73,25 @@ type AppTemplate = { id: string; version: number; name: string; framework: strin
 const emptyDraft: Draft = { name: '', description: '', framework: 'auto', runtime_version: 'system', build_runtime_version: 'system', static_output_path: 'auto', static_spa_fallback: true, source_type: 'manual', domain: '', listen_port: '', labels: '', desired_state: 'none', environment_id: '' }
 const frameworkLabels: Record<string, string> = { auto: 'تشخیص خودکار', laravel: 'Laravel', node: 'Node.js SSR', next: 'Next.js SSR', nuxt: 'Nuxt SSR', python: 'Python', wordpress: 'WordPress', static: 'فایل‌های استاتیک آماده', react: 'React SPA', vue: 'Vue SPA', vite: 'Vite SPA', custom: 'سفارشی / انتشار release' }
 const sourceLabels: Record<string, string> = { manual: 'ثبت دستی', git: 'مخزن Git', archive: 'فایل آرشیو', docker: 'Docker', 'existing-directory': 'پوشهٔ موجود', image: 'Image' }
+const frameworkIdentity: Record<string, { label: string; mark: string; color: string; background: string }> = {
+  auto: { label: 'تشخیص خودکار', mark: '?', color: '#c4b5fd', background: 'rgba(139,92,246,.12)' },
+  laravel: { label: 'Laravel', mark: 'L', color: '#ff5b52', background: 'rgba(255,91,82,.12)' },
+  node: { label: 'Node.js', mark: 'JS', color: '#83cd29', background: 'rgba(131,205,41,.12)' },
+  next: { label: 'Next.js', mark: 'N', color: '#f4f4f5', background: 'rgba(255,255,255,.08)' },
+  nuxt: { label: 'Nuxt', mark: 'N', color: '#00dc82', background: 'rgba(0,220,130,.12)' },
+  python: { label: 'Python', mark: 'Py', color: '#ffd343', background: 'rgba(55,118,171,.2)' },
+  wordpress: { label: 'WordPress', mark: 'W', color: '#72aee6', background: 'rgba(33,117,155,.16)' },
+  react: { label: 'React', mark: '⚛', color: '#61dafb', background: 'rgba(97,218,251,.12)' },
+  vue: { label: 'Vue', mark: 'V', color: '#42b883', background: 'rgba(66,184,131,.12)' },
+  vite: { label: 'Vite', mark: 'ϟ', color: '#bd34fe', background: 'rgba(189,52,254,.12)' },
+  static: { label: 'استاتیک', mark: '</>', color: '#7dd3fc', background: 'rgba(56,189,248,.12)' },
+  custom: { label: 'سفارشی', mark: '<>', color: '#dda46f', background: 'rgba(221,164,111,.12)' },
+}
+
+function PlatformIcon({ framework, className = 'h-10 w-10' }: { framework: string; className?: string }) {
+  const identity = frameworkIdentity[framework] || { label: frameworkLabels[framework] || framework, mark: '<>', color: '#dda46f', background: 'rgba(221,164,111,.12)' }
+  return <span aria-label={identity.label} title={identity.label} className={`inline-grid shrink-0 place-items-center rounded-xl border border-current/20 font-bold ${className}`} style={{ color: identity.color, backgroundColor: identity.background }}>{identity.mark}</span>
+}
 
 function asDraft(app?: AppRecord): Draft {
   return app ? { name: app.name, description: app.description, framework: app.framework, runtime_version: app.runtime_version || 'system', build_runtime_version: app.build_runtime_version || 'system', static_output_path: app.static_output_path || 'auto', static_spa_fallback: app.static_spa_fallback ?? true, source_type: app.source_type, domain: app.domain || '', listen_port: app.listen_port ? String(app.listen_port) : '', labels: app.labels.join(', '), desired_state: app.desired_state, environment_id: app.environment_id || '' } : { ...emptyDraft }
@@ -451,6 +470,76 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   </section>
 }
 
+function applicationRouteFromHash(): { appId: string | null; serverUuid: string | null } {
+  const query = window.location.hash.split('?')[1] || ''
+  const params = new URLSearchParams(query)
+  return { appId: params.get('app'), serverUuid: params.get('server') }
+}
+
+function ApplicationDetailPage({
+  row,
+  Heading: PageHeading,
+  notify,
+  readOnly,
+  onBack,
+  onEdit,
+  onArchive,
+  onRestore,
+}: {
+  row: RegistryRow
+  Heading: Heading
+  notify: (message: string) => void
+  readOnly: boolean
+  onBack: () => void
+  onEdit: () => void
+  onArchive: () => void
+  onRestore: () => void
+}) {
+  const { app, serverName } = row
+  const actions = <div className="flex flex-wrap gap-2"><Button variant="outline" onClick={onBack}><X size={14}/>همهٔ اپلیکیشن‌ها</Button>{!readOnly && (app.deleted_at ? <Button onClick={onRestore}><RotateCcw size={14}/>بازیابی</Button> : <><Button variant="outline" onClick={onEdit}><Pencil size={14}/>ویرایش مشخصات</Button><Button variant="outline" className="text-rose-200" onClick={onArchive}><Archive size={14}/>آرشیو</Button></>)}</div>
+  return <>
+    <PageHeading title={app.name} description={app.description || 'مدیریت مستقل انتشار، runtime، منابع و اتصال‌های این اپلیکیشن.'} action={actions}/>
+    <Card className="mb-5 overflow-hidden border-border/80 bg-card/55">
+      <CardContent className="flex flex-wrap items-center gap-4 p-4 sm:p-5">
+        <PlatformIcon framework={app.framework} className="h-14 w-14 rounded-2xl text-lg"/>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2"><h2 className="truncate text-lg font-semibold">{app.name}</h2><Badge variant="outline">{frameworkIdentity[app.framework]?.label || frameworkLabels[app.framework] || app.framework}</Badge><Badge variant={app.deleted_at ? 'outline' : app.observed_state === 'running' ? 'success' : app.observed_state === 'failed' ? 'destructive' : 'outline'}>{app.deleted_at ? 'آرشیو' : app.observed_state === 'running' ? 'در حال اجرا' : app.observed_state === 'failed' ? 'نیازمند بررسی' : app.observed_state === 'stopped' ? 'متوقف' : 'وضعیت مشاهده نشده'}</Badge></div>
+          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"><Server size={13}/>{serverName}{app.project_name && <span>· {app.project_name} / {app.environment_name || 'محیط نامشخص'}</span>}</p>
+        </div>
+        {app.domain && <a href={`https://${app.domain}`} target="_blank" rel="noreferrer" dir="ltr" className="inline-flex max-w-full items-center gap-1.5 truncate rounded-lg border border-border/70 px-3 py-2 text-xs font-mono text-muted-foreground hover:text-foreground"><Globe2 size={14}/>{app.domain}</a>}
+      </CardContent>
+      <div className="grid gap-px border-t border-border/70 bg-border/60 sm:grid-cols-2 xl:grid-cols-4">
+        {[
+          ['پلتفرم', frameworkIdentity[app.framework]?.label || frameworkLabels[app.framework] || app.framework],
+          ['Runtime', app.runtime_version === 'system' ? 'پیش‌فرض سیستم' : app.runtime_version],
+          ['منبع استقرار', sourceLabels[app.source_type] || app.source_type],
+          ['وضعیت هدف', app.desired_state === 'none' ? 'تعیین‌نشده' : app.desired_state === 'running' ? 'اجرا' : 'توقف'],
+        ].map(([label, value]) => <div key={label} className="bg-card/70 p-3"><p className="text-[10px] text-muted-foreground">{label}</p><p className="mt-1 truncate text-xs font-medium">{value}</p></div>)}
+      </div>
+    </Card>
+    {readOnly && <Card className="mb-5 border-amber-400/20 bg-amber-400/[.04]"><CardContent className="p-4 text-xs leading-6 text-amber-100">نمایش همهٔ VPSها فقط‌خواندنی است. برای انجام عملیات، ابتدا فضای کار VPS میزبان را از انتخاب‌گر بالای پنل باز کن.</CardContent></Card>}
+    {app.deleted_at ? <Card className="border-dashed"><CardContent className="p-5 text-sm text-muted-foreground">این اپلیکیشن آرشیو شده است؛ فایل‌ها و سرویس‌های VPS با آرشیو تغییر نمی‌کنند.</CardContent></Card> : !readOnly && <>
+      <SectionHeading title="مدیریت اپلیکیشن" description="هر بخش را جداگانه باز کن؛ عملیات این صفحه فقط برای همین اپلیکیشن هدف‌گذاری می‌شوند." icon={Layers3}/>
+      <div className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
+        <DeploymentPanel app={app} notify={notify}/>
+        <ApplicationDeveloperTools app={app} notify={notify}/>
+        {app.source_type === 'docker' && <ApplicationContainersPanel appId={app.id} notify={notify}/>}
+        {app.framework === 'laravel' && <LaravelRunnerPanel app={app} notify={notify}/>}
+        {isNodePlatform(app.framework) && <NodeRunnerPanel app={app} notify={notify}/>}
+        <ApplicationMonitoringPanel app={app}/>
+        <ApplicationResourcesPanel app={app} notify={notify}/>
+        <ApplicationNginxLinkPanel app={app} notify={notify}/>
+        <ApplicationBackupPanel appId={app.id} notify={notify}/>
+        <ApplicationWorkflowDraftPanel appId={app.id} notify={notify}/>
+      </div>
+    </>}
+  </>
+}
+
+function SectionHeading({ title, description, icon: Icon }: { title: string; description: string; icon: typeof Layers3 }) {
+  return <div className="mb-3 flex items-start gap-3"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-primary/20 bg-primary/[.06] text-primary"><Icon size={17}/></span><div><h2 className="text-sm font-semibold">{title}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p></div></div>
+}
+
 export function ApplicationsPage({ Heading: PageHeading, notify, allServers, workspaceKey, onOpenWorkspace }: { Heading: Heading; notify: (message: string) => void; allServers: boolean; workspaceKey: string; onOpenWorkspace: (key: string) => void }) {
   const [rows, setRows] = useState<RegistryRow[]>([])
   const [serverErrors, setServerErrors] = useState<ServerError[]>([])
@@ -484,6 +573,7 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
   const [projectName, setProjectName] = useState('')
   const [projectDescription, setProjectDescription] = useState('')
   const [projectSaving, setProjectSaving] = useState(false)
+  const [detailRoute, setDetailRoute] = useState(() => applicationRouteFromHash())
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -530,6 +620,11 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
   }, [allServers, workspaceKey, showArchived])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const updateRoute = () => setDetailRoute(applicationRouteFromHash())
+    window.addEventListener('hashchange', updateRoute)
+    return () => window.removeEventListener('hashchange', updateRoute)
+  }, [])
   useEffect(() => {
     if (allServers) return
     let active = true
@@ -584,6 +679,7 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
     const search = `${app.name} ${app.description} ${app.domain || ''} ${app.labels.join(' ')} ${frameworkLabels[app.framework] || app.framework}`.toLocaleLowerCase()
     return (frameworkFilter === 'all' || app.framework === frameworkFilter) && (allServers || !selectedEnvironmentId || app.environment_id === selectedEnvironmentId) && search.includes(query.trim().toLocaleLowerCase())
   }), [rows, query, frameworkFilter, selectedEnvironmentId, allServers])
+  const selectedRow = useMemo(() => detailRoute.appId ? rows.find(({ app, serverUuid }) => app.id === detailRoute.appId && (!detailRoute.serverUuid || serverUuid === detailRoute.serverUuid)) || null : null, [rows, detailRoute])
   const requestedRuntimeFamily = runtimeFamilyForFramework(draft.framework)
   const availableRuntimeVersions = runtimeInventory?.runtimes.find((runtime) => runtime.family === requestedRuntimeFamily)?.versions.filter((item) => requestedRuntimeFamily !== 'php' || item.fpm_installed).map((item) => item.version) || []
 
@@ -636,6 +732,15 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
     setError(''); setTemplatesOpen(false); setDialog('form')
   }
   function beginEdit(row: RegistryRow) { setTarget(row.app); setDraft(asDraft(row.app)); setError(''); setDialog('form') }
+  function openDetails(row: RegistryRow) {
+    const params = new URLSearchParams({ app: row.app.id, server: row.serverUuid })
+    setDetailRoute({ appId: row.app.id, serverUuid: row.serverUuid })
+    window.location.hash = `/apps?${params.toString()}`
+  }
+  function returnToList() {
+    setDetailRoute({ appId: null, serverUuid: null })
+    window.location.hash = '/apps'
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault()
@@ -664,7 +769,7 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
     try {
       await api(`apps/${encodeURIComponent(target.id)}`, { method: 'DELETE', body: JSON.stringify({ expected_version: target.version }) })
       notify('رکورد اپلیکیشن آرشیو شد؛ فایل‌ها و سرویس‌ها دست‌نخورده ماندند.')
-      setDialog(null); setTarget(null); await load(true)
+      setDialog(null); setTarget(null); if (detailRoute.appId === target.id) returnToList(); await load(true)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'آرشیو اپلیکیشن ناموفق بود.') }
     finally { setSaving(false) }
   }
@@ -683,6 +788,10 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
   const action = <div className="flex flex-wrap gap-2">{!allServers && <><Button variant="outline" onClick={() => setTemplatesOpen(true)}><Layers3 size={15}/>قالب‌ها</Button><Button onClick={beginCreate}><CirclePlus size={15}/>ثبت اپلیکیشن</Button></>}<Button variant="outline" onClick={() => void load(true)} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'animate-spin' : ''}/>تازه‌سازی</Button></div>
 
   return <>
+    {detailRoute.appId ? (
+      selectedRow ? <ApplicationDetailPage row={selectedRow} Heading={PageHeading} notify={notify} readOnly={allServers} onBack={returnToList} onEdit={() => beginEdit(selectedRow)} onArchive={() => { setTarget(selectedRow.app); setError(''); setDialog('delete') }} onRestore={() => { setTarget(selectedRow.app); setError(''); setDialog('restore') }} /> : loading ? <div className="space-y-4"><PageHeading title="بارگذاری اپلیکیشن" description="اطلاعات و وضعیت مدیریت اپ در حال دریافت است." action={<Button variant="outline" onClick={returnToList}>همهٔ اپلیکیشن‌ها</Button>} /><Skeleton className="h-40 rounded-2xl" /><Skeleton className="h-72 rounded-2xl" /></div> : <div className="space-y-4"><PageHeading title="اپلیکیشن پیدا نشد" description="این رکورد در فضای کار فعلی وجود ندارد یا VPS میزبان در دسترس نیست." action={<Button variant="outline" onClick={returnToList}>همهٔ اپلیکیشن‌ها</Button>} /><Card><CardContent className="p-5 text-sm text-muted-foreground">فضای کار VPS میزبان را بررسی کن یا از فهرست اپلیکیشن‌ها دوباره وارد شو.</CardContent></Card></div>
+    ) : (
+    <>
     <PageHeading title="اپلیکیشن‌ها" description={allServers ? 'فهرست خواندنی اپلیکیشن‌های ثبت‌شده روی VPSهای متصل؛ عملیات هر رکورد در فضای کار میزبان انجام می‌شود.' : 'فهرست مستقل اپلیکیشن‌ها و وضعیت مالکیت آن‌ها روی همین VPS.'} action={action}/>
     <Card className="mb-5 border-[#dda46f]/15 bg-card/55"><CardContent className="flex items-start gap-3 p-4"><CircleHelp className="mt-0.5 shrink-0 text-primary" size={18}/><p className="text-xs leading-6 text-muted-foreground">از کارت هر اپ می‌توان Git عمومی، ZIP یا پوشهٔ مجاز VPS را به release جدا وارد کرد. مرحله‌ها و نتیجهٔ Job پس از refresh باقی می‌مانند و لغو، retry و بازگشت نسخه دارند. برای Node.js/Next.js/Nuxt وابستگی و build در sandbox اجرا می‌شود و SSR با سرویس systemd محدود روی loopback اجرا می‌شود. React/Vue/Vite در خروجی استاتیک ساخته می‌شوند و با fallback و cache امن Nginx منتشر می‌شوند؛ سایت استاتیک سرویس process جدا نمی‌سازد. حالت تشخیص خودکار بر اساس manifest انتخاب می‌کند.</p></CardContent></Card>
     {error && <p role="alert" className="mb-4 rounded-xl border border-rose-400/20 bg-rose-400/[.05] p-3 text-sm text-rose-200">{error}</p>}
@@ -693,7 +802,17 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
       <select value={frameworkFilter} onChange={(event) => setFrameworkFilter(event.target.value)} aria-label="فیلتر چارچوب" className="h-10 rounded-md border border-input bg-background px-3 text-xs"><option value="all">همهٔ چارچوب‌ها</option>{Object.entries(frameworkLabels).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select>
       <label className="flex h-10 items-center gap-2 rounded-md border border-input px-3 text-xs text-muted-foreground"><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)} className="accent-[#dda46f]"/>نمایش آرشیوی‌ها</label>
     </div>
-        {loading ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{[0,1,2].map((item) => <Skeleton key={item} className="h-56 rounded-2xl"/>)}</div> : visibleRows.length === 0 ? <Card className="border-dashed"><CardContent className="flex min-h-48 flex-col items-center justify-center gap-3 p-6 text-center"><Layers3 size={26} className="text-primary"/><p className="font-medium">{showArchived ? 'رکوردی با این فیلتر پیدا نشد' : 'هنوز اپلیکیشنی ثبت نشده است'}</p><p className="max-w-lg text-xs leading-6 text-muted-foreground">اپلیکیشن یک موجودیت مدیریتی جدا از فایل Nginx یا کانتینر Docker است. ابتدا مشخصاتش را ثبت کن؛ دریافت سورس و releaseهای پایدار از کارت همان اپ انجام می‌شود.</p>{!allServers && <Button onClick={beginCreate}><CirclePlus size={15}/>ثبت اولین اپلیکیشن</Button>}</CardContent></Card> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{visibleRows.map(({ app, serverName, workspaceKey: ownerWorkspace, local }) => <Card key={`${app.id}:${app.owner_server_uuid || ''}`} className={`overflow-hidden ${app.deleted_at ? 'opacity-75' : ''}`}><CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><CardTitle className="flex items-center gap-2 text-base"><Code2 size={17} className="shrink-0 text-primary"/><span className="truncate">{app.name}</span></CardTitle><CardDescription className="mt-2 flex items-center gap-1.5 truncate"><Server size={12}/>{serverName}</CardDescription>{app.project_name && <p className="mt-1 truncate text-[10px] text-muted-foreground">{app.project_name} · {app.environment_name || "محیط نامشخص"}</p>}</div><Badge variant={app.deleted_at ? 'outline' : 'success'}>{app.deleted_at ? 'آرشیو' : 'ثبت‌شده'}</Badge></div></CardHeader><CardContent className="space-y-3"><div className="grid grid-cols-2 gap-2 text-xs"><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">قالب</p><p className="mt-1 truncate">{frameworkLabels[app.framework] || app.framework}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">Runtime / ساخت</p><p className="mt-1 truncate">{app.runtime_version === 'system' ? 'نسخهٔ پیش‌فرض سیستم' : app.runtime_version}</p>{isNodePlatform(app.framework) && <p className="mt-1 truncate text-[10px] text-muted-foreground">ساخت: {app.build_runtime_version === 'system' ? 'نسخهٔ سیستم' : app.build_runtime_version}</p>}</div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">منبع انتخاب‌شده</p><p className="mt-1 truncate">{sourceLabels[app.source_type] || app.source_type}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">وضعیت هدف</p><p className="mt-1">{app.desired_state === 'none' ? 'تنظیم نشده' : app.desired_state === 'running' ? 'درخواست اجرا' : 'درخواست توقف'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">وضعیت واقعی</p><p className="mt-1">{app.observed_state === 'unknown' ? 'هنوز مشاهده نشده' : app.observed_state}</p></div></div>{app.domain && <p dir="ltr" className="flex items-center justify-end gap-1.5 truncate text-left font-mono text-xs text-muted-foreground"><Globe2 size={13}/>{app.domain}</p>}{app.listen_port && <p dir="ltr" className="text-left font-mono text-[11px] text-muted-foreground">TCP :{app.listen_port}</p>}{app.description && <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{app.description}</p>}{app.labels.length > 0 && <div className="flex flex-wrap gap-1">{app.labels.map((label) => <Badge key={label} variant="outline" className="text-[10px]">{label}</Badge>)}</div>}<div className="flex items-center justify-between gap-2 border-t border-border/60 pt-3">{allServers && !local ? <Button size="sm" variant="outline" className="w-full" onClick={() => onOpenWorkspace(ownerWorkspace)}>رفتن به فضای کار میزبان</Button> : <span className="flex min-w-0 items-center gap-1.5 text-[10px] text-muted-foreground"><Database size={12}/>منابع زنده هنوز متصل نیستند</span>}{!allServers && <div className="flex shrink-0 gap-1">{app.deleted_at ? <Button size="icon" variant="ghost" title="بازیابی رکورد" aria-label="بازیابی رکورد" onClick={() => { setTarget(app); setError(''); setDialog('restore') }}><RotateCcw size={15}/></Button> : <><Button size="icon" variant="ghost" title="ویرایش مشخصات" aria-label="ویرایش مشخصات" onClick={() => beginEdit({ app, serverUuid: '', serverName, workspaceKey: '', local: true })}><Pencil size={15}/></Button><Button size="icon" variant="ghost" className="text-rose-300" title="آرشیو رکورد" aria-label="آرشیو رکورد" onClick={() => { setTarget(app); setError(''); setDialog('delete') }}><Archive size={15}/></Button></>}</div>}</div>{!allServers && !app.deleted_at && <DeploymentPanel app={app} notify={notify}/>}{!allServers && !app.deleted_at && <ApplicationDeveloperTools app={app} notify={notify}/>}{!allServers && !app.deleted_at && app.source_type === 'docker' && <ApplicationContainersPanel appId={app.id} notify={notify}/>}{!allServers && !app.deleted_at && app.framework === 'laravel' && <LaravelRunnerPanel app={app} notify={notify}/>}{!allServers && !app.deleted_at && isNodePlatform(app.framework) && <NodeRunnerPanel app={app} notify={notify}/>}{!allServers && !app.deleted_at && <ApplicationMonitoringPanel app={app}/>}{!allServers && !app.deleted_at && <ApplicationResourcesPanel app={app} notify={notify}/>}{!allServers && !app.deleted_at && <ApplicationNginxLinkPanel app={app} notify={notify}/>}{!allServers && !app.deleted_at && <ApplicationBackupPanel appId={app.id} notify={notify}/>} {!allServers && !app.deleted_at && <ApplicationWorkflowDraftPanel appId={app.id} notify={notify}/>}</CardContent></Card>)}</div>}
+        {loading ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{[0,1,2].map((item) => <Skeleton key={item} className="h-56 rounded-2xl" />)}</div> : visibleRows.length === 0 ? <Card className="border-dashed"><CardContent className="flex min-h-48 flex-col items-center justify-center gap-3 p-6 text-center"><Layers3 size={26} className="text-primary"/><p className="font-medium">{showArchived ? 'رکوردی با این فیلتر پیدا نشد' : 'هنوز اپلیکیشنی ثبت نشده است'}</p><p className="max-w-lg text-xs leading-6 text-muted-foreground">اپلیکیشن یک موجودیت مدیریتی جدا از فایل Nginx یا کانتینر Docker است. ابتدا مشخصاتش را ثبت کن؛ سپس از صفحهٔ اختصاصی همان اپ، انتشار و منابعش را مدیریت کن.</p>{!allServers && <Button onClick={beginCreate}><CirclePlus size={15}/>ثبت اولین اپلیکیشن</Button>}</CardContent></Card> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{visibleRows.map((row) => {
+          const { app, serverName, workspaceKey: ownerWorkspace, local } = row
+          return <Card key={`${app.id}:${app.owner_server_uuid || ''}`} className={`overflow-hidden transition hover:border-primary/25 ${app.deleted_at ? 'opacity-75' : ''}`}>
+            <CardHeader className="pb-3"><div className="flex items-start gap-3"><PlatformIcon framework={app.framework} /><div className="min-w-0 flex-1"><CardTitle className="truncate text-base">{app.name}</CardTitle><CardDescription className="mt-1 flex items-center gap-1.5 truncate"><Server size={12}/>{serverName}</CardDescription><p className="mt-1 truncate text-[10px] text-muted-foreground">{frameworkIdentity[app.framework]?.label || frameworkLabels[app.framework] || app.framework}{app.project_name ? ` · ${app.project_name}` : ''}</p></div><Badge variant={app.deleted_at ? 'outline' : app.observed_state === 'running' ? 'success' : app.observed_state === 'failed' ? 'destructive' : 'outline'}>{app.deleted_at ? 'آرشیو' : app.observed_state === 'running' ? 'در حال اجرا' : app.observed_state === 'failed' ? 'خطا' : 'ثبت‌شده'}</Badge></div></CardHeader>
+            <CardContent className="space-y-3"><div className="grid grid-cols-2 gap-2 text-xs"><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">Runtime</p><p className="mt-1 truncate" dir="ltr">{app.runtime_version === 'system' ? 'system' : app.runtime_version}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">منبع</p><p className="mt-1 truncate">{sourceLabels[app.source_type] || app.source_type}</p></div></div>{app.domain && <p dir="ltr" className="flex items-center justify-end gap-1.5 truncate text-left font-mono text-xs text-muted-foreground"><Globe2 size={13}/>{app.domain}</p>}{app.listen_port && <p dir="ltr" className="text-left font-mono text-[11px] text-muted-foreground">TCP :{app.listen_port}</p>}{app.description && <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{app.description}</p>}{app.labels.length > 0 && <div className="flex flex-wrap gap-1">{app.labels.map((label) => <Badge key={label} variant="outline" className="text-[10px]">{label}</Badge>)}</div>}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3">{allServers && !local ? <Button size="sm" className="flex-1" variant="outline" onClick={() => onOpenWorkspace(ownerWorkspace)}>رفتن به VPS میزبان</Button> : <Button size="sm" className="flex-1" variant="outline" onClick={() => openDetails(row)}><Layers3 size={14}/>مدیریت اپلیکیشن</Button>}{!allServers && <div className="flex shrink-0 gap-1">{app.deleted_at ? <Button size="icon" variant="ghost" title="بازیابی رکورد" aria-label="بازیابی رکورد" onClick={() => { setTarget(app); setError(''); setDialog('restore') }}><RotateCcw size={15}/></Button> : <><Button size="icon" variant="ghost" title="ویرایش مشخصات" aria-label="ویرایش مشخصات" onClick={() => beginEdit(row)}><Pencil size={15}/></Button><Button size="icon" variant="ghost" className="text-rose-300" title="آرشیو رکورد" aria-label="آرشیو رکورد" onClick={() => { setTarget(app); setError(''); setDialog('delete') }}><Archive size={15}/></Button></>}</div>}</div>
+            </CardContent>
+          </Card>
+        })}</div>}
+    </>
+    )}
     <Dialog open={dialog === 'form'} onOpenChange={(open) => { if (!saving && !open) { setDialog(null); setError('') } }}><DialogContent className="max-h-[92dvh] max-w-2xl overflow-y-auto"><DialogHeader><DialogTitle>{target ? 'ویرایش رکورد اپلیکیشن' : 'ثبت اپلیکیشن'}</DialogTitle><DialogDescription>چارچوب را خودکار تشخیص بده یا دستی انتخاب کن. در قالب منتخب فقط metadata اولیه ذخیره می‌شود؛ نصب یا اجرا انجام نمی‌شود. React/Vue/Vite به خروجی استاتیک و Nginx منتشر می‌شوند؛ Next/Nuxt و Node با سرویس SSR اجرا می‌شوند.</DialogDescription></DialogHeader><form onSubmit={(event) => void submit(event)} className="space-y-4"><div className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label htmlFor="app-name">نام</Label><Input id="app-name" required maxLength={80} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></div><div className="space-y-2"><Label htmlFor="app-environment">پروژه و محیط</Label><select id="app-environment" value={draft.environment_id} onChange={(event) => setDraft({ ...draft, environment_id: event.target.value })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">{environments.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}{environment.protected ? " · محافظت‌شده" : ""}</option>)}</select><p className="text-[10px] text-muted-foreground">پروژهٔ فعال: {projects.find((item) => item.id === selectedProjectId)?.name || "پیش‌فرض"}. انتخاب محیط فعلاً فقط scope رکورد را تعیین می‌کند و config یا داده را کپی نمی‌کند.</p></div><div className="space-y-2"><Label htmlFor="app-framework">قالب پیشنهادی</Label><select id="app-framework" disabled={!!selectedTemplate} value={draft.framework} onChange={(event) => setDraft({ ...draft, framework: event.target.value, runtime_version: 'system', build_runtime_version: 'system' })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">{Object.entries(frameworkLabels).map(([key,label]) => <option value={key} key={key}>{label}</option>)}</select></div>{requestedRuntimeFamily && <div className="space-y-2"><Label htmlFor="app-runtime-version">نسخهٔ Runtime موردنیاز</Label><select id="app-runtime-version" value={draft.runtime_version} onChange={(event) => setDraft({ ...draft, runtime_version: event.target.value })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="system">نسخهٔ پیش‌فرض سیستم</option>{availableRuntimeVersions.map((version) => <option key={version} value={version}>{version}</option>)}{draft.runtime_version !== 'system' && !availableRuntimeVersions.includes(draft.runtime_version) && <option value={draft.runtime_version}>{draft.runtime_version} · در inventory فعلی پیدا نشد</option>}</select><p className="text-[11px] leading-5 text-muted-foreground">{runtimeInventoryLoading ? 'در حال خواندن inventory نصب‌شدهٔ همین VPS…' : runtimeInventoryError || (availableRuntimeVersions.length ? `نسخه‌های نصب‌شدهٔ ${requestedRuntimeFamily} از inventory همین VPS آمده‌اند.` : `Runtime نصب‌شده برای ${requestedRuntimeFamily} پیدا نشد؛ پک نسخه را از مدیریت APT نصب و فرم را دوباره باز کن.`)}</p></div>}{isNodePlatform(draft.framework) && <div className="space-y-2"><Label htmlFor="app-build-runtime-version">نسخهٔ Node.js برای build / اجرا</Label><select id="app-build-runtime-version" value={draft.build_runtime_version} onChange={(event) => setDraft({ ...draft, build_runtime_version: event.target.value })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="system">نسخهٔ پیش‌فرض سیستم</option>{availableRuntimeVersions.map((version) => <option key={version} value={version}>{version}</option>)}{draft.build_runtime_version !== 'system' && !availableRuntimeVersions.includes(draft.build_runtime_version) && <option value={draft.build_runtime_version}>{draft.build_runtime_version} · در inventory فعلی پیدا نشد</option>}</select><p className="text-[11px] leading-5 text-muted-foreground">نسخهٔ build برای ساخت خروجی و نسخهٔ Runtime برای اجرای Next/Nuxt/Node استفاده می‌شود؛ سایت‌های استاتیک process اجرایی ندارند.</p></div>}{(isStaticFramework(draft.framework) || draft.framework === 'auto') && <div className="space-y-3 rounded-lg border border-border/70 p-3 sm:col-span-2"><div className="space-y-2"><Label htmlFor="app-static-output">مسیر خروجی سایت استاتیک</Label><Input id="app-static-output" dir="ltr" placeholder="auto، dist، build یا out" value={draft.static_output_path} onChange={(event) => setDraft({ ...draft, static_output_path: event.target.value || 'auto' })}/><p className="text-[10px] leading-5 text-muted-foreground">در حالت خودکار، ARG مسیر dist/build/out یا .output/public را با index.html پیدا می‌کند. مقدار «.» یعنی فایل index.html در ریشهٔ release است. Next و Nuxt به‌طور پیش‌فرض SSR تشخیص داده می‌شوند.</p></div><label className="flex items-start gap-2 text-xs"><input type="checkbox" checked={draft.static_spa_fallback} onChange={(event) => setDraft({ ...draft, static_spa_fallback: event.target.checked })} className="mt-0.5 accent-[#dda46f]"/><span>فعال‌کردن SPA fallback برای React/Vue/Vite <span className="block text-[10px] leading-5 text-muted-foreground">مسیرهای سمت کاربر به index.html برمی‌گردند؛ برای سایت چندصفحه‌ای ساده می‌توانی خاموشش کنی.</span></span></label></div>}<div className="space-y-2"><Label htmlFor="app-source">منبع پیش‌فرض استقرار</Label><select id="app-source" disabled={!!selectedTemplate} value={draft.source_type} onChange={(event) => setDraft({ ...draft, source_type: event.target.value })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">{Object.entries(sourceLabels).map(([key,label]) => <option value={key} key={key}>{label}</option>)}</select></div><div className="space-y-2"><Label htmlFor="app-domain">دامنهٔ رزروشده</Label><Input id="app-domain" dir="ltr" placeholder="app.example.com" value={draft.domain} onChange={(event) => setDraft({ ...draft, domain: event.target.value })}/></div><div className="space-y-2"><Label htmlFor="app-port">پورت TCP موردنظر، اختیاری</Label><Input id="app-port" type="number" min={1} max={65535} dir="ltr" placeholder="3000" value={draft.listen_port} onChange={(event) => setDraft({ ...draft, listen_port: event.target.value })}/></div><div className="space-y-2"><Label htmlFor="app-desired">وضعیت هدف (صرفاً یادداشت)</Label><select id="app-desired" value={draft.desired_state} onChange={(event) => setDraft({ ...draft, desired_state: event.target.value })} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="none">تعیین‌نشده</option><option value="running">باید اجرا شود</option><option value="stopped">باید متوقف باشد</option></select></div></div><div className="space-y-2"><Label htmlFor="app-labels">برچسب‌ها</Label><Input id="app-labels" value={draft.labels} onChange={(event) => setDraft({ ...draft, labels: event.target.value })} placeholder="مشتری الف، production، وب"/><p className="text-[11px] text-muted-foreground">برچسب‌ها را با ویرگول جدا کن.</p></div><div className="space-y-2"><Label htmlFor="app-description">توضیحات</Label><textarea id="app-description" rows={3} maxLength={1000} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]"/></div>{error && <p role="alert" className="rounded-lg border border-rose-400/20 bg-rose-400/[.05] p-3 text-xs text-rose-200">{error}</p>}<div className="flex flex-wrap justify-end gap-2 pt-2"><Button type="button" variant="outline" onClick={() => setDialog(null)} disabled={saving}>انصراف</Button><Button type="submit" disabled={saving}>{saving ? 'در حال ذخیره…' : target ? 'ذخیرهٔ تغییرات' : 'ثبت رکورد'}</Button></div></form></DialogContent></Dialog>
     <Dialog open={projectDialog} onOpenChange={(open) => { if (!projectSaving) setProjectDialog(open) }}><DialogContent className="max-w-md"><DialogHeader><DialogTitle>ساخت پروژه</DialogTitle><DialogDescription>پروژه زیر فضای‌کار انتخاب‌شده ساخته می‌شود و سه محیط Development، Staging و Production می‌گیرد. این محیط‌ها فعلاً metadata هستند؛ داده یا Secret بینشان کپی نمی‌شود.</DialogDescription></DialogHeader><form onSubmit={(event) => void createProject(event)} className="space-y-3"><label className="space-y-1 text-xs"><span>نام پروژه</span><Input required maxLength={80} value={projectName} onChange={(event) => setProjectName(event.target.value)}/></label><label className="space-y-1 text-xs"><span>توضیحات</span><textarea maxLength={1000} rows={3} value={projectDescription} onChange={(event) => setProjectDescription(event.target.value)} className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-[#dda46f]"/></label>{contextError && <p role="alert" className="text-xs text-rose-200">{contextError}</p>}<div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setProjectDialog(false)} disabled={projectSaving}>انصراف</Button><Button type="submit" disabled={projectSaving}>{projectSaving ? "در حال ساخت…" : "ساخت پروژه"}</Button></div></form></DialogContent></Dialog>
     <Dialog open={templatesOpen} onOpenChange={(open) => setTemplatesOpen(open)}><DialogContent className="max-h-[88dvh] max-w-2xl overflow-y-auto"><DialogHeader><DialogTitle>قالب‌های شروع اپلیکیشن</DialogTitle><DialogDescription>قالب فقط فرم و metadata اولیه را آماده می‌کند. فعلاً سورس، package، دیتابیس یا سرویس نصب نمی‌شود؛ برای اجرا باید سورس را متصل و Job استقرار بسازی.</DialogDescription></DialogHeader>{templatesLoading ? <Skeleton className="h-36 rounded-xl"/> : templatesError ? <p role="alert" className="rounded-lg border border-rose-300/20 p-3 text-xs text-rose-200">{templatesError}</p> : <div className="grid gap-3 sm:grid-cols-2">{templates.map((template) => <Card key={template.id}><CardHeader className="pb-2"><CardTitle className="text-sm">{template.name}</CardTitle><CardDescription dir="ltr" className="text-left font-mono text-[10px]">{template.id} · v{template.version}</CardDescription></CardHeader><CardContent className="space-y-3"><div className="flex flex-wrap gap-1"><Badge variant="outline">{frameworkLabels[template.framework] || template.framework}</Badge><Badge variant="outline">پیش‌نویس</Badge></div><ul className="list-disc space-y-1 ps-5 text-[10px] leading-5 text-muted-foreground">{template.requirements.map((requirement) => <li key={requirement}>{requirement}</li>)}</ul><Button size="sm" className="w-full" onClick={() => beginTemplateDraft(template)}>ساخت پیش‌نویس</Button></CardContent></Card>)}</div>}</DialogContent></Dialog>

@@ -514,6 +514,7 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
     match action {
         "s3-mount-start" => return start_s3_mount(request),
         "s3-mount-stop" => return stop_s3_mount(request),
+        "s3-mount-status" => return s3_mount_status(request),
         "s3-secret-write" => {
             let Some(secret) =
                 serde_json::from_value::<SecretConfig>(request["secret"].clone()).ok()
@@ -652,6 +653,57 @@ fn run_systemctl(args: &[&str]) -> Result<String, String> {
     }
 }
 
+fn is_mount_point(path: &FsPath) -> bool {
+    let expected = path.to_string_lossy();
+    fs::read_to_string("/proc/self/mountinfo").is_ok_and(|mountinfo| {
+        mountinfo.lines().any(|line| line.split_whitespace().nth(4) == Some(expected.as_ref()))
+    })
+}
+
+fn wait_for_mount(unit: &str, path: &FsPath) -> Result<(), String> {
+    for _ in 0..80 {
+        if is_mount_point(path) {
+            return Ok(());
+        }
+        if run_systemctl(&["is-active", "--quiet", unit]).is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Err("سرویس اجرا شد، اما نقطهٔ Mount در فایل‌سیستم دیده نشد. وضعیت systemd و اتصال Bucket را بررسی کن.".into())
+}
+
+fn s3_mount_status(request: &Value) -> Value {
+    let mount_id = request["mount_id"].as_i64().unwrap_or(0);
+    let connection_id = request["connection_id"].as_i64().unwrap_or(0);
+    let bucket_id = request["bucket_id"].as_i64().unwrap_or(0);
+    let Some((_, unit)) = mount_control_paths(mount_id, connection_id, bucket_id) else {
+        return json!({"ok":false,"error":"شناسه Mount نامعتبر است."});
+    };
+    let Some(path) = request["mount_path"].as_str().filter(|path| valid_named_mount_path(path)).map(PathBuf::from) else {
+        return json!({"ok":false,"error":"مسیر Mount نامعتبر است."});
+    };
+    let active_state = match run_systemctl(&["show", "--property=ActiveState", "--value", &unit]) {
+        Ok(value) => value.trim().to_owned(),
+        Err(error) if error.to_ascii_lowercase().contains("could not be found") => "inactive".into(),
+        Err(error) => return json!({"ok":false,"error":format!("خواندن وضعیت سرویس Mount ناموفق بود: {error}")}),
+    };
+    let path_mounted = is_mount_point(&path);
+    let mounted = active_state == "active" && path_mounted;
+    let failed = run_systemctl(&["is-failed", "--quiet", &unit]).is_ok();
+    let status = if mounted { "mounted" } else if path_mounted || failed { "failed" } else if active_state == "active" { "mounting" } else { "unmounted" };
+    let error = if path_mounted && !mounted {
+        Some("نقطهٔ Mount وجود دارد اما سرویس مربوطه فعال نیست؛ از همین‌جا Mount را دوباره اعمال کن.")
+    } else if failed {
+        Some("سرویس systemd این Mount با خطا متوقف شده است؛ تنظیمات اتصال و گزارش سرویس را بررسی کن.")
+    } else if status == "mounting" {
+        Some("سرویس فعال است و هنوز Mount در سیستم ثبت نشده؛ چند لحظه بعد وضعیت را تازه کن.")
+    } else {
+        None
+    };
+    json!({"ok":true,"status":status,"unit_active":active_state == "active","mounted":mounted,"error":error})
+}
+
 fn start_s3_mount(request: &Value) -> Value {
     let mount_id = request["mount_id"].as_i64().unwrap_or(0);
     let connection_id = request["connection_id"].as_i64().unwrap_or(0);
@@ -704,6 +756,7 @@ fn start_s3_mount(request: &Value) -> Value {
     }
     config.push_str(&format!("force_path_style = {}\n", secret.address_style != "virtual"));
     let already_active = run_systemctl(&["is-active", "--quiet", &unit]).is_ok();
+    let already_mounted = already_active && is_mount_point(&mount_path);
     if let Err(error) = ensure_mount_directory(PathBuf::from("/mnt/arg-s3").as_path()) {
         return json!({"ok":false,"error":format!("مسیر پایهٔ Mount امن نیست: {error}")});
     }
@@ -717,10 +770,12 @@ fn start_s3_mount(request: &Value) -> Value {
             return json!({"ok":false,"error":format!("پوشهٔ نام اتصال امن نیست: {error}")});
         }
     }
-    if let Err(error) = ensure_mount_directory(&mount_path) {
-        return json!({"ok":false,"error":format!("پوشهٔ Mount امن نیست: {error}")});
+    if !already_mounted {
+        if let Err(error) = ensure_mount_directory(&mount_path) {
+            return json!({"ok":false,"error":format!("پوشهٔ Mount امن نیست: {error}")});
+        }
     }
-    let mount_metadata = already_active || match fs::read_dir(&mount_path) {
+    let mount_metadata = already_mounted || match fs::read_dir(&mount_path) {
         Ok(mut entries) => entries.next().is_none(),
         Err(_) => false,
     };
@@ -768,7 +823,10 @@ fn start_s3_mount(request: &Value) -> Value {
         let _ = run_systemctl(&["disable", &unit]);
     }
     match run_systemctl(&["restart", &unit]) {
-        Ok(_) => json!({"ok":true,"mount_path":mount_path,"unit":unit}),
+        Ok(_) => match wait_for_mount(&unit, &mount_path) {
+            Ok(()) => json!({"ok":true,"mount_path":mount_path,"unit":unit}),
+            Err(error) => json!({"ok":false,"error":format!("Mount کامل نشد: {error}")}),
+        },
         Err(error) => json!({"ok":false,"error":format!("Mount اجرا نشد: {error}")}),
     }
 }
@@ -783,14 +841,28 @@ fn systemd_escape_arg(value: &str) -> String {
 
 fn ensure_mount_directory(path: &std::path::Path) -> Result<(), String> {
     use std::os::unix::fs::DirBuilderExt;
+    if !path.starts_with("/mnt/arg-s3") && !path.starts_with("/var/cache/arg-s3") {
+        return Err("مسیر خارج از پوشه‌های اختصاصی S3 است.".into());
+    }
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || metadata.uid() != 0
-                || metadata.permissions().mode() & 0o022 != 0
-            {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err("پوشه باید واقعی، متعلق به root و بدون مجوز نوشتن برای دیگران باشد.".into());
+            }
+            if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+                let directory = fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(path)
+                    .map_err(|_| "بازکردن امن پوشهٔ اختصاصی S3 ناموفق بود.".to_owned())?;
+                let fd = directory.as_raw_fd();
+                if unsafe { libc::fchown(fd, 0, 0) } != 0 || unsafe { libc::fchmod(fd, 0o755) } != 0 {
+                    return Err("ایمن‌سازی مالکیت و مجوز پوشهٔ اختصاصی S3 ناموفق بود.".into());
+                }
+                let secured = directory.metadata().map_err(|error| error.to_string())?;
+                if secured.uid() != 0 || secured.permissions().mode() & 0o022 != 0 {
+                    return Err("پوشه باید واقعی، متعلق به root و بدون مجوز نوشتن برای دیگران باشد.".into());
+                }
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1460,12 +1532,42 @@ fn mount_public(mount_id: i64, connection_id: i64, bucket_id: i64, bucket: &str,
 }
 
 pub(super) async fn get_bucket_mount(State(state): State<AppState>, Path(bucket_id): Path<i64>, headers: HeaderMap) -> ApiResult {
-    let db = state.lock().unwrap();
-    require_admin(&db, &headers)?;
-    let bucket: (i64, String) = db.query_row("SELECT connection_id,bucket_name FROM s3_buckets WHERE id=?1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| error(StatusCode::NOT_FOUND,"Bucket پیدا نشد."))?;
-    let mount: Option<(i64,String,bool,bool,String,Option<String>)> = db.query_row("SELECT id,mount_path,read_only!=0,auto_mount!=0,status,last_error FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional().map_err(db_error)?;
-    let value = mount.map(|(id,mount_path,read_only,auto_mount,status,last_error)| mount_public(id,bucket.0,bucket_id,&bucket.1,&mount_path,read_only,auto_mount,&status,last_error.as_deref()));
-    Ok(Json(json!({"mount":value})))
+    let (connection_id, bucket_name, mount) = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+        let bucket: (i64, String) = db.query_row("SELECT connection_id,bucket_name FROM s3_buckets WHERE id=?1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).map_err(|_| error(StatusCode::NOT_FOUND,"Bucket پیدا نشد."))?;
+        let mount: Option<(i64,String,bool,bool,String,Option<String>,i64)> = db.query_row("SELECT id,mount_path,read_only!=0,auto_mount!=0,status,last_error,updated_at FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional().map_err(db_error)?;
+        (bucket.0, bucket.1, mount)
+    };
+    let Some((id,mount_path,read_only,auto_mount,stored_status,stored_error,updated_at)) = mount else {
+        return Ok(Json(json!({"mount":null})));
+    };
+    let runtime = privileged_request_async(json!({"action":"s3-mount-status","mount_id":id,"connection_id":connection_id,"bucket_id":bucket_id,"mount_path":mount_path})).await;
+    let (status,last_error) = match runtime {
+        Ok(value) if value["ok"] == true => {
+            let runtime_status = value["status"].as_str().unwrap_or("unknown");
+            let mut resolved_status = runtime_status.to_owned();
+            let mut resolved_error = value["error"].as_str().map(str::to_owned);
+            if runtime_status == "mounting" && now().saturating_sub(updated_at) > 60 {
+                resolved_status = "failed".into();
+                resolved_error = Some("سرویس Mount بیش از یک دقیقه فعال مانده اما نقطهٔ Mount در فایل‌سیستم دیده نمی‌شود.".into());
+            } else if runtime_status == "unmounted" && stored_status == "failed" && stored_error.is_some() {
+                // Keep an actionable setup failure until a later successful start clears it.
+                resolved_status = stored_status.clone();
+                resolved_error = stored_error.clone();
+            } else if runtime_status == "unmounted" && auto_mount {
+                resolved_status = "failed".into();
+                resolved_error = Some("Mount برای اجرای خودکار تنظیم شده، اما سرویس آن فعال نیست.".into());
+            }
+            let db = state.lock().unwrap();
+            db.execute("UPDATE s3_mounts SET status=?1,last_error=?2 WHERE id=?3",params![resolved_status,resolved_error,id]).map_err(db_error)?;
+            (resolved_status, resolved_error)
+        }
+        Ok(value) => ("unknown".into(), value["error"].as_str().map(str::to_owned).or_else(|| Some("پاسخ وضعیت Mount معتبر نیست.".into()))),
+        Err((_, response)) => ("unknown".into(), response["error"].as_str().map(str::to_owned).or_else(|| Some("خواندن وضعیت واقعی Mount ناموفق بود.".into()))),
+    };
+    let mount = mount_public(id,connection_id,bucket_id,&bucket_name,&mount_path,read_only,auto_mount,&status,last_error.as_deref());
+    Ok(Json(json!({"mount":mount})))
 }
 
 pub(super) async fn configure_bucket_mount(State(state): State<AppState>, Path(bucket_id): Path<i64>, headers: HeaderMap, Json(input): Json<MountConfigInput>) -> ApiResult {

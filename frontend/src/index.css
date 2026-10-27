@@ -581,4 +581,5 @@
 @media (prefers-reduced-motion: reduce) {
   .arg-metric-card { transition: none; }
   .arg-metric-card:hover { transform: none; }
+  .arg-topology-packet { display: none; }
 }
