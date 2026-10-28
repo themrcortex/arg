@@ -3,6 +3,17 @@ use reqwest::{Client, Method};
 use std::time::Duration;
 
 const CF_API: &str = "https://api.cloudflare.com/client/v4";
+const DNS_RECORDS_PER_PAGE: u32 = 100;
+const MAX_DNS_RECORD_PAGE: u32 = 10_000;
+
+#[derive(Deserialize, Default)]
+pub(super) struct RecordsPageQuery {
+    page: Option<u32>,
+}
+
+fn bounded_record_page(page: Option<u32>) -> u32 {
+    page.unwrap_or(1).clamp(1, MAX_DNS_RECORD_PAGE)
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +171,18 @@ fn records_url(zone_id: &str) -> String {
     format!("{CF_API}/zones/{zone_id}/dns_records")
 }
 
+fn records_page_url(zone_id: &str, page: u32) -> Result<reqwest::Url, url::ParseError> {
+    let mut url = reqwest::Url::parse(&records_url(zone_id))?;
+    url.query_pairs_mut()
+        .append_pair("per_page", &DNS_RECORDS_PER_PAGE.to_string())
+        .append_pair("page", &page.to_string());
+    Ok(url)
+}
+
+fn escape_caa_value(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn record_payload(input: &RecordInput, zone: &str) -> Result<Value, (StatusCode, Json<Value>)> {
     let kind = input.kind.to_ascii_uppercase();
     if !["A", "AAAA", "CNAME", "MX", "TXT", "CAA", "SRV"].contains(&kind.as_str()) {
@@ -270,7 +293,7 @@ fn record_payload(input: &RecordInput, zone: &str) -> Result<Value, (StatusCode,
                 "{} {} \"{}\"",
                 flags.unwrap_or_default(),
                 tag.unwrap_or_default(),
-                value.unwrap_or_default()
+                escape_caa_value(value.unwrap_or_default())
             ));
             payload["data"] = json!({"flags":flags,"tag":tag,"value":value});
         }
@@ -478,18 +501,30 @@ pub(super) async fn list_records(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(query): Query<RecordsPageQuery>,
 ) -> ApiResult {
     let (zone_id, zone, token) = connection_token(&state, &headers, &id).await?;
+    let page = bounded_record_page(query.page);
+    let url = records_page_url(&zone_id, page).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Cloudflare records URL نامعتبر است.",
+        )
+    })?;
     let response = cf_request(
         Method::GET,
-        format!("{}?per_page=100&page=1", records_url(&zone_id)),
+        url.to_string(),
         &token,
         None,
     )
     .await?;
     let rows = response["result"].as_array().cloned().unwrap_or_default();
+    let total_pages = response["result_info"]["total_pages"]
+        .as_u64()
+        .unwrap_or(1)
+        .clamp(1, u64::from(MAX_DNS_RECORD_PAGE));
     Ok(Json(
-        json!({"records":rows,"zone":zone,"pagination":{"page":1,"per_page":100,"total_pages":response["result_info"]["total_pages"]},"provider":"cloudflare"}),
+        json!({"records":rows,"zone":zone,"pagination":{"page":page,"per_page":DNS_RECORDS_PER_PAGE,"total_pages":total_pages},"provider":"cloudflare"}),
     ))
 }
 
@@ -622,5 +657,30 @@ mod tests {
         let mut record = input("TXT", "@", "hello");
         record.proxied = true;
         assert!(record_payload(&record, "example.com").is_err());
+    }
+
+    #[test]
+    fn bounds_dns_record_pages() {
+        assert_eq!(bounded_record_page(None), 1);
+        assert_eq!(bounded_record_page(Some(0)), 1);
+        assert_eq!(bounded_record_page(Some(12)), 12);
+        assert_eq!(bounded_record_page(Some(u32::MAX)), MAX_DNS_RECORD_PAGE);
+    }
+
+    #[test]
+    fn cloudflare_record_url_uses_the_requested_bounded_page() {
+        let url = records_page_url("0123456789abcdef", 17).unwrap();
+        let query = url.query_pairs().collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(query.get("per_page").map(|value| value.as_ref()), Some("100"));
+        assert_eq!(query.get("page").map(|value| value.as_ref()), Some("17"));
+    }
+
+    #[test]
+    fn escapes_caa_presentation_string_without_changing_structured_value() {
+        let mut record = input("CAA", "@", "");
+        record.data = Some(json!({"flags":0,"tag":"issue","value":"ca\\name\"quoted"}));
+        let payload = record_payload(&record, "example.com").unwrap();
+        assert_eq!(payload["content"], "0 issue \"ca\\\\name\\\"quoted\"");
+        assert_eq!(payload["data"]["value"], "ca\\name\"quoted");
     }
 }
