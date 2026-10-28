@@ -547,19 +547,18 @@ async fn login(
             "Use the HTTPS panel URL to sign in. For initial setup, connect through an SSH tunnel.",
         ));
     }
-    let ip_throttle_key = (!remote.ip().is_loopback()).then(|| format!("login-ip:{}", remote.ip()));
+    let client_ip = login_client_ip(&headers, remote.ip());
+    let (username_throttle_key, ip_throttle_key) = login_throttle_keys(&input.username, client_ip);
     if input.username.len() > 32 || input.password.len() > 1024 {
         let db = state.lock().unwrap();
-        if let Some(key) = ip_throttle_key.as_deref() {
-            record_login_failure(&db, key);
-        }
+        record_login_failure(&db, &ip_throttle_key);
         return Err(error(StatusCode::UNAUTHORIZED, "Invalid credentials"));
     }
     let db = state.lock().unwrap();
     let attempts: (i64, i64) = db
         .query_row(
             "SELECT count,window_start FROM auth_failures WHERE username=?1",
-            [&input.username],
+            [&username_throttle_key],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or((0, 0));
@@ -569,20 +568,18 @@ async fn login(
             "Too many login attempts. Try again later",
         ));
     }
-    if let Some(key) = ip_throttle_key.as_deref() {
-        let ip_attempts: (i64, i64) = db
-            .query_row(
-                "SELECT count,window_start FROM auth_failures WHERE username=?1",
-                [key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap_or((0, 0));
-        if ip_attempts.0 >= 20 && now() - ip_attempts.1 < 600 {
-            return Err(error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Too many login attempts. Try again later",
-            ));
-        }
+    let ip_attempts: (i64, i64) = db
+        .query_row(
+            "SELECT count,window_start FROM auth_failures WHERE username=?1",
+            [&ip_throttle_key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or((0, 0));
+    if ip_attempts.0 >= 20 && now() - ip_attempts.1 < 600 {
+        return Err(error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many login attempts. Try again later",
+        ));
     }
     let found = db.query_row(
         "SELECT id,password_hash,enabled FROM users WHERE username=?1",
@@ -598,10 +595,8 @@ async fn login(
     let (id, hash, enabled) = match found {
         Ok(value) => value,
         Err(_) => {
-            record_login_failure(&db, &input.username);
-            if let Some(key) = ip_throttle_key.as_deref() {
-                record_login_failure(&db, key);
-            }
+            record_login_failure(&db, &username_throttle_key);
+            record_login_failure(&db, &ip_throttle_key);
             return Err(error(StatusCode::UNAUTHORIZED, "Invalid credentials"));
         }
     };
@@ -616,19 +611,14 @@ async fn login(
             .verify_password(input.password.as_bytes(), &parsed)
             .is_err()
     {
-        record_login_failure(&db, &input.username);
-        if let Some(key) = ip_throttle_key.as_deref() {
-            record_login_failure(&db, key);
-        }
+        record_login_failure(&db, &username_throttle_key);
+        record_login_failure(&db, &ip_throttle_key);
         return Err(error(StatusCode::UNAUTHORIZED, "Invalid credentials"));
     }
     let _ = db.execute(
-        "DELETE FROM auth_failures WHERE username=?1",
-        [&input.username],
+        "DELETE FROM auth_failures WHERE username IN (?1,?2,?3)",
+        params![username_throttle_key, ip_throttle_key, input.username],
     );
-    if let Some(key) = ip_throttle_key.as_deref() {
-        let _ = db.execute("DELETE FROM auth_failures WHERE username=?1", [key]);
-    }
     let raw = token();
     let session_seconds = setting_u64(&db, "session_hours", 24).clamp(1, 72) as i64 * 3600;
     let created_at = now();
@@ -644,7 +634,7 @@ async fn login(
         });
     db.execute(
         "INSERT INTO sessions (token_hash,user_id,expires_at,created_at,last_seen,remote_ip,user_agent) VALUES (?1,?2,?3,?4,?4,?5,?6)",
-        params![session_hash(&raw), id, created_at + session_seconds, created_at, remote.ip().to_string(), user_agent],
+        params![session_hash(&raw), id, created_at + session_seconds, created_at, client_ip.to_string(), user_agent],
     )
     .map_err(db_error)?;
     audit(&db, &input.username, "login", "Successful login");
@@ -655,7 +645,7 @@ async fn login(
     Ok(([(header::SET_COOKIE, cookie)], Json(json!({"ok": true}))).into_response())
 }
 fn record_login_failure(db: &Connection, username: &str) {
-    if username.len() > 64 {
+    if username.len() > 128 {
         return;
     }
     let _ = db.execute("INSERT INTO auth_failures(username,count,window_start) VALUES (?1,1,?2) ON CONFLICT(username) DO UPDATE SET count=CASE WHEN ?2-window_start>=600 THEN 1 ELSE count+1 END,window_start=CASE WHEN ?2-window_start>=600 THEN ?2 ELSE window_start END", params![username,now()]);
@@ -671,6 +661,25 @@ fn secure_transport(headers: &HeaderMap, peer: std::net::IpAddr) -> bool {
                 .get("x-forwarded-proto")
                 .and_then(|value| value.to_str().ok())
                 == Some("https"))
+}
+
+fn login_client_ip(headers: &HeaderMap, peer: std::net::IpAddr) -> std::net::IpAddr {
+    if !peer.is_loopback() {
+        return peer;
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit(',').next())
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(peer)
+}
+
+fn login_throttle_keys(username: &str, client_ip: std::net::IpAddr) -> (String, String) {
+    (
+        format!("login-user:{username}:{client_ip}"),
+        format!("login-ip:{client_ip}"),
+    )
 }
 
 async fn change_password(
@@ -5110,9 +5119,120 @@ mod update_progress_tests {
         backup_database, default_update_build_mode, ensure_federation_identity_columns,
         ensure_metric_storage_columns, firewall_rule_validation_error, update_progress_payload,
         parse_systemd_exec_start, parse_systemd_service_commands, valid_apt_install_spec,
-        valid_tls_source_path, valid_update_build_mode, role_has_admin_access, Connection,
+        valid_tls_source_path, valid_update_build_mode, role_has_admin_access,
+        login, login_client_ip, login_throttle_keys, AppState, Connection, Credentials,
         FirewallRuleInput,
     };
+
+    #[test]
+    fn login_throttles_are_scoped_to_the_client_ip_and_only_trust_forwarded_ip_from_loopback() {
+        let first_ip: std::net::IpAddr = "203.0.113.10".parse().unwrap();
+        let second_ip: std::net::IpAddr = "203.0.113.11".parse().unwrap();
+        assert_ne!(
+            login_throttle_keys("admin", first_ip).0,
+            login_throttle_keys("admin", second_ip).0
+        );
+        assert_eq!(
+            login_throttle_keys("admin", first_ip).0,
+            login_throttle_keys("admin", first_ip).0
+        );
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_static("198.51.100.8, 203.0.113.9"),
+        );
+        assert_eq!(login_client_ip(&headers, first_ip), first_ip);
+        let loopback: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            login_client_ip(&headers, loopback),
+            "203.0.113.9".parse::<std::net::IpAddr>().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_account_wide_login_lockout_does_not_block_another_client() {
+        use argon2::{password_hash::{rand_core::OsRng, PasswordHasher, SaltString}, Argon2};
+        use axum::{extract::{ConnectInfo, State}, http::{header, HeaderValue}, Json};
+        use std::sync::{Arc, Mutex};
+
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,password_hash TEXT,role TEXT,enabled INTEGER);
+             CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER,expires_at INTEGER,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT);
+             CREATE TABLE auth_failures(username TEXT PRIMARY KEY,count INTEGER,window_start INTEGER);
+             CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT);
+             CREATE TABLE audit(id INTEGER PRIMARY KEY,at INTEGER,actor TEXT,action TEXT,detail TEXT);",
+        )
+        .unwrap();
+        let password_hash = Argon2::default()
+            .hash_password(
+                b"correct-test-password",
+                &SaltString::generate(&mut OsRng),
+            )
+            .unwrap()
+            .to_string();
+        db.execute(
+            "INSERT INTO users VALUES(1,'admin',?1,'admin',1)",
+            [&password_hash],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO auth_failures(username,count,window_start) VALUES('admin',8,?1)",
+            [super::now()],
+        )
+        .unwrap();
+        let state: AppState = Arc::new(Mutex::new(db));
+        let remote: std::net::SocketAddr = "203.0.113.11:51000".parse().unwrap();
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://panel.example.test"),
+        );
+        headers.insert("x-arg-transport", HeaderValue::from_static("https"));
+
+        let rejected_password = login(
+            ConnectInfo(remote),
+            State(state.clone()),
+            headers.clone(),
+            Json(Credentials {
+                username: "admin".into(),
+                password: "wrong-test-password".into(),
+                setup_token: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected_password.0, axum::http::StatusCode::UNAUTHORIZED);
+
+        let response = login(
+            ConnectInfo(remote),
+            State(state.clone()),
+            headers,
+            Json(Credentials {
+                username: "admin".into(),
+                password: "correct-test-password".into(),
+                setup_token: None,
+            }),
+        )
+        .await
+        .expect("other client can still authenticate");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let db = state.lock().unwrap();
+        let sessions: i64 = db
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(sessions, 1);
+        let legacy_failures: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM auth_failures WHERE username='admin'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_failures, 0);
+    }
 
     #[test]
     fn service_manager_extracts_only_systemd_execstart_arguments() {
