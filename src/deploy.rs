@@ -3398,6 +3398,26 @@ mod tests {
         let result = extract_archive(&archive_path, &root.join("outside"));
         assert!(result.unwrap_err().contains("traversal"));
         assert!(!root.parent().unwrap().join("escape.txt").exists());
+
+        let symlink_archive_path = root.join("symlink.zip");
+        let file = fs::File::create(&symlink_archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.add_symlink(
+            "link",
+            "../../escape.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.finish().unwrap();
+        let symlink_dest = root.join("symlink-out");
+        fs::create_dir(&symlink_dest).unwrap();
+        let symlink_result = extract_archive(&symlink_archive_path, &symlink_dest);
+        let symlink_error = symlink_result.unwrap_err();
+        assert!(
+            symlink_error.contains("symlink داخل ZIP پذیرفته نمی‌شود"),
+            "unexpected ZIP extraction error: {symlink_error}"
+        );
+        assert!(!root.parent().unwrap().join("escape.txt").exists());
         let _ = fs::remove_dir_all(root);
     }
 
