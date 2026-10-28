@@ -67,7 +67,9 @@ jobs:
     name: Installer and helper checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
       - run: bash -n install.sh scripts/update-helper.sh scripts/ufw-helper.sh scripts/bump-version.sh
       - run: bash scripts/tests/test-update-helper.sh
       - run: bash scripts/tests/test-update-selection.sh
