@@ -124,7 +124,8 @@ export function setActiveWorkspaceNode(id: string) {
 }
 function isLocalOnlyApiPath(path: string) {
   const route = path.split('?', 1)[0].replace(/^\/+/, '')
-  return /^(state|setup|login|logout|account(?:\/|$)|nodes(?:\/|$)|federation(?:\/|$)|admin\/api-keys(?:\/|$))/.test(route)
+  // The global updater owns this ARG process; remote Nodes use the dedicated nodes/{id}/update API.
+  return /^(state|setup|login|logout|account(?:\/|$)|nodes(?:\/|$)|federation(?:\/|$)|update(?:\/|$)|admin\/api-keys(?:\/|$))/.test(route)
 }
 export function apiUrl(path: string) {
   const node = getActiveWorkspaceNode()

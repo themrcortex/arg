@@ -13,6 +13,7 @@ import {
   Github,
   LifeBuoy,
   Menu,
+  Minimize2,
   RefreshCw,
   RotateCw,
   Settings,
@@ -489,8 +490,8 @@ function UpdateDialog({ open, onOpenChange, update, checking, updating, finished
   </DialogContent></Dialog>
 }
 
-function UpdateOverlay({ active, stage, startedAt, shared, rollback, branch, buildMode, refreshing, canCancel, canceling, onCancel }: {
-  active: boolean; stage: UpdateStage; startedAt: number | null; shared: boolean; rollback: boolean; branch?: string; buildMode?: string; refreshing: boolean; canCancel: boolean; canceling: boolean; onCancel: () => void
+function UpdateOverlay({ active, stage, startedAt, shared, rollback, branch, buildMode, refreshing, canCancel, canceling, onCancel, onMinimize }: {
+  active: boolean; stage: UpdateStage; startedAt: number | null; shared: boolean; rollback: boolean; branch?: string; buildMode?: string; refreshing: boolean; canCancel: boolean; canceling: boolean; onCancel: () => void; onMinimize: () => void
 }) {
   const [elapsed, setElapsed] = useState(0)
   const overlayRef = useRef<HTMLDivElement>(null)
@@ -510,7 +511,7 @@ function UpdateOverlay({ active, stage, startedAt, shared, rollback, branch, bui
     : ['آماده‌سازی کد و وابستگی‌ها', 'کامپایل نسخهٔ جدید پنل', 'نصب فایل‌های کامپایل‌شده', 'راه‌اندازی مجدد سرویس ARG', 'بررسی سلامت نسخهٔ جدید']
   return <div ref={overlayRef} tabIndex={-1} className="fixed inset-0 z-[100] grid place-items-center bg-[#080d12]/95 p-4 backdrop-blur-md outline-none" role="alertdialog" aria-modal="true" aria-labelledby="update-overlay-title" aria-describedby="update-overlay-description">
     <div className="arg-glass-popover max-h-[calc(100dvh-2rem)] w-full max-w-xl overflow-y-auto rounded-2xl border border-[#dda46f]/25 p-5 text-right sm:p-7">
-      <div className="flex items-center gap-3"><div className="relative grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-[#ffcb91]/40 bg-[#dda46f]/15 text-[#ffd19a] shadow-[0_0_26px_rgba(221,164,111,.25)]"><RefreshCw size={22} className="animate-spin"/><i className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full bg-[#ffe2b9] shadow-[0_0_12px_#dda46f]"/></div><div><h2 id="update-overlay-title" className="text-lg font-bold text-white">{refreshing ? 'در حال بارگذاری نسخهٔ جدید' : rollback ? 'در حال بازگشت ARG' : 'در حال به‌روزرسانی ARG'}</h2><p id="update-overlay-description" className="mt-1 text-xs leading-6 text-slate-300">{refreshing ? 'پس از رفرش کامل، تغییرات نسخهٔ نصب‌شده نمایش داده می‌شود.' : shared ? (rollback ? 'بازگشت در نشست دیگری شروع شده؛ وضعیت واقعی سرور نمایش داده می‌شود.' : 'آپدیت در نشست دیگری شروع شده؛ مراحل واقعی سرور نمایش داده می‌شوند.') : rollback ? 'نسخه و دیتابیس قبلی در حال بازیابی و بررسی سلامت هستند.' : 'مراحل مطابق وضعیت سرور نمایش داده می‌شوند، نه درصد تخمینی.'}</p></div></div>
+      <div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><div className="relative grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-[#ffcb91]/40 bg-[#dda46f]/15 text-[#ffd19a] shadow-[0_0_26px_rgba(221,164,111,.25)]"><RefreshCw size={22} className="animate-spin"/><i className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full bg-[#ffe2b9] shadow-[0_0_12px_#dda46f]"/></div><div className="min-w-0"><h2 id="update-overlay-title" className="text-lg font-bold text-white">{refreshing ? 'در حال بارگذاری نسخهٔ جدید' : rollback ? 'در حال بازگشت ARG' : 'در حال به‌روزرسانی ARG'}</h2><p id="update-overlay-description" className="mt-1 text-xs leading-6 text-slate-300">{refreshing ? 'پس از رفرش کامل، تغییرات نسخهٔ نصب‌شده نمایش داده می‌شود.' : shared ? (rollback ? 'بازگشت در نشست دیگری شروع شده؛ وضعیت واقعی سرور نمایش داده می‌شود.' : 'آپدیت در نشست دیگری شروع شده؛ مراحل واقعی سرور نمایش داده می‌شوند.') : rollback ? 'نسخه و دیتابیس قبلی در حال بازیابی و بررسی سلامت هستند.' : 'مراحل مطابق وضعیت سرور نمایش داده می‌شوند، نه درصد تخمینی.'}</p></div></div><Button type="button" variant="ghost" size="icon" onClick={onMinimize} aria-label="کوچک‌کردن پنجرهٔ وضعیت آپدیت" title="کوچک‌کردن؛ عملیات ادامه پیدا می‌کند" className="h-9 w-9 shrink-0 text-slate-300 hover:bg-white/10 hover:text-white"><Minimize2 size={17}/></Button></div>
       <div className="mt-5 flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/20 px-4 py-3"><span className="text-xs font-semibold text-[#ffd29c]">{refreshing ? 'آماده‌سازی رابط جدید…' : descriptions[stage - 1]}</span><span className="rounded-md bg-[#dda46f]/10 px-2 py-1 font-mono text-xs tabular-nums text-[#ffca91]" dir="ltr">{elapsedLabel}</span></div>
       {!refreshing && !rollback && (branch || buildMode) && <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-slate-300"><span className="rounded-md border border-white/10 bg-white/[.03] px-2 py-1">شاخه: <b className="font-mono text-[#ffd19a]" dir="ltr">{branch || '—'}</b></span><span className="rounded-md border border-white/10 bg-white/[.03] px-2 py-1">حالت ساخت: <b className="font-mono text-[#ffd19a]" dir="ltr">{buildMode === 'fast' ? 'fast' : buildMode === 'complete' ? 'complete' : '—'}</b></span></div>}
       {!refreshing && <div className="mt-5"><UnifiedStepper progressLabel={rollback ? 'پیشرفت بازگشت نسخه' : 'پیشرفت به‌روزرسانی'} ariaLabel={rollback ? 'مراحل بازگشت نسخه' : 'مراحل به‌روزرسانی'} currentStep={stage - 1} compact={false} steps={labels.map((title, index) => ({ id: `${index + 1}`, title }))}/><p className="mt-3 text-xs leading-6 text-slate-400">مراحل پایان‌یافته تیک می‌خورند؛ وضعیت جاری از Backend گرفته می‌شود و پیشرفت تخمینی نمایش داده نمی‌شود.</p></div>}
@@ -599,6 +600,7 @@ export default function App() {
   const [updateConfirmAction, setUpdateConfirmAction] = useState<'cancel' | 'rollback' | null>(null)
   const [reloadQueued, setReloadQueued] = useState(false)
   const [updateFinished, setUpdateFinished] = useState(false)
+  const [updateOverlayMinimized, setUpdateOverlayMinimized] = useState(false)
   useEffect(() => {
     if (!updateDialogOpen || !updateFinished || latestChangelog) return
     let active = true
@@ -730,12 +732,14 @@ export default function App() {
         if (progress.updating) {
           if (progress.job_id && sharedUpdateJobId.current !== progress.job_id) {
             sharedUpdateJobId.current = progress.job_id
+            setUpdateOverlayMinimized(false)
             setSharedUpdateStage(updateStageFor(progress.phase))
           } else {
             setSharedUpdateStage((current) => Math.max(current, updateStageFor(progress.phase)) as UpdateStage)
           }
           if (!sharedUpdateWasActive.current) {
             sharedUpdateWasActive.current = true
+            setUpdateOverlayMinimized(false)
             sharedUpdateStartInstance.current = progress.instance
             sharedUpdateStartVersion.current = update.local || null
           } else if (sharedUpdateStartInstance.current && progress.instance !== sharedUpdateStartInstance.current) {
@@ -823,6 +827,7 @@ export default function App() {
     setUpdateFinished(false)
     setUpdateDialogOpen(false)
     setReloadQueued(true)
+    setUpdateOverlayMinimized(false)
     window.setTimeout(() => void forceFreshPanelReload(true), 1200)
   }
   async function cancelUpdate() {
@@ -859,6 +864,7 @@ export default function App() {
     if (user?.role !== 'admin' || rollingBack) return
     setUpdateConfirmAction(null)
     setRollingBack(true)
+    setUpdateOverlayMinimized(false)
     try {
       await api('update/rollback', { method: 'POST' })
       setUpdateConfirmAction(null)
@@ -892,6 +898,7 @@ export default function App() {
     setUpdateFailure(null)
     setUpdateFinished(false)
     setReloadQueued(false)
+    setUpdateOverlayMinimized(false)
     reloadScheduled.current = false
     let baselineInstance = update.instance || null
     try {
@@ -1021,7 +1028,8 @@ export default function App() {
   const currentPageLabel = allowedPages.find((item) => item.id === currentPage)?.label || 'نمای کلی'
   const activeWorkspace = workspaceNodes.find((node) => node.workspace_key === workspaceNodeId)
   const currentWorkspaceLabel = workspaceNodeId === 'all' ? 'همهٔ سرورها' : activeWorkspace?.public_name || activeWorkspace?.name || 'این VPS'
-  const updateLocked = updating || reloadQueued || (!reloadScheduled.current && sharedUpdate.updating)
+  const updateInProgress = updating || reloadQueued || (!reloadScheduled.current && sharedUpdate.updating)
+  const updateLocked = updateInProgress && !updateOverlayMinimized
   const activeUpdateStage: UpdateStage = reloadQueued ? 5 : updating ? updateStage : sharedUpdateStage
   const activeUpdateStartedAt = updating ? updateStartedAt : sharedUpdate.started_at ? sharedUpdate.started_at * 1000 : null
   function selectPage(next: PageId) {
@@ -1081,7 +1089,7 @@ export default function App() {
               <>
                 {user.role === 'admin' && workspaceMode === 'multi' && <label className="mr-1 flex h-9 max-w-[148px] shrink-0 items-center rounded-lg border border-border/70 bg-background/70 px-2 sm:max-w-[180px]"><span className="sr-only">فضای کار</span><select aria-label="انتخاب فضای کار VPS" value={workspaceNodeId} onChange={(event) => { const key = event.target.value; if (key === 'all') { openWorkspace('all'); return } const selected = workspaceNodes.find((node) => node.workspace_key === key); if (key && !selected?.workspace_ready) { notifyUser('این Node برای فضای کار کامل آماده نیست؛ آن را حذف و دوباره جفت‌سازی کن.'); return } openWorkspace(key) }} className="min-w-0 max-w-full bg-transparent text-xs text-foreground outline-none"><option value="">این VPS</option><option value="all">همهٔ سرورها · فقط خواندنی</option>{workspaceNodes.map((node) => <option key={node.workspace_key} value={node.workspace_key} disabled={!node.workspace_ready}>{node.public_name && node.public_name !== node.name ? `${node.public_name} · ${node.name}` : node.public_name || node.name}{node.workspace_ready ? '' : ' · نیاز به جفت‌سازی'}</option>)}</select></label>}
                 <ThemeToggle />
-                <Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateLocked} aria-busy={checkingUpdate || updateLocked} aria-label="بررسی و به‌روزرسانی پنل" title={updateLocked ? 'به‌روزرسانی سرور در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative h-9 w-9 shrink-0 text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateLocked ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button>
+                <Button variant="ghost" size="icon" onClick={() => void openUpdateDialog()} disabled={checkingUpdate || updateInProgress} aria-busy={checkingUpdate || updateInProgress} aria-label="بررسی و به‌روزرسانی پنل" title={updateInProgress ? 'به‌روزرسانی پنل در حال انجام است' : checkingUpdate ? 'در حال بررسی نسخه‌ها…' : 'بررسی و به‌روزرسانی پنل'} className="relative h-9 w-9 shrink-0 text-muted-foreground hover:text-primary"><RefreshCw size={17} className={checkingUpdate || updateInProgress ? 'animate-spin' : ''}/>{update.status === 'available' && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400"/>}</Button>
                 <a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground" aria-label="GitHub پروژه" title="GitHub پروژه"><Github size={18}/></a>
                 <a href="https://themrcortex.github.io/arg/" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground" aria-label="مستندات ARG" title="مستندات ARG"><BookOpen size={17}/></a>
                 <a href="https://t.me/mrc0rtex" target="_blank" rel="noopener noreferrer" className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-muted-foreground transition hover:bg-accent hover:text-foreground" aria-label="راهنما و پشتیبانی" title="راهنما و پشتیبانی"><LifeBuoy size={18}/></a>
@@ -1116,7 +1124,7 @@ export default function App() {
               {currentPage === 'mysql' && user.role === 'admin' && <MysqlPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'users' && user.role === 'admin' && <UsersPage current={user} Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'audit' && user.role === 'admin' && <AuditPage Heading={PageHeading} notify={notifyUser} />}
-              {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateLocked} checkingUpdate={checkingUpdate} panelTimeZone={panelTimeZone} onTimeZoneChange={setPanelTimeZone} />}
+              {currentPage === 'settings' && <SettingsPage Heading={PageHeading} notify={notifyUser} user={user} update={update} openUpdateDialog={() => void openUpdateDialog()} updating={updateInProgress} checkingUpdate={checkingUpdate} panelTimeZone={panelTimeZone} onTimeZoneChange={setPanelTimeZone} />}
               {currentPage === 'account' && <AccountPage Heading={PageHeading} user={user} setUser={(next) => setUser(next)} logout={logout} notify={notifyUser} />}
               {currentPage === 'bug-report' && <BugReportPage Heading={PageHeading} notify={notifyUser} version={update.local_version} commit={update.local} page={currentPage} />}
             </>}
@@ -1129,9 +1137,10 @@ export default function App() {
           </main>
         </div>
         <Toaster />
-        <UpdateOverlay active={updateLocked} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating} rollback={sharedUpdate.operation === 'rollback' || (sharedUpdate.job_id?.startsWith('arg-rollback-') ?? false)} branch={sharedUpdate.branch} buildMode={sharedUpdate.build_mode} refreshing={reloadQueued} canCancel={user.role === 'admin'} canceling={cancelingUpdate} onCancel={() => void cancelUpdate()}/>
+        <UpdateOverlay active={updateInProgress && !updateOverlayMinimized} stage={activeUpdateStage} startedAt={activeUpdateStartedAt} shared={sharedUpdate.updating && !updating} rollback={sharedUpdate.operation === 'rollback' || (sharedUpdate.job_id?.startsWith('arg-rollback-') ?? false)} branch={sharedUpdate.branch} buildMode={sharedUpdate.build_mode} refreshing={reloadQueued} canCancel={user.role === 'admin'} canceling={cancelingUpdate} onCancel={() => void cancelUpdate()} onMinimize={() => setUpdateOverlayMinimized(true)}/>
+        {updateInProgress && updateOverlayMinimized && <button type="button" onClick={() => setUpdateOverlayMinimized(false)} className="fixed bottom-4 right-4 z-[95] flex max-w-[calc(100vw-2rem)] items-center gap-3 rounded-xl border border-primary/30 bg-card/95 px-4 py-3 text-right text-sm text-foreground shadow-xl backdrop-blur-md transition hover:border-primary/50 hover:bg-card" aria-label="بازکردن وضعیت به‌روزرسانی پنل"><RefreshCw size={16} className="shrink-0 animate-spin text-primary"/><span className="min-w-0"><b className="block">به‌روزرسانی پنل در حال اجراست</b><span className="block truncate text-xs text-muted-foreground">{activeUpdateStage === 2 ? 'در حال کامپایل…' : 'عملیات ادامه دارد؛ برای نمایش جزئیات کلیک کن'}</span></span></button>}
         <UpdateActionConfirmation action={updateConfirmAction} busy={cancelingUpdate || rollingBack} onCancel={() => setUpdateConfirmAction(null)} onConfirm={() => void (updateConfirmAction === 'rollback' ? executeRollbackUpdate() : executeCancelUpdate())}/>
-        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateLocked) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateLocked} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog || 'در حال بارگذاری تغییرات نسخه…'} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} updateBranch={updateBranch} onUpdateBranchChange={changeUpdateBranch} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onRollback={() => void rollbackUpdate()} rollingBack={rollingBack} onForceRefresh={() => void forceFreshPanelReload(false)}/>
+        <UpdateDialog open={updateDialogOpen} onOpenChange={(open) => { if (!updateInProgress) setUpdateDialogOpen(open); if (!open) { setUpdateFinished(false); setUpdateFailure(null); setReloadQueued(false) } }} update={update} checking={checkingUpdate} updating={updateInProgress} finished={updateFinished} refreshing={reloadQueued} failure={updateFailure} canInstall={user.role === 'admin'} changelog={latestChangelog || 'در حال بارگذاری تغییرات نسخه…'} buildMode={updateBuildMode} onBuildModeChange={changeUpdateBuildMode} updateBranch={updateBranch} onUpdateBranchChange={changeUpdateBranch} onCheck={() => void openUpdateDialog()} onInstall={(mode) => void runUpdate(mode)} onRollback={() => void rollbackUpdate()} rollingBack={rollingBack} onForceRefresh={() => void forceFreshPanelReload(false)}/>
       </AppShell>
     </PanelTimeZoneContext.Provider>
   )

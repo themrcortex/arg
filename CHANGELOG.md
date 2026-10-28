@@ -22,6 +22,8 @@
 - Use the provided ARG logo in the sign-in screen and sidebar, show its cropped symbol in the collapsed sidebar, and remove the duplicate control-center and LIVE labels.
 
 ### Fixed
+- Keep the global ARG updater scoped to the current control panel so an update started for a managed Node cannot lock navigation across the controller workspace.
+- Let administrators minimize a running panel update into a compact status control; monitoring continues and the full progress view can be reopened without interrupting the update.
 - Rebuild and commit the embedded frontend bundle with UI source changes; CI now fails when `frontend/dist` is stale, preventing Rust releases from silently shipping the previous interface.
 - Fingerprint the service worker from the generated frontend and check for updates when the panel opens, regains focus, or remains active, then reload when a new worker takes control.
 
