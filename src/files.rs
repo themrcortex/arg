@@ -1,6 +1,9 @@
 use super::*;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
+const MAX_FILE_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
+const MAX_EDITOR_FILE_BYTES: usize = 1024 * 1024;
+
 #[derive(Deserialize)]
 pub(super) struct FileQuery {
     path: Option<String>,
@@ -20,6 +23,24 @@ fn default_scan_root() -> String {
 
 fn default_scan_mode() -> String {
     "standard".into()
+}
+
+fn max_base64_encoded_bytes(raw_limit: usize) -> usize {
+    raw_limit.saturating_add(2).saturating_div(3).saturating_mul(4)
+}
+
+fn file_content_limit(action: &str) -> Option<usize> {
+    match action {
+        "upload" => Some(MAX_FILE_UPLOAD_BYTES),
+        "save" => Some(MAX_EDITOR_FILE_BYTES),
+        _ => None,
+    }
+}
+
+fn file_content_within_limit(action: &str, encoded_len: usize) -> bool {
+    file_content_limit(action)
+        .map(|limit| encoded_len <= max_base64_encoded_bytes(limit))
+        .unwrap_or(true)
 }
 
 #[derive(Deserialize)]
@@ -181,11 +202,13 @@ pub(super) async fn file_action(
     if !allowed.contains(&input.action.as_str()) {
         return Err(error(StatusCode::BAD_REQUEST, "Unsupported file operation"));
     }
-    if input.content.len() > 3 * 1024 * 1024 {
-        return Err(error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "File content exceeds the 2 MiB upload limit",
-        ));
+    if !file_content_within_limit(&input.action, input.content.len()) {
+        let message = if input.action == "save" {
+            "Edited file content exceeds the 1 MiB limit"
+        } else {
+            "File content exceeds the 2 MiB upload limit"
+        };
+        return Err(error(StatusCode::PAYLOAD_TOO_LARGE, message));
     }
     let response = privileged_request_async(json!({
         "action":"file-action", "operation":input.action, "path":input.path,
@@ -674,7 +697,7 @@ fn execute_action(request: &Value) -> Result<Value, String> {
                     let content = BASE64
                         .decode(encoded)
                         .map_err(|_| "Invalid upload encoding")?;
-                    if content.len() > 2 * 1024 * 1024 {
+                    if content.len() > MAX_FILE_UPLOAD_BYTES {
                         return Err("Uploads are limited to 2 MiB per file.".into());
                     }
                     let mut file = std::fs::OpenOptions::new()
@@ -701,7 +724,7 @@ fn execute_action(request: &Value) -> Result<Value, String> {
             let content = BASE64
                 .decode(encoded)
                 .map_err(|_| "Invalid file encoding")?;
-            if content.len() > 1024 * 1024 {
+            if content.len() > MAX_EDITOR_FILE_BYTES {
                 return Err("The editor is limited to 1 MiB per file.".into());
             }
             save_file_atomically(&target, &content)?;
@@ -1219,9 +1242,11 @@ fn create_safe_directories(root: &std::path::Path, target: &std::path::Path) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_tree, create_zip_archive, extract_zip_archive, remove_tree, safe_name,
-        scan_disk_usage, valid_mode,
+        copy_tree, create_zip_archive, execute_action, extract_zip_archive,
+        file_content_limit, file_content_within_limit, max_base64_encoded_bytes, remove_tree,
+        safe_name, scan_disk_usage, valid_mode, BASE64, MAX_FILE_UPLOAD_BYTES,
     };
+    use base64::Engine;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::{fs, os::unix::fs::symlink, path::PathBuf};
 
@@ -1248,6 +1273,46 @@ mod tests {
         assert!(valid_mode("755"));
         assert!(!valid_mode("0899"));
         assert!(!valid_mode("77777"));
+    }
+
+    #[test]
+    fn upload_request_limit_accounts_for_base64_and_matches_decoded_file_limit() {
+        let encoded_limit = max_base64_encoded_bytes(MAX_FILE_UPLOAD_BYTES);
+        assert_eq!(encoded_limit, 2_796_204);
+        assert_eq!(file_content_limit("upload"), Some(MAX_FILE_UPLOAD_BYTES));
+        assert!(encoded_limit <= 3 * 1024 * 1024);
+        assert!(file_content_within_limit("upload", encoded_limit));
+        assert!(!file_content_within_limit("upload", encoded_limit + 1));
+
+        let root = test_dir();
+        let payload = vec![b'x'; MAX_FILE_UPLOAD_BYTES];
+        let encoded = BASE64.encode(&payload);
+        assert_eq!(encoded.len(), encoded_limit);
+        execute_action(&serde_json::json!({
+            "operation": "upload",
+            "path": root,
+            "name": "at-limit.bin",
+            "content": encoded,
+        }))
+        .expect("2 MiB upload is accepted by the privileged layer");
+
+        let oversized = BASE64.encode(vec![b'x'; MAX_FILE_UPLOAD_BYTES + 1]);
+        let error = execute_action(&serde_json::json!({
+            "operation": "upload",
+            "path": root,
+            "name": "over-limit.bin",
+            "content": oversized,
+        }))
+        .expect_err("one byte over the raw limit must be rejected");
+        assert!(error.contains("2 MiB"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn editor_request_limit_matches_its_one_mibibyte_file_limit() {
+        let encoded_limit = max_base64_encoded_bytes(1024 * 1024);
+        assert_eq!(encoded_limit, 1_398_104);
+        assert_eq!(file_content_limit("save"), Some(1024 * 1024));
     }
 
     #[test]
