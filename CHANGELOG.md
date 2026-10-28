@@ -13,6 +13,8 @@
 ## Unreleased
 
 ### Added
+- Add configurable Node package build/start scripts (selected by manifest name only) and a per-app HTTP health-check path; running services can be safely regenerated and health-verified.
+- Persist bounded deployment job output and stage events with cursor pagination, including recovery notes for older queued jobs.
 - Show update alerts for managed Nodes, open the matching update dialog from the alert, and transfer bounded remote update logs and stage metadata.
 - Add private GitHub deployment through repository-scoped Ed25519 Deploy Keys, managed SSH keys, and per-application deployment settings.
 - Add an optional ARG Mesh topology widget based on live Node probes, with measured latency, payload and TLS transport details.
@@ -29,6 +31,7 @@
 - Use the provided ARG logo in the sign-in screen and sidebar, show its cropped symbol in the collapsed sidebar, and remove the duplicate control-center and LIVE labels.
 
 ### Fixed
+- Normalize ZIP uploads with one shared top-level project directory, and commit a deployment job with its first stage atomically so failed stage writes cannot leave a permanently queued row.
 - Keep deployment job status and detailed live stage logs readable after refresh; report database/migration failures with the actual cause.
 - Use lower-memory Rust release build settings on constrained VPSs; keep updater cleanup and rollback state valid after `update_app` exits.
 - Report compiler failures before binary replacement, release the update reservation, and leave the currently running panel binary untouched.

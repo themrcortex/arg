@@ -47,6 +47,13 @@ pub(super) struct RetryRequest {
     idempotency_key: String,
 }
 
+#[derive(Deserialize, Default)]
+pub(super) struct JobLogsQuery {
+    after: Option<i64>,
+    before: Option<i64>,
+    limit: Option<i64>,
+}
+
 pub(super) fn deployment_root() -> PathBuf {
     env::var_os("ARG_DEPLOY_ROOT")
         .map(PathBuf::from)
@@ -199,7 +206,6 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, updated_at INTEGER NOT NULL,
             UNIQUE(application_id,idempotency_key));
          CREATE INDEX IF NOT EXISTS deployment_jobs_queue ON deployment_jobs(state,created_at);
-         CREATE UNIQUE INDEX IF NOT EXISTS deployment_one_active_job_per_app ON deployment_jobs(application_id) WHERE state IN ('queued','validating','running','verifying');
          CREATE INDEX IF NOT EXISTS deployment_jobs_app ON deployment_jobs(application_id,created_at DESC);
          CREATE TABLE IF NOT EXISTS deployment_job_steps (
             id INTEGER PRIMARY KEY, job_id TEXT NOT NULL REFERENCES deployment_jobs(id) ON DELETE CASCADE,
@@ -209,7 +215,7 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id),
             job_id TEXT NOT NULL UNIQUE REFERENCES deployment_jobs(id), path TEXT NOT NULL,
             state TEXT NOT NULL, source_commit TEXT, created_at INTEGER NOT NULL, activated_at INTEGER);
-         CREATE INDEX IF NOT EXISTS deployment_releases_app ON deployment_releases(application_id,created_at DESC);",
+         ",
     )?;
     // CREATE TABLE IF NOT EXISTS does not update older deployment databases.
     // Add fields introduced after the original schema before any endpoint
@@ -239,6 +245,69 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     ] {
         if !columns.contains(name) {
             db.execute(&format!("ALTER TABLE deployment_jobs ADD COLUMN {name} {definition}"), [])?;
+        }
+    }
+    // Repair duplicate active rows left by older non-transactional enqueue
+    // paths before restoring the one-active-job constraint. Keep the newest
+    // row for each app; mark older orphan rows failed instead of blocking the
+    // entire database migration.
+    db.execute(
+        "UPDATE deployment_jobs SET state='failed',error_summary='Job قدیمی به‌علت اجرای هم‌زمان تکراری در صف نگه داشته نشد.',finished_at=COALESCE(finished_at,?1),updated_at=?1 WHERE state IN ('queued','validating','running','verifying') AND id<>(SELECT newest.id FROM deployment_jobs newest WHERE newest.application_id=deployment_jobs.application_id AND newest.state IN ('queued','validating','running','verifying') ORDER BY newest.created_at DESC,newest.id DESC LIMIT 1)",
+        [now()],
+    )?;
+    db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS deployment_one_active_job_per_app ON deployment_jobs(application_id) WHERE state IN ('queued','validating','running','verifying');")?;
+    // Older installs may already have created the step/release tables with a
+    // partial schema. Bring those forward additively before any job can be
+    // inserted, so a failed step write cannot strand a queued job.
+    ensure_table_columns(db, "deployment_job_steps", &[
+        ("job_id", "TEXT NOT NULL DEFAULT ''"),
+        ("sequence", "INTEGER NOT NULL DEFAULT 0"),
+        ("step", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("state", "TEXT NOT NULL DEFAULT 'pending'"),
+        ("message", "TEXT NOT NULL DEFAULT ''"),
+        ("started_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("finished_at", "INTEGER"),
+    ])?;
+    ensure_table_columns(db, "deployment_releases", &[
+        ("application_id", "TEXT NOT NULL DEFAULT ''"),
+        ("job_id", "TEXT NOT NULL DEFAULT ''"),
+        ("path", "TEXT NOT NULL DEFAULT ''"),
+        ("state", "TEXT NOT NULL DEFAULT 'retained'"),
+        ("source_commit", "TEXT"),
+        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("activated_at", "INTEGER"),
+    ])?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS deployment_releases_app ON deployment_releases(application_id,created_at DESC);")?;
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS deployment_job_logs (
+            id INTEGER PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES deployment_jobs(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL,
+            step TEXT NOT NULL,
+            level TEXT NOT NULL DEFAULT 'info',
+            message TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS deployment_job_logs_cursor ON deployment_job_logs(job_id,id);",
+    )?;
+    db.execute(
+        "INSERT INTO deployment_job_steps(job_id,sequence,step,state,message,started_at,finished_at) SELECT jobs.id,1,'recovered','complete','Job باقی‌مانده از نسخهٔ قبلی بازیابی شد؛ اجرای آن ادامه پیدا می‌کند.',jobs.created_at,jobs.created_at FROM deployment_jobs jobs WHERE jobs.state='queued' AND NOT EXISTS (SELECT 1 FROM deployment_job_steps steps WHERE steps.job_id=jobs.id)",
+        [],
+    )?;
+    db.execute(
+        "INSERT INTO deployment_job_logs(job_id,created_at,step,level,message) SELECT jobs.id,jobs.created_at,'recovered','warning','Job قدیمی بدون مرحلهٔ ثبت‌شده بازیابی شد.' FROM deployment_jobs jobs WHERE jobs.state='queued' AND NOT EXISTS (SELECT 1 FROM deployment_job_logs logs WHERE logs.job_id=jobs.id)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_table_columns(db: &Connection, table: &str, expected: &[(&str, &str)]) -> rusqlite::Result<()> {
+    let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<std::collections::HashSet<_>, _>>()?;
+    drop(statement);
+    for (name, definition) in expected {
+        if !columns.contains(*name) {
+            db.execute(&format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"), [])?;
         }
     }
     Ok(())
@@ -492,35 +561,41 @@ fn insert_job(
     } else {
         None
     };
-    let db = state.lock().unwrap();
-    let inserted = db.execute(
+    let mut db = state.lock().unwrap();
+    let response = match persist_new_job(
+        &mut db,&job_id,app_id,&owner,&actor,&source_json,&key,healthcheck.as_deref(),at,source_kind(&source),
+    ) {
+        Ok(value) => value,
+        Err(error_value) => {
+        if let Some(path) = archive_path.as_deref() { let _ = fs::remove_file(path); }
+        return Err(db_error(error_value));
+        }
+    };
+    Ok(response)
+}
+
+fn persist_new_job(
+    db: &mut Connection,
+    job_id: &str,
+    app_id: &str,
+    owner: &str,
+    actor: &str,
+    source_json: &str,
+    key: &str,
+    healthcheck: Option<&str>,
+    at: i64,
+    source: &str,
+) -> rusqlite::Result<Value> {
+    let transaction = db.transaction()?;
+    transaction.execute(
         "INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,healthcheck_file,created_at,updated_at) VALUES (?1,?2,?3,?4,'queued',?5,?6,?7,?8,?8)",
         params![job_id,app_id,owner,actor,source_json,key,healthcheck,at],
-    );
-    if let Err(e) = inserted {
-        if let Some(path) = archive_path {
-            let _ = fs::remove_file(path);
-        }
-        return Err(db_error(e));
-    }
-    add_step(
-        &db,
-        &job_id,
-        "queued",
-        "complete",
-        "در صف اجرای محدود سرور قرار گرفت.",
-    )
-    .map_err(db_error)?;
-    audit(
-        &db,
-        &actor,
-        "deployment.enqueue",
-        &format!(
-            "job={job_id}; app={app_id}; source={}",
-            source_kind(&source)
-        ),
-    );
-    read_job(&db, &job_id).map_err(db_error)
+    )?;
+    add_step(&transaction,job_id,"queued","complete","در صف اجرای محدود سرور قرار گرفت.")?;
+    audit(&transaction,actor,"deployment.enqueue",&format!("job={job_id}; app={app_id}; source={source}"));
+    let response = read_job(&transaction,job_id)?;
+    transaction.commit()?;
+    Ok(response)
 }
 
 fn source_kind(source: &Source) -> &'static str {
@@ -537,7 +612,13 @@ fn excluded_source_path(path: &FsPath) -> bool {
             return false;
         };
         name.to_str().is_some_and(|name| {
-            name == ".git" || name == "node_modules" || name == ".env" || name.starts_with(".env.")
+            name == ".git"
+                || name == "node_modules"
+                || name == "__MACOSX"
+                || name == ".DS_Store"
+                || name.starts_with("._")
+                || name == ".env"
+                || name.starts_with(".env.")
         })
     })
 }
@@ -555,6 +636,26 @@ fn add_step(
         |row| row.get(0),
     )?;
     db.execute("INSERT INTO deployment_job_steps(job_id,sequence,step,state,message,started_at,finished_at) VALUES (?1,?2,?3,?4,?5,?6,?6)",params![job_id,sequence,step,state,message,now()])?;
+    append_job_log(db, job_id, step, if state == "failed" { "error" } else { "info" }, message)?;
+    Ok(())
+}
+
+fn append_job_log(db: &Connection, job_id: &str, step: &str, level: &str, message: &str) -> rusqlite::Result<()> {
+    let bounded = message.chars().take(8_000).collect::<String>();
+    db.execute(
+        "INSERT INTO deployment_job_logs(job_id,created_at,step,level,message) VALUES (?1,?2,?3,?4,?5)",
+        params![job_id, now(), step.chars().take(64).collect::<String>(), level, bounded],
+    )?;
+    prune_job_logs(db, job_id)
+}
+
+fn prune_job_logs(db: &Connection, job_id: &str) -> rusqlite::Result<()> {
+    // Retain the newest 2,000 events per job; the cursor endpoint can page
+    // older retained records without loading the entire deployment history.
+    db.execute(
+        "DELETE FROM deployment_job_logs WHERE job_id=?1 AND id NOT IN (SELECT id FROM deployment_job_logs WHERE job_id=?1 ORDER BY id DESC LIMIT 2000)",
+        [job_id],
+    )?;
     Ok(())
 }
 
@@ -565,9 +666,61 @@ fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
     )?;
     let mut statement = db.prepare("SELECT sequence,step,state,message,started_at,finished_at FROM deployment_job_steps WHERE job_id=?1 ORDER BY sequence")?;
     let steps = statement.query_map([job_id], |r| Ok(json!({"sequence":r.get::<_,i64>(0)?,"step":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"message":r.get::<_,String>(3)?,"started_at":r.get::<_,i64>(4)?,"finished_at":r.get::<_,Option<i64>>(5)?})))?.collect::<Result<Vec<_>,_>>()?;
+    let mut log_statement = db.prepare("SELECT id,created_at,step,level,message FROM deployment_job_logs WHERE job_id=?1 ORDER BY id DESC LIMIT 20")?;
+    let mut logs = log_statement.query_map([job_id], |r| Ok(json!({"id":r.get::<_,i64>(0)?,"created_at":r.get::<_,i64>(1)?,"step":r.get::<_,String>(2)?,"level":r.get::<_,String>(3)?,"message":r.get::<_,String>(4)?})))?.collect::<Result<Vec<_>,_>>()?;
+    logs.reverse();
+    let log_count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_job_logs WHERE job_id=?1", [job_id], |r| r.get(0))?;
     Ok(
-        json!({"id":row.0,"application_id":row.1,"owner_server_uuid":row.2,"actor":row.3,"state":row.4,"attempt":row.5,"created_at":row.6,"started_at":row.7,"finished_at":row.8,"release_path":row.9,"previous_release":row.10,"source_commit":row.11,"error":row.12,"steps":steps}),
+        json!({"id":row.0,"application_id":row.1,"owner_server_uuid":row.2,"actor":row.3,"state":row.4,"attempt":row.5,"created_at":row.6,"started_at":row.7,"finished_at":row.8,"release_path":row.9,"previous_release":row.10,"source_commit":row.11,"error":row.12,"steps":steps,"logs":logs,"log_count":log_count}),
     )
+}
+
+pub(super) async fn logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(job_id): Path<String>,
+    Query(query): Query<JobLogsQuery>,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let job_owner: Option<String> = db.query_row("SELECT owner_server_uuid FROM deployment_jobs WHERE id=?1", [&job_id], |row| row.get(0)).optional().map_err(db_error)?;
+    if job_owner.as_deref() != Some(owner.as_str()) {
+        return Err(api_error(StatusCode::NOT_FOUND,"Job پیدا نشد."));
+    }
+    let after = query.after.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(100).clamp(1,500);
+    let (sql, cursor) = if let Some(before) = query.before {
+        ("SELECT id,created_at,step,level,message FROM deployment_job_logs WHERE job_id=?1 AND id<?2 ORDER BY id DESC LIMIT ?3", before.max(0))
+    } else {
+        ("SELECT id,created_at,step,level,message FROM deployment_job_logs WHERE job_id=?1 AND id>?2 ORDER BY id LIMIT ?3", after)
+    };
+    let mut statement = db.prepare(sql).map_err(db_error)?;
+    let mut values = statement.query_map(params![job_id,cursor,limit], |row| Ok(json!({"id":row.get::<_,i64>(0)?,"created_at":row.get::<_,i64>(1)?,"step":row.get::<_,String>(2)?,"level":row.get::<_,String>(3)?,"message":row.get::<_,String>(4)?}))).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+    if query.before.is_some() { values.reverse(); }
+    let next_after = values.last().and_then(|value| value["id"].as_i64()).unwrap_or(after);
+    let next_before = values.first().and_then(|value| value["id"].as_i64());
+    Ok(Json(json!({"logs":values,"next_after":next_after,"next_before":next_before,"retention_per_job":2000})))
+}
+
+pub(super) fn record_output(state: &AppState, job_id: &str, step: &str, output: &str) {
+    let mut db = state.lock().unwrap();
+    let Ok(transaction) = db.transaction() else { return };
+    for line in output.lines().take(600) {
+        let line = line.trim_end();
+        if !line.is_empty() {
+            let bounded = line.chars().take(8_000).collect::<String>();
+            if transaction.execute(
+                "INSERT INTO deployment_job_logs(job_id,created_at,step,level,message) VALUES (?1,?2,?3,'output',?4)",
+                params![job_id,now(),step.chars().take(64).collect::<String>(),bounded],
+            ).is_err() {
+                return;
+            }
+        }
+    }
+    if prune_job_logs(&transaction, job_id).is_ok() {
+        let _ = transaction.commit();
+    }
 }
 
 fn list_jobs(db: &Connection, app_id: &str, limit: i64) -> rusqlite::Result<Vec<Value>> {
@@ -1426,7 +1579,7 @@ fn claim_next(state: &AppState) -> Option<String> {
     Some(job)
 }
 
-fn progress(state: &AppState, job_id: &str, job_state: &str, step: &str, message: &str) {
+pub(super) fn progress(state: &AppState, job_id: &str, job_state: &str, step: &str, message: &str) {
     let db = state.lock().unwrap();
     let at = now();
     let _=db.execute("UPDATE deployment_jobs SET state=?1,lease_until=?2,heartbeat_at=?3,updated_at=?3 WHERE id=?4",params![job_state,at+30,at,job_id]);
@@ -1657,17 +1810,17 @@ async fn process_job(state: AppState, job_id: String) {
         );
         return;
     }
-    let (framework, build_runtime_version, domain, static_output_path, static_spa_fallback, build_environment_json) = {
+    let (framework, build_runtime_version, domain, static_output_path, static_spa_fallback, build_environment_json, node_build_script, node_start_script) = {
         let db = state.lock().unwrap();
         db.query_row(
-            "SELECT framework,build_runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json FROM applications WHERE id=?1",
+            "SELECT framework,build_runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json,node_build_script,node_start_script FROM applications WHERE id=?1",
             [&app_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, String>(5)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, String>(5)?, row.get::<_,String>(6)?, row.get::<_,String>(7)?)),
         )
         .optional()
         .ok()
         .flatten()
-        .unwrap_or_else(|| ("custom".to_owned(), "system".to_owned(), None, "auto".to_owned(), true, "{}".to_owned()))
+        .unwrap_or_else(|| ("custom".to_owned(), "system".to_owned(), None, "auto".to_owned(), true, "{}".to_owned(), "auto".to_owned(), "auto".to_owned()))
     };
     let build_environment = match node::parse_public_build_environment(&build_environment_json) {
         Ok(variables) => variables,
@@ -1736,9 +1889,9 @@ async fn process_job(state: AppState, job_id: String) {
                     return;
                 }
                 let build = if static_site {
-                    node::prepare_static_build(&app_id, &job_id, &stage, &build_runtime_version, &build_environment).await
+                    node::prepare_static_build(&state, &app_id, &job_id, &stage, &build_runtime_version, &build_environment, &node_build_script).await
                 } else {
-                    node::prepare_build(&app_id, &job_id, &stage, &build_runtime_version, &build_environment).await
+                    node::prepare_build(&state, &app_id, &job_id, &stage, &build_runtime_version, &build_environment, &node_build_script, &node_start_script).await
                 };
                 if let Err(message) = build {
                     let _ = fs::remove_dir_all(&stage);
@@ -2366,6 +2519,10 @@ fn extract_archive(archive_path: &FsPath, dest: &FsPath) -> Result<(), String> {
     if zip.len() > MAX_ARCHIVE_ENTRIES {
         return Err("ZIP بیش از ۲۰٬۰۰۰ ورودی دارد.".into());
     }
+    // Browser-generated ZIPs commonly wrap the project in one directory.
+    // Strip that directory only when every file is below the same top-level
+    // folder; archives with files at their root keep their original layout.
+    let wrapper = common_archive_wrapper(&mut zip)?;
     let mut expanded = 0u64;
     for i in 0..zip.len() {
         let mut item = zip
@@ -2387,6 +2544,21 @@ fn extract_archive(archive_path: &FsPath, dest: &FsPath) -> Result<(), String> {
             if ![0o100000, 0o040000].contains(&(mode & 0o170000)) {
                 return Err("فایل خاص داخل ZIP پذیرفته نمی‌شود.".into());
             }
+        }
+        // Ignore known archive metadata before stripping the common wrapper;
+        // macOS ZIPs often contain __MACOSX beside the actual project folder.
+        if excluded_source_path(relative) {
+            continue;
+        }
+        let relative = match wrapper.as_ref() {
+            Some(wrapper) => match relative.strip_prefix(wrapper) {
+                Ok(path) => path.to_path_buf(),
+                Err(_) => return Err("ساختار پوشهٔ ریشهٔ ZIP ناسازگار است.".into()),
+            },
+            None => relative,
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
         }
         if excluded_source_path(&relative) {
             continue;
@@ -2422,6 +2594,32 @@ fn extract_archive(archive_path: &FsPath, dest: &FsPath) -> Result<(), String> {
         fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).ok();
     }
     Ok(())
+}
+
+fn common_archive_wrapper(zip: &mut zip::ZipArchive<fs::File>) -> Result<Option<PathBuf>, String> {
+    let mut wrapper: Option<PathBuf> = None;
+    let mut files = 0usize;
+    for index in 0..zip.len() {
+        let item = zip.by_index(index).map_err(|error| format!("ورودی ZIP خوانده نشد: {error}"))?;
+        let Some(path) = item.enclosed_name() else {
+            return Err("مسیر ZIP شامل traversal یا مسیر مطلق است.".into());
+        };
+        if !path.components().all(|component| matches!(component, Component::Normal(_))) {
+            return Err("مسیر ZIP معتبر نیست.".into());
+        }
+        if item.is_dir() { continue; }
+        if excluded_source_path(path) { continue; }
+        files += 1;
+        let mut components = path.components();
+        let Some(Component::Normal(first)) = components.next() else { return Ok(None) };
+        if components.next().is_none() { return Ok(None); }
+        let candidate = PathBuf::from(first);
+        if wrapper.as_ref().is_some_and(|existing| existing != &candidate) {
+            return Ok(None);
+        }
+        wrapper = Some(candidate);
+    }
+    Ok((files > 0).then_some(wrapper).flatten())
 }
 
 fn verify_archive_digest(path: &FsPath, expected: &str) -> Result<(), String> {
@@ -2500,7 +2698,58 @@ mod tests {
         migrate(&db).unwrap();
         migrate(&db).unwrap();
         let tables:i64=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'deployment_%'",[],|r|r.get(0)).unwrap();
-        assert_eq!(tables, 3);
+        assert_eq!(tables, 4);
+    }
+
+    #[test]
+    fn legacy_partial_step_and_release_tables_are_migrated_before_use() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT); CREATE TABLE deployment_job_steps(id INTEGER PRIMARY KEY,job_id TEXT); CREATE TABLE deployment_releases(id TEXT PRIMARY KEY);").unwrap();
+        migrate(&db).unwrap();
+        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
+        persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git").unwrap();
+        let message: String = db.query_row("SELECT message FROM deployment_job_steps WHERE job_id='job'", [], |row| row.get(0)).unwrap();
+        assert_eq!(message,"در صف اجرای محدود سرور قرار گرفت.");
+        let log_count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'", [], |row| row.get(0)).unwrap();
+        assert_eq!(log_count,1);
+    }
+
+    #[test]
+    fn deployment_output_retains_a_bounded_recent_window() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
+        migrate(&db).unwrap();
+        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
+        persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git").unwrap();
+        for line in 0..2_001 {
+            append_job_log(&db,"job","build","output",&format!("line {line}")).unwrap();
+        }
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'",[],|row|row.get(0)).unwrap();
+        let first_message: String = db.query_row("SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id LIMIT 1",[],|row|row.get(0)).unwrap();
+        let latest: String = db.query_row("SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id DESC LIMIT 1",[],|row|row.get(0)).unwrap();
+        let job = read_job(&db,"job").unwrap();
+        assert_eq!(count,2_000);
+        assert_eq!(first_message,"line 2");
+        assert_eq!(latest,"line 2000");
+        assert_eq!(job["logs"].as_array().unwrap().len(),20);
+        assert_eq!(job["log_count"],2_000);
+    }
+
+    #[test]
+    fn enqueue_job_rolls_back_parent_when_initial_step_insert_fails() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
+        migrate(&db).unwrap();
+        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_initial_step BEFORE INSERT ON deployment_job_steps BEGIN SELECT RAISE(ABORT,'step insert rejected'); END;").unwrap();
+        let failed = persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"archive");
+        assert!(failed.is_err());
+        let count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_jobs WHERE id='job'",[],|row|row.get(0)).unwrap();
+        assert_eq!(count,0,"a failed first-stage write must not leave a queued deployment");
+        db.execute_batch("DROP TRIGGER reject_initial_step;").unwrap();
+        let created = persist_new_job(&mut db,"job","app","server","admin","{}","key",None,2,"archive").unwrap();
+        assert_eq!(created["state"],"queued");
+        assert_eq!(created["steps"].as_array().unwrap().len(),1);
     }
     #[test]
     fn legacy_deployment_jobs_gain_runtime_columns_without_data_loss() {
@@ -2526,6 +2775,8 @@ mod tests {
         }
         let state: String = db.query_row("SELECT state FROM deployment_jobs WHERE id='old-job'", [], |row| row.get(0)).unwrap();
         assert_eq!(state, "queued");
+        let step: String = db.query_row("SELECT step FROM deployment_job_steps WHERE job_id='old-job'", [], |row| row.get(0)).unwrap();
+        assert_eq!(step,"recovered");
     }
 
     #[test]
@@ -2570,6 +2821,41 @@ mod tests {
         let result = extract_archive(&archive_path, &root.join("outside"));
         assert!(result.unwrap_err().contains("traversal"));
         assert!(!root.parent().unwrap().join("escape.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zip_with_single_project_directory_extracts_manifest_at_release_root() {
+        let root = std::env::temp_dir().join(format!("arg-deploy-wrapped-zip-{}", id()));
+        fs::create_dir_all(&root).unwrap();
+        let archive_path = root.join("project.zip");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.add_directory("arg-nodejs-test-site/", options).unwrap();
+        zip.start_file("arg-nodejs-test-site/package.json", options).unwrap();
+        zip.write_all(br#"{"name":"arg-nodejs-test-site","scripts":{"build":"node scripts/build.mjs","start":"node server.mjs"}}"#).unwrap();
+        zip.start_file("arg-nodejs-test-site/package-lock.json", options).unwrap();
+        zip.write_all(br#"{"name":"arg-nodejs-test-site","lockfileVersion":3}"#).unwrap();
+        zip.start_file("arg-nodejs-test-site/.env.example", options).unwrap();
+        zip.write_all(b"SHOULD_NOT_SHIP=1").unwrap();
+        zip.start_file("__MACOSX/arg-nodejs-test-site/._package.json", options).unwrap();
+        zip.write_all(b"macOS metadata").unwrap();
+        zip.start_file("arg-nodejs-test-site/server.mjs", options).unwrap();
+        zip.write_all(b"export {};").unwrap();
+        zip.finish().unwrap();
+
+        let release = root.join("release");
+        fs::create_dir_all(&release).unwrap();
+        extract_archive(&archive_path, &release).unwrap();
+        assert!(release.join("package.json").is_file());
+        assert!(release.join("package-lock.json").is_file());
+        assert!(release.join("server.mjs").is_file());
+        assert!(!release.join("arg-nodejs-test-site/package.json").exists());
+        assert!(!release.join(".env.example").exists());
+        assert!(!release.join("__MACOSX").exists());
+        let manifest = serde_json::from_slice::<Value>(&fs::read(release.join("package.json")).unwrap()).unwrap();
+        assert_eq!(manifest["scripts"]["start"],"node server.mjs");
         let _ = fs::remove_dir_all(root);
     }
 

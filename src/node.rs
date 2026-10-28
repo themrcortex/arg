@@ -26,6 +26,14 @@ pub(super) struct BuildEnvironmentRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(super) struct NodeRuntimeSettingsRequest {
+    build_script: String,
+    start_script: String,
+    healthcheck_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ServiceRequest {
     enabled: bool,
 }
@@ -110,9 +118,9 @@ enum PackageManager {
     YarnClassic,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeEntrypoint {
-    PackageStart,
+    PackageScript(String),
     NextCli,
     NuxtOutput,
 }
@@ -308,6 +316,18 @@ fn valid_script_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
+fn valid_configured_script(value: &str, allow_none: bool) -> bool {
+    value == "auto" || (value == "none" && allow_none) || (value != "none" && valid_script_name(value))
+}
+
+fn valid_healthcheck_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= 256
+        && !value.contains("//")
+        && !value.contains('#')
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._~?=&-".contains(&byte))
+}
+
 fn has_nuxt_server_entrypoint(release: &FsPath) -> bool {
     let entry = release.join(".output/server/index.mjs");
     let Ok(metadata) = fs::symlink_metadata(&entry) else { return false };
@@ -322,9 +342,13 @@ fn has_next_cli_entrypoint(release: &FsPath) -> bool {
     real_entry.starts_with(root) && real_entry.is_file()
 }
 
-fn runtime_entrypoint(manifest: &Manifest, release: &FsPath, allow_prebuild: bool) -> Option<RuntimeEntrypoint> {
+fn runtime_entrypoint(manifest: &Manifest, release: &FsPath, allow_prebuild: bool, configured_script: &str) -> Option<RuntimeEntrypoint> {
+    if configured_script != "auto" {
+        return manifest.scripts.iter().any(|script| script == configured_script)
+            .then(|| RuntimeEntrypoint::PackageScript(configured_script.to_owned()));
+    }
     if manifest.scripts.iter().any(|script| script == "start") {
-        Some(RuntimeEntrypoint::PackageStart)
+        Some(RuntimeEntrypoint::PackageScript("start".to_owned()))
     } else if manifest.detected_framework == "next" && (allow_prebuild || has_next_cli_entrypoint(release)) {
         Some(RuntimeEntrypoint::NextCli)
     } else if manifest.detected_framework == "nuxt" && (allow_prebuild || has_nuxt_server_entrypoint(release)) {
@@ -420,7 +444,7 @@ fn inspection_json(
         "dependencies_missing"
     } else if static_site && !manifest.scripts.iter().any(|script| script == "build") {
         "build_script_missing"
-    } else if !static_site && runtime_entrypoint(&manifest, root, false).is_none() {
+    } else if !static_site && runtime_entrypoint(&manifest, root, false, "auto").is_none() {
         "start_entrypoint_missing"
     } else {
         "ready"
@@ -711,23 +735,28 @@ pub(super) fn activate_release(release: &FsPath) -> Result<(), String> {
 }
 
 pub(super) async fn prepare_build(
+    state: &AppState,
     app_id: &str,
     job_id: &str,
     release: &FsPath,
     build_runtime: &str,
     build_environment: &BTreeMap<String, String>,
+    build_script: &str,
+    start_script: &str,
 ) -> Result<(), String> {
-    prepare_project_build(app_id, job_id, release, build_runtime, build_environment, true).await
+    prepare_project_build(state, app_id, job_id, release, build_runtime, build_environment, build_script, start_script, true).await
 }
 
 pub(super) async fn prepare_static_build(
+    state: &AppState,
     app_id: &str,
     job_id: &str,
     release: &FsPath,
     build_runtime: &str,
     build_environment: &BTreeMap<String, String>,
+    build_script: &str,
 ) -> Result<(), String> {
-    prepare_project_build(app_id, job_id, release, build_runtime, build_environment, false).await
+    prepare_project_build(state, app_id, job_id, release, build_runtime, build_environment, build_script, "auto", false).await
 }
 
 pub(super) fn resolve_static_output_path(
@@ -775,20 +804,36 @@ pub(super) fn resolve_static_output_path(
 }
 
 async fn prepare_project_build(
+    state: &AppState,
     app_id: &str,
     job_id: &str,
     release: &FsPath,
     build_runtime: &str,
     build_environment: &BTreeMap<String, String>,
+    build_script: &str,
+    start_script: &str,
     require_start: bool,
 ) -> Result<(), String> {
     let manifest = inspect_manifest(release)?;
     let manager = manifest.manager.ok_or("lockfile انتخابی پیدا نشد.")?;
-    if require_start && runtime_entrypoint(&manifest, release, true).is_none() {
-        return Err("برای برنامهٔ Node.js، scripts.start در package.json تعریف نشده است.".into());
+    if require_start && runtime_entrypoint(&manifest, release, true, start_script).is_none() {
+        return Err(if start_script == "auto" { "برای برنامهٔ Node.js، scripts.start در package.json تعریف نشده است." } else { "اسکریپت Runtime انتخاب‌شده در package.json پیدا نشد." }.into());
     }
-    if !require_start && !manifest.scripts.iter().any(|script| script == "build") {
-        return Err("برای انتشار استاتیک، scripts.build در package.json تعریف نشده است.".into());
+    if !valid_configured_script(build_script, true) {
+        return Err("نام scripts.build معتبر نیست.".into());
+    }
+    let selected_build = if build_script == "auto" {
+        manifest.scripts.iter().any(|script| script == "build").then_some("build")
+    } else if build_script == "none" {
+        None
+    } else {
+        manifest.scripts.iter().any(|script| script == build_script).then_some(build_script)
+    };
+    if build_script != "auto" && build_script != "none" && selected_build.is_none() {
+        return Err("اسکریپت Build انتخاب‌شده در package.json پیدا نشد.".into());
+    }
+    if !require_start && selected_build.is_none() {
+        return Err("برای انتشار استاتیک باید یک scripts.build انتخاب شود.".into());
     }
     if find_node_binary(build_runtime).is_none() {
         return Err(format!(
@@ -803,11 +848,24 @@ async fn prepare_project_build(
         ));
     }
     for step in ["install", "build"] {
-        if step == "build" && !manifest.scripts.iter().any(|script| script == "build") {
+        let script = if step == "install" { None } else { selected_build };
+        if step == "build" && script.is_none() {
             continue;
         }
+        super::deploy::progress(
+            state,
+            job_id,
+            "running",
+            if step == "install" { "node-install" } else { "node-build-script" },
+            if step == "install" {
+                "نصب وابستگی‌ها با lockfile انتخاب‌شده در sandbox ایزوله اجرا می‌شود."
+            } else {
+                &format!("اسکریپت package.json با نام {script} در sandbox ایزوله اجرا می‌شود.")
+            },
+        );
         let environment = if step == "build" { json!(build_environment) } else { json!({}) };
-        let result = privileged_request_async(json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"node_version":build_runtime,"package_manager":manager.label(),"build_environment":environment})).await.map_err(|(_, body)| body["error"].as_str().unwrap_or("Node build helper unavailable").to_owned())?;
+        let result = privileged_request_async(json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"script":script,"node_version":build_runtime,"package_manager":manager.label(),"build_environment":environment})).await.map_err(|(_, body)| body["error"].as_str().unwrap_or("Node build helper unavailable").to_owned())?;
+        super::deploy::record_output(state, job_id, step, result["data"]["output"].as_str().unwrap_or(""));
         if result["ok"] != true {
             return Err(result["error"]
                 .as_str()
@@ -881,6 +939,78 @@ pub(super) async fn inspect(
     Ok(Json(
         json!({"inspection":inspection_json(&release,&app_id,&runtime_version,environment_keys,static_site,&output_path),"static_output_path":output_path,"static_spa_fallback":spa_fallback}),
     ))
+}
+
+fn runtime_settings_for_app(db: &Connection, app_id: &str) -> rusqlite::Result<(String, String)> {
+    db.query_row(
+        "SELECT node_start_script,node_healthcheck_path FROM applications WHERE id=?1",
+        [app_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+pub(super) async fn get_runtime_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> ApiResult {
+    let (build_script, start_script, healthcheck_path) = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        db.query_row(
+            "SELECT node_build_script,node_start_script,node_healthcheck_path FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+            params![app_id, owner],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)),
+        ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?
+    };
+    let scripts = active_release(&app_id).ok().and_then(|release| inspect_manifest(&release).ok()).map(|manifest| manifest.scripts).unwrap_or_default();
+    Ok(Json(json!({"build_script":build_script,"start_script":start_script,"healthcheck_path":healthcheck_path,"available_scripts":scripts,"arbitrary_shell":false})))
+}
+
+pub(super) async fn save_runtime_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    Json(input): Json<NodeRuntimeSettingsRequest>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !valid_configured_script(&input.build_script, true)
+        || !valid_configured_script(&input.start_script, false)
+        || !valid_healthcheck_path(&input.healthcheck_path)
+    {
+        return Err(error(StatusCode::BAD_REQUEST,"نام scripts یا مسیر Health Check معتبر نیست."));
+    }
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?.username;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let framework: String = db.query_row(
+        "SELECT framework FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+        params![app_id,owner], |row| row.get(0),
+    ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
+    if !apps::is_node_runtime_framework(&framework) && !apps::is_static_framework(&framework) && !apps::is_auto_framework(&framework) {
+        return Err(error(StatusCode::CONFLICT,"تنظیمات Runtime فقط برای اپلیکیشن‌های Node قابل استفاده است."));
+    }
+    if deployment_in_progress(&db, &app_id) {
+        return Err(error(StatusCode::CONFLICT,"تا پایان استقرار نمی‌توان تنظیمات Runtime را تغییر داد."));
+    }
+    if let Ok(release) = active_release(&app_id) {
+        if has_package_manifest(&release) {
+            let manifest = inspect_manifest(&release).map_err(|message| error(StatusCode::CONFLICT,&message))?;
+            if input.build_script != "auto" && input.build_script != "none" && !manifest.scripts.contains(&input.build_script) {
+                return Err(error(StatusCode::BAD_REQUEST,"اسکریپت Build در package.json نسخهٔ فعلی پیدا نشد."));
+            }
+            if input.start_script != "auto" && !manifest.scripts.contains(&input.start_script) {
+                return Err(error(StatusCode::BAD_REQUEST,"اسکریپت Runtime در package.json نسخهٔ فعلی پیدا نشد."));
+            }
+        }
+    }
+    db.execute(
+        "UPDATE applications SET node_build_script=?1,node_start_script=?2,node_healthcheck_path=?3,version=version+1,updated_at=?4 WHERE id=?5 AND owner_server_uuid=?6 AND deleted_at IS NULL",
+        params![input.build_script,input.start_script,input.healthcheck_path,now(),app_id,owner],
+    ).map_err(db_error)?;
+    audit(&db,&actor,"node.runtime_settings.update",&format!("app={app_id}; build={}; start={}; healthcheck={}",input.build_script,input.start_script,input.healthcheck_path));
+    Ok(Json(json!({"saved":true,"settings":{"build_script":input.build_script,"start_script":input.start_script,"healthcheck_path":input.healthcheck_path}})))
 }
 
 pub(super) async fn get_build_environment(
@@ -1016,7 +1146,7 @@ pub(super) async fn set_service(
 ) -> ApiResult {
     check_origin(&headers)?;
     let _guard = laravel::APP_EXECUTION_LOCK.lock().await;
-    let (actor, framework, runtime, port, domain, output_path) = {
+    let (actor, framework, runtime, port, domain, output_path, start_script, healthcheck_path) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
@@ -1030,7 +1160,8 @@ pub(super) async fn set_service(
                 "تا پایان deploy نمی‌توان وضعیت سرویس Node را تغییر داد.",
             ));
         }
-        (actor, row.0, row.1, row.2, row.3, row.4)
+        let (start_script, healthcheck_path) = runtime_settings_for_app(&db, &app_id).map_err(db_error)?;
+        (actor, row.0, row.1, row.2, row.3, row.4, start_script, healthcheck_path)
     };
     if apps::is_auto_framework(&framework) {
         let release = active_release(&app_id)?;
@@ -1057,7 +1188,7 @@ pub(super) async fn set_service(
         let release = active_release(&app_id)?;
         let manifest =
             inspect_manifest(&release).map_err(|message| error(StatusCode::CONFLICT, &message))?;
-        let entrypoint = runtime_entrypoint(&manifest, &release, false);
+        let entrypoint = runtime_entrypoint(&manifest, &release, false, &start_script);
         if manifest.manager.is_none()
             || entrypoint.is_none()
             || !release.join("node_modules").is_dir()
@@ -1073,7 +1204,7 @@ pub(super) async fn set_service(
                 "برای سرویس Node یک پورت آزاد بزرگ‌تر از 1023 در مشخصات اپ ثبت کن.",
             )
         })?;
-        json!({"action":"node-service-enable","application_id":app_id,"node_version":runtime,"port":port})
+        json!({"action":"node-service-enable","application_id":app_id,"node_version":runtime,"port":port,"start_script":start_script,"healthcheck_path":healthcheck_path})
     } else {
         json!({"action":"node-service-disable","application_id":app_id})
     };
@@ -1424,6 +1555,10 @@ fn helper_build_step(request: &Value) -> Value {
     else {
         return json!({"ok":false,"error":"Node build step is not allowlisted"});
     };
+    let script = request["script"].as_str();
+    if step == "build" && script.is_none_or(|value| !valid_script_name(value)) {
+        return json!({"ok":false,"error":"Build script name is invalid"});
+    }
     let Some(node_version) = request["node_version"].as_str() else {
         return json!({"ok":false,"error":"Node version is missing"});
     };
@@ -1459,8 +1594,8 @@ fn helper_build_step(request: &Value) -> Value {
     let Some((node_binary, _)) = find_node_binary(node_version) else {
         return json!({"ok":false,"error":"Requested Node.js runtime is not installed"});
     };
-    if step == "build" && !manifest.scripts.iter().any(|script| script == "build") {
-        return json!({"ok":false,"error":"The source has no allowlisted build script"});
+    if step == "build" && !manifest.scripts.iter().any(|available| Some(available.as_str()) == script) {
+        return json!({"ok":false,"error":"The selected build script does not exist in package.json"});
     }
     let build_environment = if step == "build" {
         match build_environment_from_value(&request["build_environment"]) {
@@ -1482,11 +1617,8 @@ fn helper_build_step(request: &Value) -> Value {
         let _ = restore_tree_owner(&real_stage, &group);
         return json!({"ok":false,"error":format!("{} is not installed",manager.label())});
     };
-    let args = if step == "install" {
-        manager.install_args()
-    } else {
-        &["run", "build"]
-    };
+    let build_args = script.map(|name| vec!["run", name]);
+    let args = if step == "install" { manager.install_args() } else { build_args.as_deref().unwrap_or(&[]) };
     let output = run_sandboxed(
         &real_stage,
         &build_cache,
@@ -1525,6 +1657,11 @@ fn helper_service_enable(request: &Value) -> Value {
     let Some(runtime) = request["node_version"].as_str() else {
         return json!({"ok":false,"error":"Node runtime is missing"});
     };
+    let start_script = request["start_script"].as_str().unwrap_or("auto");
+    let healthcheck_path = request["healthcheck_path"].as_str().unwrap_or("/");
+    if !valid_configured_script(start_script, false) || !valid_healthcheck_path(healthcheck_path) {
+        return json!({"ok":false,"error":"Runtime script or health check path is invalid"});
+    }
     let Some((node, _)) = find_node_binary(runtime) else {
         return json!({"ok":false,"error":"Node runtime does not match"});
     };
@@ -1544,7 +1681,7 @@ fn helper_service_enable(request: &Value) -> Value {
         Ok(value) => value,
         Err(message) => return json!({"ok":false,"error":message}),
     };
-        let entrypoint = runtime_entrypoint(&manifest, &release, false);
+        let entrypoint = runtime_entrypoint(&manifest, &release, false, start_script);
         if entrypoint.is_none()
         || !release.join("node_modules").is_dir()
     {
@@ -1572,6 +1709,7 @@ fn helper_service_enable(request: &Value) -> Value {
         &node,
         &package_manager,
         port,
+        healthcheck_path,
         entrypoint.unwrap(),
     ) {
         Ok(content) => content,
@@ -1606,7 +1744,7 @@ fn helper_service_enable(request: &Value) -> Value {
         let restore = restore_node_unit(&unit_path, &unit, existing.as_deref(), was_enabled, was_active);
         return json!({"ok":false,"error":format!("{message}{}", restore.err().map(|problem| format!("؛ بازگرداندن تنظیم قبلی هم شکست خورد: {problem}")).unwrap_or_default())});
     }
-    match verify_node_service(port as u16, &unit) {
+    match verify_node_service(port as u16, &unit, healthcheck_path) {
         Ok(()) => {
             json!({"ok":true,"data":{"unit":unit,"enabled":true,"state":"active","port":port,"bind":"127.0.0.1","message":"Node service is running on its private loopback port"}})
         }
@@ -1638,7 +1776,7 @@ fn restore_node_unit(
     } else if was_active {
         systemctl(&["restart", unit])?;
         if let Some(port) = manifest_port(unit_path) {
-            verify_node_service(port, unit)?;
+            verify_node_service(port, unit, &manifest_healthcheck_path(unit_path))?;
         }
     } else if was_enabled {
         systemctl(&["enable", unit])?;
@@ -1685,7 +1823,7 @@ fn helper_service_restart(request: &Value) -> Value {
     if let Err(message) = systemctl(&["restart", &unit]) {
         return json!({"ok":false,"error":message});
     }
-    match verify_node_service(port, &unit) {
+    match verify_node_service(port, &unit, &manifest_healthcheck_path(&unit_path)) {
         Ok(()) => json!({"ok":true,"data":{"unit":unit,"state":"active","port":port,"bind":"127.0.0.1"}}),
         Err(message) => {
             let stop = systemctl(&["stop", &unit]);
@@ -1701,6 +1839,14 @@ fn manifest_port(unit_path: &FsPath) -> Option<u16> {
         .lines()
         .find_map(|line| line.strip_prefix("Environment=PORT=")?.parse::<u16>().ok())
         .filter(|port| (1024..=65535).contains(port))
+}
+
+fn manifest_healthcheck_path(unit_path: &FsPath) -> String {
+    fs::read_to_string(unit_path)
+        .ok()
+        .and_then(|contents| contents.lines().find_map(|line| line.strip_prefix("Environment=ARG_HEALTHCHECK_PATH=").map(str::to_owned)))
+        .filter(|path| valid_healthcheck_path(path))
+        .unwrap_or_else(|| "/".to_owned())
 }
 
 fn managed_unit(path: &FsPath) -> bool {
@@ -2207,6 +2353,7 @@ fn render_node_unit(
     node: &FsPath,
     package_manager: &FsPath,
     port: u64,
+    healthcheck_path: &str,
     entrypoint: RuntimeEntrypoint,
 ) -> Result<String, String> {
     let current = current.to_string_lossy().into_owned();
@@ -2217,8 +2364,12 @@ fn render_node_unit(
         .unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
     let package_manager = package_manager.to_string_lossy().into_owned();
     let env_file = shared.to_string();
+    if !valid_healthcheck_path(healthcheck_path) {
+        return Err("Health check path is invalid".into());
+    }
     let start_command = match entrypoint {
-        RuntimeEntrypoint::PackageStart => format!("{package_manager} run start"),
+        RuntimeEntrypoint::PackageScript(script) if valid_script_name(&script) => format!("{package_manager} run {script}"),
+        RuntimeEntrypoint::PackageScript(_) => return Err("Runtime script is invalid".into()),
         RuntimeEntrypoint::NextCli => format!("{} /workspace/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port {port}", node.display()),
         RuntimeEntrypoint::NuxtOutput => format!("{} /workspace/.output/server/index.mjs", node.display()),
     };
@@ -2229,7 +2380,7 @@ fn render_node_unit(
     {
         return Err("Application paths cannot be safely represented in a systemd unit".into());
     }
-    Ok(format!("# Managed by ARG Node runner; edits are replaced from the panel.\n[Unit]\nDescription=ARG Node application {unit}\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\nType=simple\nDynamicUser=yes\nGroup={group}\nWorkingDirectory=/workspace\nBindReadOnlyPaths={current}:/workspace\nBindReadOnlyPaths={shared}/.env:/shared/.env\nBindPaths={shared}/data:/shared/data\nEnvironmentFile=-{env_file}/.env\nInaccessiblePaths=/var/lib/arg\nInaccessiblePaths=/etc/arg\nInaccessiblePaths=/usr/local/lib/arg\nProtectSystem=strict\nProtectHome=true\nPrivateTmp=true\nPrivateDevices=true\nNoNewPrivileges=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nCapabilityBoundingSet=\nUMask=0027\nEnvironment=HOME=/tmp\nEnvironment=NODE_ENV=production\nEnvironment=HOST=127.0.0.1\nEnvironment=PORT={port}\nEnvironment=NITRO_HOST=127.0.0.1\nEnvironment=NITRO_PORT={port}\nEnvironment=PATH={path}\nExecStart={start_command}\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=30\nKillMode=control-group\nMemoryMax=1G\nCPUQuota=200%\nTasksMax=256\n\n[Install]\nWantedBy=multi-user.target\n"))
+    Ok(format!("# Managed by ARG Node runner; edits are replaced from the panel.\n[Unit]\nDescription=ARG Node application {unit}\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=60\nStartLimitBurst=5\n\n[Service]\nType=simple\nDynamicUser=yes\nGroup={group}\nWorkingDirectory=/workspace\nBindReadOnlyPaths={current}:/workspace\nBindReadOnlyPaths={shared}/.env:/shared/.env\nBindPaths={shared}/data:/shared/data\nEnvironmentFile=-{env_file}/.env\nInaccessiblePaths=/var/lib/arg\nInaccessiblePaths=/etc/arg\nInaccessiblePaths=/usr/local/lib/arg\nProtectSystem=strict\nProtectHome=true\nPrivateTmp=true\nPrivateDevices=true\nNoNewPrivileges=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\nRestrictSUIDSGID=true\nLockPersonality=true\nCapabilityBoundingSet=\nUMask=0027\nEnvironment=HOME=/tmp\nEnvironment=NODE_ENV=production\nEnvironment=HOST=127.0.0.1\nEnvironment=PORT={port}\nEnvironment=NITRO_HOST=127.0.0.1\nEnvironment=NITRO_PORT={port}\nEnvironment=ARG_HEALTHCHECK_PATH={healthcheck_path}\nEnvironment=PATH={path}\nExecStart={start_command}\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=30\nKillMode=control-group\nMemoryMax=1G\nCPUQuota=200%\nTasksMax=256\n\n[Install]\nWantedBy=multi-user.target\n"))
 }
 
 fn safe_systemd_path(path: &str) -> bool {
@@ -2328,14 +2479,17 @@ fn ensure_loopback_listener(port: u16, unit: &str) -> Result<(), String> {
     }
 }
 
-fn verify_node_service(port: u16, unit: &str) -> Result<(), String> {
+fn verify_node_service(port: u16, unit: &str, healthcheck_path: &str) -> Result<(), String> {
+    if !valid_healthcheck_path(healthcheck_path) {
+        return Err("مسیر Health Check در سرویس معتبر نیست.".into());
+    }
     ensure_loopback_listener(port, unit)?;
     let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
     let deadline = std::time::Instant::now() + Duration::from_secs(12);
     loop {
-        let last_error = match probe_node_http(address) {
-            Ok(status) if (200..500).contains(&status) => return Ok(()),
-            Ok(status) => format!("بررسی HTTP مسیر / کد {status} گرفت."),
+        let last_error = match probe_node_http(address, healthcheck_path) {
+            Ok(status) if (200..300).contains(&status) => return Ok(()),
+            Ok(status) => format!("بررسی HTTP مسیر {healthcheck_path} کد {status} گرفت؛ پاسخ 2xx لازم است."),
             Err(message) => message,
         };
         if std::time::Instant::now() >= deadline {
@@ -2345,7 +2499,8 @@ fn verify_node_service(port: u16, unit: &str) -> Result<(), String> {
     }
 }
 
-fn probe_node_http(address: SocketAddr) -> Result<u16, String> {
+fn probe_node_http(address: SocketAddr, path: &str) -> Result<u16, String> {
+    if !valid_healthcheck_path(path) { return Err("مسیر Health Check ناامن است.".into()); }
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|error| format!("اتصال به health check محلی برقرار نشد: {error}"))?;
     stream
@@ -2353,7 +2508,7 @@ fn probe_node_http(address: SocketAddr) -> Result<u16, String> {
         .and_then(|_| stream.set_write_timeout(Some(Duration::from_secs(2))))
         .map_err(|error| error.to_string())?;
     stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nUser-Agent: ARG-healthcheck\r\n\r\n")
+        .write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nUser-Agent: ARG-healthcheck\r\n\r\n").as_bytes())
         .map_err(|error| format!("درخواست health check ارسال نشد: {error}"))?;
     let mut response = Vec::with_capacity(1024);
     let mut buffer = [0u8; 1024];
@@ -2534,13 +2689,15 @@ mod tests {
             FsPath::new("/usr/bin/node"),
             FsPath::new("/usr/bin/pnpm"),
             31234,
-            RuntimeEntrypoint::PackageStart,
+            "/health",
+            RuntimeEntrypoint::PackageScript("start".into()),
         )
         .unwrap();
         assert!(unit.contains("BindReadOnlyPaths=/var/lib/arg/deployments/apps/app/shared/.env:/shared/.env"));
         assert!(unit.contains("BindPaths=/var/lib/arg/deployments/apps/app/shared/data:/shared/data"));
         assert!(!unit.contains("BindPaths=/var/lib/arg/deployments/apps/app/shared:/shared"));
         assert!(unit.contains("ExecStart=/usr/bin/pnpm run start"));
+        assert!(unit.contains("Environment=ARG_HEALTHCHECK_PATH=/health"));
         assert!(unit.contains("TimeoutStopSec=30"));
         let nuxt = render_node_unit(
             "arg-node-12345678-123.service",
@@ -2550,6 +2707,7 @@ mod tests {
             FsPath::new("/usr/bin/node"),
             FsPath::new("/usr/bin/npm"),
             31234,
+            "/ready",
             RuntimeEntrypoint::NuxtOutput,
         ).unwrap();
         assert!(nuxt.contains("ExecStart=/usr/bin/node /workspace/.output/server/index.mjs"));
@@ -2564,6 +2722,7 @@ mod tests {
             FsPath::new("/usr/bin/node"),
             FsPath::new("/usr/bin/npm"),
             31234,
+            "/api/health",
             RuntimeEntrypoint::NextCli,
         ).unwrap();
         assert!(next.contains("ExecStart=/usr/bin/node /workspace/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 31234"));
@@ -2581,8 +2740,32 @@ mod tests {
         assert_eq!(parse_node_http_status(response), Some(204));
         assert_eq!(parse_node_http_status(b"HTTP/1.1 503 Service Unavailable\r\n\r\n"), Some(503));
         assert_eq!(parse_node_http_status(b"not HTTP\r\n\r\n"), None);
-        assert!((200..500).contains(&parse_node_http_status(response).unwrap()));
-        assert!(!(200..500).contains(&parse_node_http_status(b"HTTP/1.1 503 Error\r\n\r\n").unwrap()));
+        assert!((200..300).contains(&parse_node_http_status(response).unwrap()));
+        assert!(!(200..300).contains(&parse_node_http_status(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap()));
+        assert!(!(200..300).contains(&parse_node_http_status(b"HTTP/1.1 503 Error\r\n\r\n").unwrap()));
+    }
+
+    #[test]
+    fn runtime_script_and_health_path_inputs_are_not_shell_commands_or_headers() {
+        assert!(valid_configured_script("start:prod", false));
+        assert!(valid_configured_script("auto", true));
+        assert!(valid_configured_script("none", true));
+        assert!(!valid_configured_script("start; touch /tmp/pwned", false));
+        let manifest = Manifest {
+            name: None,
+            version: None,
+            package_manager: None,
+            node_engine: None,
+            scripts: vec!["start".to_owned(), "start:prod".to_owned()],
+            manager: None,
+            detected_framework: "node".to_owned(),
+        };
+        assert_eq!(runtime_entrypoint(&manifest, FsPath::new("/unused"), false, "start:prod"), Some(RuntimeEntrypoint::PackageScript("start:prod".to_owned())));
+        assert_eq!(runtime_entrypoint(&manifest, FsPath::new("/unused"), false, "missing"), None);
+        assert!(valid_healthcheck_path("/api/health?ready=true"));
+        assert!(!valid_healthcheck_path("/health\\r\\nHost:evil"));
+        assert!(!valid_healthcheck_path("//example.test/path"));
+        assert!(!valid_healthcheck_path("/health#fragment"));
     }
 
     #[test]

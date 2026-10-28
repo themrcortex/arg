@@ -61,12 +61,14 @@ type ProjectRecord = { id: string; name: string; description: string; environmen
 type EnvironmentRecord = { id: string; name: string; kind: string; protected: boolean }
 type RuntimeInventory = { runtimes: { family: string; state: string; versions: { version: string; fpm_installed?: boolean }[] }[] }
 type DeployStep = { sequence: number; step: string; state: string; message: string; started_at: number; finished_at: number | null }
-type DeployJob = { id: string; application_id: string; state: string; attempt: number; created_at: number; started_at: number | null; finished_at: number | null; release_path: string | null; previous_release: string | null; error: string | null; steps: DeployStep[] }
+type DeployLog = { id: number; created_at: number; step: string; level: string; message: string }
+type DeployJob = { id: string; application_id: string; state: string; attempt: number; created_at: number; started_at: number | null; finished_at: number | null; release_path: string | null; previous_release: string | null; error: string | null; steps: DeployStep[]; logs?: DeployLog[]; log_count?: number }
 type LaravelOperation = { id: string; action: string; state: string; output: string; exit_code: number | null; error: string | null; created_at: number; started_at: number | null; finished_at: number | null }
 type LaravelInspection = { framework: string; state: string; release_path: string; public_path: string; runtime_version: string; message: string; composer: { php_constraint?: string; laravel_constraint?: string; required_extensions?: string[]; has_lockfile?: boolean }; files: Record<string, boolean | string[]> & { app_key_configured?: boolean; environment_keys?: string[] } }
 type LaravelService = 'queue' | 'scheduler' | 'horizon' | 'reverb' | 'octane'
 type LaravelWebState = { configured: boolean; site?: { site_name: string; domain: string; php_fpm_socket: string; enabled: boolean } | null; runtime_version: string; services: Record<LaravelService, string> & { reverb_port?: number | null; octane_port?: number | null } }
 type NodeInspection = { state: string; framework?: string; detected_framework?: string; static_output_path?: string; release_path: string; node_version?: string | null; requested_node_version?: string; package_name?: string; package_version?: string; package_manager?: string; node_engine?: string; scripts: string[]; dependencies_installed?: boolean; environment_keys: string[]; message: string }
+type NodeRuntimeSettings = { build_script: string; start_script: string; healthcheck_path: string; available_scripts: string[]; arbitrary_shell: false }
 type NodeService = { unit: string; state: string; enabled: boolean }
 type NodeBuildEnvironment = { variables: Record<string, string>; values_are_public: boolean }
 type AppTemplate = { id: string; version: number; name: string; framework: string; source_type: string; runtime: string; readiness: string; requirements: string[]; creates: string; installs_packages: boolean; creates_services: boolean }
@@ -116,6 +118,9 @@ function newIdempotencyKey() {
 
 function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: string) => void }) {
   const [jobs, setJobs] = useState<DeployJob[]>([])
+  const [jobLogs, setJobLogs] = useState<Record<string, DeployLog[]>>({})
+  const [olderLogsBefore, setOlderLogsBefore] = useState<Record<string, number | null>>({})
+  const [logsBusy, setLogsBusy] = useState<Record<string, boolean>>({})
   const [mode, setMode] = useState<'git' | 'directory' | 'archive'>('git')
   const [repository, setRepository] = useState('')
   const [gitAccess, setGitAccess] = useState<'https' | 'ssh'>('https')
@@ -160,15 +165,45 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
     try {
       const result = await api<{ jobs: DeployJob[] }>(`apps/${encodeURIComponent(app.id)}/deploy/jobs`)
       setJobs(result.jobs)
+      for (const job of result.jobs) {
+        const first = job.logs?.[0]?.id
+        setOlderLogsBefore((cursors) => ({ ...cursors, [job.id]: job.log_count && first && job.log_count > (job.logs?.length || 0) ? (cursors[job.id] ?? first) : null }))
+      }
+      setJobLogs((current) => {
+        const next = { ...current }
+        for (const job of result.jobs) {
+          const incoming = job.logs || []
+          if (!incoming.length) continue
+          const existing = next[job.id] || []
+          const byId = new Map([...existing, ...incoming].map((row) => [row.id, row]))
+          next[job.id] = [...byId.values()].sort((a, b) => a.id - b.id)
+        }
+        return next
+      })
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'وضعیت استقرار خوانده نشد.')
     }
   }, [app.id])
 
+  async function loadOlderLogs(jobId: string) {
+    const before = olderLogsBefore[jobId]
+    if (!before || logsBusy[jobId]) return
+    setLogsBusy((current) => ({ ...current, [jobId]: true }))
+    try {
+      const result = await api<{ logs: DeployLog[]; next_before: number | null }>(`deploy/jobs/${encodeURIComponent(jobId)}/logs?before=${before}&limit=100`)
+      setJobLogs((current) => {
+        const byId = new Map([...(result.logs || []), ...(current[jobId] || [])].map((row) => [row.id, row]))
+        return { ...current, [jobId]: [...byId.values()].sort((a, b) => a.id - b.id) }
+      })
+      setOlderLogsBefore((current) => ({ ...current, [jobId]: result.next_before }))
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'لاگ‌های قدیمی‌تر خوانده نشدند.') }
+    finally { setLogsBusy((current) => ({ ...current, [jobId]: false })) }
+  }
+
   useEffect(() => { void loadJobs() }, [loadJobs])
   useEffect(() => {
     if (!active) return
-    const timer = window.setInterval(() => void loadJobs(), 1200)
+    const timer = window.setInterval(() => void loadJobs(), 1800)
     return () => window.clearInterval(timer)
   }, [active, loadJobs])
 
@@ -247,6 +282,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
   }
 
   const labels: Record<string, string> = { queued: 'در صف', validating: 'اعتبارسنجی', running: 'در حال دریافت', verifying: 'بررسی و فعال‌سازی', succeeded: 'موفق', failed: 'ناموفق', cancelled: 'لغوشده' }
+  const stepLabels: Record<string, string> = { queued: 'ثبت Job', validating: 'اعتبارسنجی ورودی و مالکیت', recovered: 'بازیابی پس از راه‌اندازی مجدد', acquiring: 'دریافت منبع', 'node-build': 'آماده‌سازی پروژه Node', 'node-install': 'نصب وابستگی‌ها', 'node-build-script': 'اجرای اسکریپت Build', 'laravel-persistent-data': 'آماده‌سازی داده‌های پایدار', 'verifying': 'بررسی و فعال‌سازی', succeeded: 'استقرار کامل شد', failed: 'استقرار ناموفق بود', cancelled: 'استقرار لغو شد' }
   const deploymentDescription = isStaticFramework(app.framework)
     ? 'خروجی build را با lockfile می‌سازد یا فایل استاتیک آماده را می‌پذیرد، سپس Nginx را به current وصل می‌کند. process جداگانه‌ای اجرا نمی‌شود.'
     : isNodePlatform(app.framework)
@@ -265,7 +301,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
       <div className="flex justify-end gap-2"><Button type="button" size="sm" variant="outline" onClick={() => setOpen(false)} disabled={busy}>انصراف</Button><Button size="sm" disabled={busy}>{busy ? 'در حال ثبت…' : 'ساخت Job'}</Button></div>
     </form>}
     {error && !open && <p role="alert" className="mt-2 text-xs text-rose-200">{error}</p>}
-    {jobs.length > 0 && <div className="mt-3 space-y-2">{jobs.slice(0,3).map((job) => <details key={job.id} className="rounded-lg border border-border/70 bg-background/35 p-2"><summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium">{labels[job.state] || job.state}</span><span dir="ltr" className="font-mono text-[10px] text-muted-foreground">{job.id.slice(0,8)} · {new Date(job.created_at * 1000).toLocaleString('fa-IR')}</span></summary><div className="mt-2 space-y-1.5">{job.steps.map((step) => <div key={`${job.id}:${step.sequence}`} className="flex items-start gap-2 border-r border-border/70 pr-2 text-[10px]"><span className={step.state === 'running' ? 'text-amber-200' : step.state === 'failed' ? 'text-rose-200' : 'text-emerald-200'}>●</span><div><p className="font-medium">{step.step}</p><p className="leading-5 text-muted-foreground">{step.message}</p></div></div>)}{job.error && <p className="rounded bg-rose-400/[.05] p-2 text-[10px] text-rose-200">{job.error}</p>}{job.release_path && <p dir="ltr" className="break-all text-left font-mono text-[10px] text-muted-foreground">{job.release_path}</p>}<div className="flex justify-end gap-2">{['queued','validating','running','verifying'].includes(job.state) ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void action(job,'cancel')}><X size={12}/>لغو Job</Button> : <>{job.state === 'failed' && mode !== 'archive' && <Button size="sm" variant="outline" disabled={busy} onClick={() => void action(job,'retry')}><RotateCcw size={12}/>اجرای دوباره</Button>}{job.state === 'succeeded' && job.previous_release && <Button size="sm" variant="outline" disabled={busy} onClick={() => void rollback(job)}><RotateCcw size={12}/>بازگشت به نسخهٔ قبلی</Button>}</>}</div></div></details>)}</div>}
+    {jobs.length > 0 && <div className="mt-3 space-y-2">{jobs.slice(0,3).map((job) => <details key={job.id} className="rounded-lg border border-border/70 bg-background/35 p-2"><summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium">{labels[job.state] || job.state}</span><span dir="ltr" className="font-mono text-[10px] text-muted-foreground">{job.id.slice(0,8)} · {new Date(job.created_at * 1000).toLocaleString('fa-IR')}</span></summary><div className="mt-2 space-y-1.5">{job.steps.map((step) => <div key={`${job.id}:${step.sequence}`} className="flex items-start gap-2 border-r border-border/70 pr-2 text-[10px]"><span className={step.state === 'running' ? 'text-amber-200' : step.state === 'failed' ? 'text-rose-200' : 'text-emerald-200'}>●</span><div><p className="font-medium">{stepLabels[step.step] || step.step}</p><p className="leading-5 text-muted-foreground">{step.message}</p></div></div>)}{(jobLogs[job.id] || job.logs || []).length > 0 && <div className="rounded-lg border border-border/60 bg-black/20 p-2"><div className="mb-1 flex items-center justify-between gap-2"><p className="text-[10px] font-medium">لاگ‌های پایدار استقرار</p>{olderLogsBefore[job.id] && <Button size="sm" variant="outline" disabled={logsBusy[job.id]} onClick={() => void loadOlderLogs(job.id)}>{logsBusy[job.id] ? 'در حال دریافت…' : 'لاگ‌های قدیمی‌تر'}</Button>}</div><pre dir="ltr" className="max-h-56 overflow-auto whitespace-pre-wrap break-words text-left font-mono text-[9px] leading-4 text-muted-foreground">{(jobLogs[job.id] || job.logs || []).map((line) => `[${new Date(line.created_at * 1000).toLocaleTimeString()}] ${line.step} ${line.level}: ${line.message}`).join('\n')}</pre></div>}{job.error && <p className="rounded bg-rose-400/[.05] p-2 text-[10px] text-rose-200">{job.error}</p>}{job.release_path && <p dir="ltr" className="break-all text-left font-mono text-[10px] text-muted-foreground">{job.release_path}</p>}<div className="flex justify-end gap-2">{['queued','validating','running','verifying'].includes(job.state) ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void action(job,'cancel')}><X size={12}/>لغو Job</Button> : <>{job.state === 'failed' && mode !== 'archive' && <Button size="sm" variant="outline" disabled={busy} onClick={() => void action(job,'retry')}><RotateCcw size={12}/>اجرای دوباره</Button>}{job.state === 'succeeded' && job.previous_release && <Button size="sm" variant="outline" disabled={busy} onClick={() => void rollback(job)}><RotateCcw size={12}/>بازگشت به نسخهٔ قبلی</Button>}</>}</div></div></details>)}</div>}
     <Dialog open={!!rollbackTarget} onOpenChange={(isOpen) => { if (!isOpen && !busy) setRollbackTarget(null) }}><DialogContent className="max-w-md"><DialogHeader><DialogTitle>بازگشت به release قبلی؟</DialogTitle><DialogDescription>{isNodePlatform(app.framework) ? 'اشاره‌گر release برمی‌گردد؛ برای SSR سرویس loopback بررسی و در صورت نیاز restart می‌شود، و برای Static مسیر Nginx با خروجی release قبلی همگام می‌شود.' : 'اشاره‌گر release به نسخهٔ پیشین تغییر می‌کند. برای این قالب، سرویس یا Nginx راه‌اندازی مجدد نمی‌شود.'}</DialogDescription></DialogHeader>{error && <p role="alert" className="text-xs text-rose-200">{error}</p>}<div className="flex justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => setRollbackTarget(null)}>انصراف</Button><Button disabled={busy} onClick={() => void confirmRollback()}>{busy ? 'در حال بازگشت…' : 'تأیید بازگشت'}</Button></div></DialogContent></Dialog>
   </section>
 }
@@ -415,6 +451,7 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   const [expanded, setExpanded] = useState(false)
   const [inspection, setInspection] = useState<NodeInspection | null>(null)
   const [service, setService] = useState<NodeService | null>(null)
+  const [runtimeSettings, setRuntimeSettings] = useState<NodeRuntimeSettings>({ build_script: 'auto', start_script: 'auto', healthcheck_path: '/', available_scripts: [], arbitrary_shell: false })
   const [logs, setLogs] = useState('')
   const [logCursor, setLogCursor] = useState<string | null>(null)
   const [error, setError] = useState('')
@@ -422,6 +459,7 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   const [busy, setBusy] = useState(false)
   const [environmentBusy, setEnvironmentBusy] = useState(false)
   const [buildEnvironmentBusy, setBuildEnvironmentBusy] = useState(false)
+  const [runtimeSettingsBusy, setRuntimeSettingsBusy] = useState(false)
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [buildDraft, setBuildDraft] = useState<Record<string, string>>({})
   const [newKey, setNewKey] = useState('')
@@ -432,14 +470,16 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [node, currentService, buildEnvironment] = await Promise.all([
+      const [node, currentService, buildEnvironment, runtimeSettingsResult] = await Promise.all([
         api<{ inspection: NodeInspection }>(`apps/${encodeURIComponent(app.id)}/node`),
         api<{ service: NodeService; port: number | null }>(`apps/${encodeURIComponent(app.id)}/node/service`),
         api<NodeBuildEnvironment>(`apps/${encodeURIComponent(app.id)}/node/build-environment`),
+        api<NodeRuntimeSettings>(`apps/${encodeURIComponent(app.id)}/node/runtime-settings`).catch(() => ({ build_script: 'auto', start_script: 'auto', healthcheck_path: '/', available_scripts: [], arbitrary_shell: false as const })),
       ])
       setInspection(node.inspection)
       setService(currentService.service)
       setBuildDraft(buildEnvironment.variables || {})
+      setRuntimeSettings(runtimeSettingsResult)
       setDraft((current) => {
         const next = { ...current }
         for (const key of node.inspection.environment_keys || []) if (!(key in next)) next[key] = ''
@@ -489,6 +529,16 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
     finally { setBuildEnvironmentBusy(false) }
   }
 
+  async function saveRuntimeSettings(event: React.FormEvent) {
+    event.preventDefault(); setRuntimeSettingsBusy(true); setError('')
+    try {
+      const saved = await api<{ saved: boolean; settings: Pick<NodeRuntimeSettings, 'build_script' | 'start_script' | 'healthcheck_path'> }>(`apps/${encodeURIComponent(app.id)}/node/runtime-settings`, { method: 'PUT', body: JSON.stringify({ build_script: runtimeSettings.build_script, start_script: runtimeSettings.start_script, healthcheck_path: runtimeSettings.healthcheck_path }) })
+      setRuntimeSettings((current) => ({ ...current, ...saved.settings }))
+      notify(service?.state === 'active' ? 'تنظیمات ذخیره شد؛ برای اعمال روی سرویس فعال، «اعمال تنظیمات سرویس» را بزن.' : 'تنظیمات استقرار و Health Check ذخیره شد.')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'ذخیرهٔ تنظیمات Node ناموفق بود.') }
+    finally { setRuntimeSettingsBusy(false) }
+  }
+
   async function readLogs(after?: string) {
     setError('')
     try {
@@ -514,7 +564,16 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
         <div className="grid gap-2 sm:grid-cols-2"><Input aria-label="نام متغیر عمومی Build" dir="ltr" value={newBuildKey} onChange={(event) => setNewBuildKey(event.target.value.toUpperCase())} placeholder="VITE_API_ORIGIN"/><Input aria-label="مقدار متغیر عمومی Build" dir="ltr" value={newBuildValue} onChange={(event) => setNewBuildValue(event.target.value)} placeholder="https://api.example.com"/></div>
         <Button size="sm" disabled={buildEnvironmentBusy || busy || (!Object.keys(buildDraft).length && !newBuildKey.trim())}>{buildEnvironmentBusy ? 'در حال ذخیره…' : 'ذخیرهٔ متغیرهای Build'}</Button>
       </form>
-      {staticProject ? <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{inspection.static_output_path || 'auto'}<span dir="rtl" className="mr-2 font-sans">· خروجی از release جاری با Nginx سرو می‌شود؛ فضای Node یا systemd برای اجرای سایت مصرف نمی‌شود.</span></p> : <>{app.listen_port && <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">127.0.0.1:{app.listen_port}<span dir="rtl" className="mr-2 font-sans">· با فعال‌سازی، ARG reverse proxy مستقل Nginx را می‌سازد؛ SSL از صفحهٔ Nginx فعال می‌شود. health check از GET / پاسخ ۵xx را رد می‌کند.</span></p>}
+      <form onSubmit={(event) => void saveRuntimeSettings(event)} className="space-y-2 border-t border-border/60 pt-3">
+        <div><p className="text-xs font-medium">فرمان‌های استقرار و Health Check</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">ARG فقط نام اسکریپت ثبت‌شده در package.json را با آرگومان‌های ثابت package manager اجرا می‌کند؛ فرمان Shell آزاد پذیرفته نمی‌شود. Health Check از loopback همین VPS انجام می‌شود و باید پاسخ 2xx بدهد.</p></div>
+        <div className="grid gap-2 sm:grid-cols-3">
+          <label className="space-y-1 text-[10px] text-muted-foreground">اسکریپت Build<select value={runtimeSettings.build_script} onChange={(event) => setRuntimeSettings((current) => ({ ...current, build_script: event.target.value }))} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground"><option value="auto">auto · اجرای build در صورت وجود</option><option value="none">none · بدون Build</option>{runtimeSettings.available_scripts.filter((name) => name !== 'build').map((name) => <option key={name} value={name}>{name}</option>)}{runtimeSettings.build_script !== 'auto' && runtimeSettings.build_script !== 'none' && !runtimeSettings.available_scripts.includes(runtimeSettings.build_script) && <option value={runtimeSettings.build_script}>{runtimeSettings.build_script} · تنظیم‌شده</option>}</select></label>
+          <label className="space-y-1 text-[10px] text-muted-foreground">اسکریپت اجرای سرویس<select value={runtimeSettings.start_script} onChange={(event) => setRuntimeSettings((current) => ({ ...current, start_script: event.target.value }))} className="h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground"><option value="auto">auto · start یا entrypoint تشخیص‌داده‌شده</option>{runtimeSettings.available_scripts.map((name) => <option key={name} value={name}>{name}</option>)}{runtimeSettings.start_script !== 'auto' && !runtimeSettings.available_scripts.includes(runtimeSettings.start_script) && <option value={runtimeSettings.start_script}>{runtimeSettings.start_script} · تنظیم‌شده</option>}</select></label>
+          <label className="space-y-1 text-[10px] text-muted-foreground">مسیر Health Check<Input dir="ltr" value={runtimeSettings.healthcheck_path} onChange={(event) => setRuntimeSettings((current) => ({ ...current, healthcheck_path: event.target.value }))} placeholder="/health"/></label>
+        </div>
+        <div className="flex flex-wrap gap-2"><Button size="sm" disabled={runtimeSettingsBusy || busy}>{runtimeSettingsBusy ? 'در حال ذخیره…' : 'ذخیرهٔ تنظیمات Runtime'}</Button>{service?.state === 'active' && <Button type="button" size="sm" variant="outline" disabled={busy || runtimeSettingsBusy} onClick={() => void toggleService(true)}>اعمال تنظیمات سرویس</Button>}</div>
+      </form>
+      {staticProject ? <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{inspection.static_output_path || 'auto'}<span dir="rtl" className="mr-2 font-sans">· خروجی از release جاری با Nginx سرو می‌شود؛ فضای Node یا systemd برای اجرای سایت مصرف نمی‌شود.</span></p> : <>{app.listen_port && <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">127.0.0.1:{app.listen_port}<span dir="rtl" className="mr-2 font-sans">· با فعال‌سازی، ARG reverse proxy مستقل Nginx را می‌سازد؛ SSL از صفحهٔ Nginx فعال می‌شود. Health Check از مسیر تنظیم‌شده پاسخ 2xx می‌خواهد.</span></p>}
       <div className="flex flex-wrap gap-2 border-t border-border/60 pt-3"><Button size="sm" disabled={busy || loading || (service?.state !== 'active' && inspection.state !== 'ready')} onClick={() => void toggleService(service?.state !== 'active')}><Server size={13}/>{busy ? 'در حال اعمال…' : service?.state === 'active' ? 'توقف سرویس' : 'فعال‌سازی سرویس'}</Button><Button size="sm" variant="outline" onClick={() => void readLogs()}><Search size={13}/>نمایش لاگ‌های اجرا</Button></div>
       <form onSubmit={(event) => void saveEnvironment(event)} className="space-y-2 border-t border-border/60 pt-3"><div><p className="text-xs font-medium">متغیرهای Runtime</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">مقدارهای فعلی هرگز خوانده نمی‌شوند. مقدار خالی یعنی بدون تغییر. این متغیرها فقط هنگام اجرای سرویس در دسترس‌اند، نه برای اسکریپت build.</p></div>
         <div className="grid gap-2 sm:grid-cols-2">{Object.keys(draft).map((key) => <label key={key} className="space-y-1 text-[10px] text-muted-foreground"><span dir="ltr" className="font-mono">{key}</span><Input type={/(SECRET|TOKEN|PASSWORD|KEY)/i.test(key) ? 'password' : 'text'} dir="ltr" autoComplete="new-password" value={draft[key]} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} placeholder="برای نگه‌داشتن مقدار فعلی خالی بگذار"/></label>)}</div>

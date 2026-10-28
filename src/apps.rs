@@ -429,6 +429,9 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
         ("static_output_path", "TEXT NOT NULL DEFAULT 'auto'"),
         ("static_spa_fallback", "INTEGER NOT NULL DEFAULT 1"),
         ("build_environment_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("node_build_script", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("node_start_script", "TEXT NOT NULL DEFAULT 'auto'"),
+        ("node_healthcheck_path", "TEXT NOT NULL DEFAULT '/'"),
     ] {
         let mut statement = db.prepare("PRAGMA table_info(applications)")?;
         let columns = statement

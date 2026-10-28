@@ -291,6 +291,7 @@ pub(super) fn router(state: AppState) -> Router {
             put(laravel::save_environment).post(laravel::generate_key),
         )
         .route("/api/apps/{id}/node", get(node::inspect))
+        .route("/api/apps/{id}/node/runtime-settings", get(node::get_runtime_settings).put(node::save_runtime_settings))
         .route(
             "/api/apps/{id}/node/service",
             get(node::service).put(node::set_service),
@@ -316,6 +317,7 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/apps/{id}/deploy/jobs", get(deploy::list))
         .route("/api/apps/{id}/deploy/rollback", post(deploy::rollback))
         .route("/api/deploy/jobs/{id}", get(deploy::get))
+        .route("/api/deploy/jobs/{id}/logs", get(deploy::logs))
         .route("/api/deploy/jobs/{id}/events", get(deploy::events))
         .route("/api/deploy/jobs/{id}/cancel", post(deploy::cancel))
         .route("/api/deploy/jobs/{id}/retry", post(deploy::retry))
