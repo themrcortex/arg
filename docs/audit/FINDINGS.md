@@ -51,6 +51,7 @@ This is a running index for completed phases only. It is not a statement that th
 | ID | Finding | Status | Resolution | Details |
 |---|---|---|---|---|
 | FED-002 | Repeated workspace-session renewal can create unbounded valid session rows | AUDIT_REQUIRED | Open; retry-safe idempotency design needed | [04-federation.md](04-federation.md) |
+| CQ-001 | Strict Clippy gate fails on repository-wide lint debt | CONFIRMED | P3 maintainability debt; 50 unique diagnostics remain, no mass autofix applied | [11-code-quality.md](11-code-quality.md) |
 
 ## Not an issue
 
@@ -60,4 +61,4 @@ This is a running index for completed phases only. It is not a statement that th
 
 ## Open audit coverage
 
-Phases 0–10 have been reviewed and documented. Phases 11–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
+Phases 0–11 have been reviewed and documented. Phases 12–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
