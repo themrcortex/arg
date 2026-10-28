@@ -3117,7 +3117,7 @@ fn nginx_domain_claimed_in_directories(
     own_site: &str,
     directories: &[&std::path::Path],
 ) -> Result<bool, String> {
-    for directory in directories {
+    for (directory_index, directory) in directories.iter().enumerate() {
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
@@ -3126,7 +3126,7 @@ fn nginx_domain_claimed_in_directories(
         for entry in entries {
             let entry = entry.map_err(|error| error.to_string())?;
             let file_type = entry.file_type().map_err(|error| error.to_string())?;
-            if entry.file_name().to_str() == Some(own_site)
+            if (directory_index == 0 && entry.file_name().to_str() == Some(own_site))
                 || !(file_type.is_file() || file_type.is_symlink())
             {
                 continue;
@@ -3266,6 +3266,40 @@ mod node_proxy_tests {
             &[directory.as_path()],
         );
         fs::remove_dir_all(&directory).unwrap();
+        assert!(result.unwrap());
+    }
+
+    #[test]
+    fn domain_conflict_check_ignores_own_site_only_in_sites_available() {
+        use std::{fs, time::SystemTime};
+        let root = std::env::temp_dir().join(format!(
+            "arg-nginx-domain-same-name-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let available = root.join("available");
+        let conf_d = root.join("conf.d");
+        fs::create_dir_all(&available).unwrap();
+        fs::create_dir_all(&conf_d).unwrap();
+        fs::write(
+            available.join("same-site"),
+            "server { server_name api.example.com; }",
+        )
+        .unwrap();
+        fs::write(
+            conf_d.join("same-site"),
+            "server { server_name api.example.com; }",
+        )
+        .unwrap();
+        let result = super::nginx_domain_claimed_in_directories(
+            "api.example.com",
+            "same-site",
+            &[available.as_path(), conf_d.as_path()],
+        );
+        fs::remove_dir_all(&root).unwrap();
         assert!(result.unwrap());
     }
 }
