@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 3 at revision `52824d034b0f988785866b89d0f6f7decb6894cc` on `audit/development-hardening`.
+Updated through phase 4 at revision `6852cddcdd7328584127d8103cc1b62b2c1be888` on `audit/development-hardening`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -17,9 +17,11 @@ Updated through phase 3 at revision `52824d034b0f988785866b89d0f6f7decb6894cc` o
 | PRIV-001 | P1 | Fixed | Helper requires both `arg` UID and membership in `/system.slice/arg.service` | `privileged_helper_accepts_only_the_panel_systemd_service_cgroup` | `d2f5f19` |
 | PRIV-002 | P2 | Fixed | Eight-connection admission limit, 10-second request deadline, 4 MiB request cap, 32 MiB response cap | `privileged_socket_reader_rejects_oversized_and_stalled_requests`; `privileged_socket_response_is_bounded_and_must_be_complete` | `d2f5f19`, `52824d0` |
 | PRIV-003 | P2 | Fixed | Scan keeps bounded top-K result sets instead of all paths | `disk_scan_keeps_only_bounded_top_entries_in_deterministic_order` | `512ba90` |
+| FED-001 | P2 | Fixed | Cloud metadata targets are denied even with private endpoint opt-in; CGNAT is classified as private | `federation_blocks_cloud_metadata_even_for_explicit_private_networks`; `federation_private_endpoint_opt_in_does_not_allow_cgnat_by_default`; endpoint assertions | `6852cdd` |
+| FED-002 | P3 | Audit required | Repeated authorized workspace renewal creates additional session rows; defer rate limiting until renewal is retry-safe | No test; pending focused design | — |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - The helper's full per-action path/TOCTOU review continues alongside phases 5–8.
-- Phases 4–15 are not yet marked complete. Results must be appended as each phase is audited and tested.
+- Phases 5–15 are not yet marked complete. Results must be appended as each phase is audited and tested.

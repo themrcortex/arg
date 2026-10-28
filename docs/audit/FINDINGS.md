@@ -23,10 +23,13 @@ This is a running index for completed phases only. It is not a statement that th
 | AUTH-004 | App-volume scan POST did not verify Origin | CONFIRMED | Fixed in `2ee2f4a` | [02-auth-security.md](02-auth-security.md) |
 | PRIV-002 | Helper accepted unbounded connection tasks and unbounded-time reads | CONFIRMED | Fixed in `d2f5f19`; response cap in `52824d0` | [03-privileged-helper.md](03-privileged-helper.md) |
 | PRIV-003 | Deep disk scan retained all paths before truncating output | CONFIRMED | Fixed in `512ba90` | [03-privileged-helper.md](03-privileged-helper.md) |
+| FED-001 | Private endpoint opt-in allowed cloud metadata targets and CGNAT classification was incomplete | CONFIRMED | Fixed in `6852cdd` | [04-federation.md](04-federation.md) |
 
 ## P3 / Low
 
-No P3 findings are recorded from completed phases yet.
+| ID | Finding | Status | Resolution | Details |
+|---|---|---|---|---|
+| FED-002 | Repeated workspace-session renewal can create unbounded valid session rows | AUDIT_REQUIRED | Open; retry-safe idempotency design needed | [04-federation.md](04-federation.md) |
 
 ## Not an issue
 
@@ -36,4 +39,4 @@ No P3 findings are recorded from completed phases yet.
 
 ## Open audit coverage
 
-Phases 0–3 have been reviewed and documented. Phases 4–15 remain unreviewed or incomplete and may add findings. In particular, this index must not be interpreted as a clean full-project security assessment.
+Phases 0–4 have been reviewed and documented. Phases 5–15 remain unreviewed or incomplete and may add findings. In particular, this index must not be interpreted as a clean full-project security assessment.
