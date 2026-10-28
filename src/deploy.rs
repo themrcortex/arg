@@ -822,6 +822,37 @@ fn prune_job_logs(db: &Connection, job_id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JobEventRevision {
+    state: String,
+    step_count: i64,
+    latest_log_id: i64,
+}
+
+impl JobEventRevision {
+    fn is_terminal(&self) -> bool {
+        matches!(self.state.as_str(), "succeeded" | "failed" | "cancelled")
+    }
+}
+
+fn job_event_revision(db: &Connection, job_id: &str) -> rusqlite::Result<Option<JobEventRevision>> {
+    db.query_row(
+        "SELECT state,
+                (SELECT COUNT(*) FROM deployment_job_steps WHERE job_id=?1),
+                COALESCE((SELECT MAX(id) FROM deployment_job_logs WHERE job_id=?1),0)
+         FROM deployment_jobs WHERE id=?1",
+        [job_id],
+        |row| {
+            Ok(JobEventRevision {
+                state: row.get(0)?,
+                step_count: row.get(1)?,
+                latest_log_id: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
 fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
     let row: (String,String,String,String,String,i64,i64,Option<i64>,Option<String>,Option<String>,Option<String>,Option<String>,Option<String>) = db.query_row(
         "SELECT id,application_id,owner_server_uuid,actor,state,attempt,created_at,started_at,finished_at,release_path,previous_release,source_commit,error_summary FROM deployment_jobs WHERE id=?1",
@@ -1581,7 +1612,7 @@ pub(super) async fn events(
     let state = state.clone();
     let job_id = job_id.clone();
     let events = stream::unfold(
-        (state, job_id, headers, 0_u64, false),
+        (state, job_id, headers, None::<JobEventRevision>, false),
         |(state, job_id, headers, revision, done)| async move {
             if done {
                 return None;
@@ -1592,29 +1623,32 @@ pub(super) async fn events(
                 if require_admin(&db, &headers).is_err() {
                     None
                 } else {
-                    read_job(&db, &job_id).ok()
+                    let next_revision = job_event_revision(&db, &job_id).ok().flatten()?;
+                    let changed = revision.as_ref() != Some(&next_revision);
+                    let terminal = next_revision.is_terminal();
+                    let job = if changed || terminal {
+                        Some(read_job(&db, &job_id).ok()?)
+                    } else {
+                        None
+                    };
+                    Some((next_revision, job))
                 }
             };
-            let Some(job) = result else {
+            let Some((next_revision, job)) = result else {
                 return None;
             };
-            let next_revision = job["steps"]
-                .as_array()
-                .map_or(0, |steps| steps.len() as u64)
-                .saturating_add(job["log_count"].as_u64().unwrap_or(0));
-            let terminal = matches!(
-                job["state"].as_str(),
-                Some("succeeded" | "failed" | "cancelled")
-            );
-            let event = if next_revision != revision || terminal {
-                Event::default()
+            let terminal = next_revision.is_terminal();
+            let event = match job {
+                Some(job) => Event::default()
                     .event("job")
                     .json_data(&job)
-                    .unwrap_or_default()
-            } else {
-                Event::default().comment("heartbeat")
+                    .unwrap_or_default(),
+                None => Event::default().comment("heartbeat"),
             };
-            Some((Ok(event), (state, job_id, headers, next_revision, terminal)))
+            Some((
+                Ok(event),
+                (state, job_id, headers, Some(next_revision), terminal),
+            ))
         },
     );
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
@@ -3217,24 +3251,68 @@ mod tests {
     }
 
     #[test]
-    fn deployment_output_retains_a_bounded_recent_window() {
+    fn deployment_output_retention_and_sse_revision_advance_at_limit() {
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);",
+        )
+        .unwrap();
         migrate(&db).unwrap();
-        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
-        persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git","[]").unwrap();
-        for line in 0..2_001 {
-            append_job_log(&db,"job","build","output",&format!("line {line}")).unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 1, "git", "[]",
+        )
+        .unwrap();
+        for line in 0..2_000 {
+            append_job_log(&db, "job", "build", "output", &format!("line {line}")).unwrap();
         }
-        let count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'",[],|row|row.get(0)).unwrap();
-        let first_message: String = db.query_row("SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id LIMIT 1",[],|row|row.get(0)).unwrap();
-        let latest: String = db.query_row("SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id DESC LIMIT 1",[],|row|row.get(0)).unwrap();
-        let job = read_job(&db,"job").unwrap();
-        assert_eq!(count,2_000);
-        assert_eq!(first_message,"line 1");
-        assert_eq!(latest,"line 2000");
-        assert_eq!(job["logs"].as_array().unwrap().len(),20);
-        assert_eq!(job["log_count"],2_000);
+        let count_before: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let revision_before = job_event_revision(&db, "job").unwrap().unwrap();
+        append_job_log(&db, "job", "build", "output", "line 2000").unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let first_message: String = db
+            .query_row(
+                "SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let latest: String = db
+            .query_row(
+                "SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let revision_after = job_event_revision(&db, "job").unwrap().unwrap();
+        let job = read_job(&db, "job").unwrap();
+        assert_eq!(count_before, 2_000);
+        assert_eq!(count, 2_000);
+        assert_eq!(first_message, "line 1");
+        assert_eq!(latest, "line 2000");
+        assert_eq!(job["logs"].as_array().unwrap().len(), 20);
+        assert_eq!(job["log_count"], 2_000);
+        assert_ne!(
+            revision_before,
+            revision_after,
+            "the latest retained log ID must advance even when retained count stays capped"
+        );
     }
 
     #[test]
