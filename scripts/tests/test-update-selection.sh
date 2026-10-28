@@ -7,6 +7,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 sed -n '/^select_update_options() {$/,/^}$/p' "$root/install.sh" > "$tmp/functions.sh"
 sed -n '/^installer_script_url() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
+sed -n '/^release_build_cpu_count() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^configure_release_build_resources() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_is_root() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_swap_active() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
@@ -18,6 +19,7 @@ sed -n '/^build_release() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^cleanup_update_build_cache() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^cleanup_update_reservation() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 source "$tmp/functions.sh"
+release_build_cpu_count() { printf '16\n'; }
 
 BRANCH=main
 ARG_UPDATE_MODE=complete
@@ -32,15 +34,23 @@ select_update_options main complete
 [[ "$BRANCH" == main && "$ARG_UPDATE_MODE" == complete ]]
 [[ "$(installer_script_url main)" == https://raw.githubusercontent.com/themrcortex/arg/main/install.sh ]]
 
-unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL
+unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
 configure_release_build_resources 2048
-[[ "$CARGO_BUILD_JOBS" == 1 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 1 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 2 ]]
-unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL
+[[ "$CARGO_BUILD_JOBS" == 1 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 4 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 2 ]]
+unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
 configure_release_build_resources 1024
 [[ "$CARGO_BUILD_JOBS" == 1 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 1 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 0 ]]
-unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL
+unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
 configure_release_build_resources 8192
-[[ -z "${CARGO_BUILD_JOBS:-}" && -z "${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-}" && -z "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" ]]
+[[ "$CARGO_BUILD_JOBS" == 2 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 8 && -z "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" ]]
+unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
+configure_release_build_resources 16384
+[[ "$CARGO_BUILD_JOBS" == 5 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 3 && -z "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" ]]
+unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
+ARG_CARGO_BUILD_JOBS=20
+configure_release_build_resources 8192
+[[ "$CARGO_BUILD_JOBS" == 2 ]]
+unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
 
 # Exercise temporary swap lifecycle with shell mocks. No host swap or disk is changed.
 swap_test_dir="$tmp/swap"

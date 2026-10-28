@@ -231,19 +231,68 @@ prepare_source() {
   fi
 }
 
+release_build_cpu_count() {
+  local count
+  count="$(nproc 2>/dev/null || true)"
+  if [[ "$count" =~ ^[0-9]+$ ]] && (( count > 0 )); then
+    printf '%s\n' "$count"
+    return 0
+  fi
+  count="$(awk '/^processor[[:space:]]*:/ { count++ } END { print count+0 }' /proc/cpuinfo 2>/dev/null || true)"
+  [[ "$count" =~ ^[0-9]+$ ]] && (( count > 0 )) || count=1
+  printf '%s\n' "$count"
+}
+
 configure_release_build_resources() {
-  local memory_budget_mb="${1:-0}"
+  local memory_budget_mb="${1:-0}" cpu_count max_jobs requested_jobs codegen_units
   [[ "$memory_budget_mb" =~ ^[0-9]+$ ]] || memory_budget_mb=0
-  if (( memory_budget_mb < 4096 )); then
-    export CARGO_BUILD_JOBS="${ARG_CARGO_BUILD_JOBS:-1}"
-    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-1}"
-    if (( memory_budget_mb < 2048 )); then
-      export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-0}"
-      warn "Available RAM and swap are below 2 GiB; using the minimum-memory release profile (1 job, opt-level 0, 1 codegen unit)."
-    else
+  cpu_count="$(release_build_cpu_count)"
+
+  if (( memory_budget_mb < 2048 )); then
+    max_jobs=1
+    codegen_units=1
+    export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-0}"
+    warn "Available RAM and swap are below 2 GiB; using 1 Cargo job, 1 codegen unit, and opt-level 0 to avoid another OOM."
+  elif (( memory_budget_mb < 4096 )); then
+    max_jobs=1
+    codegen_units=$((memory_budget_mb / 512))
+    (( codegen_units > cpu_count )) && codegen_units="$cpu_count"
+    (( codegen_units > 8 )) && codegen_units=8
+    (( codegen_units > 0 )) || codegen_units=1
+    export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-2}"
+    warn "Available RAM and swap are below 4 GiB; keeping one Cargo job for memory safety and scaling codegen units with RAM and CPU (up to 8) to use more processing power."
+  else
+    max_jobs=$((memory_budget_mb / 3072))
+    (( max_jobs > 0 )) || max_jobs=1
+    (( max_jobs > cpu_count )) && max_jobs="$cpu_count"
+    codegen_units=$((memory_budget_mb / 512))
+    (( codegen_units > cpu_count / max_jobs )) && codegen_units=$((cpu_count / max_jobs))
+    (( codegen_units > 16 )) && codegen_units=16
+    (( codegen_units > 0 )) || codegen_units=1
+    if (( memory_budget_mb < 8192 )); then
       export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-2}"
-      warn "Available RAM and swap are below 4 GiB; using a lower-memory release build (1 job, opt-level 2, 1 codegen unit)."
+    elif [[ -n "${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" ]]; then
+      export CARGO_PROFILE_RELEASE_OPT_LEVEL="$ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL"
+    else
+      unset CARGO_PROFILE_RELEASE_OPT_LEVEL
     fi
+  fi
+
+  requested_jobs="${ARG_CARGO_BUILD_JOBS:-$max_jobs}"
+  if [[ ! "$requested_jobs" =~ ^[0-9]+$ ]] || (( 10#$requested_jobs < 1 )); then
+    warn "Invalid ARG_CARGO_BUILD_JOBS value; using the safe automatic job count ($max_jobs)."
+    requested_jobs="$max_jobs"
+  elif (( 10#$requested_jobs > max_jobs )); then
+    warn "ARG_CARGO_BUILD_JOBS exceeds the safe memory limit; capping Cargo at $max_jobs parallel job(s)."
+    requested_jobs="$max_jobs"
+  else
+    requested_jobs=$((10#$requested_jobs))
+  fi
+  export CARGO_BUILD_JOBS="$requested_jobs"
+  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-$codegen_units}"
+
+  if (( memory_budget_mb >= 4096 )); then
+    info "Rust build will use $CARGO_BUILD_JOBS Cargo job(s) with up to $CARGO_PROFILE_RELEASE_CODEGEN_UNITS codegen unit(s) per job across $cpu_count available CPU core(s)."
   fi
 }
 
