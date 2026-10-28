@@ -46,6 +46,7 @@ use tokio::{
 const PRIVILEGED_SOCKET: &str = "/run/arg-privileged/manager.sock";
 const UPDATE_STATUS_FILE: &str = "/run/arg-update-in-progress";
 const PRIVILEGED_REQUEST_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PRIVILEGED_RESPONSE_MAX_BYTES: usize = 32 * 1024 * 1024;
 const PRIVILEGED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 static PRIVILEGED_CONNECTIONS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
@@ -2245,15 +2246,16 @@ fn privileged_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)
             "Could not send privileged operation",
         )
     })?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_line(&mut response)
-        .map_err(|_| {
-            error(
-                StatusCode::BAD_GATEWAY,
-                "Privileged manager did not respond",
-            )
-        })?;
+    let response = read_bounded_privileged_response(
+        BufReader::new(stream),
+        PRIVILEGED_RESPONSE_MAX_BYTES,
+    )
+    .map_err(|_| {
+        error(
+            StatusCode::BAD_GATEWAY,
+            "Privileged manager response was missing, incomplete, or exceeded the size limit",
+        )
+    })?;
     serde_json::from_str(&response).map_err(|_| {
         error(
             StatusCode::BAD_GATEWAY,
@@ -4906,6 +4908,50 @@ where
     Ok(line)
 }
 
+fn read_bounded_privileged_response<R>(
+    reader: R,
+    max_bytes: usize,
+) -> std::io::Result<String>
+where
+    R: std::io::BufRead,
+{
+    let mut line = String::new();
+    let bytes_read = reader
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_line(&mut line)?;
+    if bytes_read == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "privileged response is empty",
+        ));
+    }
+    if bytes_read > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "privileged response exceeded the size limit",
+        ));
+    }
+    if !line.ends_with('\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "privileged response is incomplete",
+        ));
+    }
+    Ok(line)
+}
+
+fn encode_bounded_privileged_response(response: &Value, max_bytes: usize) -> Vec<u8> {
+    const SIZE_LIMIT_RESPONSE: &[u8] =
+        br#"{"ok":false,"error":"Privileged response exceeded the size limit"}"#;
+    let mut encoded = serde_json::to_vec(response)
+        .unwrap_or_else(|_| br#"{"ok":false,"error":"Could not encode response"}"#.to_vec());
+    if encoded.len() > max_bytes {
+        encoded = SIZE_LIMIT_RESPONSE.to_vec();
+    }
+    encoded.push(b'\n');
+    encoded
+}
+
 async fn serve_privileged_connection(mut stream: UnixStream) {
     if !privileged_peer_allowed(&stream) {
         return;
@@ -4933,7 +4979,8 @@ async fn serve_privileged_connection(mut stream: UnixStream) {
         },
         Err(_) => json!({"ok":false,"error":"Invalid request"}),
     };
-    let _ = stream.write_all(format!("{}\n", response).as_bytes()).await;
+    let encoded = encode_bounded_privileged_response(&response, PRIVILEGED_RESPONSE_MAX_BYTES);
+    let _ = stream.write_all(&encoded).await;
 }
 
 async fn run_privileged_helper() -> Result<(), Box<dyn std::error::Error>> {
@@ -5170,10 +5217,12 @@ mod update_progress_tests {
     use super::{
         backup_database, default_update_build_mode, ensure_federation_identity_columns,
         ensure_metric_storage_columns, firewall_rule_validation_error, update_progress_payload,
-        login, login_client_ip, login_throttle_keys, parse_systemd_exec_start,
-        parse_systemd_service_commands, process_belongs_to_arg_service, read_privileged_line,
-        role_has_admin_access, valid_apt_install_spec, valid_tls_source_path,
-        valid_update_build_mode, AppState, Connection, Credentials, FirewallRuleInput,
+        encode_bounded_privileged_response, login, login_client_ip, login_throttle_keys,
+        parse_systemd_exec_start, parse_systemd_service_commands,
+        process_belongs_to_arg_service, read_bounded_privileged_response,
+        read_privileged_line, role_has_admin_access, valid_apt_install_spec,
+        valid_tls_source_path, valid_update_build_mode, AppState, Connection, Credentials,
+        FirewallRuleInput,
     };
 
     #[test]
@@ -5231,6 +5280,33 @@ mod update_progress_tests {
             "0::/user.slice/user-1000.slice/arg.service\n"
         ));
         assert!(!process_belongs_to_arg_service("invalid cgroup record\n"));
+    }
+
+    #[test]
+    fn privileged_socket_response_is_bounded_and_must_be_complete() {
+        let oversized = encode_bounded_privileged_response(
+            &serde_json::json!({"result":"x".repeat(1024)}),
+            256,
+        );
+        assert!(oversized.len() <= 256);
+        assert!(String::from_utf8_lossy(&oversized).contains("response exceeded the size limit"));
+
+        let response = read_bounded_privileged_response(
+            std::io::Cursor::new(b"{\"ok\":true}\n"),
+            32,
+        )
+        .expect("bounded complete response");
+        assert_eq!(response, "{\"ok\":true}\n");
+        assert!(read_bounded_privileged_response(
+            std::io::Cursor::new(b"123456789\n"),
+            8
+        )
+        .is_err());
+        assert!(read_bounded_privileged_response(
+            std::io::Cursor::new(b"{\"ok\":true}"),
+            32
+        )
+        .is_err());
     }
 
     #[tokio::test]
