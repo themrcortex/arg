@@ -1,6 +1,6 @@
 # Source Deployments and Durable Jobs
 
-This page describes ARG's base deployment phase. ARG acquires source into an isolated release, validates its contents, and atomically switches the `current` pointer. Job state and step history live in SQLite, so closing the browser does not discard progress.
+This page describes ARG's base deployment workflow. ARG acquires source into an isolated release, validates its contents, and atomically switches the `current` pointer. Job state and step history live in SQLite, so closing the browser does not discard progress.
 
 ## Current scope
 

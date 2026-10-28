@@ -41,7 +41,7 @@ In an application form, choose a framework to identify its runtime family:
 
 The selector is populated from installed versions on that VPS. PHP choices require the matching PHP-FPM version to be installed. **System default** leaves the version unpinned. Node's build version is saved separately from its runtime version for applications that need different build and execution toolchains.
 
-This preference is stored in the application record. Additive migrations give existing records the default `system`. ARG does not yet run the application's build script or create its process service in this phase. Treat it as a requested version, not proof that a runtime process is active. Later runner phases use it for preflight and restricted execution.
+This preference is stored in the application record. Additive migrations give existing records the default `system`. Selecting a version does not run the application's build script or create its process service. Treat it as a requested version, not proof that a runtime process is active. For supported Laravel and Node.js execution, see the corresponding runner guides.
 
 ## Supporting tools
 
@@ -79,5 +79,5 @@ Install that version from the packs available on this VPS, then reopen the appli
 
 - Runtime installation uses the existing APT configuration on Debian/Ubuntu; ARG does not add third-party repositories.
 - Installing a package does not configure Nginx/PHP-FPM or create an application systemd service.
-- Selecting a version does not run framework builds or start applications; those belong to later runner phases.
+- Selecting a version does not run framework builds or start applications. Use the Laravel or Node.js runner guide for the supported execution workflows.
 - This page does not infer which sites depend on a runtime before removing it. Package removal can affect other sites and must be reviewed separately in APT management.

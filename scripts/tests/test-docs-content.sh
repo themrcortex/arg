@@ -18,6 +18,16 @@ page_ids = [page_id for page_id, _, _ in entries]
 if len(page_ids) != len(set(page_ids)):
     raise SystemExit('Documentation page IDs must be unique')
 by_file = {file_name: page_id for page_id, _, file_name in entries}
+internal_planning_files = ('app-platform-architecture', 'app-platform-roadmap-13-18', 'app-platform-roadmap-18-48')
+if any(page_id.startswith('app-platform-') or file_name.startswith('app-platform-') for page_id, _, file_name in entries):
+    raise SystemExit('Internal application-platform planning documents must not appear in the public docs catalog')
+for lang in ('fa', 'en'):
+    public_planning_files = [name for name in internal_planning_files if (root / 'docs' / lang / f'{name}.md').exists()]
+    if public_planning_files:
+        raise SystemExit(f'Internal planning files must live outside docs/{lang}: {public_planning_files}')
+    for name in internal_planning_files:
+        if not (root / 'ai-context' / 'application-platform' / lang / f'{name}.md').is_file():
+            raise SystemExit(f'Missing internal AI context file: ai-context/application-platform/{lang}/{name}.md')
 legacy = dict(re.findall(r"'(guide-[\w-]*-)': '([^']+)'", catalog))
 for prefix, target in legacy.items():
     if target not in page_ids:
@@ -126,6 +136,12 @@ for lang in ('fa', 'en'):
     leftovers = list((root / 'docs' / lang).glob('guide-*.md'))
     if leftovers:
         errors.append(f'One-task guides should be merged into canonical pages; found {len(leftovers)} {lang} files')
+for path in (root / 'docs' / 'fa').glob('*.md'):
+    if 'app-platform-roadmap' in path.read_text():
+        errors.append(f'Public Persian docs must not link to internal roadmaps: {path.relative_to(root)}')
+for path in (root / 'docs' / 'en').glob('*.md'):
+    if 'app-platform-roadmap' in path.read_text():
+        errors.append(f'Public English docs must not link to internal roadmaps: {path.relative_to(root)}')
 semantic_groups = {group for _, group, _ in entries}
 if any(group.isdigit() for group in semantic_groups):
     errors.append('Documentation categories must use semantic IDs, not numeric group IDs')

@@ -60,7 +60,7 @@ Service status is based on systemd and the actual listening socket. Before repor
 - **Save runtime variables:** validates names and values and persists them privately. Existing values cannot be retrieved.
 - **Deploy / Retry / Roll back:** uses the durable deployment job and release history. Rollback changes code and restarts an enabled service; it does not reverse database or external side effects made by application code.
 
-ARG does not manage Node clusters, arbitrary worker commands, per-route health checks, staging promotion, package-manager auto-installation, or Yarn Berry in this phase. A project-specific command is not accepted as a free-form field. Static React/Vite deployment, Next.js/Nuxt SSR behavior, and build-output-to-Nginx document-root configuration are separate later runner phases.
+ARG does not manage Node clusters, arbitrary worker commands, per-route health checks, staging promotion, package-manager auto-installation, or Yarn Berry. A project-specific command is not accepted as a free-form field. Static React/Vite publishing and Next.js/Nuxt SSR are described in the separate static publishing guide.
 
 ## Troubleshooting
 
