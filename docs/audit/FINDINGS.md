@@ -61,7 +61,8 @@ This is a running index for completed phases only. It is not a statement that th
 | ID | Observation | Result | Evidence |
 |---|---|---|---|
 | ARG-006 | Private-network UI/API reports a draft with no active enforcement | NOT_AN_ISSUE | [01-known-findings.md](01-known-findings.md) |
+| SUPPLY-003 | Secret scanner flagged SQL and permission-scope strings as generic keys | NOT_AN_ISSUE | Confirmed false positives; only exact historic fingerprints are ignored in `.gitleaksignore`, and the full-history scan is clean | [14-ci-quality-gates.md](14-ci-quality-gates.md) |
 
 ## Open audit coverage
 
-Phases 0–13 have been reviewed and documented. Phase 13's coverage assessment is in [13-test-coverage.md](13-test-coverage.md); phases 14–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
+Phases 0–14 have been reviewed and documented. Phase 14's CI controls are in [14-ci-quality-gates.md](14-ci-quality-gates.md); phase 15 final verification remains. Open P1 audit items remain; this index is not a clean full-project security assessment.
