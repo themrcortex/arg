@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 12 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
+Updated through phase 13 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -43,9 +43,10 @@ Updated through phase 12 on `audit/development-hardening`; source baseline `eec2
 | CQ-001 | P3 | Confirmed / open | Strict Clippy check still fails on 50 unique repository diagnostics; a new SSE lint was removed without auto-fixing unrelated modules | `cargo clippy --locked --all-targets -- -D warnings`; 246 Rust tests pass | `e7d8d6c` |
 | SUPPLY-001 | P2 | Fixed | Upgraded `zip` from vulnerable 2.6.1 to patched 9.1.3; retained entry-by-entry extraction and added traversal/symlink regression | `zip_extraction_rejects_traversal_and_tree_copy_excludes_secrets`; 246 Rust tests; `cargo audit` | `adf5f78` |
 | SUPPLY-002 | P2 | Audit required | Source and rustup bootstrap are fetched over HTTPS without a separately trusted signature/checksum; release trust-root decision remains open | Source review; cryptographic provenance test not implemented | — |
+| UI-004 | P2 | Fixed | Rebuilt the checked-in Rust-embedded frontend bundle from the locked frontend dependency graph | `npm ci`; `npm run check`; `npm run test:offline`; `npm run build`; `scripts/verify-embedded-frontend.sh` | `47c5a82` |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - S3 endpoint pinning and privileged file path TOCTOU are open high-priority items. They must be fixed or mitigated and tested before release.
-- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`; Phase 9 frontend state, async requests and interaction lifecycles are documented in `09-frontend.md`; Phase 10 performance and concurrency review is documented in `10-performance.md`; Phase 11 quality and maintainability review is documented in `11-code-quality.md`; Phase 12 supply chain and dependency controls are documented in `12-supply-chain.md`. No live Cloudflare, Certbot/Nginx host, browser E2E, screen-reader, representative VPS load, or multi-Node workspace integration was available; phases 13–15 remain unreviewed or incomplete.
+- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`; Phase 9 frontend state, async requests and interaction lifecycles are documented in `09-frontend.md`; Phase 10 performance and concurrency review is documented in `10-performance.md`; Phase 11 quality and maintainability review is documented in `11-code-quality.md`; Phase 12 supply chain and dependency controls are documented in `12-supply-chain.md`; Phase 13 test coverage is documented in `13-test-coverage.md`. No live Cloudflare, Certbot/Nginx host, browser E2E, screen-reader, representative VPS load, or multi-Node workspace integration was available; phases 14–15 remain unreviewed or incomplete.

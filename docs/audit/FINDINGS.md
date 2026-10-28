@@ -44,6 +44,7 @@ This is a running index for completed phases only. It is not a statement that th
 | UI-001 | Older async responses could replace dashboard, workspace, Job-detail, or S3 object-browser state | CONFIRMED | Fixed with request epochs and response-order regression tests in `2d26692` | [09-frontend.md](09-frontend.md) |
 | UI-002 | Deployment status polling could start overlapping reads when the endpoint exceeded the poll interval | CONFIRMED | Fixed with a tested single-flight gate, timeout, and abort on cleanup in `2d26692` | [09-frontend.md](09-frontend.md) |
 | UI-003 | Shared API wrapper has no route-class timeout policy | AUDIT_REQUIRED | Global change deferred; long streams and job operations need different deadlines | [09-frontend.md](09-frontend.md) |
+| UI-004 | Embedded production frontend did not match the frontend source | CONFIRMED | Rebuilt and committed `frontend/dist` from clean locked dependencies (`47c5a82`) | [13-test-coverage.md](13-test-coverage.md) |
 | PERF-001 | Deployment SSE revision stopped changing when the retained log count reached 2,000 | CONFIRMED | Fixed in `e4d128e`; latest log ID now advances the revision and unchanged heartbeats avoid full Job reads | [10-performance.md](10-performance.md) |
 | SUPPLY-001 | Locked ZIP release had RustSec advisories in built-in extraction APIs | CONFIRMED | Upgraded to `zip 9.1.3`; custom extraction regression covers traversal and symlinks (`adf5f78`) | [12-supply-chain.md](12-supply-chain.md) |
 | SUPPLY-002 | Installer/updater do not cryptographically verify source or artifact provenance | AUDIT_REQUIRED | Open; select release trust root and implement signature/attestation verification | [12-supply-chain.md](12-supply-chain.md) |
@@ -63,4 +64,4 @@ This is a running index for completed phases only. It is not a statement that th
 
 ## Open audit coverage
 
-Phases 0–12 have been reviewed and documented. Phases 13–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
+Phases 0–13 have been reviewed and documented. Phase 13's coverage assessment is in [13-test-coverage.md](13-test-coverage.md); phases 14–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
