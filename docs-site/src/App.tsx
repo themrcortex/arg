@@ -129,7 +129,6 @@ export default function App() {
   const [targetAnchor, setTargetAnchor] = useState(() => decodeURIComponent(window.location.hash.slice(1)))
   const [selectedCategory, setSelectedCategory] = useState<string>(getInitialCategory)
   const searchRef = useRef<HTMLInputElement>(null)
-  const mobileSearchRef = useRef<HTMLInputElement>(null)
   const previousFocus = useRef<HTMLElement | null>(null)
   const transitionTimer = useRef<number | null>(null)
   const previousPageId = useRef(pageId)
@@ -195,20 +194,16 @@ export default function App() {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === '/' && !['INPUT', 'TEXTAREA'].includes((event.target as HTMLElement).tagName)) {
         event.preventDefault()
-        if (window.matchMedia('(max-width: 760px)').matches) {
-          setMobileNav(true)
-          requestAnimationFrame(() => mobileSearchRef.current?.focus())
-        } else searchRef.current?.focus()
+        searchRef.current?.focus()
       }
       if (event.key === 'Escape') { setMobileNav(false); setQuery('') }
-      if (event.key === 'ArrowDown' && (event.target as HTMLElement).matches('.top-search input, .side-search input') && query.trim().length >= 2) {
+      if (event.key === 'ArrowDown' && (event.target as HTMLElement).matches('.top-search input') && query.trim().length >= 2) {
         event.preventDefault()
         document.querySelector<HTMLElement>('.search-results button, .inline-search-results button')?.focus()
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        if (window.matchMedia('(max-width: 760px)').matches) setMobileNav(true)
-        requestAnimationFrame(() => (window.matchMedia('(max-width: 760px)').matches ? mobileSearchRef.current : searchRef.current)?.focus())
+        searchRef.current?.focus()
       }
     }
     window.addEventListener('popstate', onPop)
@@ -274,7 +269,7 @@ export default function App() {
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const oldOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
-    requestAnimationFrame(() => mobileSearchRef.current?.focus())
+    requestAnimationFrame(() => document.querySelector<HTMLElement>('.mobile-sidebar .sidebar-category-option')?.focus())
     return () => {
       document.body.style.overflow = oldOverflow
       previousFocus.current?.focus()
@@ -323,22 +318,17 @@ export default function App() {
   }
 
   function focusDocsSearch() {
-    if (window.matchMedia('(max-width: 760px)').matches) {
-      setMobileNav(true)
-      requestAnimationFrame(() => mobileSearchRef.current?.focus())
-    } else searchRef.current?.focus()
+    searchRef.current?.focus()
   }
 
   function renderSidebar(mobile = false) {
     const idPrefix = mobile ? 'mobile-' : 'desktop-'
-    const searching = query.trim().length >= 2
     const activeTrail = pageTrail(page.id)
     const activeSection = activeTrail[1]?.id
     const currentCategory = navigation.find((category) => category.id === selectedCategory) || navigation[0]
     const currentCategoryPages = currentCategory?.children.flatMap((section) => section.pages) || []
     return <>
       <div className="sidebar-heading"><div className="sidebar-heading-icon"><BookOpen size={17}/></div><div className="sidebar-heading-copy min-w-0"><p>{isFa ? 'راهنمای ARG' : 'ARG docs'}</p><span>{texts.menu} · {readingOrder.length} {texts.allDocs}</span></div><button className="mobile-close" onClick={() => setMobileNav(false)} aria-label={texts.close}><X size={18}/></button></div>
-      <label className="side-search"><Search size={15}/><input ref={mobile ? mobileSearchRef : undefined} aria-label={texts.search} placeholder={texts.search} value={query} onChange={(event) => setQuery(event.target.value)}/><kbd>/</kbd></label>
       <nav className="side-nav sidebar-two-stage" aria-label={texts.menu}>
         <div className={`sidebar-category-rail ${selectedCategory ? 'is-collapsed' : ''}`} role="group" aria-label={isFa ? 'انتخاب دسته‌بندی' : 'Choose a category'}>
           {navigation.map((category) => {
@@ -350,12 +340,8 @@ export default function App() {
           })}
         </div>
         <div className="sidebar-panel" aria-live="polite">
-          {!searching && currentCategory && <div className="sidebar-panel-heading"><strong>{currentCategory.title[locale]}</strong><span>{currentCategoryPages.length} {texts.allDocs}</span></div>}
-          {searching && (searchIndex ? rankedSearchResults.length ? <div className="inline-search-results">{rankedSearchResults.map((result) => {
-          const target = pages.find((item) => item.id === result.id)!
-          return <button key={result.id} onClick={() => navigate(target, result.heading?.id)}><small>{groupsList[target.group]}</small><strong>{highlightText(target.title[locale], query.trim())}</strong><span>{highlightText(result.heading?.text || result.excerpt || target.summary[locale], query.trim())}</span></button>
-        })}</div> : <p className="empty-search">{isFa ? 'نتیجه‌ای پیدا نشد.' : 'No results found.'}</p> : <p className="empty-search">{isFa ? 'در حال آماده‌سازی جست‌وجو…' : 'Preparing search…'}</p>)}
-          {!searching && currentCategory?.children.map((section) => {
+          {currentCategory && <div className="sidebar-panel-heading"><strong>{currentCategory.title[locale]}</strong><span>{currentCategoryPages.length} {texts.allDocs}</span></div>}
+          {currentCategory?.children.map((section) => {
               const sectionIsCurrent = currentCategory.id === page.group && activeSection === section.id
               const sectionContentId = `${idPrefix}section-${currentCategory.id}-${section.id}`
               return <section key={section.id} className={`nav-subgroup ${sectionIsCurrent ? 'is-current' : ''}`}>
