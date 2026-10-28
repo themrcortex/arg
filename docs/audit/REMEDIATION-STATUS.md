@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 9 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
+Updated through phase 10 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -37,9 +37,12 @@ Updated through phase 9 on `audit/development-hardening`; source baseline `eec27
 | UI-001 | P2 | Fixed | Request epochs prevent stale dashboard ranges, application workspaces, deployment detail and S3 object responses from replacing current state | `an older asynchronous response cannot replace newer page state`; `changing the resource invalidates its in-flight request`; `npm run check` / build | `2d26692` |
 | UI-002 | P2 | Fixed | Deployment Job polling is single-flight, has a 10-second deadline and aborts on unmount | `single-flight polling rejects overlap and stale releases cannot unlock a newer request`; frontend checks/build | `2d26692` |
 | UI-003 | P2 | Audit required | Shared API wrapper has no route-class deadline policy; no unsafe global timeout was applied | Source review; short-read, stream and durable-job timeout classes still need design/tests | — |
+| PERF-001 | P2 | Fixed | Deployment SSE compares state, step count and latest retained log ID; unchanged 900 ms heartbeats no longer rebuild the full Job payload | `deployment_output_retention_and_sse_revision_advance_at_limit`; 246 Rust tests | `e4d128e` |
+| PERF-002 | P2 | Audit required | Single synchronous SQLite connection is serialized by `std::sync::Mutex`; no connection-pool rewrite without representative benchmark | Source review; VPS latency/lock-wait measurement unavailable | — |
+| PERF-003 | P2 | Audit required | One worker and per-app active-job constraint exist, but distinct applications may accumulate an unbounded global queue | Source review; queue capacity policy unprovided | — |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - S3 endpoint pinning and privileged file path TOCTOU are open high-priority items. They must be fixed or mitigated and tested before release.
-- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`; Phase 9 frontend state, async requests and interaction lifecycles are documented in `09-frontend.md`. No live Cloudflare, Certbot/Nginx host, browser E2E, screen-reader, or multi-Node workspace integration was available; phases 10–15 remain unreviewed or incomplete.
+- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`; Phase 9 frontend state, async requests and interaction lifecycles are documented in `09-frontend.md`; Phase 10 performance and concurrency review is documented in `10-performance.md`. No live Cloudflare, Certbot/Nginx host, browser E2E, screen-reader, representative VPS load, or multi-Node workspace integration was available; phases 11–15 remain unreviewed or incomplete.
