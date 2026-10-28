@@ -527,6 +527,17 @@ fn node_unit_name(app_id: &str) -> String {
     format!("arg-node-{}.service", &app_id[..12])
 }
 
+fn deployment_build_unit_name(app_id: &str, job_id: &str, step: &str) -> Option<String> {
+    if !valid_app_id(app_id)
+        || !valid_app_id(job_id)
+        || !(matches!(step, "install" | "build")
+            || (1..=8).any(|number| step == format!("pre-deploy-{number}")))
+    {
+        return None;
+    }
+    Some(format!("arg-node-build-{}-{}-{step}", &app_id[..8], &job_id[..8]))
+}
+
 fn service_record_id() -> String {
     let mut bytes = [0_u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -994,6 +1005,9 @@ async fn request_build_step_with_live_logs(state: &AppState, job_id: &str, step:
     let mut offset = 0_u64;
     let mut pending = Vec::new();
     let mut streamed = false;
+    let application_id = request["application_id"].as_str().unwrap_or_default().to_owned();
+    let helper_step = request["step"].as_str().unwrap_or_default().to_owned();
+    let mut last_cancel_request = None;
     let request = privileged_request_async(request);
     tokio::pin!(request);
     loop {
@@ -1009,6 +1023,17 @@ async fn request_build_step_with_live_logs(state: &AppState, job_id: &str, step:
             }
             _ = tokio::time::sleep(Duration::from_millis(400)) => {
                 streamed |= drain_live_build_log(log_path, &mut offset, &mut pending, false, state, job_id, step);
+                if super::deploy::cancelled(state, job_id)
+                    && last_cancel_request.is_none_or(|last: std::time::Instant| last.elapsed() >= Duration::from_secs(1))
+                {
+                    last_cancel_request = Some(std::time::Instant::now());
+                    let _ = privileged_request_async(json!({
+                        "action":"node-build-cancel",
+                        "application_id":application_id,
+                        "job_id":job_id,
+                        "step":helper_step,
+                    })).await;
+                }
             }
         }
     }
@@ -1608,6 +1633,7 @@ pub(super) async fn logs(
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     match action {
         "node-build-step" => helper_build_step(request),
+        "node-build-cancel" => helper_build_cancel(request),
         "node-pre-deploy-command" => helper_pre_deploy_command(request),
         "node-service-enable" => helper_service_enable(request),
         "node-service-disable" => helper_service_disable(request),
@@ -1620,6 +1646,41 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
         "node-nginx-proxy" => helper_node_nginx_proxy(request),
         "node-nginx-static" => helper_node_nginx_static(request),
         _ => json!({"ok":false,"error":"Node helper operation is not allowlisted"}),
+    }
+}
+
+fn helper_build_cancel(request: &Value) -> Value {
+    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+        return json!({"ok":false,"error":"Application ID is invalid"});
+    };
+    let Some(job_id) = request["job_id"].as_str().filter(|value| valid_app_id(value)) else {
+        return json!({"ok":false,"error":"Deployment ID is invalid"});
+    };
+    let Some(step) = request["step"].as_str() else {
+        return json!({"ok":false,"error":"Build step is missing"});
+    };
+    let Some(unit) = deployment_build_unit_name(app_id, job_id, step) else {
+        return json!({"ok":false,"error":"Build unit is not allowlisted"});
+    };
+    let active = match Command::new("/usr/bin/systemctl")
+        .args(["is-active", &unit])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        Err(error) => return json!({"ok":false,"error":format!("Could not inspect build unit: {error}")}),
+    };
+    if !matches!(active.as_str(), "active" | "activating" | "deactivating" | "reloading") {
+        return json!({"ok":true,"data":{"unit":unit,"stop_requested":false}});
+    }
+    match Command::new("/usr/bin/systemctl")
+        .args(["--no-block", "stop", &unit])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(output) if output.status.success() => json!({"ok":true,"data":{"unit":unit,"stop_requested":true}}),
+        Ok(output) => json!({"ok":false,"error":format!("Could not stop build unit: {}", String::from_utf8_lossy(&output.stderr).trim())}),
+        Err(error) => json!({"ok":false,"error":format!("Could not stop build unit: {error}")}),
     }
 }
 
@@ -2416,7 +2477,9 @@ fn run_sandboxed(
     {
         return Err("Deployment path cannot be represented safely in systemd properties.".into());
     }
-    let unit = format!("arg-node-build-{}-{}-{step}", &app_id[..8], &job_id[..8]);
+    let Some(unit) = deployment_build_unit_name(app_id, job_id, step) else {
+        return Err("Deployment build unit identity is invalid".into());
+    };
     let systemd = PathBuf::from("/usr/bin/systemd-run");
     if !systemd.is_file() {
         return Err("systemd-run is required for isolated Node builds.".into());
@@ -2970,6 +3033,28 @@ mod tests {
         let id = "12345678-1234-4234-8234-123456789abc";
         assert_eq!(node_unit_name(id), "arg-node-12345678-123.service");
         assert_eq!(app_group(id), "argapp-12345678-123");
+        let job = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+        assert_eq!(
+            deployment_build_unit_name(id, job, "install").as_deref(),
+            Some("arg-node-build-12345678-abcdefab-install")
+        );
+        assert_eq!(
+            deployment_build_unit_name(id, job, "pre-deploy-8").as_deref(),
+            Some("arg-node-build-12345678-abcdefab-pre-deploy-8")
+        );
+        assert!(deployment_build_unit_name(id, job, "--all").is_none());
+        assert!(deployment_build_unit_name("../etc/passwd", job, "build").is_none());
+    }
+
+    #[test]
+    fn build_cancel_helper_rejects_untrusted_unit_inputs_without_running_systemctl() {
+        let result = helper_build_cancel(&json!({
+            "application_id":"12345678-1234-4234-8234-123456789abc",
+            "job_id":"abcdefab-cdef-4abc-8def-abcdefabcdef",
+            "step":"../../system"
+        }));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"], "Build unit is not allowlisted");
     }
 
     #[test]

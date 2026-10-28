@@ -3864,6 +3864,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("laravel-service") => "laravel-service",
         Some("laravel-refresh-services") => "laravel-refresh-services",
         Some("node-build-step") => "node-build-step",
+        Some("node-build-cancel") => "node-build-cancel",
         Some("node-pre-deploy-command") => "node-pre-deploy-command",
         Some("node-service-enable") => "node-service-enable",
         Some("node-service-disable") => "node-service-disable",

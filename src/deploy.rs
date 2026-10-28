@@ -1809,7 +1809,7 @@ pub(super) fn progress(state: &AppState, job_id: &str, job_state: &str, step: &s
     let _ = add_step(&db, job_id, step, "running", message);
 }
 
-fn cancelled(state: &AppState, job_id: &str) -> bool {
+pub(super) fn cancelled(state: &AppState, job_id: &str) -> bool {
     state
         .lock()
         .unwrap()
@@ -1819,6 +1819,14 @@ fn cancelled(state: &AppState, job_id: &str) -> bool {
             |r| r.get::<_, bool>(0),
         )
         .unwrap_or(true)
+}
+
+fn finish_failure_or_cancel(state: &AppState, job_id: &str, message: &str) {
+    if cancelled(state, job_id) {
+        finish(state, job_id, "cancelled", &format!("Job لغو شد؛ عملیات جاری متوقف شد: {message}"));
+    } else {
+        finish(state, job_id, "failed", message);
+    }
 }
 
 fn finish(state: &AppState, job_id: &str, final_state: &str, message: &str) {
@@ -2048,7 +2056,7 @@ async fn process_job(state: AppState, job_id: String) {
         Err(message) => {
             let _ = fs::remove_dir_all(&stage);
             let _ = fs::remove_dir_all(&work);
-            finish(&state, &job_id, "failed", &message);
+            finish_failure_or_cancel(&state, &job_id, &message);
             return;
         }
     };
@@ -2166,7 +2174,7 @@ async fn process_job(state: AppState, job_id: String) {
                 };
                 if let Err(message) = build {
                     let _ = fs::remove_dir_all(&stage);
-                    finish(&state, &job_id, "failed", &message);
+                    finish_failure_or_cancel(&state, &job_id, &message);
                     return;
                 }
             }
@@ -2191,7 +2199,7 @@ async fn process_job(state: AppState, job_id: String) {
             Err(message) => {
                 let _ = fs::remove_dir_all(&stage);
                 let _ = fs::remove_dir_all(&work);
-                finish(&state, &job_id, "failed", &format!("دستور پیش از فعال‌سازی شماره {} شکست خورد: {message}", index + 1));
+                finish_failure_or_cancel(&state, &job_id, &format!("دستور پیش از فعال‌سازی شماره {} شکست خورد: {message}", index + 1));
                 return;
             }
         }
@@ -2585,6 +2593,7 @@ async fn acquire_git(
         .current_dir(destination)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .kill_on_drop(true)
         .output();
     command_output(state, job_id, "acquiring", remote, Duration::from_secs(15), "ثبت مخزن").await?;
     let fetch = tokio::process::Command::new("git")
@@ -2649,9 +2658,17 @@ async fn acquire_git(
         .current_dir(destination)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output()
-        .await
-        .map_err(|e| format!("خواندن revision ناموفق بود: {e}"))?;
+        .kill_on_drop(true)
+        .output();
+    let rev = wait_process_output(
+        state,
+        job_id,
+        rev,
+        Duration::from_secs(15),
+        "خواندن revision",
+    )
+    .await?;
+    record_process_output(state, job_id, "acquiring", "خواندن revision", &rev);
     if !rev.status.success() {
         record_output(state, job_id, "acquiring", &format!("git rev-parse failed with exit code {}", rev.status.code().unwrap_or(-1)));
         return Err("commit دریافت‌شده قابل شناسایی نیست.".into());
@@ -2681,10 +2698,7 @@ async fn command_output<F>(state: &AppState, job_id: &str, step: &str, future: F
 where
     F: std::future::Future<Output = io::Result<std::process::Output>>,
 {
-    let output = tokio::time::timeout(timeout, future)
-        .await
-        .map_err(|_| format!("{label} از مهلت زمانی گذشت."))?
-        .map_err(|e| format!("{label} اجرا نشد: {e}"))?;
+    let output = wait_process_output(state, job_id, future, timeout, label).await?;
     record_process_output(state, job_id, step, label, &output);
     if output.status.success() {
         return Ok(());
@@ -2697,6 +2711,35 @@ where
         "{label} ناموفق بود: {}",
         stderr.trim().replace('\0', "")
     ))
+}
+
+async fn wait_process_output<F>(
+    state: &AppState,
+    job_id: &str,
+    future: F,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output, String>
+where
+    F: std::future::Future<Output = io::Result<std::process::Output>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            output = &mut future => {
+                return output.map_err(|error| format!("{label} اجرا نشد: {error}"));
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(format!("{label} از مهلت زمانی گذشت."));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                if cancelled(state, job_id) {
+                    return Err(format!("{label} به‌دلیل لغو استقرار متوقف شد."));
+                }
+            }
+        }
+    }
 }
 
 async fn command_output_bounded<F>(
@@ -2732,6 +2775,9 @@ where
                 return Err(format!("{label} از مهلت زمانی گذشت."));
             }
             _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                if cancelled(state, job_id) {
+                    return Err(format!("{label} به‌دلیل لغو استقرار متوقف شد."));
+                }
                 match bounded_tree_size(directory, max_bytes) {
                     Ok(size) if size > max_bytes => {
                         return Err(format!("حجم مخزن Git از سقف {} GiB عبور کرد؛ دریافت متوقف شد.", max_bytes / (1024 * 1024 * 1024)));
@@ -3530,5 +3576,61 @@ mod tests {
         assert!(release_root.join(&ids[7]).exists());
         drop(db);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn active_git_command_wait_stops_when_job_is_cancelled() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE deployment_jobs(id TEXT PRIMARY KEY,cancel_requested INTEGER NOT NULL); INSERT INTO deployment_jobs VALUES('job',0);",
+        )
+        .unwrap();
+        let state = Arc::new(Mutex::new(db));
+        let cancel_state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel_state
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE deployment_jobs SET cancel_requested=1 WHERE id='job'",
+                    [],
+                )
+                .unwrap();
+        });
+
+        let pid_path = std::env::temp_dir().join(format!("arg-deploy-cancel-{}.pid", id()));
+        let command_script = format!("echo $$ > {}; exec /bin/sleep 30", pid_path.display());
+        let command = tokio::process::Command::new("/bin/sh")
+            .args(["-c", &command_script])
+            .kill_on_drop(true)
+            .output();
+        let started = std::time::Instant::now();
+        let result = command_output(
+            &state,
+            "job",
+            "acquiring",
+            command,
+            Duration::from_secs(5),
+            "regression sleep",
+        )
+        .await;
+
+        assert!(result.unwrap_err().contains("لغو"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let pid: i32 = fs::read_to_string(&pid_path).unwrap().trim().parse().unwrap();
+        let mut still_running = true;
+        for _ in 0..20 {
+            let state = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| stat.split_whitespace().nth(2).map(str::to_owned));
+            if !matches!(state.as_deref(), Some(state) if state != "Z") {
+                still_running = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = fs::remove_file(pid_path);
+        assert!(!still_running, "cancelled Git child must not remain running");
     }
 }
