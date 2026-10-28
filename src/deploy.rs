@@ -1634,9 +1634,7 @@ pub(super) async fn events(
                     Some((next_revision, job))
                 }
             };
-            let Some((next_revision, job)) = result else {
-                return None;
-            };
+            let (next_revision, job) = result?;
             let terminal = next_revision.is_terminal();
             let event = match job {
                 Some(job) => Event::default()
