@@ -2547,7 +2547,7 @@ fn extract_archive(archive_path: &FsPath, dest: &FsPath) -> Result<(), String> {
         }
         // Ignore known archive metadata before stripping the common wrapper;
         // macOS ZIPs often contain __MACOSX beside the actual project folder.
-        if excluded_source_path(relative) {
+        if excluded_source_path(&relative) {
             continue;
         }
         let relative = match wrapper.as_ref() {
@@ -2608,7 +2608,7 @@ fn common_archive_wrapper(zip: &mut zip::ZipArchive<fs::File>) -> Result<Option<
             return Err("مسیر ZIP معتبر نیست.".into());
         }
         if item.is_dir() { continue; }
-        if excluded_source_path(path) { continue; }
+        if excluded_source_path(&path) { continue; }
         files += 1;
         let mut components = path.components();
         let Some(Component::Normal(first)) = components.next() else { return Ok(None) };
@@ -2703,7 +2703,7 @@ mod tests {
 
     #[test]
     fn legacy_partial_step_and_release_tables_are_migrated_before_use() {
-        let db = Connection::open_in_memory().unwrap();
+        let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT); CREATE TABLE deployment_job_steps(id INTEGER PRIMARY KEY,job_id TEXT); CREATE TABLE deployment_releases(id TEXT PRIMARY KEY);").unwrap();
         migrate(&db).unwrap();
         db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();

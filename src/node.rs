@@ -860,7 +860,7 @@ async fn prepare_project_build(
             if step == "install" {
                 "نصب وابستگی‌ها با lockfile انتخاب‌شده در sandbox ایزوله اجرا می‌شود."
             } else {
-                &format!("اسکریپت package.json با نام {script} در sandbox ایزوله اجرا می‌شود.")
+                &format!("اسکریپت package.json با نام {} در sandbox ایزوله اجرا می‌شود.", script.unwrap_or("نامشخص"))
             },
         );
         let environment = if step == "build" { json!(build_environment) } else { json!({}) };
