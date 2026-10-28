@@ -1,0 +1,1 @@
+function n(){let t=0;return{next(){return t+=1,t},isCurrent(e){return e===t},invalidate(){t+=1}}}function u(){let t=0,e=0;return{tryEnter(){return e!==0?null:(e=++t,e)},release(r){e===r&&(e=0)},reset(){e=0}}}export{u as a,n as c};
