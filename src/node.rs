@@ -852,16 +852,17 @@ async fn prepare_project_build(
         if step == "build" && script.is_none() {
             continue;
         }
+        let progress_message = if step == "install" {
+            "نصب وابستگی‌ها با lockfile انتخاب‌شده در sandbox ایزوله اجرا می‌شود.".to_owned()
+        } else {
+            format!("اسکریپت package.json با نام {} در sandbox ایزوله اجرا می‌شود.", script.unwrap_or("نامشخص"))
+        };
         super::deploy::progress(
             state,
             job_id,
             "running",
             if step == "install" { "node-install" } else { "node-build-script" },
-            if step == "install" {
-                "نصب وابستگی‌ها با lockfile انتخاب‌شده در sandbox ایزوله اجرا می‌شود."
-            } else {
-                &format!("اسکریپت package.json با نام {} در sandbox ایزوله اجرا می‌شود.", script.unwrap_or("نامشخص"))
-            },
+            &progress_message,
         );
         let environment = if step == "build" { json!(build_environment) } else { json!({}) };
         let result = privileged_request_async(json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"script":script,"node_version":build_runtime,"package_manager":manager.label(),"build_environment":environment})).await.map_err(|(_, body)| body["error"].as_str().unwrap_or("Node build helper unavailable").to_owned())?;
