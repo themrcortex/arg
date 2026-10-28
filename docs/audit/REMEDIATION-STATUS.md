@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 6 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
+Updated through phase 7 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -27,9 +27,13 @@ Updated through phase 6 on `audit/development-hardening`; source baseline `eec27
 | S3-004 | P1 | Audit required | DNS precheck is not connected to the SDK's later DNS resolution; needs IP-pinned transport without disabling TLS checks | No transport test yet | — |
 | FILE-001 | P2 | Fixed | Limit recursive ZIP creation to 64 levels and remove partial archives on failure | `zip_creation_rejects_excessive_directory_depth_and_removes_partial_archive` | `bd2e973` |
 | FILE-002 | P1 | Audit required | Path validation and later privileged mutations are not anchored to directory descriptors; race risk needs focused fix | Existing traversal/symlink tests do not cover TOCTOU | — |
+| DNS-001 | P2 | Fixed | Added bounded page selection to Cloudflare record listing and UI controls; stale responses and invalidated-zone requests are discarded | `bounds_dns_record_pages`; `cloudflare_record_url_uses_the_requested_bounded_page`; `npm run check`/build | `f423309`, `0fdc55d` |
+| DNS-002 | P2 | Fixed | Escaped CAA quote/backslash characters in the presentation string while preserving structured `data.value` | `escapes_caa_presentation_string_without_changing_structured_value` | `f423309` |
+| NGINX-001 | P2 | Fixed | Domain conflict scan includes symlinked regular config fragments, ignores the selected site only in sites-available, and fails closed on oversized candidates | `domain_conflict_check_includes_symlinked_nginx_fragments`; `domain_conflict_check_ignores_own_site_only_in_sites_available`; `oversized_nginx_config_fails_closed_during_domain_conflict_check` | `40ab081`, `df57120` |
+| NGINX-002 | P2 | Likely / mitigated | SSL issuance now rejects names already claimed by another scanned Nginx file; Certbot duplicate-vhost selection still needs VM verification | `ssl_domain_conflict_detection_covers_literal_and_wildcard_server_names` | `40ab081`, `df57120` |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - S3 endpoint pinning and privileged file path TOCTOU are open high-priority items. They must be fixed or mitigated and tested before release.
-- Phases 7–15 are not yet marked complete. Results must be appended as each phase is audited and tested.
+- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`. No live Cloudflare or Certbot/Nginx host integration was available; phases 8–15 remain unreviewed or incomplete.

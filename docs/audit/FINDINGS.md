@@ -32,6 +32,10 @@ This is a running index for completed phases only. It is not a statement that th
 | S3-002 | Concurrent S3 transfers could exhaust disk and leave temporary files | CONFIRMED | Fixed in `52f224c` | [06-files-and-s3.md](06-files-and-s3.md) |
 | S3-003 | S3 usage scans could paginate/queue without a finite bound | CONFIRMED | Fixed in `52f224c` | [06-files-and-s3.md](06-files-and-s3.md) |
 | FILE-001 | ZIP archive creation had unbounded recursive directory depth | CONFIRMED | Fixed in `bd2e973` | [06-files-and-s3.md](06-files-and-s3.md) |
+| DNS-001 | Cloudflare DNS UI/API fetched only the first 100 records | CONFIRMED | Fixed in `f423309`, stale request follow-up in `0fdc55d` | [07-nginx-ssl-dns.md](07-nginx-ssl-dns.md) |
+| DNS-002 | CAA presentation strings did not escape quote/backslash characters | CONFIRMED | Fixed in `f423309` | [07-nginx-ssl-dns.md](07-nginx-ssl-dns.md) |
+| NGINX-001 | Domain conflict scan skipped included symlinks and silently ignored oversized configs | CONFIRMED | Fixed in `40ab081`, same-name follow-up in `df57120` | [07-nginx-ssl-dns.md](07-nginx-ssl-dns.md) |
+| NGINX-002 | SSL issuance accepted a domain that another server block might also claim | LIKELY | Added a preflight conflict check; live Certbot behavior still needs a disposable-host test | [07-nginx-ssl-dns.md](07-nginx-ssl-dns.md) |
 
 ## P3 / Low
 
@@ -47,4 +51,4 @@ This is a running index for completed phases only. It is not a statement that th
 
 ## Open audit coverage
 
-Phases 0–6 have been reviewed and documented. Phases 7–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
+Phases 0–7 have been reviewed and documented. Phases 8–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
