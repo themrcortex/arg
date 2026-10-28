@@ -855,3 +855,51 @@ body { font-family: Inter, Abar, Peyda, Arial, Helvetica, "Segoe UI", Roboto, sa
   .mobile-sidebar .sidebar-panel { padding-inline: 9px; }
   .mobile-sidebar .sidebar-panel-heading { margin-inline: -9px; padding-inline: 10px; }
 }
+
+/* Keep category labels on one line beside their icons, even in the mobile drawer. */
+.sidebar-category-rail { width: 176px; flex-basis: 176px; gap: 3px; padding: 10px 8px; }
+.sidebar-category-option {
+  display: flex;
+  min-width: 0;
+  min-height: 46px;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  white-space: nowrap;
+}
+.sidebar-category-option > svg { width: 17px; height: 17px; flex: 0 0 17px; }
+.sidebar-category-option > span {
+  display: block;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-line-clamp: unset;
+}
+.sidebar-category-option > small {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: var(--docs-soft);
+  font-size: 9px;
+  line-height: 1.4;
+}
+@media (min-width: 1400px) {
+  .docs-layout { grid-template-columns: 412px minmax(0, 1fr) 208px; }
+  .desktop-sidebar { width: 412px; }
+  .sidebar-category-rail { width: 176px; flex-basis: 176px; }
+}
+@media (max-width: 1399px) and (min-width: 761px) {
+  .docs-layout { grid-template-columns: 382px minmax(0, 1fr); }
+  .desktop-sidebar { width: 382px; }
+  .sidebar-category-rail { width: 164px; flex-basis: 164px; }
+}
+@media (max-width: 760px) {
+  .mobile-sidebar .sidebar-category-rail { width: 148px; flex-basis: 148px; padding-inline: 6px; }
+  .mobile-sidebar .sidebar-category-option { min-height: 44px; gap: 7px; padding-inline: 6px; }
+  .mobile-sidebar .sidebar-category-option > span { font-size: 11px; }
+  .mobile-sidebar .sidebar-category-option > small { display: none; }
+}
