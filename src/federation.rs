@@ -350,6 +350,25 @@ fn session_scope_for(path: &str, method: &axum::http::Method) -> &'static str {
     }
 }
 
+fn terminal_mode_is_root(query: Option<&str>) -> bool {
+    query.is_some_and(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .any(|(key, value)| key == "mode" && value == "root")
+    })
+}
+
+fn workspace_session_scope_for(
+    path: &str,
+    method: &axum::http::Method,
+    query: Option<&str>,
+) -> &'static str {
+    if path == "/api/terminal" && terminal_mode_is_root(query) {
+        "workspace.root_terminal"
+    } else {
+        session_scope_for(path, method)
+    }
+}
+
 pub(super) async fn workspace_session_guard(
     State(state): State<AppState>,
     request: Request,
@@ -357,6 +376,7 @@ pub(super) async fn workspace_session_guard(
 ) -> Response {
     let path = request.uri().path().to_owned();
     let method = request.method().clone();
+    let query = request.uri().query().map(str::to_owned);
     let Some(raw) = cookie_token(request.headers()) else { return next.run(request).await };
     let hash = session_hash(&raw);
     let result = {
@@ -377,11 +397,7 @@ pub(super) async fn workspace_session_guard(
         let _ = db.execute("DELETE FROM federation_proxy_sessions WHERE token_hash=?1", [&hash]);
         return error(StatusCode::UNAUTHORIZED, "نشست فضای کار این سرور منقضی شده است؛ Node را دوباره متصل کن.").into_response();
     }
-    let required = if path == "/api/terminal" && cookie_named(request.headers(), "arg_root_ticket").is_some() {
-        "workspace.root_terminal"
-    } else {
-        session_scope_for(&path, &method)
-    };
+    let required = workspace_session_scope_for(&path, &method, query.as_deref());
     let scopes = decode_scopes(&scopes_json);
     if !scopes.iter().any(|scope| scope == required) {
         return error(StatusCode::FORBIDDEN, "این نشست Federation اجازهٔ انجام این عملیات را ندارد.").into_response();
@@ -1987,7 +2003,10 @@ pub(super) async fn proxy_workspace_terminal(
     if !origin_ok {
         return (StatusCode::FORBIDDEN, "Invalid WebSocket origin").into_response();
     }
-    let root_ticket = cookie_named(&headers, "arg_root_ticket");
+    let root_mode = terminal_mode_is_root(uri.query());
+    let root_ticket = root_mode
+        .then(|| cookie_named(&headers, "arg_root_ticket"))
+        .flatten();
     {
         let db = state.lock().unwrap();
         if require_admin(&db, &headers).is_err() {
@@ -2008,7 +2027,11 @@ pub(super) async fn proxy_workspace_terminal(
             Ok(value) => value,
             Err(_) => return (StatusCode::NOT_FOUND, "Node not found").into_response(),
         };
-        let terminal_scope = if root_ticket.is_some() { "workspace.root_terminal" } else { "workspace.terminal" };
+        let terminal_scope = workspace_session_scope_for(
+            "/api/terminal",
+            &axum::http::Method::GET,
+            uri.query(),
+        );
         if !decode_scopes(&scopes_json).iter().any(|scope| scope == terminal_scope) {
             return (StatusCode::FORBIDDEN, "Remote terminal is not permitted for this pairing").into_response();
         }
@@ -2340,6 +2363,7 @@ mod tests {
     use super::{
         address_is_private, known_capability, node_identity_matches, node_update_route,
         resolve_workspace_node_id, role_valid, scopes_for_mode, session_scope_for,
+        terminal_mode_is_root, workspace_session_scope_for,
         should_forget_node_after_revoke_failure, supported_capabilities, valid_server_uuid,
         valid_workspace_api_path, validate_endpoint, validate_public_name, workspace_key,
         NodeUpdateRoute,
@@ -2428,6 +2452,36 @@ mod tests {
         assert_eq!(session_scope_for("/api/files/action", &axum::http::Method::POST), "workspace.write");
         assert_eq!(session_scope_for("/api/terminal", &axum::http::Method::GET), "workspace.terminal");
         assert_eq!(session_scope_for("/api/terminal/root/authorize", &axum::http::Method::POST), "workspace.root_terminal");
+    }
+
+    #[test]
+    fn terminal_scope_tracks_requested_mode_not_root_ticket_cookie_presence() {
+        let get = axum::http::Method::GET;
+        assert!(!terminal_mode_is_root(None));
+        assert!(!terminal_mode_is_root(Some("mode=user")));
+        assert!(terminal_mode_is_root(Some("mode=root")));
+        assert!(terminal_mode_is_root(Some("other=1&mode=root")));
+
+        assert_eq!(
+            workspace_session_scope_for("/api/terminal", &get, None),
+            "workspace.terminal"
+        );
+        assert_eq!(
+            workspace_session_scope_for("/api/terminal", &get, Some("mode=user")),
+            "workspace.terminal"
+        );
+        assert_eq!(
+            workspace_session_scope_for("/api/terminal", &get, Some("mode=root")),
+            "workspace.root_terminal"
+        );
+        assert_eq!(
+            workspace_session_scope_for(
+                "/api/terminal/root/authorize",
+                &axum::http::Method::POST,
+                None
+            ),
+            "workspace.root_terminal"
+        );
     }
 
     #[test]
