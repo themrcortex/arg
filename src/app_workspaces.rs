@@ -22,6 +22,32 @@ fn valid_name(value: &str) -> bool {
     !value.is_empty() && value.chars().count() <= 80 && !value.chars().any(char::is_control)
 }
 
+fn query_workspace_rows(db: &Connection, owner: &str) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = db.prepare("SELECT id,name,description,is_default,created_at FROM app_workspaces WHERE owner_server_uuid=?1 ORDER BY is_default DESC,name COLLATE NOCASE")?;
+    let rows = statement.query_map([owner], |row| {
+        Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"description":row.get::<_,String>(2)?,"is_default":row.get::<_,bool>(3)?,"created_at":row.get::<_,i64>(4)?}))
+    })?;
+    rows.collect()
+}
+
+fn query_project_rows(db: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = db.prepare(
+        "SELECT id,name,description,created_at,(SELECT COUNT(*) FROM app_environments e WHERE e.project_id=p.id) FROM app_projects p WHERE workspace_id=?1 ORDER BY name COLLATE NOCASE",
+    )?;
+    let rows = statement.query_map([workspace_id], |row| {
+        Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"description":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?,"environment_count":row.get::<_,i64>(4)?}))
+    })?;
+    rows.collect()
+}
+
+fn query_environment_rows(db: &Connection, project_id: &str) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = db.prepare("SELECT id,name,kind,protected,created_at FROM app_environments WHERE project_id=?1 ORDER BY CASE kind WHEN 'development' THEN 1 WHEN 'staging' THEN 2 WHEN 'production' THEN 3 ELSE 4 END,name COLLATE NOCASE")?;
+    let rows = statement.query_map([project_id], |row| {
+        Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"kind":row.get::<_,String>(2)?,"protected":row.get::<_,bool>(3)?,"created_at":row.get::<_,i64>(4)?}))
+    })?;
+    rows.collect()
+}
+
 pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS app_workspaces(
@@ -256,15 +282,7 @@ pub(super) async fn list_workspaces(
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
     let owner = federation::local_server_uuid(&db).map_err(db_error)?;
-    let mut statement = db
-        .prepare("SELECT id,name,description,is_default,created_at FROM app_workspaces WHERE owner_server_uuid=?1 ORDER BY is_default DESC,name COLLATE NOCASE")
-        .map_err(db_error)?;
-    let rows = statement
-        .query_map([owner], |row| {
-            Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"description":row.get::<_,String>(2)?,"is_default":row.get::<_,bool>(3)?,"created_at":row.get::<_,i64>(4)?}))
-        })
-        .map_err(db_error)?;
-    let workspaces = rows.filter_map(Result::ok).collect::<Vec<_>>();
+    let workspaces = query_workspace_rows(&db, &owner).map_err(db_error)?;
     Ok(Json(json!({"workspaces":workspaces})))
 }
 
@@ -330,12 +348,9 @@ pub(super) async fn list_projects(
     if !exists {
         return Err(error(StatusCode::NOT_FOUND, "فضای‌کار پیدا نشد."));
     }
-    let mut statement = db.prepare(
-        "SELECT id,name,description,created_at,(SELECT COUNT(*) FROM app_environments e WHERE e.project_id=p.id) FROM app_projects p WHERE workspace_id=?1 ORDER BY name COLLATE NOCASE",
-    ).map_err(db_error)?;
-    let rows = statement.query_map([workspace_id], |row| Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"description":row.get::<_,String>(2)?,"created_at":row.get::<_,i64>(3)?,"environment_count":row.get::<_,i64>(4)?}))).map_err(db_error)?;
+    let projects = query_project_rows(&db, &workspace_id).map_err(db_error)?;
     Ok(Json(
-        json!({"projects":rows.filter_map(Result::ok).collect::<Vec<_>>()}),
+        json!({"projects":projects}),
     ))
 }
 
@@ -404,10 +419,9 @@ pub(super) async fn list_environments(
     if !valid {
         return Err(error(StatusCode::NOT_FOUND, "پروژه پیدا نشد."));
     }
-    let mut statement = db.prepare("SELECT id,name,kind,protected,created_at FROM app_environments WHERE project_id=?1 ORDER BY CASE kind WHEN 'development' THEN 1 WHEN 'staging' THEN 2 WHEN 'production' THEN 3 ELSE 4 END,name COLLATE NOCASE").map_err(db_error)?;
-    let rows = statement.query_map([project_id],|row|Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"kind":row.get::<_,String>(2)?,"protected":row.get::<_,bool>(3)?,"created_at":row.get::<_,i64>(4)?}))).map_err(db_error)?;
+    let environments = query_environment_rows(&db, &project_id).map_err(db_error)?;
     Ok(Json(
-        json!({"environments":rows.filter_map(Result::ok).collect::<Vec<_>>()}),
+        json!({"environments":environments}),
     ))
 }
 
@@ -530,5 +544,23 @@ mod tests {
         assert!(valid_name("Customer workspace"));
         assert!(!valid_name("  "));
         assert!(!valid_name("a\nroot"));
+    }
+
+    #[test]
+    fn workspace_project_and_environment_lists_propagate_malformed_row_errors() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE app_workspaces(id TEXT,name TEXT,description TEXT,is_default,created_at,owner_server_uuid TEXT);
+             INSERT INTO app_workspaces VALUES('w','Broken','', 'not-a-bool',1,'server');
+             CREATE TABLE app_projects(id TEXT,name TEXT,description TEXT,created_at,workspace_id TEXT);
+             INSERT INTO app_projects VALUES('p','Broken','', 'not-an-integer','w');
+             CREATE TABLE app_environments(id TEXT,name TEXT,kind TEXT,protected,created_at,project_id TEXT);
+             INSERT INTO app_environments VALUES('e','Broken','custom','not-a-bool',1,'p');",
+        )
+        .unwrap();
+
+        assert!(query_workspace_rows(&db, "server").is_err());
+        assert!(query_project_rows(&db, "w").is_err());
+        assert!(query_environment_rows(&db, "p").is_err());
     }
 }
