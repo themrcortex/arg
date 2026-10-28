@@ -61,9 +61,10 @@ Runner مربوط به Node.js فرایند یک اپلیکیشن را از دا
 - **نمایش لاگ‌های اجرا:** لاگ اخیر سرویس را می‌خواند و ترمینال ایجاد نمی‌کند.
 - **ذخیرهٔ متغیرهای محیط:** نام و مقدار را بررسی و فایل خصوصی را به‌روز می‌کند؛ مقدار ذخیره‌شده قابل بازخوانی نیست.
 - **Deploy / Retry / بازگشت:** از Job پایدار و تاریخچهٔ release استفاده می‌کند. Rollback کد را عوض و سرویس فعال را restart می‌کند؛ migration دیتابیس یا اثر خارجی کد اپ را برنمی‌گرداند.
+- **دستورهای سفارشی پیش از فعال‌سازی:** در فرم Deploy، هر خط یک فرمان مستقل است و بعد از دریافت منبع و نصب/Build خودکار، اما پیش از فعال‌کردن release اجرا می‌شود. آرگومان‌ها به فرایند داده می‌شوند؛ shell، pipe، redirect و expansion اجرا نمی‌شود. Runner فقط release موقت و cache را در sandbox با سقف CPU/RAM/زمان می‌بیند؛ `.env` تولید و رازهای سرویس به آن داده نمی‌شوند. رمز یا توکن را در آرگومان ننویس. خروجی زنده هر دستور در جزئیات همان Job ثبت می‌شود و اگر کد خروج غیرصفر باشد فعال‌سازی متوقف می‌شود. اثرهای بیرونی، مثل تغییر دیتابیس، با rollback فایل‌ها خنثی نمی‌شوند.
 - **تنظیمات Runtime:** نام اسکریپت‌های manifest و مسیر Health Check را انتخاب می‌کند. ذخیره، فرمان دلخواه اجرا نمی‌کند؛ برای بازتولید امن unit فعال از **اعمال تنظیمات سرویس** استفاده کن.
 
-ARG مدیریت Node cluster، فرمان worker دلخواه، انتقال staging، نصب خودکار package manager، Yarn Berry یا ورودی فرمان آزاد را پشتیبانی نمی‌کند. نام اسکریپت Build و Runtime از فهرست `package.json` انتخاب می‌شود. برای انتشار Static React/Vite و SSR با Next.js/Nuxt، راهنمای انتشار Static و SSR را ببین.
+ARG مدیریت Node cluster، انتقال staging، نصب خودکار package manager یا تفسیر shell آزاد را پشتیبانی نمی‌کند. نام اسکریپت Build و Runtime از فهرست `package.json` انتخاب می‌شود؛ فرمان سفارشی فقط به شکل یک برنامه و آرگومان‌های آن اجرا می‌شود. برای انتشار Static React/Vite و SSR با Next.js/Nuxt، راهنمای انتشار Static و SSR را ببین.
 
 ## عیب‌یابی
 
@@ -73,7 +74,7 @@ ARG مدیریت Node cluster، فرمان worker دلخواه، انتقال st
 | lockfile گم، متعارض یا پشتیبانی‌نشده است | یک lockfile پشتیبانی‌شده را نگه دار و commit کن. Yarn Berry هنوز پشتیبانی نمی‌شود. |
 | Runtime یا مدیر بسته موجود نیست | نسخهٔ دقیق را از Runtime Manager نصب و inventory را تازه کن. |
 | build شکست خورد | خروجی Job را ببین؛ شرط engine، نیاز build native و اسکریپت پروژه را بررسی کن. |
-| هنگام ساخت Deploy پیام `Database error` می‌آید | Job و مرحلهٔ آغازین اکنون اتمی ذخیره می‌شوند. علت SQLite را در لاگ سرویس ARG ببین؛ Job صف‌ماندهٔ قدیمی بدون مرحله در migration بازیابی می‌شود و از کارت قابل لغو یا retry است. |
+| Job در صف می‌ماند یا خطای پایگاه‌داده می‌دهد | از کارت Job گزینهٔ «مشاهدهٔ جزئیات فرایند» را باز کن. خطای SQLite با متن اصلی و لاگ Worker نمایش داده می‌شود؛ Worker هنگام خطای موقت دوباره تلاش می‌کند و خطا در گزارش Job ثبت می‌ماند. خروجی واقعی Git و نصب/Build Node هم زنده و صفحه‌بندی‌شده ذخیره می‌شود. |
 | پورت اشغال است | پورت آزاد رزرو کن و برنامه را برای استفاده از `PORT` تنظیم کن؛ bind عمومی نکن. |
 | listener loopback نیست یا Health Check پاسخ 2xx نمی‌دهد | اسکریپت Runtime، مسیر Health Check، لاگ‌ها، متغیرهای لازم و رعایت `HOST` و `PORT` را بررسی کن. |
 | Nginx proxy رد شد | `server_name` و تنظیم سایت موجود را ببین؛ ARG سایت دستی‌تغییریافته یا نامرتبط را جایگزین نمی‌کند. |
@@ -81,6 +82,6 @@ ARG مدیریت Node cluster، فرمان worker دلخواه، انتقال st
 
 ## API و مجوز
 
-Runner از `GET /api/apps/{id}/node`، `GET|PUT /api/apps/{id}/node/service`، `GET|PUT /api/apps/{id}/node/runtime-settings`، `PUT /api/apps/{id}/node/environment` و `GET /api/apps/{id}/node/service/logs` استفاده می‌کند. لاگ Deploy از `GET /api/deploy/jobs/{id}/logs?after={id}` یا `?before={id}` با صفحه‌بندی محدود دریافت می‌شود. Write به نشست مدیر، Origin معتبر، مالکیت اپ روی سرور انتخاب‌شده و رویداد Audit نیاز دارد. عملیات ریشه از طریق درخواست ساختاریافته روی helper محافظت‌شده انجام می‌شوند؛ رشتهٔ shell دریافتی از کاربر اجرا نمی‌شود.
+Runner از `GET /api/apps/{id}/node`، `GET|PUT /api/apps/{id}/node/service`، `GET|PUT /api/apps/{id}/node/runtime-settings`، `PUT /api/apps/{id}/node/environment` و `GET /api/apps/{id}/node/service/logs` استفاده می‌کند. لاگ Deploy از `GET /api/deploy/jobs/{id}/logs?tail=true&limit=500` برای آخرین صفحه، `?after={id}` برای لاگ تازه و `?before={id}` برای صفحهٔ قدیمی‌تر دریافت می‌شود. Write به نشست مدیر، Origin معتبر، مالکیت اپ روی سرور انتخاب‌شده و رویداد Audit نیاز دارد. عملیات ریشه از طریق درخواست ساختاریافته روی helper محافظت‌شده انجام می‌شوند؛ رشتهٔ shell دریافتی از کاربر اجرا نمی‌شود.
 
 تست خودکار انتخاب manifest و lockfile، اعتبارسنجی محیط، محدودیت unit، بررسی loopback، پاسخ HTTP و مسیرهای rollback را می‌پوشاند. اجرای سرویس روی VPS آزمایشی Debian/Ubuntu با systemd و Nginx هنوز تست یکپارچگی لازم دارد و در نتایج تست مخزن ادعا نشده است.

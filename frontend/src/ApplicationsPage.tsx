@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Archive, CircleAlert, CircleHelp, CirclePlus, Copy, ExternalLink, Globe2, KeyRound, Layers3, Pencil, RefreshCw, RotateCcw, Search, Server, Trash2, Upload, X, Terminal, Wrench } from 'lucide-react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Activity, Archive, ArrowDownToLine, CircleAlert, CircleHelp, CirclePlus, Copy, ExternalLink, Globe2, KeyRound, Layers3, Pencil, RefreshCw, RotateCcw, Search, Server, Trash2, Upload, X, Terminal, Wrench } from 'lucide-react'
 import { ApiError, api, apiForWorkspace } from './lib/api'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
@@ -62,7 +62,7 @@ type EnvironmentRecord = { id: string; name: string; kind: string; protected: bo
 type RuntimeInventory = { runtimes: { family: string; state: string; versions: { version: string; fpm_installed?: boolean }[] }[] }
 type DeployStep = { sequence: number; step: string; state: string; message: string; started_at: number; finished_at: number | null }
 type DeployLog = { id: number; created_at: number; step: string; level: string; message: string }
-type DeployJob = { id: string; application_id: string; state: string; attempt: number; created_at: number; started_at: number | null; finished_at: number | null; release_path: string | null; previous_release: string | null; error: string | null; steps: DeployStep[]; logs?: DeployLog[]; log_count?: number }
+type DeployJob = { id: string; application_id: string; state: string; attempt: number; created_at: number; started_at: number | null; finished_at: number | null; release_path: string | null; previous_release: string | null; source_commit?: string | null; error: string | null; steps: DeployStep[]; logs?: DeployLog[]; log_count?: number }
 type LaravelOperation = { id: string; action: string; state: string; output: string; exit_code: number | null; error: string | null; created_at: number; started_at: number | null; finished_at: number | null }
 type LaravelInspection = { framework: string; state: string; release_path: string; public_path: string; runtime_version: string; message: string; composer: { php_constraint?: string; laravel_constraint?: string; required_extensions?: string[]; has_lockfile?: boolean }; files: Record<string, boolean | string[]> & { app_key_configured?: boolean; environment_keys?: string[] } }
 type LaravelService = 'queue' | 'scheduler' | 'horizon' | 'reverb' | 'octane'
@@ -78,6 +78,7 @@ type GeneratedDeploymentKey = DeploymentKey & { private_key_saved_on_server: boo
 const emptyDraft: Draft = { name: '', description: '', framework: 'auto', runtime_version: 'system', build_runtime_version: 'system', static_output_path: 'auto', static_spa_fallback: true, source_type: 'manual', domain: '', listen_port: '', labels: '', desired_state: 'none', environment_id: '' }
 const frameworkLabels: Record<string, string> = { auto: 'تشخیص خودکار', laravel: 'Laravel', node: 'Node.js SSR', next: 'Next.js SSR', nuxt: 'Nuxt SSR', python: 'Python', wordpress: 'WordPress', static: 'فایل‌های استاتیک آماده', react: 'React SPA', vue: 'Vue SPA', vite: 'Vite SPA', custom: 'سفارشی / انتشار release' }
 const sourceLabels: Record<string, string> = { manual: 'ثبت دستی', git: 'مخزن Git', archive: 'فایل آرشیو', docker: 'Docker', 'existing-directory': 'پوشهٔ موجود', image: 'Image' }
+const deploymentStepLabels: Record<string, string> = { queued: 'ثبت Job', validating: 'اعتبارسنجی ورودی و مالکیت', recovered: 'بازیابی پس از راه‌اندازی مجدد', acquiring: 'دریافت منبع', 'node-build': 'آماده‌سازی پروژه Node', 'node-install': 'نصب وابستگی‌ها', 'node-build-script': 'اجرای اسکریپت Build', 'laravel-persistent-data': 'آماده‌سازی داده‌های پایدار', verifying: 'بررسی و فعال‌سازی', activating: 'فعال‌سازی release', succeeded: 'استقرار کامل شد', failed: 'استقرار ناموفق بود', cancelled: 'استقرار لغو شد', database: 'دسترسی پایگاه‌داده' }
 const frameworkIdentity: Record<string, { label: string; mark: string; color: string; background: string; logo?: string }> = {
   auto: { label: 'تشخیص خودکار', mark: '?', color: '#c4b5fd', background: 'rgba(139,92,246,.12)' },
   laravel: { label: 'Laravel', mark: 'L', logo: '/arg/platforms/laravel.svg', color: '#FF2D20', background: 'rgba(255,45,32,.12)' },
@@ -115,12 +116,105 @@ function isStaticFramework(framework: string) { return ['static', 'react', 'vue'
 function newIdempotencyKey() {
   return typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
 }
+function encodeBase64UrlUtf8(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+function deploymentStepLabel(step: string) {
+  const custom = /^pre-deploy-(\d+)$/.exec(step)
+  return custom ? `دستور پیش از استقرار · ${custom[1]}` : deploymentStepLabels[step] || step
+}
+
+function DeploymentJobDetailsDialog({ job, logs, olderAvailable, olderBusy, loading, error, onOpenChange, onRefresh, onLoadOlder, onNotify }: {
+  job: DeployJob | null
+  logs: DeployLog[]
+  olderAvailable: boolean
+  olderBusy: boolean
+  loading: boolean
+  error: string
+  onOpenChange: (open: boolean) => void
+  onRefresh: () => void
+  onLoadOlder: () => void
+  onNotify: (message: string) => void
+}) {
+  const viewport = useRef<HTMLPreElement>(null)
+  const followTail = useRef(true)
+  const [following, setFollowing] = useState(true)
+  useEffect(() => {
+    followTail.current = true
+    setFollowing(true)
+  }, [job?.id])
+  useLayoutEffect(() => {
+    const node = viewport.current
+    if (!node || !followTail.current) return
+    const frame = window.requestAnimationFrame(() => {
+      if (viewport.current && followTail.current) viewport.current.scrollTo({ top: viewport.current.scrollHeight, behavior: 'auto' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [logs, job?.id])
+  const statusLabels: Record<string, string> = { queued: 'در صف', validating: 'اعتبارسنجی', running: 'در حال اجرا', verifying: 'بررسی و فعال‌سازی', succeeded: 'موفق', failed: 'ناموفق', cancelled: 'لغوشده' }
+  const active = !!job && ['queued', 'validating', 'running', 'verifying'].includes(job.state)
+  const text = logs.map((line) => `[${new Date(line.created_at * 1000).toLocaleString()}] ${deploymentStepLabel(line.step)} ${line.level}: ${line.message}`).join('\n')
+  async function copyLogs() {
+    if (!job) return
+    const full = `${text}${job.error ? `\n\n[خطای نهایی/تشخیصی]\n${job.error}` : ''}`
+    try { await navigator.clipboard.writeText(full); onNotify('گزارش و خطای استقرار کپی شد.') }
+    catch { onNotify('کپی خودکار ممکن نشد؛ گزارش را از کادر انتخاب و کپی کن.') }
+  }
+  return <Dialog open={!!job} onOpenChange={onOpenChange}>
+    <DialogContent className="max-h-[92dvh] max-w-4xl overflow-y-auto">
+      <DialogHeader>
+        <DialogTitle className="flex flex-wrap items-center gap-2">
+          <span>جزئیات فرایند استقرار</span>
+          {job && <Badge variant={job.state === 'failed' ? 'destructive' : job.state === 'succeeded' ? 'success' : 'info'}>{statusLabels[job.state] || job.state}</Badge>}
+        </DialogTitle>
+        <DialogDescription>وضعیت، مراحل ثبت‌شده و خروجی واقعی فرمان‌های استقرار این Job. گزارش با تازه‌شدن صفحه در پایگاه‌داده باقی می‌ماند.</DialogDescription>
+      </DialogHeader>
+      {!job ? null : <div className="space-y-4">
+        <div className="grid gap-2 rounded-xl border border-border/70 bg-background/45 p-3 text-xs sm:grid-cols-2">
+          <div><span className="text-muted-foreground">شناسهٔ کامل Job</span><code dir="ltr" className="mt-1 block break-all text-left font-mono">{job.id}</code></div>
+          <div><span className="text-muted-foreground">زمان ثبت</span><p dir="ltr" className="mt-1 text-left font-mono">{new Date(job.created_at * 1000).toLocaleString()}</p></div>
+          <div><span className="text-muted-foreground">تلاش</span><p className="mt-1">{job.attempt}</p></div>
+          <div><span className="text-muted-foreground">نسخهٔ Git</span><code dir="ltr" className="mt-1 block break-all text-left font-mono">{job.source_commit || 'برای این منبع ثبت نشده'}</code></div>
+        </div>
+        {job.error && <section role={job.state === 'failed' ? 'alert' : undefined} className={`space-y-1 rounded-xl border p-3 ${job.state === 'failed' ? 'border-rose-400/30 bg-rose-400/[.07]' : 'border-amber-300/25 bg-amber-300/[.05]'}`}>
+          <p className={`text-xs font-semibold ${job.state === 'failed' ? 'text-rose-200' : 'text-amber-100'}`}>{job.state === 'failed' ? 'متن کامل خطا' : 'خطای موقت / تشخیصی؛ Job هنوز نهایی نشده'}</p>
+          <pre dir="auto" className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs leading-6 text-foreground">{job.error}</pre>
+          {active && <p className="text-[10px] leading-5 text-muted-foreground">Worker هنوز Job را در صف نگه داشته و دوباره تلاش می‌کند. وضعیت و لاگ‌ها به‌صورت خودکار تازه می‌شوند.</p>}
+        </section>}
+        <section className="space-y-2">
+          <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">مراحل فرایند</h3><span className="text-[10px] text-muted-foreground">{job.steps.length} مرحله · {job.log_count || logs.length} رویداد ثبت‌شده</span></div>
+          {job.steps.length ? <ol className="space-y-2">{job.steps.map((step) => <li key={`${job.id}:${step.sequence}`} className="flex gap-2 rounded-lg border border-border/60 bg-background/35 p-2.5 text-xs">
+            <span aria-hidden="true" className={`mt-0.5 shrink-0 ${step.state === 'failed' ? 'text-rose-300' : step.state === 'running' ? 'text-amber-300' : step.state === 'cancelled' ? 'text-muted-foreground' : 'text-emerald-300'}`}>{step.state === 'running' ? '◌' : step.state === 'failed' ? '×' : step.state === 'cancelled' ? '–' : '✓'}</span>
+            <div className="min-w-0 flex-1"><div className="flex flex-wrap justify-between gap-x-3 gap-y-1"><p className="font-medium">{deploymentStepLabel(step.step)}</p><span className="text-[10px] text-muted-foreground">{new Date(step.started_at * 1000).toLocaleTimeString()}{step.finished_at ? ` – ${new Date(step.finished_at * 1000).toLocaleTimeString()}` : ' · در حال اجرا'}</span></div><p className="mt-1 whitespace-pre-wrap break-words leading-5 text-muted-foreground">{step.message}</p></div>
+          </li>)}</ol> : <p className="rounded-lg border border-border/60 p-3 text-xs text-muted-foreground">هنوز مرحله‌ای از Worker ثبت نشده است.</p>}
+        </section>
+        {job.release_path && <div className="rounded-lg border border-border/60 p-2 text-xs"><span className="text-muted-foreground">مسیر release</span><code dir="ltr" className="mt-1 block break-all text-left font-mono">{job.release_path}</code></div>}
+        <section className="space-y-2 rounded-xl border border-border/70 bg-background/45 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><h3 className="text-sm font-semibold">لاگ‌های واقعی و پایدار</h3>{active && <span className="flex items-center gap-1.5 text-[10px] text-emerald-300"><i className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300"/>زنده</span>}</div><div className="flex gap-1.5"><Button type="button" size="sm" variant="outline" disabled={loading} onClick={onRefresh}><RefreshCw size={13} className={loading ? 'animate-spin' : ''}/>تازه‌سازی</Button><Button type="button" size="sm" variant="outline" onClick={() => { followTail.current = true; setFollowing(true); viewport.current?.scrollTo({ top: viewport.current.scrollHeight, behavior: 'smooth' }) }}><ArrowDownToLine size={13}/>آخرین لاگ</Button><Button type="button" size="sm" variant="outline" onClick={() => void copyLogs()}><Copy size={13}/>کپی گزارش</Button></div></div>
+          <div className="flex items-center justify-between text-[10px] text-muted-foreground"><span>{following ? 'دنبال‌کردن لاگ‌های تازه فعال است' : 'نمایش روی لاگ‌های قبلی متوقف شده است'}</span>{olderAvailable && <Button type="button" size="sm" variant="ghost" disabled={olderBusy} onClick={onLoadOlder}>{olderBusy ? 'در حال دریافت…' : 'بارگیری لاگ‌های قدیمی‌تر'}</Button>}</div>
+          {error && <p role="alert" className="rounded-lg border border-rose-400/25 bg-rose-400/[.06] p-2 text-xs text-rose-200">{error}</p>}
+          {loading && <p className="text-[10px] text-muted-foreground">در حال واکشی جزئیات تازهٔ Job…</p>}
+          <pre ref={viewport} onScroll={(event) => { const node = event.currentTarget; const atTail = node.scrollHeight - node.scrollTop - node.clientHeight < 30; followTail.current = atTail; setFollowing(atTail) }} dir="ltr" aria-label="لاگ‌های واقعی فرایند استقرار" className="max-h-[min(42dvh,420px)] min-h-28 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border bg-[#080a0e] p-3 text-left font-mono text-[11px] leading-5 text-foreground/85">{text || (active ? 'در انتظار ثبت نخستین خروجی واقعی Worker…' : 'برای این Job لاگی ثبت نشده است.')}</pre>
+          <p className="text-[10px] leading-5 text-muted-foreground">لاگ Git، هر دستور سفارشی و خروجی نصب وابستگی / Build ذخیره می‌شود. مقدارهای شناخته‌شدهٔ محرمانه پیش از ثبت در پایگاه‌داده پوشانده می‌شوند.</p>
+        </section>
+      </div>}
+    </DialogContent>
+  </Dialog>
+}
 
 function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: string) => void }) {
   const [jobs, setJobs] = useState<DeployJob[]>([])
   const [jobLogs, setJobLogs] = useState<Record<string, DeployLog[]>>({})
   const [olderLogsBefore, setOlderLogsBefore] = useState<Record<string, number | null>>({})
   const [logsBusy, setLogsBusy] = useState<Record<string, boolean>>({})
+  const [detailsJob, setDetailsJob] = useState<DeployJob | null>(null)
+  const [detailsBusy, setDetailsBusy] = useState(false)
+  const [detailsError, setDetailsError] = useState('')
+  const [jobsLoadError, setJobsLoadError] = useState('')
+  const detailsLogCursor = useRef<Record<string, number>>({})
   const [mode, setMode] = useState<'git' | 'directory' | 'archive'>('git')
   const [repository, setRepository] = useState('')
   const [gitAccess, setGitAccess] = useState<'https' | 'ssh'>('https')
@@ -132,6 +226,8 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
   const [reference, setReference] = useState('main')
   const [directory, setDirectory] = useState('')
   const [healthcheck, setHealthcheck] = useState(isStaticFramework(app.framework) ? '' : '')
+  const [preDeployCommands, setPreDeployCommands] = useState('')
+  const [preDeployConfirmed, setPreDeployConfirmed] = useState(false)
   const [archive, setArchive] = useState<File | null>(null)
   const [rollbackTarget, setRollbackTarget] = useState<DeployJob | null>(null)
   const [open, setOpen] = useState(false)
@@ -165,6 +261,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
     try {
       const result = await api<{ jobs: DeployJob[] }>(`apps/${encodeURIComponent(app.id)}/deploy/jobs`)
       setJobs(result.jobs)
+      setJobsLoadError('')
       for (const job of result.jobs) {
         const first = job.logs?.[0]?.id
         setOlderLogsBefore((cursors) => ({ ...cursors, [job.id]: job.log_count && first && job.log_count > (job.logs?.length || 0) ? (cursors[job.id] ?? first) : null }))
@@ -181,7 +278,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
         return next
       })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'وضعیت استقرار خوانده نشد.')
+      setJobsLoadError(cause instanceof Error ? cause.message : 'وضعیت استقرار خوانده نشد.')
     }
   }, [app.id])
 
@@ -196,9 +293,62 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
         return { ...current, [jobId]: [...byId.values()].sort((a, b) => a.id - b.id) }
       })
       setOlderLogsBefore((current) => ({ ...current, [jobId]: result.next_before }))
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'لاگ‌های قدیمی‌تر خوانده نشدند.') }
+    } catch (cause) { setDetailsError(cause instanceof Error ? cause.message : 'لاگ‌های قدیمی‌تر خوانده نشدند.') }
     finally { setLogsBusy((current) => ({ ...current, [jobId]: false })) }
   }
+
+  async function openJobDetails(job: DeployJob) {
+    setDetailsJob(job)
+    setDetailsError('')
+    setDetailsBusy(true)
+    try {
+      const [fresh, result] = await Promise.all([
+        api<DeployJob>(`deploy/jobs/${encodeURIComponent(job.id)}`),
+        api<{ logs: DeployLog[]; next_before: number | null }>(`deploy/jobs/${encodeURIComponent(job.id)}/logs?tail=true&limit=500`),
+      ])
+      setDetailsJob(fresh)
+      setJobs((current) => current.map((item) => item.id === fresh.id ? fresh : item))
+      const rows = result.logs || []
+      setJobLogs((current) => ({ ...current, [job.id]: rows }))
+      setOlderLogsBefore((current) => ({ ...current, [job.id]: result.next_before }))
+      detailsLogCursor.current[job.id] = rows.at(-1)?.id || 0
+    } catch (cause) {
+      setDetailsError(cause instanceof Error ? cause.message : 'جزئیات و خطای واقعی Job خوانده نشد.')
+    } finally { setDetailsBusy(false) }
+  }
+
+  useEffect(() => {
+    if (!detailsJob || detailsBusy || !['queued', 'validating', 'running', 'verifying'].includes(detailsJob.state)) return
+    const jobId = detailsJob.id
+    let cancelled = false
+    let timer = 0
+    const poll = async () => {
+      try {
+        const after = detailsLogCursor.current[jobId] || 0
+        const [fresh, result] = await Promise.all([
+          api<DeployJob>(`deploy/jobs/${encodeURIComponent(jobId)}`),
+          api<{ logs: DeployLog[] }>(`deploy/jobs/${encodeURIComponent(jobId)}/logs?after=${after}&limit=500`),
+        ])
+        if (cancelled) return
+        setDetailsJob(fresh)
+        setJobs((current) => current.map((item) => item.id === fresh.id ? fresh : item))
+        const incoming = result.logs || []
+        if (incoming.length) {
+          detailsLogCursor.current[jobId] = incoming.at(-1)?.id || after
+          setJobLogs((current) => {
+            const byId = new Map([...(current[jobId] || []), ...incoming].map((row) => [row.id, row]))
+            return { ...current, [jobId]: [...byId.values()].sort((a, b) => a.id - b.id) }
+          })
+        }
+        setDetailsError('')
+      } catch (cause) {
+        if (!cancelled) setDetailsError(cause instanceof Error ? cause.message : 'دریافت لاگ زنده ناموفق بود.')
+      }
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 1400)
+    }
+    timer = window.setTimeout(() => void poll(), 250)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [detailsJob?.id, detailsJob?.state, detailsBusy])
 
   useEffect(() => { void loadJobs() }, [loadJobs])
   useEffect(() => {
@@ -211,9 +361,14 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
     event.preventDefault(); setBusy(true); setError('')
     try {
       const key = newIdempotencyKey()
+      const commands = preDeployCommands.split('\n').map((line) => line.trim()).filter(Boolean)
+      if (commands.length > 8) throw new Error('حداکثر ۸ دستور پیش از استقرار می‌توانی وارد کنی.')
+      if (commands.some((line) => new TextEncoder().encode(line).length > 512)) throw new Error('طول هر دستور نباید بیشتر از ۵۱۲ بایت باشد.')
+      if (new TextEncoder().encode(commands.join('')).length > 4096) throw new Error('مجموع دستورها نباید بیشتر از ۴ کیلوبایت باشد.')
+      if (commands.length && !preDeployConfirmed) throw new Error('پیش از اجرای دستورهای سفارشی، پیامد و محدودیت آن‌ها را تأیید کن.')
       if (mode === 'archive') {
         if (!archive) throw new Error('یک فایل ZIP انتخاب کن.')
-        const result = await api<DeployJob>(`apps/${encodeURIComponent(app.id)}/deploy/archive`, { method: 'POST', body: archive, headers: { 'Content-Type': 'application/zip', 'Idempotency-Key': key } })
+        const result = await api<DeployJob>(`apps/${encodeURIComponent(app.id)}/deploy/archive`, { method: 'POST', body: archive, headers: { 'Content-Type': 'application/zip', 'Idempotency-Key': key, 'X-ARG-Pre-Deploy-Commands': encodeBase64UrlUtf8(JSON.stringify(commands)) } })
         setJobs((current) => [result, ...current.filter((item) => item.id !== result.id)])
       } else {
         const source: Record<string, string> = mode === 'git'
@@ -224,7 +379,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
           if (!deployKeyInstalled) throw new Error('ابتدا کلید عمومی را در تنظیمات GitHub مخزن ثبت کن و تأیید را علامت بزن.')
           source.ssh_key_id = sshKeyId
         }
-        const result = await api<DeployJob>(`apps/${encodeURIComponent(app.id)}/deploy`, { method: 'POST', body: JSON.stringify({ source, idempotency_key: key, healthcheck_file: healthcheck.trim() || null }) })
+        const result = await api<DeployJob>(`apps/${encodeURIComponent(app.id)}/deploy`, { method: 'POST', body: JSON.stringify({ source, idempotency_key: key, healthcheck_file: healthcheck.trim() || null, pre_deploy_commands: commands }) })
         setJobs((current) => [result, ...current.filter((item) => item.id !== result.id)])
       }
       setOpen(false); notify('Job استقرار ثبت شد؛ تا پایان از همین کارت قابل پیگیری است.')
@@ -282,7 +437,6 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
   }
 
   const labels: Record<string, string> = { queued: 'در صف', validating: 'اعتبارسنجی', running: 'در حال دریافت', verifying: 'بررسی و فعال‌سازی', succeeded: 'موفق', failed: 'ناموفق', cancelled: 'لغوشده' }
-  const stepLabels: Record<string, string> = { queued: 'ثبت Job', validating: 'اعتبارسنجی ورودی و مالکیت', recovered: 'بازیابی پس از راه‌اندازی مجدد', acquiring: 'دریافت منبع', 'node-build': 'آماده‌سازی پروژه Node', 'node-install': 'نصب وابستگی‌ها', 'node-build-script': 'اجرای اسکریپت Build', 'laravel-persistent-data': 'آماده‌سازی داده‌های پایدار', 'verifying': 'بررسی و فعال‌سازی', succeeded: 'استقرار کامل شد', failed: 'استقرار ناموفق بود', cancelled: 'استقرار لغو شد' }
   const deploymentDescription = isStaticFramework(app.framework)
     ? 'خروجی build را با lockfile می‌سازد یا فایل استاتیک آماده را می‌پذیرد، سپس Nginx را به current وصل می‌کند. process جداگانه‌ای اجرا نمی‌شود.'
     : isNodePlatform(app.framework)
@@ -296,12 +450,26 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
       {mode === 'directory' && <label className="block space-y-1 text-[11px] text-muted-foreground">مسیر پوشهٔ سرور<Input dir="ltr" required value={directory} onChange={(event) => setDirectory(event.target.value)} placeholder="/var/www/site"/><span className="block text-[10px]">مسیر باید زیر /var/www یا /opt/arg/apps باشد؛ symlink رد می‌شود.</span></label>}
       {mode === 'archive' && <label className="block space-y-1 text-[11px] text-muted-foreground">ZIP پروژه<input type="file" accept=".zip,application/zip" required onChange={(event) => setArchive(event.target.files?.[0] || null)} className="block w-full rounded-md border border-input bg-background p-2 text-xs file:ml-2 file:rounded-md file:border-0 file:bg-primary file:px-2 file:py-1"/><span className="block text-[10px]">حداکثر ۲۵۶ MiB؛ محتوای بازشده حداکثر ۲ GiB. مسیرهای traversal، symlink و فایل‌های خاص رد می‌شوند.</span></label>}
       {mode !== 'archive' && <label className="block space-y-1 text-[11px] text-muted-foreground">فایل بررسی اختیاری (نسبی به ریشهٔ منبع)<Input dir="ltr" value={healthcheck} onChange={(event) => setHealthcheck(event.target.value)} placeholder="index.html"/></label>}
+      <section className="space-y-2 rounded-lg border border-border/70 bg-background/35 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-medium">دستورهای سفارشی پیش از فعال‌سازی</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">هر خط یک دستور است و به‌ترتیب، پس از دریافت منبع و نصب/Build خودکار و پیش از فعال‌کردن release اجرا می‌شود. خالی بگذار تا مرحله‌ای اضافه نشود.</p></div><Badge variant="outline">{preDeployCommands.split('\n').filter((line) => line.trim()).length}/8</Badge></div>
+        <textarea dir="ltr" value={preDeployCommands} maxLength={4096} onChange={(event) => { setPreDeployCommands(event.target.value); setPreDeployConfirmed(false) }} placeholder={'npm run generate\nphp artisan config:cache'} rows={4} spellCheck={false} aria-label="دستورهای سفارشی پیش از استقرار" className="flex w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-left font-mono text-xs leading-5 outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-[#dda46f]" />
+        <p className="text-[10px] leading-5 text-muted-foreground">ARG هر خط را به آرگومان‌های برنامه تبدیل می‌کند؛ shell، pipe، redirect و جایگذاری متغیر اجرا نمی‌شود. از نقل‌قول برای آرگومان دارای فاصله استفاده کن. محیط تولید و فایل <code dir="ltr">.env</code> به فرمان داده نمی‌شود؛ رمز یا توکن را هم داخل آرگومان ننویس. حداکثر ۸ دستور و ۴ کیلوبایت.</p>
+        {preDeployCommands.split('\n').filter((line) => line.trim()).length > 0 && <div className="space-y-2 rounded-md border border-amber-300/20 bg-amber-300/[.04] p-2"><p className="text-[10px] leading-5 text-amber-100">فرمان‌ها در sandbox با دسترسی نوشتن به release موقت و cache و سقف منابع/زمان اجرا می‌شوند. اثر بیرونی مثل تغییر دیتابیس با rollback فایل‌ها برنمی‌گردد؛ فرمان‌های برگشت‌ناپذیر را با احتیاط وارد کن.</p><label className="flex items-start gap-2 text-[10px] leading-5 text-foreground"><input type="checkbox" checked={preDeployConfirmed} onChange={(event) => setPreDeployConfirmed(event.target.checked)} className="mt-1 accent-primary"/>می‌دانم این دستورها در سرور اجرا می‌شوند و اثرهای بیرونی آن‌ها خودکار rollback نمی‌شود.</label></div>}
+      </section>
       <p className="rounded-lg border border-amber-300/15 bg-amber-300/[.04] p-2 text-[10px] leading-5 text-amber-100/80">فایل‌های محیطی مثل <code dir="ltr">.env</code>، پوشهٔ <code dir="ltr">.git</code> و <code dir="ltr">node_modules</code> از منبع کپی نمی‌شوند. نسخهٔ قبلی تا تأیید موفق سرویس حفظ می‌شود؛ در اپ Node با شکست restart اشاره‌گر به release قبلی برمی‌گردد.</p>
       {error && <p role="alert" className="text-xs text-rose-200">{error}</p>}
       <div className="flex justify-end gap-2"><Button type="button" size="sm" variant="outline" onClick={() => setOpen(false)} disabled={busy}>انصراف</Button><Button size="sm" disabled={busy}>{busy ? 'در حال ثبت…' : 'ساخت Job'}</Button></div>
     </form>}
     {error && !open && <p role="alert" className="mt-2 text-xs text-rose-200">{error}</p>}
-    {jobs.length > 0 && <div className="mt-3 space-y-2">{jobs.slice(0,3).map((job) => <details key={job.id} className="rounded-lg border border-border/70 bg-background/35 p-2"><summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium">{labels[job.state] || job.state}</span><span dir="ltr" className="font-mono text-[10px] text-muted-foreground">{job.id.slice(0,8)} · {new Date(job.created_at * 1000).toLocaleString('fa-IR')}</span></summary><div className="mt-2 space-y-1.5">{job.steps.map((step) => <div key={`${job.id}:${step.sequence}`} className="flex items-start gap-2 border-r border-border/70 pr-2 text-[10px]"><span className={step.state === 'running' ? 'text-amber-200' : step.state === 'failed' ? 'text-rose-200' : 'text-emerald-200'}>●</span><div><p className="font-medium">{stepLabels[step.step] || step.step}</p><p className="leading-5 text-muted-foreground">{step.message}</p></div></div>)}{(jobLogs[job.id] || job.logs || []).length > 0 && <div className="rounded-lg border border-border/60 bg-black/20 p-2"><div className="mb-1 flex items-center justify-between gap-2"><p className="text-[10px] font-medium">لاگ‌های پایدار استقرار</p>{olderLogsBefore[job.id] && <Button size="sm" variant="outline" disabled={logsBusy[job.id]} onClick={() => void loadOlderLogs(job.id)}>{logsBusy[job.id] ? 'در حال دریافت…' : 'لاگ‌های قدیمی‌تر'}</Button>}</div><pre dir="ltr" className="max-h-56 overflow-auto whitespace-pre-wrap break-words text-left font-mono text-[9px] leading-4 text-muted-foreground">{(jobLogs[job.id] || job.logs || []).map((line) => `[${new Date(line.created_at * 1000).toLocaleTimeString()}] ${line.step} ${line.level}: ${line.message}`).join('\n')}</pre></div>}{job.error && <p className="rounded bg-rose-400/[.05] p-2 text-[10px] text-rose-200">{job.error}</p>}{job.release_path && <p dir="ltr" className="break-all text-left font-mono text-[10px] text-muted-foreground">{job.release_path}</p>}<div className="flex justify-end gap-2">{['queued','validating','running','verifying'].includes(job.state) ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void action(job,'cancel')}><X size={12}/>لغو Job</Button> : <>{job.state === 'failed' && mode !== 'archive' && <Button size="sm" variant="outline" disabled={busy} onClick={() => void action(job,'retry')}><RotateCcw size={12}/>اجرای دوباره</Button>}{job.state === 'succeeded' && job.previous_release && <Button size="sm" variant="outline" disabled={busy} onClick={() => void rollback(job)}><RotateCcw size={12}/>بازگشت به نسخهٔ قبلی</Button>}</>}</div></div></details>)}</div>}
+    {jobsLoadError && <div role="alert" className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-400/25 bg-rose-400/[.05] p-2 text-xs text-rose-200"><span>{jobsLoadError}</span><Button size="sm" variant="outline" onClick={() => void loadJobs()}><RefreshCw size={12}/>تلاش دوباره</Button></div>}
+    {jobs.length > 0 && <div className="mt-3 space-y-2">{jobs.slice(0,3).map((job) => <article key={job.id} className="space-y-2 rounded-xl border border-border/70 bg-background/35 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex min-w-0 flex-wrap items-center gap-2"><Badge variant={job.state === 'failed' ? 'destructive' : job.state === 'succeeded' ? 'success' : 'info'}>{labels[job.state] || job.state}</Badge><code dir="ltr" className="font-mono text-[10px] text-muted-foreground">{job.id.slice(0,8)} · {new Date(job.created_at * 1000).toLocaleString('fa-IR')}</code><span className="text-[10px] text-muted-foreground">{job.log_count || 0} رویداد</span></div>
+        <div className="flex flex-wrap justify-end gap-1.5"><Button size="sm" variant="outline" onClick={() => void openJobDetails(job)}><Activity size={13}/>مشاهدهٔ جزئیات فرایند</Button>{['queued','validating','running','verifying'].includes(job.state) ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void action(job,'cancel')}><X size={12}/>لغو</Button> : <>{job.state === 'failed' && mode !== 'archive' && <Button size="sm" variant="outline" disabled={busy} onClick={() => void action(job,'retry')}><RotateCcw size={12}/>اجرای دوباره</Button>}{job.state === 'succeeded' && job.previous_release && <Button size="sm" variant="outline" disabled={busy} onClick={() => void rollback(job)}><RotateCcw size={12}/>بازگشت</Button>}</>}</div>
+      </div>
+      {job.steps.length > 0 && <p className="truncate text-[10px] text-muted-foreground">مرحلهٔ آخر: {job.steps.at(-1)?.message}</p>}
+      {job.error && <p className={`whitespace-pre-wrap break-words rounded-lg border p-2 text-[10px] ${['queued','validating','running','verifying'].includes(job.state) ? 'border-amber-300/20 bg-amber-300/[.04] text-amber-100' : 'border-rose-400/20 bg-rose-400/[.05] text-rose-200'}`}>{job.error}</p>}
+    </article>)}</div>}
+    <DeploymentJobDetailsDialog job={detailsJob} logs={detailsJob ? (jobLogs[detailsJob.id] || detailsJob.logs || []) : []} olderAvailable={!!(detailsJob && olderLogsBefore[detailsJob.id])} olderBusy={!!(detailsJob && logsBusy[detailsJob.id])} loading={detailsBusy} error={detailsError} onOpenChange={(isOpen) => { if (!isOpen) { setDetailsJob(null); setDetailsError('') } }} onRefresh={() => { if (detailsJob) void openJobDetails(detailsJob) }} onLoadOlder={() => { if (detailsJob) void loadOlderLogs(detailsJob.id) }} onNotify={notify}/>
     <Dialog open={!!rollbackTarget} onOpenChange={(isOpen) => { if (!isOpen && !busy) setRollbackTarget(null) }}><DialogContent className="max-w-md"><DialogHeader><DialogTitle>بازگشت به release قبلی؟</DialogTitle><DialogDescription>{isNodePlatform(app.framework) ? 'اشاره‌گر release برمی‌گردد؛ برای SSR سرویس loopback بررسی و در صورت نیاز restart می‌شود، و برای Static مسیر Nginx با خروجی release قبلی همگام می‌شود.' : 'اشاره‌گر release به نسخهٔ پیشین تغییر می‌کند. برای این قالب، سرویس یا Nginx راه‌اندازی مجدد نمی‌شود.'}</DialogDescription></DialogHeader>{error && <p role="alert" className="text-xs text-rose-200">{error}</p>}<div className="flex justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => setRollbackTarget(null)}>انصراف</Button><Button disabled={busy} onClick={() => void confirmRollback()}>{busy ? 'در حال بازگشت…' : 'تأیید بازگشت'}</Button></div></DialogContent></Dialog>
   </section>
 }

@@ -3823,6 +3823,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("laravel-service") => "laravel-service",
         Some("laravel-refresh-services") => "laravel-refresh-services",
         Some("node-build-step") => "node-build-step",
+        Some("node-pre-deploy-command") => "node-pre-deploy-command",
         Some("node-service-enable") => "node-service-enable",
         Some("node-service-disable") => "node-service-disable",
         Some("node-service-restart") => "node-service-restart",
@@ -4146,6 +4147,75 @@ fn command_result(command: &mut std::process::Command) -> Result<(bool, String),
     };
     Ok((output.status.success(), result))
 }
+fn parse_systemd_exec_start(value: &str) -> Option<String> {
+    let mut commands = value
+        .split("argv[]=")
+        .skip(1)
+        .filter_map(|part| {
+            let command = part
+                .split(" ; ")
+                .next()
+                .unwrap_or(part)
+                .trim()
+                .trim_end_matches('}')
+                .trim();
+            (!command.is_empty()).then(|| command.to_owned())
+        })
+        .collect::<Vec<_>>();
+
+    if commands.is_empty() {
+        if let Some(path) = value.split("path=").nth(1) {
+            let path = path
+                .split(" ; ")
+                .next()
+                .unwrap_or(path)
+                .trim()
+                .trim_end_matches('}')
+                .trim();
+            if !path.is_empty() {
+                commands.push(path.to_owned());
+            }
+        }
+    }
+
+    if commands.is_empty() {
+        return None;
+    }
+    let command = commands.join("\n");
+    (command.len() <= 4096
+        && !command
+            .chars()
+            .any(|character| character.is_control() && character != '\n'))
+    .then_some(command)
+}
+
+fn parse_systemd_service_commands(output: &str) -> HashMap<String, String> {
+    let mut commands = HashMap::new();
+    let mut unit: Option<String> = None;
+    let mut exec_start = String::new();
+
+    let save = |commands: &mut HashMap<String, String>, unit: &Option<String>, value: &str| {
+        if let (Some(unit), Some(command)) = (unit, parse_systemd_exec_start(value)) {
+            commands.insert(unit.clone(), command);
+        }
+    };
+
+    for line in output.lines() {
+        if let Some(value) = line.strip_prefix("Id=") {
+            save(&mut commands, &unit, &exec_start);
+            unit = Some(value.trim().to_owned());
+            exec_start.clear();
+        } else if let Some(value) = line.strip_prefix("ExecStart=") {
+            if !exec_start.is_empty() {
+                exec_start.push('\n');
+            }
+            exec_start.push_str(value.trim());
+        }
+    }
+    save(&mut commands, &unit, &exec_start);
+    commands
+}
+
 fn execute_apt_request(action: &str, request: &Value) -> Value {
     if action == "apt-preview" {
         let packages: Vec<&str> = request["packages"]
@@ -4443,11 +4513,27 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
                 Some((unit.to_owned(), (state.to_owned(), sub.to_owned(), desc)))
             })
             .collect();
+        let service_units = file_output
+            .lines()
+            .filter_map(|line| {
+                let unit = line.split_whitespace().next()?;
+                valid_service_unit(unit).then(|| unit.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let mut service_commands = HashMap::new();
+        for batch in service_units.chunks(128) {
+            let mut show = std::process::Command::new("systemctl");
+            show.args(["show", "--no-pager", "--property=Id,ExecStart"])
+            .args(batch);
+            if let Ok((true, output)) = command_result(&mut show) {
+                service_commands.extend(parse_systemd_service_commands(&output));
+            }
+        }
         let services: Vec<Value> = file_output.lines().filter_map(|line| {
             let mut f=line.split_whitespace(); let unit=f.next()?; let enabled=f.next()?;
             if !valid_service_unit(unit) { return None; }
             let (state,sub,description)=active.get(unit).cloned().unwrap_or_else(||("inactive".into(),"dead".into(),String::new()));
-            Some(json!({"unit":unit,"enabled":enabled,"state":state,"sub_state":sub,"description":if description.is_empty(){"System service"}else{description.as_str()}}))
+            Some(json!({"unit":unit,"enabled":enabled,"state":state,"sub_state":sub,"description":if description.is_empty(){"System service"}else{description.as_str()},"command":service_commands.get(unit)}))
         }).collect();
         return json!({"ok":true,"data":{"services":services}});
     }
@@ -5013,9 +5099,28 @@ mod update_progress_tests {
     use super::{
         backup_database, default_update_build_mode, ensure_federation_identity_columns,
         ensure_metric_storage_columns, firewall_rule_validation_error, update_progress_payload,
-        valid_apt_install_spec, valid_tls_source_path, valid_update_build_mode, role_has_admin_access, Connection,
+        parse_systemd_exec_start, parse_systemd_service_commands, valid_apt_install_spec,
+        valid_tls_source_path, valid_update_build_mode, role_has_admin_access, Connection,
         FirewallRuleInput,
     };
+
+    #[test]
+    fn service_manager_extracts_only_systemd_execstart_arguments() {
+        let output = concat!(
+            "Id=cron.service\n",
+            "ExecStart={ path=/usr/sbin/cron ; argv[]=/usr/sbin/cron -f ; ignore_errors=no }\n\n",
+            "Id=worker.service\n",
+            "ExecStart={ path=/usr/bin/worker ; argv[]=/usr/bin/worker --queue high ; ignore_errors=no }\n",
+        );
+        let commands = parse_systemd_service_commands(output);
+        assert_eq!(commands.get("cron.service").map(String::as_str), Some("/usr/sbin/cron -f"));
+        assert_eq!(commands.get("worker.service").map(String::as_str), Some("/usr/bin/worker --queue high"));
+        assert_eq!(
+            parse_systemd_exec_start("{ path=/usr/bin/worker ; ignore_errors=no }"),
+            Some("/usr/bin/worker".to_owned())
+        );
+        assert_eq!(parse_systemd_exec_start("{ ; ignore_errors=no }"), None);
+    }
 
     #[test]
     fn apt_install_specs_allow_pinned_versions_without_shell_syntax() {

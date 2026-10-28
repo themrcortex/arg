@@ -5,6 +5,12 @@
 ### Development
 - Development prerelease based on the next patch after main.
 
+### Changed
+- Show each systemd service's actual `ExecStart` command under its unit name instead of the localized service description.
+- Scale Cargo's parallel build jobs to available CPU and memory, while balancing per-job Rust code generation parallelism to use the available cores without running several memory-heavy Cargo jobs at once.
+- Persist Git and live Node install/build output per deployment Job, show it in a follow-tail process details dialog, and surface the underlying database cause when job status cannot be read or claimed.
+- Add ordered, custom pre-deploy commands for Git, directory and ZIP releases. Commands run as argv (without shell interpretation) in the resource-limited staging sandbox, and each command's live output is retained in the deployment Job.
+
 ## v0.7.2 — 2026-10-28
 
 ### Added

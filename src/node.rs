@@ -1,11 +1,13 @@
 use super::*;
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    fs::OpenOptions,
+    io::{Read, Seek, SeekFrom, Write},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path as FsPath, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -759,6 +761,39 @@ pub(super) async fn prepare_static_build(
     prepare_project_build(state, app_id, job_id, release, build_runtime, build_environment, build_script, "auto", false).await
 }
 
+pub(super) async fn run_pre_deploy_command(
+    state: &AppState,
+    app_id: &str,
+    job_id: &str,
+    step: &str,
+    argv: Vec<String>,
+) -> Result<(), String> {
+    if !valid_deployment_log_step(step) {
+        return Err("مرحلهٔ دستور سفارشی معتبر نیست.".into());
+    }
+    let log_path = create_live_build_log(job_id, step)?;
+    let response = request_build_step_with_live_logs(
+        state,
+        job_id,
+        step,
+        &log_path,
+        json!({"action":"node-pre-deploy-command","application_id":app_id,"job_id":job_id,"step":step,"argv":argv,"log_path":log_path}),
+    ).await?;
+    if response["ok"] != true {
+        return Err(response["error"].as_str().unwrap_or("اجرای دستور سفارشی در sandbox شکست خورد.").to_owned());
+    }
+    let exit_code = response["data"]["exit_code"].as_i64().unwrap_or(1);
+    if exit_code != 0 {
+        let output = response["data"]["output"].as_str().unwrap_or("");
+        return Err(if output.is_empty() { format!("فرمان با کد خروج {exit_code} تمام شد.") } else { format!("کد خروج: {exit_code}\n{output}") });
+    }
+    Ok(())
+}
+
+fn valid_deployment_log_step(step: &str) -> bool {
+    matches!(step, "install" | "build") || (1..=8).any(|number| step == format!("pre-deploy-{number}"))
+}
+
 pub(super) fn resolve_static_output_path(
     release: &FsPath,
     configured: &str,
@@ -865,8 +900,15 @@ async fn prepare_project_build(
             &progress_message,
         );
         let environment = if step == "build" { json!(build_environment) } else { json!({}) };
-        let result = privileged_request_async(json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"script":script,"node_version":build_runtime,"package_manager":manager.label(),"build_environment":environment})).await.map_err(|(_, body)| body["error"].as_str().unwrap_or("Node build helper unavailable").to_owned())?;
-        super::deploy::record_output(state, job_id, step, result["data"]["output"].as_str().unwrap_or(""));
+        let log_path = create_live_build_log(job_id, step)?;
+        let result = request_build_step_with_live_logs(
+            state,
+            job_id,
+            step,
+            &log_path,
+            json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"script":script,"node_version":build_runtime,"package_manager":manager.label(),"build_environment":environment,"log_path":log_path}),
+        ).await?;
+        super::deploy::record_output(state, job_id, step, &format!("Runner finished {step}; exit code {}.", result["data"]["exit_code"].as_i64().unwrap_or(-1)));
         if result["ok"] != true {
             return Err(result["error"]
                 .as_str()
@@ -894,6 +936,82 @@ async fn prepare_project_build(
         }
     }
     Ok(())
+}
+
+fn create_live_build_log(job_id: &str, step: &str) -> Result<PathBuf, String> {
+    if !valid_app_id(job_id) || !valid_deployment_log_step(step) {
+        return Err("شناسه یا مرحلهٔ فایل لاگ Build معتبر نیست.".into());
+    }
+    let deployment = deployment_root();
+    let deployment_metadata = fs::symlink_metadata(&deployment)
+        .map_err(|error| format!("ریشهٔ استقرار برای لاگ Build پیدا نشد: {error}"))?;
+    if !deployment_metadata.is_dir() || deployment_metadata.file_type().is_symlink() {
+        return Err("ریشهٔ استقرار برای لاگ Build باید پوشهٔ واقعی باشد.".into());
+    }
+    let log_directory = deployment.join("job-logs");
+    match fs::symlink_metadata(&log_directory) {
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => return Err("پوشهٔ لاگ‌های Build معتبر نیست.".into()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&log_directory).map_err(|error| format!("پوشهٔ لاگ Build ساخته نشد: {error}"))?,
+        Err(error) => return Err(format!("پوشهٔ لاگ Build بررسی نشد: {error}")),
+    }
+    let canonical_deployment = deployment.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_logs = log_directory.canonicalize().map_err(|error| error.to_string())?;
+    if canonical_logs.parent() != Some(canonical_deployment.as_path()) {
+        return Err("پوشهٔ لاگ Build از ریشهٔ استقرار خارج شده است.".into());
+    }
+    let path = canonical_logs.join(format!("{job_id}-{step}.log"));
+    OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)
+        .map_err(|error| format!("فایل لاگ Build امن ساخته نشد: {error}"))?;
+    Ok(path)
+}
+
+fn drain_live_build_log(path: &FsPath, offset: &mut u64, pending: &mut Vec<u8>, final_read: bool, state: &AppState, job_id: &str, step: &str) -> bool {
+    let mut file = match fs::File::open(path) { Ok(file) => file, Err(_) => return false };
+    if file.seek(SeekFrom::Start(*offset)).is_err() { return false; }
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() { return false; }
+    *offset = offset.saturating_add(bytes.len() as u64);
+    pending.extend_from_slice(&bytes);
+    let mut lines = Vec::new();
+    while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+        let line = pending.drain(..=end).collect::<Vec<_>>();
+        let message = String::from_utf8_lossy(&line).trim().to_owned();
+        if !message.is_empty() { lines.push(message); }
+    }
+    if final_read && !pending.is_empty() {
+        let line = std::mem::take(pending);
+        let message = String::from_utf8_lossy(&line).trim().to_owned();
+        if !message.is_empty() { lines.push(message); }
+    }
+    if lines.is_empty() { false } else {
+        super::deploy::record_output(state, job_id, step, &lines.join("\n"));
+        true
+    }
+}
+
+async fn request_build_step_with_live_logs(state: &AppState, job_id: &str, step: &str, log_path: &FsPath, request: Value) -> Result<Value, String> {
+    let mut offset = 0_u64;
+    let mut pending = Vec::new();
+    let mut streamed = false;
+    let request = privileged_request_async(request);
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            response = &mut request => {
+                streamed |= drain_live_build_log(log_path, &mut offset, &mut pending, true, state, job_id, step);
+                let _ = fs::remove_file(log_path);
+                let response = response.map_err(|(_, body)| body["error"].as_str().unwrap_or("Node build helper unavailable").to_owned())?;
+                if !streamed {
+                    super::deploy::record_output(state, job_id, step, response["data"]["output"].as_str().unwrap_or(""));
+                }
+                return Ok(response);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(400)) => {
+                streamed |= drain_live_build_log(log_path, &mut offset, &mut pending, false, state, job_id, step);
+            }
+        }
+    }
 }
 
 pub(super) async fn inspect(
@@ -1490,6 +1608,7 @@ pub(super) async fn logs(
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     match action {
         "node-build-step" => helper_build_step(request),
+        "node-pre-deploy-command" => helper_pre_deploy_command(request),
         "node-service-enable" => helper_service_enable(request),
         "node-service-disable" => helper_service_disable(request),
         "node-service-restart" => helper_service_restart(request),
@@ -1556,6 +1675,9 @@ fn helper_build_step(request: &Value) -> Value {
     else {
         return json!({"ok":false,"error":"Node build step is not allowlisted"});
     };
+    let Some(log_path) = request["log_path"].as_str() else {
+        return json!({"ok":false,"error":"Live build log path is missing"});
+    };
     let script = request["script"].as_str();
     if step == "build" && script.is_none_or(|value| !valid_script_name(value)) {
         return json!({"ok":false,"error":"Build script name is invalid"});
@@ -1618,6 +1740,10 @@ fn helper_build_step(request: &Value) -> Value {
         let _ = restore_tree_owner(&real_stage, &group);
         return json!({"ok":false,"error":format!("{} is not installed",manager.label())});
     };
+    let log_file = match open_build_log_file(log_path, job_id, step) {
+        Ok(file) => file,
+        Err(message) => { let _ = restore_tree_owner(&real_stage, &group); return json!({"ok":false,"error":message}); }
+    };
     let build_args = script.map(|name| vec!["run", name]);
     let args = if step == "install" { manager.install_args() } else { build_args.as_deref().unwrap_or(&[]) };
     let output = run_sandboxed(
@@ -1631,12 +1757,86 @@ fn helper_build_step(request: &Value) -> Value {
         app_id,
         job_id,
         step,
+        log_file,
     );
     let restored = restore_tree_owner(&real_stage, &group);
     match (output, restored) {
         (Ok((code, output)), Ok(())) => {
             json!({"ok":true,"data":{"exit_code":code,"output":output}})
         }
+        (Err(message), _) => json!({"ok":false,"error":message}),
+        (_, Err(message)) => json!({"ok":false,"error":message}),
+    }
+}
+
+fn helper_pre_deploy_command(request: &Value) -> Value {
+    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+        return json!({"ok":false,"error":"Application ID is invalid"});
+    };
+    let Some(job_id) = request["job_id"].as_str().filter(|value| valid_app_id(value)) else {
+        return json!({"ok":false,"error":"Deployment ID is invalid"});
+    };
+    let Some(step) = request["step"].as_str().filter(|value| valid_deployment_log_step(value) && value.starts_with("pre-deploy-")) else {
+        return json!({"ok":false,"error":"Pre-deploy step is invalid"});
+    };
+    let Some(log_path) = request["log_path"].as_str() else {
+        return json!({"ok":false,"error":"Pre-deploy log path is missing"});
+    };
+    let Some(argv) = request["argv"].as_array().filter(|args| !args.is_empty() && args.len() <= 32) else {
+        return json!({"ok":false,"error":"Pre-deploy argv is invalid"});
+    };
+    let mut owned_argv = Vec::with_capacity(argv.len());
+    let mut total_bytes = 0usize;
+    for item in argv {
+        let Some(value) = item.as_str().filter(|value| !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)) else {
+            return json!({"ok":false,"error":"Pre-deploy argument is invalid"});
+        };
+        total_bytes = total_bytes.saturating_add(value.len());
+        owned_argv.push(value.to_owned());
+    }
+    if total_bytes > 4096 {
+        return json!({"ok":false,"error":"Pre-deploy argv exceeds the size limit"});
+    }
+    let root = deployment_root().join("apps").join(app_id);
+    let stage = root.join(format!(".staging-{job_id}"));
+    if fs::symlink_metadata(&root).is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink()) {
+        return json!({"ok":false,"error":"Application root must be a regular directory"});
+    }
+    let (Ok(real_root), Ok(real_stage)) = (root.canonicalize(), stage.canonicalize()) else {
+        return json!({"ok":false,"error":"Application or staging path does not exist"});
+    };
+    if !real_stage.starts_with(&real_root) || !real_stage.is_dir() {
+        return json!({"ok":false,"error":"Staging path escaped the application root"});
+    }
+    let group = app_group(app_id);
+    let build_cache = root.join("build-cache");
+    if fs::symlink_metadata(&build_cache).is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink()) {
+        return json!({"ok":false,"error":"Build cache path must be a regular directory"});
+    }
+    if let Err(message) = fs::create_dir_all(&build_cache)
+        .map_err(|error| error.to_string())
+        .and_then(|_| ensure_group(&group))
+        .and_then(|_| prepare_tree_for_build(&real_stage, &group))
+        .and_then(|_| prepare_cache_for_build(&build_cache, &group))
+    {
+        return json!({"ok":false,"error":message});
+    }
+    let env = ["/usr/bin/env", "/bin/env"].iter().map(PathBuf::from).find(|path| path.is_file());
+    let Some(env) = env else {
+        let _ = restore_tree_owner(&real_stage, &group);
+        return json!({"ok":false,"error":"env executable is not installed"});
+    };
+    let log_file = match open_build_log_file(log_path, job_id, step) {
+        Ok(file) => file,
+        Err(message) => { let _ = restore_tree_owner(&real_stage, &group); return json!({"ok":false,"error":message}); }
+    };
+    let mut args: Vec<&str> = vec!["--"];
+    args.extend(owned_argv.iter().map(String::as_str));
+    let empty_environment = BTreeMap::new();
+    let output = run_sandboxed(&real_stage, &build_cache, &group, &env, &env, &args, &empty_environment, app_id, job_id, step, log_file);
+    let restored = restore_tree_owner(&real_stage, &group);
+    match (output, restored) {
+        (Ok((code, output)), Ok(())) => json!({"ok":true,"data":{"exit_code":code,"output":output}}),
         (Err(message), _) => json!({"ok":false,"error":message}),
         (_, Err(message)) => json!({"ok":false,"error":message}),
     }
@@ -2202,6 +2402,7 @@ fn run_sandboxed(
     app_id: &str,
     job_id: &str,
     step: &str,
+    log_file: fs::File,
 ) -> Result<(i32, String), String> {
     let stage = release
         .to_str()
@@ -2279,8 +2480,11 @@ fn run_sandboxed(
         .map_err(|error_value| format!("Could not start isolated Node task: {error_value}"))?;
     let stdout = child.stdout.take().ok_or("stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("stderr unavailable")?;
-    let out = thread::spawn(move || read_capped_sync(stdout));
-    let err = thread::spawn(move || read_capped_sync(stderr));
+    let sink = Arc::new(Mutex::new(BuildLogSink { file: log_file, bytes_written: 0, truncated: false }));
+    let out_sink = sink.clone();
+    let err_sink = sink.clone();
+    let out = thread::spawn(move || read_build_stream(stdout, "stdout", out_sink));
+    let err = thread::spawn(move || read_build_stream(stderr, "stderr", err_sink));
     let status = child
         .wait()
         .map_err(|error_value| error_value.to_string())?;
@@ -2293,7 +2497,92 @@ fn run_sandboxed(
         }
         output.push_str(&stderr);
     }
+    let mut sink = sink.lock().unwrap();
+    if sink.truncated {
+        let _ = sink.file.write_all(b"[ARG] build log reached the 4 MiB retention limit; additional process output was omitted.\n");
+        let _ = sink.file.flush();
+    }
     Ok((status.code().unwrap_or(128), sanitize_build_output(&output)))
+}
+
+const LIVE_BUILD_LOG_LIMIT: usize = 4 * 1024 * 1024;
+
+struct BuildLogSink {
+    file: fs::File,
+    bytes_written: usize,
+    truncated: bool,
+}
+
+fn open_build_log_file(path: &str, job_id: &str, step: &str) -> Result<fs::File, String> {
+    if !valid_app_id(job_id) || !valid_deployment_log_step(step) {
+        return Err("Live build log identity is invalid".into());
+    }
+    let directory = deployment_root().join("job-logs");
+    let metadata = fs::symlink_metadata(&directory).map_err(|error| format!("Build log directory is unavailable: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("Build log directory must be a regular directory".into());
+    }
+    let canonical_directory = directory.canonicalize().map_err(|error| error.to_string())?;
+    let requested = PathBuf::from(path);
+    if !requested.is_absolute()
+        || requested.file_name().and_then(|name| name.to_str()) != Some(format!("{job_id}-{step}.log").as_str())
+        || requested.parent().and_then(|parent| parent.canonicalize().ok()).as_deref() != Some(canonical_directory.as_path())
+    {
+        return Err("Build log path is outside the job log directory".into());
+    }
+    let metadata = fs::symlink_metadata(&requested).map_err(|error| format!("Build log file is unavailable: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.permissions().mode() & 0o077 != 0 {
+        return Err("Build log must be a private regular file".into());
+    }
+    OpenOptions::new().append(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(requested)
+        .map_err(|error| format!("Build log could not be opened safely: {error}"))
+}
+
+fn write_build_log_line(sink: &Arc<Mutex<BuildLogSink>>, stream: &str, line: &[u8]) {
+    let mut sink = sink.lock().unwrap();
+    if sink.truncated { return; }
+    let prefix = format!("[{stream}] ");
+    let remaining = LIVE_BUILD_LOG_LIMIT.saturating_sub(sink.bytes_written);
+    if remaining == 0 { sink.truncated = true; return; }
+    let total = prefix.len().saturating_add(line.len()).saturating_add(1);
+    let keep = remaining.min(total);
+    let prefix_bytes = prefix.as_bytes();
+    let prefix_keep = keep.min(prefix_bytes.len());
+    let _ = sink.file.write_all(&prefix_bytes[..prefix_keep]);
+    let line_keep = keep.saturating_sub(prefix_keep).min(line.len());
+    let _ = sink.file.write_all(&line[..line_keep]);
+    if keep > prefix_keep + line_keep { let _ = sink.file.write_all(b"\n"); }
+    let _ = sink.file.flush();
+    sink.bytes_written = sink.bytes_written.saturating_add(keep);
+    if keep < total { sink.truncated = true; }
+}
+
+fn read_build_stream<R: Read>(mut reader: R, stream: &'static str, sink: Arc<Mutex<BuildLogSink>>) -> Vec<u8> {
+    let mut saved = Vec::new();
+    let mut pending = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(length) => {
+                let remaining = OUTPUT_LIMIT.saturating_sub(saved.len());
+                saved.extend_from_slice(&buffer[..length.min(remaining)]);
+                pending.extend_from_slice(&buffer[..length]);
+                while let Some(end) = pending.iter().position(|byte| *byte == b'\n' || *byte == b'\r') {
+                    let line = pending.drain(..end).collect::<Vec<_>>();
+                    let consumed = pending.remove(0);
+                    if !line.is_empty() { write_build_log_line(&sink, stream, &line); }
+                    if consumed == b'\r' && pending.first() == Some(&b'\n') { pending.remove(0); }
+                }
+                while pending.len() > 16 * 1024 {
+                    let chunk = pending.drain(..16 * 1024).collect::<Vec<_>>();
+                    write_build_log_line(&sink, stream, &chunk);
+                }
+            }
+        }
+    }
+    if !pending.is_empty() { write_build_log_line(&sink, stream, &pending); }
+    saved
 }
 
 fn read_capped_sync<R: Read>(mut reader: R) -> Vec<u8> {
@@ -2547,6 +2836,19 @@ fn parse_node_http_status(response: &[u8]) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn build_runner_streams_each_real_output_line_to_its_job_log() {
+        let path = std::env::temp_dir().join(format!("arg-build-live-log-{}.log", rand::random::<u64>()));
+        let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
+        let sink = Arc::new(Mutex::new(BuildLogSink { file, bytes_written: 0, truncated: false }));
+        let output = read_build_stream(std::io::Cursor::new(b"installing package\r\nrun build\n"), "stdout", sink.clone());
+        assert_eq!(String::from_utf8(output).unwrap(), "installing package\r\nrun build\n");
+        drop(sink);
+        let log = fs::read_to_string(&path).unwrap();
+        assert_eq!(log, "[stdout] installing package\n[stdout] run build\n");
+        let _ = fs::remove_file(path);
+    }
+
     #[test]
     fn static_framework_detection_and_output_resolution_cover_spa_and_ssr() {
         let root = std::env::temp_dir().join(format!("arg-static-test-{}", rand::random::<u64>()));

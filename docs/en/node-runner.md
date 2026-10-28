@@ -61,9 +61,10 @@ Service status is based on systemd and the actual listening socket. Before repor
 - **Execution logs:** reads recent service logs; it does not open a shell.
 - **Save runtime variables:** validates names and values and persists them privately. Existing values cannot be retrieved.
 - **Deploy / Retry / Roll back:** uses the durable deployment job and release history. Rollback changes code and restarts an enabled service; it does not reverse database or external side effects made by application code.
+- **Custom pre-activation commands:** enter one command per line in the Deploy form. ARG runs them after source acquisition and automatic dependency/build steps, but before activating the release. It passes each command as an executable plus arguments; it does not interpret shell syntax, pipes, redirects, or expansions. The runner can write only to the staging release and build cache inside its CPU/RAM/time-limited systemd sandbox. Production `.env` values and service secrets are not passed; do not put passwords or tokens in command arguments. Live output is retained in that Job's details, and a non-zero exit stops activation. External effects such as database changes are not reversed by a file rollback.
 - **Runtime settings:** select manifest script names and a loopback HTTP health path. Saving settings does not execute free-form commands; use **Apply service settings** to safely regenerate and verify an already-running systemd unit.
 
-ARG does not manage Node clusters, arbitrary worker commands, staging promotion, package-manager auto-installation, or Yarn Berry. Build and runtime options are selected from package script names; no free-form command field is provided. Static React/Vite publishing and Next.js/Nuxt SSR are described in the separate static publishing guide.
+ARG does not manage Node clusters, staging promotion, package-manager auto-installation, or Yarn Berry, and it does not interpret free-form shell scripts. Build and runtime options are selected from package script names; pre-deploy commands are executed only as an executable and its argument list. Static React/Vite publishing and Next.js/Nuxt SSR are described in the separate static publishing guide.
 
 ## Troubleshooting
 
@@ -75,12 +76,12 @@ ARG does not manage Node clusters, arbitrary worker commands, staging promotion,
 | Build exits unsuccessfully | Open the deployment job output; check engine constraints, native build prerequisites, and the project's own script. |
 | Port already in use | Select a free reserved port and configure the app to use `PORT`; do not bind it publicly. |
 | No loopback listener / health check is not 2xx | Check the selected runtime script, health path, app logs, required environment keys, and whether the app honors `HOST` and `PORT`. |
-| `Database error` while creating a deploy | A queued row and its initial stage are now committed atomically. Check ARG service logs for the SQLite cause; an older orphaned queued job is repaired during migration and can be cancelled or retried from the card. |
+| A Job stays queued or shows a database error | Open **View process details** on the Job card. The dialog shows the original SQLite cause and worker log; transient claim errors are retried and retained in the Job report. Real Git and Node install/build output is streamed and stored with bounded pagination. |
 | Nginx proxy rejected | Review the existing site's `server_name` and configuration. ARG will not replace a manually changed or unrelated site. |
 | Service stopped after failed activation | The runner stopped a newly created service after verification failed. Correct the cause and activate again. |
 
 ## API and authorization
 
-The runner uses `GET /api/apps/{id}/node`, `GET|PUT /api/apps/{id}/node/service`, `GET|PUT /api/apps/{id}/node/runtime-settings`, `PUT /api/apps/{id}/node/environment`, and `GET /api/apps/{id}/node/service/logs`. Deployment logs use `GET /api/deploy/jobs/{id}/logs?after={id}` or `?before={id}` with bounded pagination. Writes require an administrator session, a valid same-origin request, application ownership on the selected server, and an audit event. Root work is passed as structured actions over the protected helper socket; user-provided shell strings are not executed.
+The runner uses `GET /api/apps/{id}/node`, `GET|PUT /api/apps/{id}/node/service`, `GET|PUT /api/apps/{id}/node/runtime-settings`, `PUT /api/apps/{id}/node/environment`, and `GET /api/apps/{id}/node/service/logs`. Deployment logs use `GET /api/deploy/jobs/{id}/logs?tail=true&limit=500` for the latest page, `?after={id}` for new events, or `?before={id}` for earlier pages. Writes require an administrator session, a valid same-origin request, application ownership on the selected server, and an audit event. Root work is passed as structured actions over the protected helper socket; user-provided shell strings are not executed.
 
 Automated tests cover manifest/lockfile selection, environment validation, generated unit isolation, loopback-only verification, HTTP status handling, and deployment rollback paths. Running the service against a disposable Debian/Ubuntu VPS with systemd and Nginx remains an integration test and is not claimed by the repository test suite.
