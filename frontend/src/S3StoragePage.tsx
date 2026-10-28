@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { ArrowDownToLine, ChevronLeft, ChevronRight, Cloud, Database, ExternalLink, Folder, HardDrive, KeyRound, LoaderCircle, Plus, RefreshCw, ShieldCheck, Trash2, UploadCloud, X } from 'lucide-react'
 import { api, apiUrl, formatBytes, formatNumber } from './lib/api'
+import { createRequestEpoch } from './lib/request-epoch.mjs'
 import { Alert, AlertDescription } from './components/ui/alert'
 import { Badge } from './components/ui/badge'
 import { Button } from './components/ui/button'
@@ -78,6 +79,8 @@ export function S3StoragePage({ Heading, notify }: Props) {
   const [serverBrowseError, setServerBrowseError] = useState('')
   const [detailTab, setDetailTab] = useState('files')
   const uploadInput = useRef<HTMLInputElement>(null)
+  const [objectRequestEpoch] = useState(() => createRequestEpoch())
+  const [connectionRequestEpoch] = useState(() => createRequestEpoch())
 
   const selected = connections.find((item) => item.id === selectedId) || null
   const selectedBucket = bucketData?.connections.find((item) => item.bucket_name === bucketName) || null
@@ -93,24 +96,30 @@ export function S3StoragePage({ Heading, notify }: Props) {
     return <><a href={downloadUrl(object.key)} aria-label={`دانلود ${object.key}`} title="دانلود Object" className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground"><ArrowDownToLine size={14}/></a><Button size="icon" variant="ghost" aria-label={`ذخیره ${object.key} روی VPS`} title="انتقال به VPS" onClick={() => openTransfer('download', object.key)} disabled={!!working}><HardDrive size={14}/></Button><Button size="icon" variant="ghost" aria-label={`حذف ${object.key}`} title="حذف Object" onClick={() => void deleteObject(object.key)} disabled={!!working}><Trash2 size={14} className="text-destructive"/></Button></>
   }
   const load = useCallback(async (quiet = false) => {
+    const request = connectionRequestEpoch.next()
     if (quiet) setRefreshing(true); else setLoading(true)
     try {
       const [providerResult, connectionResult] = await Promise.all([
         api<{ providers: Provider[] }>('s3/providers'), api<{ connections: S3Connection[] }>('s3/connections'),
       ])
+      if (!connectionRequestEpoch.isCurrent(request)) return
       setProviders(providerResult.providers); setConnections(connectionResult.connections)
       setSelectedId((current) => current && connectionResult.connections.some((item) => item.id === current) ? current : null)
-    } catch (error) { notify(error instanceof Error ? error.message : 'دریافت وضعیت فضای S3 ناموفق بود.') }
-    finally { setLoading(false); setRefreshing(false) }
-  }, [notify])
-  useEffect(() => { void load() }, [load])
+    } catch (error) { if (connectionRequestEpoch.isCurrent(request)) notify(error instanceof Error ? error.message : 'دریافت وضعیت فضای S3 ناموفق بود.') }
+    finally { if (connectionRequestEpoch.isCurrent(request)) { setLoading(false); setRefreshing(false) } }
+  }, [notify, connectionRequestEpoch])
   useEffect(() => {
+    void load()
+    return () => connectionRequestEpoch.invalidate()
+  }, [load, connectionRequestEpoch])
+  useEffect(() => {
+    objectRequestEpoch.invalidate()
     if (!selectedId) { setBucketData(null); setRemoteError(''); return }
     let cancelled = false
-    setBucketData(null); setRemoteError(''); setPage(null); setBucketName(''); setPrefix(''); setCursor(null); setTestReport(null)
+    setBucketData(null); setRemoteError(''); setPage(null); setPageError(''); setPageLoading(false); setBucketName(''); setPrefix(''); setCursor(null); setTestReport(null)
     api<{ provider_buckets: string[] | null; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`).then((result) => { if (!cancelled) { setBucketData(result); setRemoteError('') } }).catch((error) => { if (!cancelled) { setBucketData({ provider_buckets: null, connections: [] }); setRemoteError(error instanceof Error ? error.message : 'فهرست اتصال‌های محلی خوانده نشد.') } })
-    return () => { cancelled = true }
-  }, [selectedId])
+    return () => { cancelled = true; objectRequestEpoch.invalidate() }
+  }, [selectedId, objectRequestEpoch])
   useEffect(() => {
     if (!selectedId || !bucketData?.connections.some((bucket) => bucket.scan_status === 'scanning')) return
     let cancelled = false
@@ -132,6 +141,8 @@ export function S3StoragePage({ Heading, notify }: Props) {
     }).catch(() => { if (!cancelled) setMount(null) })
     return () => { cancelled = true }
   }, [selectedBucket?.id])
+
+  useEffect(() => () => objectRequestEpoch.invalidate(), [objectRequestEpoch])
 
   const refreshMountStatus = useCallback(async () => {
     if (!selectedBucket) { setMount(null); return }
@@ -156,14 +167,31 @@ export function S3StoragePage({ Heading, notify }: Props) {
 
   const refreshObjects = async (nextPrefix = prefix, nextCursor: string | null = null) => {
     if (!selected || !bucketName) return
+    const request = objectRequestEpoch.next()
+    const connectionId = selected.id
+    const requestedBucket = bucketName
     setPageLoading(true); setPageError('')
     try {
-      const query = new URLSearchParams({ bucket: bucketName, prefix: nextPrefix, max_keys: '200' })
+      const query = new URLSearchParams({ bucket: requestedBucket, prefix: nextPrefix, max_keys: '200' })
       if (nextCursor) query.set('continuation_token', nextCursor)
-      const result = await api<BrowserPage & { ok?: boolean }>(`s3/connections/${selected.id}/objects?${query}`)
+      const result = await api<BrowserPage & { ok?: boolean }>(`s3/connections/${connectionId}/objects?${query}`)
+      if (!objectRequestEpoch.isCurrent(request)) return
       setPage(result); setPrefix(nextPrefix); setCursor(nextCursor)
-    } catch (error) { setPageError(error instanceof Error ? error.message : 'فهرست Objectها دریافت نشد.') }
-    finally { setPageLoading(false) }
+    } catch (error) {
+      if (objectRequestEpoch.isCurrent(request)) setPageError(error instanceof Error ? error.message : 'فهرست Objectها دریافت نشد.')
+    } finally {
+      if (objectRequestEpoch.isCurrent(request)) setPageLoading(false)
+    }
+  }
+
+  const selectBucket = (name: string) => {
+    objectRequestEpoch.invalidate()
+    setBucketName(name)
+    setPrefix('')
+    setCursor(null)
+    setPage(null)
+    setPageError('')
+    setPageLoading(false)
   }
 
   const uploadFile = async (file?: File) => {
@@ -181,7 +209,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
   }
 
   const downloadUrl = (key: string) => selected ? apiUrl(`s3/connections/${selected.id}/objects/download?${new URLSearchParams({ bucket: bucketName, key })}`) : '#'
-  const selectConnection = (id: number) => { setSelectedId(id); setDetailTab('files'); setPage(null) }
+  const selectConnection = (id: number) => { objectRequestEpoch.invalidate(); setSelectedId(id); setDetailTab('files'); setPage(null); setPageError(''); setPageLoading(false) }
   const refreshBucketList = async () => {
     if (!selected) return
     setWorking('list-buckets'); setRemoteError('')
@@ -227,7 +255,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
     setWorking('bucket')
     try {
       await api(`s3/connections/${selected.id}/buckets?local_only=1`, { method: 'POST', body: JSON.stringify({ bucket_name: name, display_name: name }) })
-      setManualBucket(''); setBucketName(name); setBucketData(null)
+      setManualBucket(''); selectBucket(name); setBucketData(null)
       const result = await api<{ provider_buckets: string[]; connections: BucketRow[] }>(`s3/connections/${selected.id}/buckets?local_only=1`)
       setBucketData(result); notify('Bucket به فهرست ARG اضافه شد؛ دادهٔ سمت ارائه‌دهنده تغییر نکرده است.')
       await load(true)
@@ -250,7 +278,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
     setWorking('create-bucket')
     try {
       await api(`s3/connections/${selected.id}/buckets/create`, { method: 'POST', body: JSON.stringify({ bucket_name: name, confirm_name: name }) })
-      setBucketName(name); setManualBucket(''); const result = await api<{ provider_buckets: string[]; connections: BucketRow[] }>(`s3/connections/${selected.id}/buckets?local_only=1`); setBucketData(result); notify('Bucket در سرویس‌دهنده ساخته شد.')
+      selectBucket(name); setManualBucket(''); const result = await api<{ provider_buckets: string[]; connections: BucketRow[] }>(`s3/connections/${selected.id}/buckets?local_only=1`); setBucketData(result); notify('Bucket در سرویس‌دهنده ساخته شد.')
       await load(true)
     } catch (error) { notify(error instanceof Error ? error.message : 'ساخت Bucket ناموفق بود.') }
     finally { setWorking('') }
@@ -258,7 +286,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
   const detachBucket = async (item: BucketRow) => {
     if (!await confirm({ title: 'قطع اتصال Bucket', description: `فقط اتصال داخلی ARG به Bucket «${item.bucket_name}» قطع شود؟ فایل‌های ابری حذف نمی‌شوند.`, confirmLabel: 'قطع اتصال', destructive: true })) return
     setWorking('bucket')
-    try { await api(`s3/buckets/${item.id}`, { method: 'DELETE', body: JSON.stringify({ confirm_bucket: item.bucket_name }) }); if (bucketName === item.bucket_name) { setBucketName(''); setPage(null) }; const result = await api<{ provider_buckets: string[]; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`); setBucketData(result); await load(true) }
+    try { await api(`s3/buckets/${item.id}`, { method: 'DELETE', body: JSON.stringify({ confirm_bucket: item.bucket_name }) }); if (bucketName === item.bucket_name) selectBucket(''); const result = await api<{ provider_buckets: string[]; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`); setBucketData(result); await load(true) }
     catch (error) { notify(error instanceof Error ? error.message : 'قطع اتصال Bucket ناموفق بود.') }
     finally { setWorking('') }
   }
@@ -267,7 +295,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
     if (!await confirm({ title: 'حذف اتصال و کلید محلی', description: `این کار فقط اتصال و اعتبارنامهٔ محلی ARG را پاک می‌کند؛ Bucketها و فایل‌های ارائه‌دهنده باقی می‌مانند.`, phrase: selected.display_name, confirmLabel: 'حذف اتصال', destructive: true })) return
     const confirmation = selected.display_name
     setWorking('delete')
-    try { await api(`s3/connections/${selected.id}`, { method: 'DELETE', body: JSON.stringify({ confirm_name: confirmation }) }); setSelectedId(null); setBucketName(''); notify('اتصال و کلید محلی حذف شد؛ Bucketها و Objectهای ارائه‌دهنده دست‌نخورده‌اند.'); await load(true) }
+    try { await api(`s3/connections/${selected.id}`, { method: 'DELETE', body: JSON.stringify({ confirm_name: confirmation }) }); objectRequestEpoch.invalidate(); setSelectedId(null); selectBucket(''); notify('اتصال و کلید محلی حذف شد؛ Bucketها و Objectهای ارائه‌دهنده دست‌نخورده‌اند.'); await load(true) }
     catch (error) { notify(error instanceof Error ? error.message : 'حذف اتصال ناموفق بود.') }
     finally { setWorking('') }
   }
@@ -432,8 +460,8 @@ export function S3StoragePage({ Heading, notify }: Props) {
           <TabsContent value="files" className="min-w-0 space-y-4">
         <Card className="rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0 p-4"><div><CardTitle className="text-sm">Bucketها</CardTitle><CardDescription className="mt-1">فهرست راه‌دور فقط با درخواست صریح و مجوز ListBuckets خوانده می‌شود.</CardDescription></div><div className="flex items-center gap-3"><Button size="sm" variant="outline" onClick={() => void refreshBucketList()} disabled={!!working}><RefreshCw size={13} className={working === 'list-buckets' ? 'animate-spin' : ''}/>بررسی فهرست Provider</Button><a className="flex items-center gap-1 text-xs text-muted-foreground hover:text-primary" href={providers.find((item) => item.id === selected.provider_type)?.docs} target="_blank" rel="noreferrer">راهنمای Provider <ExternalLink size={12}/></a></div></CardHeader><CardContent className="space-y-3 p-4 pt-0">
           {remoteError && <Alert className="border-amber-400/20 bg-amber-400/[.04]"><AlertDescription>{remoteError} اگر کلید به یک Bucket محدود است، نام را دستی اضافه کن؛ اتصال به‌خاطر نداشتن ListBuckets رد نمی‌شود.</AlertDescription></Alert>}
-          {!bucketData ? <Skeleton className="h-16"/> : bucketData.provider_buckets === null ? <p className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">برای دیدن Bucketهای سرویس‌دهنده، «بررسی فهرست Provider» را بزن. اگر ListBuckets مجاز نباشد می‌توانی نام Bucket را دستی وارد کنی.</p> : <div className="flex flex-wrap gap-2">{(bucketData.provider_buckets || []).map((name) => { const attached = bucketData.connections.some((item) => item.bucket_name === name); return <div key={name} className={`flex items-center gap-1 rounded-lg border px-2 py-1 ${bucketName === name ? 'border-primary/40 bg-primary/[.07]' : 'border-border bg-background/40'}`}><button type="button" className="flex items-center gap-2 px-1 py-1 text-xs" onClick={() => { setBucketName(name); setPrefix(''); setCursor(null); setPage(null) }}><Database size={13} className="text-primary"/><span className="font-mono" dir="ltr">{name}</span></button>{attached ? <Badge variant="outline">متصل در ARG</Badge> : <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => void attachBucket(name)} disabled={!!working}>افزودن</Button>}</div>})}</div>}
-          {bucketData?.connections.length ? <div className="divide-y divide-border rounded-lg border border-border">{bucketData.connections.map((bucket) => <div key={bucket.id} className="flex items-center gap-2 p-2.5"><button type="button" className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-right text-xs" onClick={() => { setBucketName(bucket.bucket_name); setPrefix(''); setPage(null) }}><Database size={14} className="shrink-0 text-primary"/><span className="truncate">{bucket.display_name}</span><code className="truncate text-muted-foreground" dir="ltr">{bucket.bucket_name}</code><span className="mr-auto flex items-center gap-1 text-[10px] text-muted-foreground">حجم: {bucket.used_bytes == null ? (bucket.scan_status === 'scanning' ? 'در حال محاسبه…' : 'محاسبه نشده') : formatBytes(bucket.used_bytes)}</span></button><Button size="icon" variant="ghost" aria-label={`قطع اتصال ${bucket.bucket_name} از ARG`} onClick={() => void detachBucket(bucket)} disabled={!!working}><X size={14}/></Button></div>)}</div> : <p className="text-xs text-muted-foreground">Bucketی در ARG متصل نشده است.</p>}
+          {!bucketData ? <Skeleton className="h-16"/> : bucketData.provider_buckets === null ? <p className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">برای دیدن Bucketهای سرویس‌دهنده، «بررسی فهرست Provider» را بزن. اگر ListBuckets مجاز نباشد می‌توانی نام Bucket را دستی وارد کنی.</p> : <div className="flex flex-wrap gap-2">{(bucketData.provider_buckets || []).map((name) => { const attached = bucketData.connections.some((item) => item.bucket_name === name); return <div key={name} className={`flex items-center gap-1 rounded-lg border px-2 py-1 ${bucketName === name ? 'border-primary/40 bg-primary/[.07]' : 'border-border bg-background/40'}`}><button type="button" className="flex items-center gap-2 px-1 py-1 text-xs" onClick={() => selectBucket(name)}><Database size={13} className="text-primary"/><span className="font-mono" dir="ltr">{name}</span></button>{attached ? <Badge variant="outline">متصل در ARG</Badge> : <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => void attachBucket(name)} disabled={!!working}>افزودن</Button>}</div>})}</div>}
+          {bucketData?.connections.length ? <div className="divide-y divide-border rounded-lg border border-border">{bucketData.connections.map((bucket) => <div key={bucket.id} className="flex items-center gap-2 p-2.5"><button type="button" className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-right text-xs" onClick={() => selectBucket(bucket.bucket_name)}><Database size={14} className="shrink-0 text-primary"/><span className="truncate">{bucket.display_name}</span><code className="truncate text-muted-foreground" dir="ltr">{bucket.bucket_name}</code><span className="mr-auto flex items-center gap-1 text-[10px] text-muted-foreground">حجم: {bucket.used_bytes == null ? (bucket.scan_status === 'scanning' ? 'در حال محاسبه…' : 'محاسبه نشده') : formatBytes(bucket.used_bytes)}</span></button><Button size="icon" variant="ghost" aria-label={`قطع اتصال ${bucket.bucket_name} از ARG`} onClick={() => void detachBucket(bucket)} disabled={!!working}><X size={14}/></Button></div>)}</div> : <p className="text-xs text-muted-foreground">Bucketی در ARG متصل نشده است.</p>}
           <form className="flex flex-wrap gap-2" onSubmit={(event) => { event.preventDefault(); void attachBucket(manualBucket) }}><Input aria-label="نام Bucket موجود" dir="ltr" className="min-w-[180px] flex-1" placeholder="نام Bucket موجود را وارد کن" value={manualBucket} onChange={(event) => setManualBucket(event.target.value)}/><Button type="submit" variant="outline" disabled={!manualBucket || !!working}><Plus size={14}/>اتصال موجود</Button>{provider?.create_bucket && <Button type="button" variant="outline" disabled={!manualBucket || !!working} onClick={() => void createBucket(manualBucket)}>ساخت Bucket</Button>}</form>
         </CardContent></Card>
         {bucketName && <FileManagerBrowser title="مدیریت فایل‌ها در Bucket" description="Objectها و Prefixهای S3 با همان مرورگر فایل‌منیجر سرور نمایش داده می‌شوند؛ عملیات نوشتن از API ارائه‌دهنده انجام می‌شود." path={`${bucketName}/${prefix}`} parentPath={bucketParentPrefix} entries={bucketBrowserEntries} loading={pageLoading} onNavigate={(nextPrefix) => void refreshObjects(nextPrefix)} renderActions={renderBucketActions} emptyMessage={page ? "در این Prefix فایلی نیست." : "برای دریافت فهرست این Bucket، دکمهٔ تازه‌سازی را بزن."} toolbar={<><Button size="sm" variant="outline" onClick={() => void refreshObjects(prefix)} disabled={pageLoading}><RefreshCw size={13} className={pageLoading ? 'animate-spin' : ''}/>تازه‌سازی</Button><Button size="sm" variant={transferOpen && transferDirection === 'upload' ? 'secondary' : 'outline'} onClick={() => transferOpen && transferDirection === 'upload' ? setTransferOpen(false) : openTransfer('upload', prefix)} disabled={!!working}><HardDrive size={14}/>{transferOpen && transferDirection === 'upload' ? 'بستن انتقال VPS' : 'انتقال از دیسک VPS'}</Button><input ref={uploadInput} type="file" className="hidden" aria-label="انتخاب فایل برای بارگذاری" onChange={(event) => void uploadFile(event.target.files?.[0])}/><Button size="sm" variant="outline" onClick={() => uploadInput.current?.click()} disabled={!!working}><UploadCloud size={14}/>{working === 'upload' ? 'در حال بارگذاری…' : 'آپلود'}</Button></>} pagination={page && <div className="flex items-center justify-between text-xs text-muted-foreground"><span>{formatNumber(page.key_count)} مورد در این صفحه</span><Button size="sm" variant="outline" disabled={!page.is_truncated || !page.next_token || pageLoading} onClick={() => void refreshObjects(prefix, page.next_token)}>صفحهٔ بعدی <ChevronLeft size={14}/></Button></div>}>

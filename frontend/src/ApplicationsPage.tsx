@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Activity, Archive, ArrowDownToLine, CircleAlert, CircleHelp, CirclePlus, Copy, ExternalLink, Globe2, KeyRound, Layers3, Pencil, RefreshCw, RotateCcw, Search, Server, Trash2, Upload, X, Terminal, Wrench } from 'lucide-react'
 import { ApiError, api, apiForWorkspace } from './lib/api'
+import { createRequestEpoch, createSingleFlightGate } from './lib/request-epoch.mjs'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
@@ -215,6 +216,11 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
   const [detailsError, setDetailsError] = useState('')
   const [jobsLoadError, setJobsLoadError] = useState('')
   const detailsLogCursor = useRef<Record<string, number>>({})
+  const [jobsLoadGate] = useState(() => createSingleFlightGate())
+  const jobsLoadToken = useRef<number | null>(null)
+  const jobsLoadAbort = useRef<AbortController | null>(null)
+  const [detailsRequestEpoch] = useState(() => createRequestEpoch())
+  const [jobsRequestEpoch] = useState(() => createRequestEpoch())
   const [mode, setMode] = useState<'git' | 'directory' | 'archive'>('git')
   const [repository, setRepository] = useState('')
   const [gitAccess, setGitAccess] = useState<'https' | 'ssh'>('https')
@@ -258,8 +264,16 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
   }, [repository, sshKeys, sshKeyId])
 
   const loadJobs = useCallback(async () => {
+    const token = jobsLoadGate.tryEnter()
+    if (token === null) return
+    jobsLoadToken.current = token
+    const request = jobsRequestEpoch.next()
+    const controller = new AbortController()
+    jobsLoadAbort.current = controller
+    const timeout = window.setTimeout(() => controller.abort(new DOMException('خواندن وضعیت استقرار بیش از ۱۰ ثانیه طول کشید.', 'TimeoutError')), 10000)
     try {
-      const result = await api<{ jobs: DeployJob[] }>(`apps/${encodeURIComponent(app.id)}/deploy/jobs`)
+      const result = await api<{ jobs: DeployJob[] }>(`apps/${encodeURIComponent(app.id)}/deploy/jobs`, { signal: controller.signal })
+      if (!jobsRequestEpoch.isCurrent(request)) return
       setJobs(result.jobs)
       setJobsLoadError('')
       for (const job of result.jobs) {
@@ -278,9 +292,16 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
         return next
       })
     } catch (cause) {
-      setJobsLoadError(cause instanceof Error ? cause.message : 'وضعیت استقرار خوانده نشد.')
+      if (jobsRequestEpoch.isCurrent(request)) setJobsLoadError(cause instanceof Error ? cause.message : 'وضعیت استقرار خوانده نشد.')
+    } finally {
+      window.clearTimeout(timeout)
+      if (jobsLoadToken.current === token) {
+        jobsLoadToken.current = null
+        jobsLoadAbort.current = null
+      }
+      jobsLoadGate.release(token)
     }
-  }, [app.id])
+  }, [app.id, jobsRequestEpoch, jobsLoadGate])
 
   async function loadOlderLogs(jobId: string) {
     const before = olderLogsBefore[jobId]
@@ -298,6 +319,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
   }
 
   async function openJobDetails(job: DeployJob) {
+    const request = detailsRequestEpoch.next()
     setDetailsJob(job)
     setDetailsError('')
     setDetailsBusy(true)
@@ -306,6 +328,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
         api<DeployJob>(`deploy/jobs/${encodeURIComponent(job.id)}`),
         api<{ logs: DeployLog[]; next_before: number | null }>(`deploy/jobs/${encodeURIComponent(job.id)}/logs?tail=true&limit=500`),
       ])
+      if (!detailsRequestEpoch.isCurrent(request)) return
       setDetailsJob(fresh)
       setJobs((current) => current.map((item) => item.id === fresh.id ? fresh : item))
       const rows = result.logs || []
@@ -313,9 +336,13 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
       setOlderLogsBefore((current) => ({ ...current, [job.id]: result.next_before }))
       detailsLogCursor.current[job.id] = rows.at(-1)?.id || 0
     } catch (cause) {
-      setDetailsError(cause instanceof Error ? cause.message : 'جزئیات و خطای واقعی Job خوانده نشد.')
-    } finally { setDetailsBusy(false) }
+      if (detailsRequestEpoch.isCurrent(request)) setDetailsError(cause instanceof Error ? cause.message : 'جزئیات و خطای واقعی Job خوانده نشد.')
+    } finally {
+      if (detailsRequestEpoch.isCurrent(request)) setDetailsBusy(false)
+    }
   }
+
+  useEffect(() => () => detailsRequestEpoch.invalidate(), [])
 
   useEffect(() => {
     if (!detailsJob || detailsBusy || !['queued', 'validating', 'running', 'verifying'].includes(detailsJob.state)) return
@@ -351,6 +378,13 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
   }, [detailsJob?.id, detailsJob?.state, detailsBusy])
 
   useEffect(() => { void loadJobs() }, [loadJobs])
+  useEffect(() => () => {
+    jobsRequestEpoch.invalidate()
+    jobsLoadAbort.current?.abort()
+    jobsLoadAbort.current = null
+    jobsLoadToken.current = null
+    jobsLoadGate.reset()
+  }, [jobsRequestEpoch, jobsLoadGate])
   useEffect(() => {
     if (!active) return
     const timer = window.setInterval(() => void loadJobs(), 1800)
@@ -469,7 +503,7 @@ function DeploymentPanel({ app, notify }: { app: AppRecord; notify: (message: st
       {job.steps.length > 0 && <p className="truncate text-[10px] text-muted-foreground">مرحلهٔ آخر: {job.steps.at(-1)?.message}</p>}
       {job.error && <p className={`whitespace-pre-wrap break-words rounded-lg border p-2 text-[10px] ${['queued','validating','running','verifying'].includes(job.state) ? 'border-amber-300/20 bg-amber-300/[.04] text-amber-100' : 'border-rose-400/20 bg-rose-400/[.05] text-rose-200'}`}>{job.error}</p>}
     </article>)}</div>}
-    <DeploymentJobDetailsDialog job={detailsJob} logs={detailsJob ? (jobLogs[detailsJob.id] || detailsJob.logs || []) : []} olderAvailable={!!(detailsJob && olderLogsBefore[detailsJob.id])} olderBusy={!!(detailsJob && logsBusy[detailsJob.id])} loading={detailsBusy} error={detailsError} onOpenChange={(isOpen) => { if (!isOpen) { setDetailsJob(null); setDetailsError('') } }} onRefresh={() => { if (detailsJob) void openJobDetails(detailsJob) }} onLoadOlder={() => { if (detailsJob) void loadOlderLogs(detailsJob.id) }} onNotify={notify}/>
+    <DeploymentJobDetailsDialog job={detailsJob} logs={detailsJob ? (jobLogs[detailsJob.id] || detailsJob.logs || []) : []} olderAvailable={!!(detailsJob && olderLogsBefore[detailsJob.id])} olderBusy={!!(detailsJob && logsBusy[detailsJob.id])} loading={detailsBusy} error={detailsError} onOpenChange={(isOpen) => { if (!isOpen) { detailsRequestEpoch.invalidate(); setDetailsJob(null); setDetailsBusy(false); setDetailsError('') } }} onRefresh={() => { if (detailsJob) void openJobDetails(detailsJob) }} onLoadOlder={() => { if (detailsJob) void loadOlderLogs(detailsJob.id) }} onNotify={notify}/>
     <Dialog open={!!rollbackTarget} onOpenChange={(isOpen) => { if (!isOpen && !busy) setRollbackTarget(null) }}><DialogContent className="max-w-md"><DialogHeader><DialogTitle>بازگشت به release قبلی؟</DialogTitle><DialogDescription>{isNodePlatform(app.framework) ? 'اشاره‌گر release برمی‌گردد؛ برای SSR سرویس loopback بررسی و در صورت نیاز restart می‌شود، و برای Static مسیر Nginx با خروجی release قبلی همگام می‌شود.' : 'اشاره‌گر release به نسخهٔ پیشین تغییر می‌کند. برای این قالب، سرویس یا Nginx راه‌اندازی مجدد نمی‌شود.'}</DialogDescription></DialogHeader>{error && <p role="alert" className="text-xs text-rose-200">{error}</p>}<div className="flex justify-end gap-2"><Button variant="outline" disabled={busy} onClick={() => setRollbackTarget(null)}>انصراف</Button><Button disabled={busy} onClick={() => void confirmRollback()}>{busy ? 'در حال بازگشت…' : 'تأیید بازگشت'}</Button></div></DialogContent></Dialog>
   </section>
 }
@@ -862,6 +896,7 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
   const [runtimeInventory, setRuntimeInventory] = useState<RuntimeInventory | null>(null)
   const [runtimeInventoryError, setRuntimeInventoryError] = useState('')
   const [runtimeInventoryLoading, setRuntimeInventoryLoading] = useState(false)
+  const [registryRequestEpoch] = useState(() => createRequestEpoch())
   const [templatesOpen, setTemplatesOpen] = useState(false)
   const [templates, setTemplates] = useState<AppTemplate[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null)
@@ -884,12 +919,14 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
   const [detailRoute, setDetailRoute] = useState(() => applicationRouteFromHash())
 
   const load = useCallback(async (quiet = false) => {
+    const request = registryRequestEpoch.next()
     if (!quiet) setLoading(true)
     setRefreshing(true)
     setError('')
     try {
       if (!allServers) {
         const registry = await api<Registry>(`apps${showArchived ? '?include_deleted=true' : ''}`)
+        if (!registryRequestEpoch.isCurrent(request)) return
         setRows(registry.apps.map((app) => ({ app, serverUuid: registry.server_uuid, serverName: 'این VPS', workspaceKey, local: !workspaceKey })))
         setServerErrors([])
         return
@@ -917,17 +954,23 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
           }
         }
       }))
+      if (!registryRequestEpoch.isCurrent(request)) return
       setRows(result)
       setServerErrors(failures.filter(Boolean))
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'فهرست اپلیکیشن‌ها خوانده نشد.')
+      if (registryRequestEpoch.isCurrent(request)) setError(cause instanceof Error ? cause.message : 'فهرست اپلیکیشن‌ها خوانده نشد.')
     } finally {
-      setLoading(false)
-      setRefreshing(false)
+      if (registryRequestEpoch.isCurrent(request)) {
+        setLoading(false)
+        setRefreshing(false)
+      }
     }
-  }, [allServers, workspaceKey, showArchived])
+  }, [allServers, workspaceKey, showArchived, registryRequestEpoch])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => registryRequestEpoch.invalidate()
+  }, [load, registryRequestEpoch])
   useEffect(() => {
     const updateRoute = () => setDetailRoute(applicationRouteFromHash())
     window.addEventListener('hashchange', updateRoute)

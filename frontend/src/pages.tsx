@@ -81,6 +81,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './components/ui/tooltip'
 import { formatPanelDate, usePanelTimeZone } from './lib/timezone'
 import { cachedRequest, invalidateCached } from './lib/heavy-cache'
+import { createRequestEpoch } from './lib/request-epoch.mjs'
 import { S3OverviewKpi, StorageInventorySection, StorageOverviewKpi } from './components/storage/StorageInventory'
 import { useConfirmDialog } from './hooks/useConfirmDialog'
 import { EmptyState, FilterBar } from './components/ui/data-views'
@@ -137,13 +138,16 @@ function useDashboard(notify: (message: string) => void) {
   const [loading, setLoading] = useState(true)
   const [dashboardError, setDashboardError] = useState(false)
   const [historyError, setHistoryError] = useState(false)
+  const [refreshRequestEpoch] = useState(() => createRequestEpoch())
   const refresh = useCallback(async (force = true) => {
+    const request = refreshRequestEpoch.next()
     try {
       const query = range === 'custom' && appliedCustom ? `from=${appliedCustom.from}&to=${appliedCustom.to}` : `range=${range === 'custom' ? '5m' : range}`
       const [dashboardResult, historyResult] = await Promise.allSettled([
         cachedRequest('metrics-dashboard', () => api<Dashboard>('dashboard'), 10000, force),
         cachedRequest(`metrics-history:${query}`, () => api<{ samples: StoredSample[]; config: MonitoringConfig }>(`history?${query}`), 10000, force),
       ])
+      if (!refreshRequestEpoch.isCurrent(request)) return
       setDashboardError(dashboardResult.status === 'rejected')
       setHistoryError(historyResult.status === 'rejected')
       if (dashboardResult.status === 'fulfilled') setData(dashboardResult.value)
@@ -155,16 +159,16 @@ function useDashboard(notify: (message: string) => void) {
       if (dashboardResult.status === 'rejected') notify('خواندن وضعیت فعلی سرور ناموفق بود')
       if (historyResult.status === 'rejected') notify('خواندن تاریخچهٔ منابع ناموفق بود')
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'خواندن اطلاعات سرور ناموفق بود')
+      if (refreshRequestEpoch.isCurrent(request)) notify(e instanceof Error ? e.message : 'خواندن اطلاعات سرور ناموفق بود')
     } finally {
-      setLoading(false)
+      if (refreshRequestEpoch.isCurrent(request)) setLoading(false)
     }
-  }, [notify, range, appliedCustom])
+  }, [notify, range, appliedCustom, refreshRequestEpoch])
   useEffect(() => {
     void refresh(false)
     const timer = window.setInterval(() => void refresh(true), 15000)
-    return () => window.clearInterval(timer)
-  }, [refresh])
+    return () => { window.clearInterval(timer); refreshRequestEpoch.invalidate() }
+  }, [refresh, refreshRequestEpoch])
   const history = samples.map((sample) => ({ at: sample.at, time: new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', minute: '2-digit' }).format(sample.at * 1000), rx: sample.rx, tx: sample.tx }))
   const resourceHistory = samples.map(({ at, cpu, memory, disk }) => ({ at, cpu, memory, disk }))
   const diskCapacityHistory = samples.filter((sample) => sample.disk_total_bytes != null && sample.disk_total_bytes > 0 && sample.disk_used_bytes != null).map((sample) => ({ at: sample.at, capacity: Math.min(100, sample.disk_used_bytes! / sample.disk_total_bytes! * 100) }))
