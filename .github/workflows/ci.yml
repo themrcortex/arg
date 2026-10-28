@@ -40,6 +40,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run check
+      - run: npm run test:offline
       - run: npm run build
       - run: bash ../scripts/verify-embedded-frontend.sh
 
@@ -74,4 +75,15 @@ jobs:
       - run: bash scripts/tests/test-update-helper.sh
       - run: bash scripts/tests/test-update-selection.sh
       - run: bash scripts/tests/test-ufw-helper.sh
+      - run: bash scripts/tests/test-public-ip-detection.sh
       - run: bash scripts/tests/test-workflow-security.sh
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: bash scripts/tests/test-secret-scan.sh
