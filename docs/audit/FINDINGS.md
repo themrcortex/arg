@@ -65,4 +65,4 @@ This is a running index for completed phases only. It is not a statement that th
 
 ## Open audit coverage
 
-Phases 0–14 have been reviewed and documented. Phase 14's CI controls are in [14-ci-quality-gates.md](14-ci-quality-gates.md); phase 15 final verification remains. Open P1 audit items remain; this index is not a clean full-project security assessment.
+Phases 0–15 have been reviewed and documented. The final disposition and release recommendation are in [15-release-audit.md](15-release-audit.md) and [FINAL-REPORT.md](FINAL-REPORT.md). Two P1 items remain `AUDIT_REQUIRED`; they are not represented as proven exploits or cleared findings.

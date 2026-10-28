@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 14 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
+Updated through phase 15 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -49,4 +49,6 @@ Updated through phase 14 on `audit/development-hardening`; source baseline `eec2
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - S3 endpoint pinning and privileged file path TOCTOU are open high-priority items. They must be fixed or mitigated and tested before release.
-- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`; Phase 9 frontend state, async requests and interaction lifecycles are documented in `09-frontend.md`; Phase 10 performance and concurrency review is documented in `10-performance.md`; Phase 11 quality and maintainability review is documented in `11-code-quality.md`; Phase 12 supply chain and dependency controls are documented in `12-supply-chain.md`; Phase 13 test coverage is documented in `13-test-coverage.md`. No live Cloudflare, Certbot/Nginx host, browser E2E, screen-reader, representative VPS load, or multi-Node workspace integration was available; phases 14–15 remain unreviewed or incomplete.
+- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`; Phase 9 frontend state, async requests and interaction lifecycles are documented in `09-frontend.md`; Phase 10 performance and concurrency review is documented in `10-performance.md`; Phase 11 quality and maintainability review is documented in `11-code-quality.md`; Phase 12 supply chain and dependency controls are documented in `12-supply-chain.md`; Phase 13 test coverage is documented in `13-test-coverage.md`; phase 14 CI controls are in `14-ci-quality-gates.md`; phase 15 disposition is in `15-release-audit.md` and `FINAL-REPORT.md`.
+
+- The audit branch has no tracked working-tree changes at final verification. The two untracked workspace directories `.arg-audit-target/` and `generated_images/` pre-existed and were left untouched.
