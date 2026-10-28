@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 5 at revision `d8489670b72c3e891220706e5d89ec4e1dc13506` on `audit/development-hardening`.
+Updated through phase 6 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -21,9 +21,15 @@ Updated through phase 5 at revision `d8489670b72c3e891220706e5d89ec4e1dc13506` o
 | FED-002 | P3 | Audit required | Repeated authorized workspace renewal creates additional session rows; defer rate limiting until renewal is retry-safe | No test; pending focused design | — |
 | DEPLOY-001 | P2 | Fixed | Observe cancellation while Git runs; kill direct child on drop; stop the exact UUID-derived transient Node build unit and preserve cancelled terminal state | `active_git_command_wait_stops_when_job_is_cancelled`; `build_cancel_helper_rejects_untrusted_unit_inputs_without_running_systemctl`; unit-name tests | `14aa314` |
 | DEPLOY-002 | P2 | Fixed | Serialize archive upload and retain 64 MiB free-space reserve while streaming; remove partial file and return 507 when reserve is unavailable | `archive_upload_preserves_minimum_free_disk_reserve`; `archive_upload_gate_rejects_a_second_concurrent_writer` | `d848967` |
+| S3-001 | P1 | Fixed | Preserve pre-existing `arg-verify`; require explicit missing-key evidence and conditional create | `verify_marker_never_replaces_existing_unrelated_objects`; conditional header and missing-key tests | `52f224c` |
+| S3-002 | P2 | Fixed | Bound direct/helper transfer concurrency and upload duration; keep 64 MiB disk reserve; RAII cleanup; accept empty objects | Transfer reserve, cleanup, empty object, bounded-action tests | `52f224c` |
+| S3-003 | P2 | Fixed | Bound usage scans to 2M objects/15 minutes, cap queue at 16, validate continuation token size | `bucket_usage_scan_stops_at_object_and_time_limits` | `52f224c` |
+| S3-004 | P1 | Audit required | DNS precheck is not connected to the SDK's later DNS resolution; needs IP-pinned transport without disabling TLS checks | No transport test yet | — |
+| FILE-001 | P2 | Fixed | Limit recursive ZIP creation to 64 levels and remove partial archives on failure | `zip_creation_rejects_excessive_directory_depth_and_removes_partial_archive` | `bd2e973` |
+| FILE-002 | P1 | Audit required | Path validation and later privileged mutations are not anchored to directory descriptors; race risk needs focused fix | Existing traversal/symlink tests do not cover TOCTOU | — |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
-- The helper's full per-action path/TOCTOU review continues alongside phases 5–8.
-- Phases 6–15 are not yet marked complete. Results must be appended as each phase is audited and tested.
+- S3 endpoint pinning and privileged file path TOCTOU are open high-priority items. They must be fixed or mitigated and tested before release.
+- Phases 7–15 are not yet marked complete. Results must be appended as each phase is audited and tested.
