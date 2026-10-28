@@ -13,11 +13,18 @@ use std::{
 
 const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RELEASE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MIN_DEPLOYMENT_FREE_SPACE: u64 = 64 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 20_000;
 const MAX_PRE_DEPLOY_COMMANDS: usize = 8;
 const MAX_PRE_DEPLOY_COMMAND_LENGTH: usize = 512;
 const MAX_PRE_DEPLOY_COMMANDS_BYTES: usize = 4096;
 const JOB_ACTIVE: &[&str] = &["queued", "validating", "running", "verifying"];
+static ARCHIVE_UPLOAD_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+fn archive_upload_chunk_required_space(chunk_bytes: usize) -> u64 {
+    (chunk_bytes as u64).saturating_add(MIN_DEPLOYMENT_FREE_SPACE)
+}
 
 #[derive(Deserialize, Serialize, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -974,6 +981,14 @@ pub(super) async fn upload_archive(
             "پوشهٔ دریافت ZIP آماده نشد.",
         )
     })?;
+    // Serialize writes so simultaneous authenticated uploads cannot each
+    // consume the same apparent free-space reserve.
+    let _upload_guard = ARCHIVE_UPLOAD_LOCK.try_lock().map_err(|_| {
+        api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "یک بارگذاری استقرار در حال اجراست؛ پس از پایان آن دوباره تلاش کن.",
+        )
+    })?;
     let temp = dir.join(format!("upload-{}.tmp", id()));
     #[cfg(unix)]
     let mut file = {
@@ -1042,6 +1057,14 @@ pub(super) async fn upload_archive(
             return Err(api_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "ZIP باید حداکثر ۲۵۶ MiB باشد.",
+            ));
+        }
+        if ensure_space(&dir, archive_upload_chunk_required_space(chunk.len())).is_err() {
+            drop(file);
+            let _ = fs::remove_file(&temp);
+            return Err(api_error(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "برای نگه‌داشتن فضای امن سیستم، ظرفیت کافی برای ادامهٔ بارگذاری ZIP وجود ندارد.",
             ));
         }
         hasher.update(&chunk);
@@ -3058,6 +3081,30 @@ mod tests {
         assert!(valid_relative_file("dist/index.html"));
         assert!(!valid_relative_file("../../etc/passwd"));
         assert!(!valid_relative_file("/tmp/a"));
+    }
+
+    #[test]
+    fn archive_upload_preserves_minimum_free_disk_reserve() {
+        assert_eq!(
+            archive_upload_chunk_required_space(1024 * 1024),
+            65 * 1024 * 1024
+        );
+        assert_eq!(
+            archive_upload_chunk_required_space(MAX_ARCHIVE_BYTES),
+            320 * 1024 * 1024
+        );
+        assert_eq!(
+            archive_upload_chunk_required_space(0),
+            MIN_DEPLOYMENT_FREE_SPACE
+        );
+    }
+
+    #[test]
+    fn archive_upload_gate_rejects_a_second_concurrent_writer() {
+        let first = ARCHIVE_UPLOAD_LOCK.try_lock().unwrap();
+        assert!(ARCHIVE_UPLOAD_LOCK.try_lock().is_err());
+        drop(first);
+        assert!(ARCHIVE_UPLOAD_LOCK.try_lock().is_ok());
     }
 
     #[test]
