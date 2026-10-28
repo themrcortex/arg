@@ -1,0 +1,56 @@
+name: Dependency security audit
+
+on:
+  push:
+    branches: [main, development]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "frontend/package.json"
+      - "frontend/package-lock.json"
+      - "docs-site/package.json"
+      - "docs-site/package-lock.json"
+      - ".github/workflows/security-audit.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "frontend/package.json"
+      - "frontend/package-lock.json"
+      - "docs-site/package.json"
+      - "docs-site/package-lock.json"
+      - ".github/workflows/security-audit.yml"
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo:
+    name: Rust advisory database
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  npm:
+    name: JavaScript advisory database
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - run: npm audit --audit-level=moderate
+        working-directory: frontend
+      - run: npm audit --audit-level=moderate
+        working-directory: docs-site
