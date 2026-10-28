@@ -739,3 +739,78 @@ mark { border-radius:2px; background:hsl(var(--primary) / .25); color:inherit; }
   .mobile-sidebar .sidebar-category-option { min-height: 58px; }
   .mobile-sidebar .sidebar-category-option > span { font-size: 10px; }
 }
+
+/* GSAP-inspired docs skin: ink-black surfaces, warm paper text, and a focused green accent. */
+:root {
+  color-scheme: dark;
+  --background: 150 7% 6%;
+  --foreground: 54 14% 69%;
+  --card: 150 6% 9%;
+  --primary: 145 100% 45%;
+  --muted: 150 5% 12%;
+  --muted-foreground: 54 9% 57%;
+  --border: 150 4% 19%;
+  --accent: 145 22% 14%;
+  --docs-line: #282a29;
+  --docs-soft: rgba(255,252,225,.045);
+  --docs-code: #1c1e1d;
+}
+:root[data-theme='light'] {
+  color-scheme: light;
+  --background: 54 100% 94%;
+  --foreground: 150 6% 16%;
+  --card: 54 100% 98%;
+  --primary: 145 100% 31%;
+  --muted: 54 30% 90%;
+  --muted-foreground: 150 4% 36%;
+  --border: 150 5% 75%;
+  --accent: 145 28% 91%;
+  --docs-line: rgba(22,27,24,.16);
+  --docs-soft: rgba(22,27,24,.045);
+  --docs-code: #f1efd8;
+}
+body { font-family: Inter, Arial, Helvetica, "Segoe UI", Roboto, sans-serif; }
+.topbar { border-color: var(--docs-line); background: hsl(var(--background) / .98); backdrop-filter: none; }
+.brand-mark { border-radius: 5px; border-color: hsl(var(--primary) / .4); background: transparent; color: hsl(var(--primary)); }
+.brand-name, .hero-copy h1, .article-heading h1, .article-content h2, .article-content h3, .article-content h4 { color: #fffce1; }
+:root[data-theme='light'] .brand-name,
+:root[data-theme='light'] .hero-copy h1,
+:root[data-theme='light'] .article-heading h1,
+:root[data-theme='light'] .article-content h2,
+:root[data-theme='light'] .article-content h3,
+:root[data-theme='light'] .article-content h4 { color: #171a18; }
+.desktop-sidebar { background: hsl(var(--background)); }
+.sidebar-heading { border-color: var(--docs-line); }
+.sidebar-heading-icon { border-radius: 5px; background: transparent; color: hsl(var(--foreground)); }
+.side-search, .topbar .top-search { border-color: hsl(var(--muted-foreground) / .55); border-radius: 999px; background: transparent; }
+.side-search:focus-within, .topbar .top-search:focus-within { border-color: hsl(var(--primary)); box-shadow: 0 0 0 1px hsl(var(--primary) / .2); }
+.sidebar-category-rail { border-color: var(--docs-line); background: hsl(var(--background)); }
+.sidebar-category-option { border-radius: 2px; }
+.sidebar-category-option.is-selected { border-inline-start-color: hsl(var(--primary)); background: hsl(var(--primary) / .09); }
+.sidebar-category-option.is-selected > span, .sidebar-category-option.is-selected > svg,
+.sidebar-panel .nav-subgroup.is-current > summary,
+.sidebar-panel .nav-subgroup .nav-link.active,
+.article-content a, .hero-copy h1 span { color: hsl(var(--primary)); }
+.sidebar-panel { background: hsl(var(--background)); }
+.sidebar-panel-heading { border-color: var(--docs-line); background: hsl(var(--background)); }
+.sidebar-panel .nav-subgroup summary { border-radius: 2px; }
+.sidebar-panel .nav-subgroup .nav-link { border-radius: 2px; }
+.sidebar-panel .nav-subgroup .nav-link:hover { color: hsl(var(--foreground)); background: var(--docs-soft); }
+.sidebar-panel .nav-subgroup .nav-link.active { border-inline-start-color: hsl(var(--primary)); background: hsl(var(--primary) / .09); }
+.article-content { max-width: 810px; font-size: 16px; line-height: 1.8; }
+.article-content p, .article-content li { color: hsl(var(--foreground)); }
+.article-content h2 { border-color: var(--docs-line); font-size: 27px; }
+.article-content blockquote { border-radius: 0; background: hsl(var(--primary) / .07); }
+.article-content code:not(pre code) { border-radius: 2px; }
+.doc-code { border-radius: 6px; background: var(--docs-code); }
+.page-pager button, .help-card { border-radius: 5px; }
+.page-pager button { background: transparent; }
+.page-pager button:hover { border-color: hsl(var(--primary) / .65); background: hsl(var(--primary) / .055); }
+.reading-progress span { background: hsl(var(--primary)); }
+.toc-sticky nav a.toc-active { border-color: hsl(var(--primary)); color: hsl(var(--primary)); }
+.hero-card { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.hero-start { border-color: var(--docs-line); border-radius: 6px; background: transparent; }
+.hero-start-link { border-radius: 3px; }
+.hero-start-link:hover, .hero-start-link:focus-visible { border-color: hsl(var(--primary) / .35); background: hsl(var(--primary) / .07); }
+.hero-start-number { border-radius: 3px; }
+.hero-facts code { color: hsl(var(--primary)); }
