@@ -5,7 +5,6 @@ readonly APP_NAME="ARG"
 readonly SERVICE_NAME="arg"
 readonly LEGACY_SERVICE_NAME="donatello"
 readonly REPOSITORY="https://github.com/themrcortex/arg.git"
-readonly INSTALL_SCRIPT_URL="https://raw.githubusercontent.com/themrcortex/arg/main/install.sh"
 requested_branch="${ARG_UPDATE_BRANCH:-${ARG_BRANCH:-main}}"
 case "$requested_branch" in
   main|development) ;;
@@ -71,6 +70,10 @@ UPDATE_LOCAL_REV=""
 UPDATE_REMOTE_REV=""
 MENU_STATUS_DIR=""
 MENU_STATUS_PID=""
+UPDATE_CLEANUP_BUILD_STARTED=0
+UPDATE_CLEANUP_BINARY_SWAPPED=0
+UPDATE_CLEANUP_STAGED=""
+UPDATE_CLEANUP_DATABASE_STAGED=""
 
 readonly RUST_HOME="${RUSTUP_HOME:-/root/.rustup}"
 readonly CARGO_HOME_DIR="${CARGO_HOME:-/root/.cargo}"
@@ -228,12 +231,56 @@ prepare_source() {
   fi
 }
 
+configure_release_build_resources() {
+  local memory_budget_mb="${1:-0}"
+  [[ "$memory_budget_mb" =~ ^[0-9]+$ ]] || memory_budget_mb=0
+  if (( memory_budget_mb < 4096 )); then
+    export CARGO_BUILD_JOBS="${ARG_CARGO_BUILD_JOBS:-1}"
+    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-1}"
+    if (( memory_budget_mb < 2048 )); then
+      export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-1}"
+      warn "Available RAM and swap are below 2 GiB; using the conservative release build profile (1 job, opt-level 1, 1 codegen unit)."
+    else
+      export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-2}"
+      warn "Available RAM and swap are below 4 GiB; using a lower-memory release build (1 job, opt-level 2, 1 codegen unit)."
+    fi
+  fi
+}
+
+release_build_memory_budget_mb() {
+  local available_kb swap_free_kb
+  available_kb="$(awk '$1 == "MemAvailable:" { print $2; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || true)"
+  swap_free_kb="$(awk '$1 == "SwapFree:" { print $2; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || true)"
+  [[ "$available_kb" =~ ^[0-9]+$ ]] || available_kb=0
+  [[ "$swap_free_kb" =~ ^[0-9]+$ ]] || swap_free_kb=0
+  printf '%s\n' "$(((available_kb + swap_free_kb) / 1024))"
+}
+
+release_build_disk_space_ok() {
+  local available_mb="${1:-0}" required_mb="${2:-0}"
+  [[ "$available_mb" =~ ^[0-9]+$ && "$required_mb" =~ ^[0-9]+$ ]] || return 1
+  (( available_mb >= required_mb ))
+}
+
 build_release() {
+  local available_disk_mb required_disk_mb=2048
   [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the selected ARG branch and repository."
   if [[ "${ARG_UPDATE_CONTEXT:-}" == "update" && "${ARG_UPDATE_MODE:-complete}" == "complete" ]]; then
     run_with_progress "Clearing previous Rust build cache" bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR"
   fi
-  run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"
+  [[ "${ARG_UPDATE_CONTEXT:-}" != "update" || "${ARG_UPDATE_MODE:-complete}" != "fast" ]] || required_disk_mb=1024
+  available_disk_mb="$(df -Pm "$SOURCE_DIR" | awk 'NR == 2 { print $4 }')"
+  if ! release_build_disk_space_ok "$available_disk_mb" "$required_disk_mb"; then
+    die "Not enough free disk space to compile ARG safely (${available_disk_mb:-unknown} MiB available; at least ${required_disk_mb} MiB required). Free disk space, then retry."
+  fi
+  configure_release_build_resources "$(release_build_memory_budget_mb)"
+  if ! run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"; then
+    if [[ "${ARG_UPDATE_CONTEXT:-}" != "update" ]]; then
+      bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR" >/dev/null 2>&1 || warn "The failed first-install build cache could not be removed; free space manually under $SOURCE_DIR/target."
+    fi
+    warn "Rust compilation failed before the new ARG binary was installed; the currently active binary, if any, was left untouched. Check available RAM and swap; if the kernel killed rustc, add temporary swap and retry."
+    return 1
+  fi
   [[ -x "$SOURCE_DIR/target/release/arg" ]] || die "The ARG binary was not created."
 }
 
@@ -1146,10 +1193,17 @@ activate_binary() {
   mv -f "$staged" "$BINARY"
 }
 
+installer_script_url() {
+  local branch="${1:-$BRANCH}"
+  [[ "$branch" == main || "$branch" == development ]] || return 2
+  printf 'https://raw.githubusercontent.com/themrcortex/arg/%s/install.sh' "$branch"
+}
+
 install_cli() {
-  local staged
+  local staged installer_url
+  installer_url="$(installer_script_url "$BRANCH")" || die "Cannot install the CLI for unsupported branch '$BRANCH'."
   staged="$(mktemp /usr/local/bin/.arg-cli.XXXXXX)"
-  curl --proto '=https' --tlsv1.2 -fsSL "$INSTALL_SCRIPT_URL" -o "$staged"
+  curl --proto '=https' --tlsv1.2 -fsSL "$installer_url" -o "$staged"
   chmod 0755 "$staged"
   chown root:root "$staged"
   mv -f "$staged" "$CLI"
@@ -1256,10 +1310,73 @@ select_update_options() {
   info "Update source: $BRANCH ($UPDATE_STATUS) · build mode: $ARG_UPDATE_MODE"
 }
 
+cleanup_update_build_cache() {
+  local exit_code="${1:-0}"
+  (( UPDATE_CLEANUP_BUILD_STARTED )) || return 0
+  [[ "$ARG_UPDATE_MODE" == "complete" || "$exit_code" != 0 ]] || return 0
+  if bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR" >/dev/null 2>&1; then
+    info "Removed the Rust build cache to reclaim disk space."
+  elif (( exit_code == 0 )); then
+    warn "The update succeeded, but the Rust build cache could not be removed. Run 'cargo clean' in $SOURCE_DIR later."
+  else
+    warn "The update failed and the Rust build cache could not be removed. Free disk space manually under $SOURCE_DIR/target before retrying."
+  fi
+}
+cleanup_update_reservation() {
+  local exit_code="${1:-$?}"
+  if (( exit_code != 0 )); then
+    if [[ -e "$UPDATE_CANCEL_FILE" ]]; then
+      local cancellation_recovered=1
+      if (( UPDATE_CLEANUP_BINARY_SWAPPED )) && [[ -x "$PREVIOUS_BINARY" ]] && ! cmp -s "$BINARY" "$PREVIOUS_BINARY"; then
+        warn "Cancellation arrived during activation. Restoring the previous release before finishing cancellation."
+        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+        restore_previous_database || { warn "The previous database snapshot could not be restored."; cancellation_recovered=0; }
+        if [[ -x "$PREVIOUS_BINARY" ]]; then
+          install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY" || cancellation_recovered=0
+          systemctl start "$SERVICE_NAME" 2>/dev/null || cancellation_recovered=0
+          wait_for_panel || cancellation_recovered=0
+          UPDATE_CLEANUP_BINARY_SWAPPED=0
+        else
+          cancellation_recovered=0
+        fi
+      fi
+      if (( cancellation_recovered )); then
+        "$UPDATE_HELPER" state cancelled cancelled "The update was cancelled; the previous release was restored and checked." >/dev/null 2>&1 || true
+      else
+        "$UPDATE_HELPER" state failed failed "Cancellation recovery needs attention. Check ARG service logs and the saved rollback files." >/dev/null 2>&1 || true
+      fi
+    else
+      if (( UPDATE_CLEANUP_BINARY_SWAPPED )) && [[ -x "$PREVIOUS_BINARY" ]] && ! cmp -s "$BINARY" "$PREVIOUS_BINARY"; then
+        warn "The update stopped unexpectedly after replacing the ARG binary. Restoring the previous release."
+        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+        restore_previous_database || warn "The previous database snapshot could not be restored."
+        if [[ -x "$PREVIOUS_BINARY" ]]; then
+          install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY" || true
+          systemctl start "$SERVICE_NAME" 2>/dev/null || true
+          wait_for_panel || warn "The previous binary was restored, but the panel health check still fails. Review service logs."
+          UPDATE_CLEANUP_BINARY_SWAPPED=0
+        fi
+      fi
+      "$UPDATE_HELPER" state failed failed "The update stopped before successful verification. Review the update log and retry." >/dev/null 2>&1 || true
+    fi
+  fi
+  cleanup_update_build_cache "$exit_code"
+  [[ -z "${UPDATE_CLEANUP_STAGED:-}" ]] || rm -f "$UPDATE_CLEANUP_STAGED"
+  [[ -z "${UPDATE_CLEANUP_DATABASE_STAGED:-}" ]] || rm -f "$UPDATE_CLEANUP_DATABASE_STAGED"
+  rm -f "$UPDATE_STATUS_FILE"
+  rm -f "$UPDATE_CANCEL_FILE"
+  rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
+  return "$exit_code"
+}
+
 update_app() {
   require_root update
   require_systemd
-  local was_installed=0 build_started=0 binary_swapped=0 previous staged database_path database_staged update_mutex_fd
+  local was_installed=0 previous database_path update_mutex_fd
+  UPDATE_CLEANUP_BUILD_STARTED=0
+  UPDATE_CLEANUP_BINARY_SWAPPED=0
+  UPDATE_CLEANUP_STAGED=""
+  UPDATE_CLEANUP_DATABASE_STAGED=""
   select_update_options "${1:-}" "${2:-}"
   [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
   (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
@@ -1305,61 +1422,6 @@ update_app() {
     "$UPDATE_HELPER" state running "$1" "${2:-}" >/dev/null 2>&1 || true
     [[ ! -e "$UPDATE_CANCEL_FILE" ]]
   }
-  cleanup_update_build_cache() {
-    (( build_started )) || return 0
-    [[ "$ARG_UPDATE_MODE" == "complete" ]] || return 0
-    if bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR" >/dev/null 2>&1; then
-      info "Removed the Rust build cache to reclaim disk space."
-    else
-      warn "The update succeeded, but the Rust build cache could not be removed. Run 'cargo clean' in $SOURCE_DIR later."
-    fi
-  }
-  cleanup_update_reservation() {
-    local exit_code="${1:-$?}"
-    if (( exit_code != 0 )); then
-      if [[ -e "$UPDATE_CANCEL_FILE" ]]; then
-        local cancellation_recovered=1
-        if (( binary_swapped )) && [[ -x "$PREVIOUS_BINARY" ]] && ! cmp -s "$BINARY" "$PREVIOUS_BINARY"; then
-          warn "Cancellation arrived during activation. Restoring the previous release before finishing cancellation."
-          systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-          restore_previous_database || { warn "The previous database snapshot could not be restored."; cancellation_recovered=0; }
-          if [[ -x "$PREVIOUS_BINARY" ]]; then
-            install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY" || cancellation_recovered=0
-            systemctl start "$SERVICE_NAME" 2>/dev/null || cancellation_recovered=0
-            wait_for_panel || cancellation_recovered=0
-            binary_swapped=0
-          else
-            cancellation_recovered=0
-          fi
-        fi
-        if (( cancellation_recovered )); then
-          "$UPDATE_HELPER" state cancelled cancelled "The update was cancelled; the previous release was restored and checked." >/dev/null 2>&1 || true
-        else
-          "$UPDATE_HELPER" state failed failed "Cancellation recovery needs attention. Check ARG service logs and the saved rollback files." >/dev/null 2>&1 || true
-        fi
-      else
-        if (( binary_swapped )) && [[ -x "$PREVIOUS_BINARY" ]] && ! cmp -s "$BINARY" "$PREVIOUS_BINARY"; then
-          warn "The update stopped unexpectedly after replacing the ARG binary. Restoring the previous release."
-          systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-          restore_previous_database || warn "The previous database snapshot could not be restored."
-          if [[ -x "$PREVIOUS_BINARY" ]]; then
-            install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY" || true
-            systemctl start "$SERVICE_NAME" 2>/dev/null || true
-            wait_for_panel || warn "The previous binary was restored, but the panel health check still fails. Review service logs."
-            binary_swapped=0
-          fi
-        fi
-        "$UPDATE_HELPER" state failed failed "The update stopped before successful verification. Review the update log and retry." >/dev/null 2>&1 || true
-      fi
-    fi
-    cleanup_update_build_cache
-    [[ -z "${staged:-}" ]] || rm -f "$staged"
-    [[ -z "${database_staged:-}" ]] || rm -f "$database_staged"
-    rm -f "$UPDATE_STATUS_FILE"
-    rm -f "$UPDATE_CANCEL_FILE"
-    rmdir "$UPDATE_LOCK_DIR" 2>/dev/null || true
-    return "$exit_code"
-  }
   trap cleanup_update_reservation EXIT
   update_phase preparing "Preparing the ARG update."
   migrate_legacy_install
@@ -1371,27 +1433,27 @@ update_app() {
   # Keep the privileged updater helper in sync before the replacement service starts polling it.
   configure_ufw_status
   update_phase building "Building the new ARG release."
-  build_started=1
+  UPDATE_CLEANUP_BUILD_STARTED=1
   build_release
   ensure_service_account
   configure_ufw_status
   take_database_ownership
   install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
-  staged="$(mktemp /usr/local/lib/arg/.arg.XXXXXX)"
+  UPDATE_CLEANUP_STAGED="$(mktemp /usr/local/lib/arg/.arg.XXXXXX)"
   install -d -o root -g root -m 0700 "$ROLLBACK_DIR"
   install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$DB_BACKUP_TOOL"
   database_path="$(configured_db_path)"
   rm -f "$PREVIOUS_DATABASE"
   if [[ -s "$database_path" ]]; then
-    database_staged="$(mktemp "$ROLLBACK_DIR/.arg.db.previous.XXXXXX")"
-    rm -f "$database_staged"
-    if ! "$SOURCE_DIR/target/release/arg" database-backup "$database_path" "$database_staged"; then
-      rm -f "$database_staged"
+    UPDATE_CLEANUP_DATABASE_STAGED="$(mktemp "$ROLLBACK_DIR/.arg.db.previous.XXXXXX")"
+    rm -f "$UPDATE_CLEANUP_DATABASE_STAGED"
+    if ! "$SOURCE_DIR/target/release/arg" database-backup "$database_path" "$UPDATE_CLEANUP_DATABASE_STAGED"; then
+      rm -f "$UPDATE_CLEANUP_DATABASE_STAGED"
       die "Could not create a consistent database snapshot. The running ARG binary was left untouched."
     fi
-    chown root:root "$database_staged"
-    chmod 0600 "$database_staged"
-    mv -f "$database_staged" "$PREVIOUS_DATABASE"
+    chown root:root "$UPDATE_CLEANUP_DATABASE_STAGED"
+    chmod 0600 "$UPDATE_CLEANUP_DATABASE_STAGED"
+    mv -f "$UPDATE_CLEANUP_DATABASE_STAGED" "$PREVIOUS_DATABASE"
   fi
   if [[ -x "$BINARY" ]]; then
     previous="$(mktemp "$ROLLBACK_DIR/.arg.previous.XXXXXX")"
@@ -1399,12 +1461,12 @@ update_app() {
     chmod 0755 "$previous"
     mv -f "$previous" "$PREVIOUS_BINARY"
   fi
-  install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$staged"
+  install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$UPDATE_CLEANUP_STAGED"
   update_phase installing "Installing the verified build."
   # Arm the EXIT recovery before the atomic rename. If a signal arrives between
   # rename and the next shell instruction, cleanup still knows a swap may have happened.
-  binary_swapped=1
-  mv -f "$staged" "$BINARY"
+  UPDATE_CLEANUP_BINARY_SWAPPED=1
+  mv -f "$UPDATE_CLEANUP_STAGED" "$BINARY"
   write_privileged_service_unit
   systemctl restart arg-privileged.service
   write_service_unit
@@ -1417,7 +1479,7 @@ update_app() {
     say "ARG was updated successfully"
     info "Source revision: $(git -C "$SOURCE_DIR" rev-parse --short HEAD)"
     "$UPDATE_HELPER" state succeeded complete "ARG is updated and the service is active." >/dev/null 2>&1 || true
-    binary_swapped=0
+    UPDATE_CLEANUP_BINARY_SWAPPED=0
     show_setup_code_if_needed || true
     cleanup_update_reservation 0
     trap - EXIT
@@ -1433,7 +1495,7 @@ update_app() {
     install -o root -g root -m 0755 "$PREVIOUS_BINARY" "$BINARY"
     systemctl start "$SERVICE_NAME" || true
     wait_for_panel || warn "The previous binary was restored, but the panel health check still fails. Review service logs."
-    binary_swapped=0
+    UPDATE_CLEANUP_BINARY_SWAPPED=0
   fi
   journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
   die "The update could not be activated."

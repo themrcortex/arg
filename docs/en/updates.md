@@ -12,6 +12,14 @@ The selected branch determines which GitHub ref is fetched and which version/API
 
 Cache size depends on Rust target, architecture, and dependencies; there is no universal fixed value. Complete mode does not delete source, installed binary, or rollback files.
 
+### Build resource safeguards
+
+Before compiling, the installer checks free disk space on the source filesystem: it requires at least 2 GiB for a complete build and 1 GiB for a fast build. Complete mode clears the old Cargo target before this check. It refuses to start a build that is likely to fill the filesystem.
+
+The installer also sums currently available RAM and free swap. Below 4 GiB it compiles Cargo jobs serially with one Rust codegen unit and optimization level 2; below 2 GiB it uses optimization level 1. These are build-only settings and do not change the running panel. If compilation still fails with `SIGKILL`, check `free -h` and `df -h /opt/arg/source`; add RAM or temporary swap only when the filesystem has enough free space.
+
+If compilation fails, ARG does not replace the active binary. The updater records a failed result, removes temporary files, releases its update reservation, and clears the incomplete Cargo target even in fast mode so a retry can reclaim disk space. Complete mode also clears the target after a successful build.
+
 ## SSH updates
 
 Select branch and mode in the SSH menu. Non-interactive examples:

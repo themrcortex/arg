@@ -30,6 +30,8 @@
 
 ### Fixed
 - Keep deployment job status and detailed live stage logs readable after refresh; report database/migration failures with the actual cause.
+- Use lower-memory Rust release build settings on constrained VPSs; keep updater cleanup and rollback state valid after `update_app` exits.
+- Report compiler failures before binary replacement, release the update reservation, and leave the currently running panel binary untouched.
 - Keep the global ARG updater scoped to the current control panel so an update started for a managed Node cannot lock navigation across the controller workspace.
 - Let administrators minimize a running panel update into a compact status control; monitoring continues and the full progress view can be reopened without interrupting the update.
 - Rebuild and commit the embedded frontend bundle with UI source changes; CI now fails when `frontend/dist` is stale, preventing Rust releases from silently shipping the previous interface.
