@@ -24,6 +24,8 @@ This is a running index for completed phases only. It is not a statement that th
 | PRIV-002 | Helper accepted unbounded connection tasks and unbounded-time reads | CONFIRMED | Fixed in `d2f5f19`; response cap in `52824d0` | [03-privileged-helper.md](03-privileged-helper.md) |
 | PRIV-003 | Deep disk scan retained all paths before truncating output | CONFIRMED | Fixed in `512ba90` | [03-privileged-helper.md](03-privileged-helper.md) |
 | FED-001 | Private endpoint opt-in allowed cloud metadata targets and CGNAT classification was incomplete | CONFIRMED | Fixed in `6852cdd` | [04-federation.md](04-federation.md) |
+| DEPLOY-001 | Cancelling an active deployment did not stop Git/build work | CONFIRMED | Fixed in `14aa314` | [05-deployment.md](05-deployment.md) |
+| DEPLOY-002 | Concurrent ZIP uploads could consume system disk reserve | CONFIRMED | Fixed in `d848967` | [05-deployment.md](05-deployment.md) |
 
 ## P3 / Low
 
@@ -39,4 +41,4 @@ This is a running index for completed phases only. It is not a statement that th
 
 ## Open audit coverage
 
-Phases 0–4 have been reviewed and documented. Phases 5–15 remain unreviewed or incomplete and may add findings. In particular, this index must not be interpreted as a clean full-project security assessment.
+Phases 0–5 have been reviewed and documented. Phases 6–15 remain unreviewed or incomplete and may add findings. In particular, this index must not be interpreted as a clean full-project security assessment.

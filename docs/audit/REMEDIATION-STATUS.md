@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 4 at revision `6852cddcdd7328584127d8103cc1b62b2c1be888` on `audit/development-hardening`.
+Updated through phase 5 at revision `d8489670b72c3e891220706e5d89ec4e1dc13506` on `audit/development-hardening`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -19,9 +19,11 @@ Updated through phase 4 at revision `6852cddcdd7328584127d8103cc1b62b2c1be888` o
 | PRIV-003 | P2 | Fixed | Scan keeps bounded top-K result sets instead of all paths | `disk_scan_keeps_only_bounded_top_entries_in_deterministic_order` | `512ba90` |
 | FED-001 | P2 | Fixed | Cloud metadata targets are denied even with private endpoint opt-in; CGNAT is classified as private | `federation_blocks_cloud_metadata_even_for_explicit_private_networks`; `federation_private_endpoint_opt_in_does_not_allow_cgnat_by_default`; endpoint assertions | `6852cdd` |
 | FED-002 | P3 | Audit required | Repeated authorized workspace renewal creates additional session rows; defer rate limiting until renewal is retry-safe | No test; pending focused design | — |
+| DEPLOY-001 | P2 | Fixed | Observe cancellation while Git runs; kill direct child on drop; stop the exact UUID-derived transient Node build unit and preserve cancelled terminal state | `active_git_command_wait_stops_when_job_is_cancelled`; `build_cancel_helper_rejects_untrusted_unit_inputs_without_running_systemctl`; unit-name tests | `14aa314` |
+| DEPLOY-002 | P2 | Fixed | Serialize archive upload and retain 64 MiB free-space reserve while streaming; remove partial file and return 507 when reserve is unavailable | `archive_upload_preserves_minimum_free_disk_reserve`; `archive_upload_gate_rejects_a_second_concurrent_writer` | `d848967` |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - The helper's full per-action path/TOCTOU review continues alongside phases 5–8.
-- Phases 5–15 are not yet marked complete. Results must be appended as each phase is audited and tested.
+- Phases 6–15 are not yet marked complete. Results must be appended as each phase is audited and tested.
