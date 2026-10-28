@@ -4,12 +4,19 @@ const SCOPES: &[&str] = &["apps:read", "deployments:read"];
 const REQUESTS_PER_MINUTE: i64 = 60;
 
 pub(super) async fn no_store(request: Request, next: Next) -> Response {
+    let api_path = is_api_path(request.uri().path());
     let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, private, max-age=0"),
-    );
+    if api_path {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, private, max-age=0"),
+        );
+    }
     response
+}
+
+fn is_api_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
 }
 
 #[derive(Deserialize)]
@@ -333,7 +340,9 @@ pub(super) async fn openapi() -> Json<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListQuery, authorize, migrate, pagination, revoke_if_owner_ineligible};
+    use super::{
+        ListQuery, authorize, is_api_path, migrate, pagination, revoke_if_owner_ineligible,
+    };
     use crate::{session_hash, token};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use rusqlite::Connection;
@@ -361,6 +370,15 @@ mod tests {
             }),
             (1, 1_000_000)
         );
+    }
+
+    #[test]
+    fn cache_policy_covers_api_routes_without_changing_static_assets() {
+        assert!(is_api_path("/api/state"));
+        assert!(is_api_path("/api/apps/123"));
+        assert!(is_api_path("/api"));
+        assert!(!is_api_path("/"));
+        assert!(!is_api_path("/assets/app.js"));
     }
 
     #[test]

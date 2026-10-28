@@ -514,6 +514,7 @@ pub(super) fn router(state: AppState) -> Router {
             federation::workspace_session_guard,
         ))
         .layer(middleware::from_fn(update_guard))
+        .layer(middleware::from_fn(api_keys::no_store))
         .with_state(state)
 }
 
