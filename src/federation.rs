@@ -636,7 +636,7 @@ pub(super) async fn list_nodes(State(state): State<AppState>, headers: HeaderMap
     let controllers: Vec<Value> = {
         let mut query = db.prepare("SELECT id,controller_name,local_label,created_at,last_seen,server_uuid,scopes_json,token_expires_at FROM federation_controllers WHERE enabled=1 ORDER BY created_at DESC LIMIT 100").map_err(db_error)?;
         let rows = query.query_map([], |row| Ok(json!({"id":row.get::<_,i64>(0)?,"name":row.get::<_,String>(2)?,"public_name":row.get::<_,String>(1)?,"created_at":row.get::<_,i64>(3)?,"last_seen":row.get::<_,Option<i64>>(4)?,"server_uuid":row.get::<_,Option<String>>(5)?,"scopes":decode_scopes(&row.get::<_,String>(6)?),"token_expires_at":row.get::<_,Option<i64>>(7)?}))).map_err(db_error)?;
-        rows.filter_map(Result::ok).collect()
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
     };
     Ok(Json(
         json!({"protocol":"arg-node/2","capabilities_version":CAPABILITIES_VERSION,"server_uuid":server_uuid,"public_name":public_name,"role":role,"nodes":nodes,"controllers":controllers}),

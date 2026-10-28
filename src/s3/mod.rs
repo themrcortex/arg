@@ -365,7 +365,10 @@ fn read_connection(
     db: &Connection,
     id: i64,
 ) -> Result<S3ConnectionRecord, (StatusCode, Json<Value>)> {
-    db.query_row("SELECT id,display_name,description,provider_type,endpoint,region,address_style,allow_private_endpoint,credential_present,last_rotated_at,status,last_test_at,last_error,created_at,updated_at FROM s3_connections WHERE id=?1", [id], |row| Ok(S3ConnectionRecord { id:row.get(0)?,display_name:row.get(1)?,description:row.get(2)?,provider_type:row.get(3)?,endpoint:row.get(4)?,region:row.get(5)?,address_style:row.get(6)?,allow_private_endpoint:row.get::<_,i64>(7)? != 0,credential_present:row.get::<_,i64>(8)? != 0,last_rotated_at:row.get(9)?,status:row.get(10)?,last_test_at:row.get(11)?,last_error:row.get(12)?,created_at:row.get(13)?,updated_at:row.get(14)?})).map_err(|_| error(StatusCode::NOT_FOUND, "اتصال S3 پیدا نشد."))
+    db.query_row("SELECT id,display_name,description,provider_type,endpoint,region,address_style,allow_private_endpoint,credential_present,last_rotated_at,status,last_test_at,last_error,created_at,updated_at FROM s3_connections WHERE id=?1", [id], |row| Ok(S3ConnectionRecord { id:row.get(0)?,display_name:row.get(1)?,description:row.get(2)?,provider_type:row.get(3)?,endpoint:row.get(4)?,region:row.get(5)?,address_style:row.get(6)?,allow_private_endpoint:row.get::<_,i64>(7)? != 0,credential_present:row.get::<_,i64>(8)? != 0,last_rotated_at:row.get(9)?,status:row.get(10)?,last_test_at:row.get(11)?,last_error:row.get(12)?,created_at:row.get(13)?,updated_at:row.get(14)?})).map_err(|problem| match problem {
+        rusqlite::Error::QueryReturnedNoRows => error(StatusCode::NOT_FOUND, "اتصال S3 پیدا نشد."),
+        other => db_error(other),
+    })
 }
 fn read_secret_file(id: i64) -> Result<SecretConfig, String> {
     if id <= 0 {
@@ -1618,6 +1621,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn s3_connection_reads_distinguish_missing_rows_from_database_decode_errors() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE s3_connections(id INTEGER PRIMARY KEY,display_name TEXT,description TEXT,provider_type TEXT,endpoint TEXT,region TEXT,address_style TEXT,allow_private_endpoint,credential_present,last_rotated_at INTEGER,status TEXT,last_test_at INTEGER,last_error TEXT,created_at INTEGER,updated_at INTEGER);
+             INSERT INTO s3_connections VALUES(1,'broken','','generic','https://s3.example.test','us-east-1','auto','not-an-integer',1,1,'connected',1,NULL,1,1);",
+        )
+        .unwrap();
+
+        let missing = read_connection(&db, 2).err().unwrap();
+        let malformed = read_connection(&db, 1).err().unwrap();
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        assert_eq!(malformed.0, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
     fn missing_object_head_errors_allow_new_upload_but_not_missing_bucket() {
         use ::s3::error::S3Error;
         assert!(head_error_means_object_missing(&S3Error::HttpFailWithBody(
@@ -1932,9 +1950,9 @@ pub(super) async fn stop_bucket_mount(State(state): State<AppState>, Path(mount_
 pub(super) async fn summary(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
-    let (connections, healthy, buckets, mounted): (i64,i64,i64,i64) = db.query_row("SELECT (SELECT COUNT(*) FROM s3_connections),(SELECT COUNT(*) FROM s3_connections WHERE status='connected'),(SELECT COUNT(*) FROM s3_buckets WHERE enabled=1),(SELECT COUNT(*) FROM s3_mounts WHERE status='mounted')", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap_or((0,0,0,0));
-    let due_soon: i64 = db.query_row("SELECT COUNT(*) FROM s3_contracts WHERE status IN ('active','upcoming') AND next_due_date BETWEEN date('now') AND date('now','+7 days')", [], |row| row.get(0)).unwrap_or(0);
-    let (usage_sum,quota_sum,measured,min_measured,total,quota_count):(Option<i64>,Option<i64>,i64,Option<i64>,i64,i64) = db.query_row("SELECT SUM(u.used_bytes),SUM(u.quota_bytes),SUM(CASE WHEN u.scan_status IN ('measured','stale') AND u.used_bytes IS NOT NULL THEN 1 ELSE 0 END),MIN(CASE WHEN u.scan_status IN ('measured','stale') AND u.used_bytes IS NOT NULL THEN u.measured_at END),COUNT(*),SUM(CASE WHEN u.quota_bytes IS NOT NULL THEN 1 ELSE 0 END) FROM s3_buckets b LEFT JOIN s3_usage_snapshots u ON u.id=(SELECT s.id FROM s3_usage_snapshots s WHERE s.bucket_id=b.id ORDER BY s.id DESC LIMIT 1) WHERE b.enabled=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).unwrap_or((None,None,0,None,0,0));
+    let (connections, healthy, buckets, mounted): (i64,i64,i64,i64) = db.query_row("SELECT (SELECT COUNT(*) FROM s3_connections),(SELECT COUNT(*) FROM s3_connections WHERE status='connected'),(SELECT COUNT(*) FROM s3_buckets WHERE enabled=1),(SELECT COUNT(*) FROM s3_mounts WHERE status='mounted')", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).map_err(db_error)?;
+    let due_soon: i64 = db.query_row("SELECT COUNT(*) FROM s3_contracts WHERE status IN ('active','upcoming') AND next_due_date BETWEEN date('now') AND date('now','+7 days')", [], |row| row.get(0)).map_err(db_error)?;
+    let (usage_sum,quota_sum,measured,min_measured,total,quota_count):(Option<i64>,Option<i64>,i64,Option<i64>,i64,i64) = db.query_row("SELECT SUM(u.used_bytes),SUM(u.quota_bytes),SUM(CASE WHEN u.scan_status IN ('measured','stale') AND u.used_bytes IS NOT NULL THEN 1 ELSE 0 END),MIN(CASE WHEN u.scan_status IN ('measured','stale') AND u.used_bytes IS NOT NULL THEN u.measured_at END),COUNT(*),SUM(CASE WHEN u.quota_bytes IS NOT NULL THEN 1 ELSE 0 END) FROM s3_buckets b LEFT JOIN s3_usage_snapshots u ON u.id=(SELECT s.id FROM s3_usage_snapshots s WHERE s.bucket_id=b.id ORDER BY s.id DESC LIMIT 1) WHERE b.enabled=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).map_err(db_error)?;
     let usage_bytes = (total > 0 && measured == total).then_some(usage_sum).flatten();
     let quota_bytes = (total > 0 && quota_count == total).then_some(quota_sum).flatten();
     let usage_status = if measured == 0 { "not_measured" } else if min_measured.is_none_or(|value| value <= 0 || now().saturating_sub(value) >= 24 * 3600) { "stale" } else { "fresh" };
@@ -1954,19 +1972,19 @@ pub(super) async fn list_connections(
     let ids: Vec<i64> = statement
         .query_map([], |row| row.get(0))
         .map_err(db_error)?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(db_error)?;
     let connections: Vec<S3ConnectionRecord> = ids
         .into_iter()
-        .filter_map(|id| read_connection(&db, id).ok())
-        .collect();
+        .map(|id| read_connection(&db, id))
+        .collect::<Result<_, _>>()?;
     Ok(Json(json!({"connections":connections})))
 }
 
 pub(super) async fn bucket_catalog(State(state):State<AppState>,headers:HeaderMap)->ApiResult{
     let db=state.lock().unwrap();require_admin(&db,&headers)?;
     let mut stmt=db.prepare("SELECT b.id,b.bucket_name,b.display_name,c.display_name,c.provider_type,c.status,b.enabled FROM s3_buckets b JOIN s3_connections c ON c.id=b.connection_id ORDER BY c.display_name COLLATE NOCASE,b.display_name COLLATE NOCASE").map_err(db_error)?;
-    let buckets=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"bucket_name":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?,"connection_name":r.get::<_,String>(3)?,"provider":r.get::<_,String>(4)?,"connection_status":r.get::<_,String>(5)?,"enabled":r.get::<_,bool>(6)?}))).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();Ok(Json(json!({"buckets":buckets})))
+    let buckets=stmt.query_map([],|r|Ok(json!({"id":r.get::<_,i64>(0)?,"bucket_name":r.get::<_,String>(1)?,"display_name":r.get::<_,String>(2)?,"connection_name":r.get::<_,String>(3)?,"provider":r.get::<_,String>(4)?,"connection_status":r.get::<_,String>(5)?,"enabled":r.get::<_,bool>(6)?}))).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;Ok(Json(json!({"buckets":buckets})))
 }
 pub(super) async fn get_connection(
     State(state): State<AppState>,
@@ -2260,14 +2278,14 @@ pub(super) async fn list_buckets(
         let db = state.lock().unwrap();
         let mut statement = db.prepare("SELECT id,bucket_name FROM s3_buckets WHERE connection_id=?1 AND enabled=1").map_err(db_error)?;
         let rows = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?))).map_err(db_error)?;
-        rows.filter_map(Result::ok).collect()
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
     };
     for (bucket_id, name) in local_buckets {
         let _ = begin_usage_scan(state.clone(), bucket_id, id, name, false).await;
     }
     let db = state.lock().unwrap();
     let mut statement=db.prepare("SELECT b.id,b.bucket_name,b.display_name,b.description,b.enabled,b.verified_at,b.created_at,u.used_bytes,u.object_count,u.quota_bytes,u.quota_source,u.usage_source,u.scan_status,u.measured_at,u.error FROM s3_buckets b LEFT JOIN s3_usage_snapshots u ON u.id=(SELECT s.id FROM s3_usage_snapshots s WHERE s.bucket_id=b.id ORDER BY s.id DESC LIMIT 1) WHERE b.connection_id=?1 ORDER BY b.display_name").map_err(db_error)?;
-    let stored:Vec<Value>=statement.query_map([id],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"bucket_name":row.get::<_,String>(1)?,"display_name":row.get::<_,String>(2)?,"description":row.get::<_,String>(3)?,"enabled":row.get::<_,bool>(4)?,"verified_at":row.get::<_,Option<i64>>(5)?,"created_at":row.get::<_,i64>(6)?,"used_bytes":row.get::<_,Option<i64>>(7)?,"object_count":row.get::<_,Option<i64>>(8)?,"quota_bytes":row.get::<_,Option<i64>>(9)?,"quota_source":row.get::<_,Option<String>>(10)?,"usage_source":row.get::<_,Option<String>>(11)?,"scan_status":row.get::<_,Option<String>>(12)?,"measured_at":row.get::<_,Option<i64>>(13)?,"error":row.get::<_,Option<String>>(14)?}))).map_err(db_error)?.filter_map(Result::ok).collect();
+    let stored:Vec<Value>=statement.query_map([id],|row|Ok(json!({"id":row.get::<_,i64>(0)?,"bucket_name":row.get::<_,String>(1)?,"display_name":row.get::<_,String>(2)?,"description":row.get::<_,String>(3)?,"enabled":row.get::<_,bool>(4)?,"verified_at":row.get::<_,Option<i64>>(5)?,"created_at":row.get::<_,i64>(6)?,"used_bytes":row.get::<_,Option<i64>>(7)?,"object_count":row.get::<_,Option<i64>>(8)?,"quota_bytes":row.get::<_,Option<i64>>(9)?,"quota_source":row.get::<_,Option<String>>(10)?,"usage_source":row.get::<_,Option<String>>(11)?,"scan_status":row.get::<_,Option<String>>(12)?,"measured_at":row.get::<_,Option<i64>>(13)?,"error":row.get::<_,Option<String>>(14)?}))).map_err(db_error)?.collect::<Result<_,_>>().map_err(db_error)?;
     Ok(Json(
         json!({"provider_buckets":provider_buckets,"connections":stored}),
     ))

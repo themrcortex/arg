@@ -73,12 +73,12 @@ pub(super) async fn read(State(state): State<AppState>, headers: HeaderMap) -> A
             }).unwrap_or_else(|| "آدرس نامعتبر".to_owned());
             Ok(json!({"name":name,"endpoint":origin,"state":state,"compatibility":compatibility,"last_seen":last_seen,"last_check":last_check,"last_error":last_error}))
         }).map_err(db_error)?;
-        rows.filter_map(Result::ok).collect()
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
     };
     let active_controllers: Vec<Value> = {
         let mut statement = db.prepare("SELECT COALESCE(NULLIF(local_label,''),controller_name),last_seen FROM federation_controllers WHERE enabled=1 ORDER BY created_at DESC LIMIT 100").map_err(db_error)?;
         let rows = statement.query_map([], |row| Ok(json!({"name":row.get::<_,String>(0)?,"last_seen":row.get::<_,Option<i64>>(1)?}))).map_err(db_error)?;
-        rows.filter_map(Result::ok).collect()
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
     };
     let (controllers, enabled_controllers): (i64, i64) = db.query_row(
         "SELECT COUNT(*),SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) FROM federation_controllers",

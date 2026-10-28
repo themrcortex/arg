@@ -149,7 +149,7 @@ pub(super) async fn list_trust_keys(
             "SELECT id,label,enabled,created_at,revoked_at FROM extension_trust_keys ORDER BY id",
         )
         .map_err(db_error)?;
-    let keys = statement.query_map([], |row| Ok(json!({"id":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?,"enabled":row.get::<_,bool>(2)?,"created_at":row.get::<_,i64>(3)?,"revoked_at":row.get::<_,Option<i64>>(4)?}))).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    let keys = statement.query_map([], |row| Ok(json!({"id":row.get::<_,String>(0)?,"label":row.get::<_,String>(1)?,"enabled":row.get::<_,bool>(2)?,"created_at":row.get::<_,i64>(3)?,"revoked_at":row.get::<_,Option<i64>>(4)?}))).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     Ok(Json(json!({"keys":keys})))
 }
 

@@ -231,8 +231,7 @@ fn ensure_sessions_metadata(db: &Connection) -> Result<(), rusqlite::Error> {
     let mut statement = db.prepare("PRAGMA table_info(sessions)")?;
     let existing: Vec<String> = statement
         .query_map([], |row| row.get(1))?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<_, _>>()?;
     drop(statement);
     for (name, definition) in [
         ("created_at", "INTEGER"),
@@ -253,8 +252,7 @@ fn ensure_metric_storage_columns(db: &Connection) -> Result<(), rusqlite::Error>
     let mut statement = db.prepare("PRAGMA table_info(metric_samples)")?;
     let existing: Vec<String> = statement
         .query_map([], |row| row.get(1))?
-        .filter_map(Result::ok)
-        .collect();
+        .collect::<Result<_, _>>()?;
     drop(statement);
     for (name, definition) in [
         ("disk_read_rate", "REAL"),
@@ -297,8 +295,7 @@ fn ensure_federation_identity_columns(db: &Connection) -> Result<(), rusqlite::E
         let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
         let existing: Vec<String> = statement
             .query_map([], |row| row.get(1))?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<Result<_, _>>()?;
         drop(statement);
         if !existing.iter().any(|column| column == name) {
             db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"))?;
@@ -826,7 +823,7 @@ async fn list_account_sessions(State(state): State<AppState>, headers: HeaderMap
         "expires_at":row.get::<_,i64>(3)?,"remote_ip":row.get::<_,Option<String>>(4)?,"user_agent":row.get::<_,Option<String>>(5)?,
         "current":row.get::<_,String>(6)? == current_hash
     }))).map_err(db_error)?;
-    let sessions: Vec<Value> = rows.filter_map(Result::ok).collect();
+    let sessions: Vec<Value> = rows.collect::<Result<_, _>>().map_err(db_error)?;
     Ok(Json(json!({"sessions":sessions})))
 }
 
@@ -1565,7 +1562,7 @@ async fn history(
         "disk_read": row.get::<_, Option<f64>>(6)?, "disk_write": row.get::<_, Option<f64>>(7)?,
         "disk_used_bytes": row.get::<_, Option<i64>>(8)?, "disk_total_bytes": row.get::<_, Option<i64>>(9)?
     }))).map_err(db_error)?;
-    let samples: Vec<Value> = rows.filter_map(Result::ok).collect();
+    let samples: Vec<Value> = rows.collect::<Result<_, _>>().map_err(db_error)?;
     Ok(Json(
         json!({"samples": samples, "config": monitoring_config(&db)}),
     ))
@@ -1659,12 +1656,16 @@ async fn network_traffic_volume(
     let sql = format!("SELECT {bucket_expr},SUM(rx_bytes),SUM(tx_bytes),COUNT(DISTINCT interface) FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND (?3 IS NULL OR interface=?3) AND (?4=0 OR eligible_for_total=1) GROUP BY 1 ORDER BY 1");
     let mut statement = db.prepare(&sql).map_err(db_error)?;
     let rows = statement.query_map(params![from, to, interface, if selected_interface == "all" {1} else {0}], |row| Ok(json!({"at":row.get::<_,i64>(0)?,"rx_bytes":row.get::<_,i64>(1)?.max(0),"tx_bytes":row.get::<_,i64>(2)?.max(0),"interfaces":row.get::<_,i64>(3)?}))).map_err(db_error)?;
-    let buckets: Vec<Value> = rows.filter_map(Result::ok).collect();
+    let buckets: Vec<Value> = rows.collect::<Result<_, _>>().map_err(db_error)?;
     let interface_query = if selected_interface != "all" {
         let name = selected_interface.clone();
-        db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND interface=?3 ORDER BY interface").and_then(|mut statement| statement.query_map(params![from,to,name], |row| row.get::<_,String>(0)).map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())).unwrap_or_default()
+        let mut statement = db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND interface=?3 ORDER BY interface").map_err(db_error)?;
+        let rows = statement.query_map(params![from,to,name], |row| row.get::<_,String>(0)).map_err(db_error)?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?
     } else {
-        db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND eligible_for_total=1 ORDER BY interface").and_then(|mut statement| statement.query_map(params![from,to], |row| row.get::<_,String>(0)).map(|rows| rows.filter_map(Result::ok).collect::<Vec<_>>())).unwrap_or_default()
+        let mut statement = db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND eligible_for_total=1 ORDER BY interface").map_err(db_error)?;
+        let rows = statement.query_map(params![from,to], |row| row.get::<_,String>(0)).map_err(db_error)?;
+        rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?
     };
     let fresh_at = buckets.last().and_then(|bucket| bucket["at"].as_i64());
     Ok(Json(
@@ -5565,8 +5566,8 @@ mod update_progress_tests {
             statement
                 .query_map([], |row| row.get::<_, String>(1))
                 .unwrap()
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
         };
         for column in [
             "disk_read_rate",

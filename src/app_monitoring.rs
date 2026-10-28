@@ -116,20 +116,20 @@ pub(super) async fn read(
     ).map_err(db_error)?;
     let samples = statement.query_map(params![app_id, now() - 24 * 60 * 60], |row| {
         Ok(json!({"at":row.get::<_,i64>(0)?,"service_state":row.get::<_,String>(1)?,"cpu_percent":row.get::<_,Option<f64>>(2)?,"memory_bytes":row.get::<_,Option<i64>>(3)?,"volume_bytes":row.get::<_,Option<i64>>(4)?,"volume_status":row.get::<_,String>(5)?}))
-    }).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     let rules = read_rules(&db, &app_id).map_err(db_error)?;
     let mut statement = db.prepare(
         "SELECT metric,state,current_value,threshold,first_seen,last_seen,resolved_at FROM application_monitoring_alerts WHERE application_id=?1 ORDER BY last_seen DESC LIMIT 50",
     ).map_err(db_error)?;
     let alerts = statement.query_map([app_id.as_str()], |row| {
         Ok(json!({"metric":row.get::<_,String>(0)?,"state":row.get::<_,String>(1)?,"current_value":row.get::<_,Option<f64>>(2)?,"threshold":row.get::<_,Option<f64>>(3)?,"first_seen":row.get::<_,i64>(4)?,"last_seen":row.get::<_,i64>(5)?,"resolved_at":row.get::<_,Option<i64>>(6)?}))
-    }).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     let mut statement = db.prepare(
         "SELECT id,metric,event_type,lifecycle_started_at,created_at,current_value,threshold,acknowledged_at,acknowledged_by FROM application_monitoring_events WHERE application_id=?1 ORDER BY created_at DESC,id DESC LIMIT 50",
     ).map_err(db_error)?;
     let events = statement.query_map([app_id.as_str()], |row| {
         Ok(json!({"id":row.get::<_,i64>(0)?,"metric":row.get::<_,String>(1)?,"event_type":row.get::<_,String>(2)?,"lifecycle_started_at":row.get::<_,i64>(3)?,"created_at":row.get::<_,i64>(4)?,"current_value":row.get::<_,Option<f64>>(5)?,"threshold":row.get::<_,Option<f64>>(6)?,"acknowledged_at":row.get::<_,Option<i64>>(7)?,"acknowledged_by":row.get::<_,Option<String>>(8)?}))
-    }).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     Ok(Json(
         json!({"latest":latest,"samples":samples,"rules":rules,"alerts":alerts,"events":events,"sampling":{"interval_seconds":60,"retention_days":30,"scope":"managed-systemd-services","network_bytes":null,"http_latency_ms":null}}),
     ))

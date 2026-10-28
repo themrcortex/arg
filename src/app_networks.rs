@@ -45,7 +45,7 @@ pub(super) async fn list(State(state): State<AppState>, headers: HeaderMap) -> A
     require_admin(&db, &headers)?;
     let owner = federation::local_server_uuid(&db).map_err(db_error)?;
     let mut stmt = db.prepare("SELECT n.id,n.name,n.driver,n.visibility,n.docker_network,n.created_at,(SELECT COUNT(*) FROM application_network_members m WHERE m.network_id=n.id) FROM application_networks n WHERE owner_server_uuid=?1 ORDER BY name COLLATE NOCASE").map_err(db_error)?;
-    let networks = stmt.query_map([owner], |row| Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"driver":row.get::<_,String>(2)?,"visibility":row.get::<_,String>(3)?,"docker_network":row.get::<_,Option<String>>(4)?,"created_at":row.get::<_,i64>(5)?,"member_count":row.get::<_,i64>(6)?}))).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    let networks = stmt.query_map([owner], |row| Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"driver":row.get::<_,String>(2)?,"visibility":row.get::<_,String>(3)?,"docker_network":row.get::<_,Option<String>>(4)?,"created_at":row.get::<_,i64>(5)?,"member_count":row.get::<_,i64>(6)?}))).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     Ok(Json(
         json!({"networks":networks,"host_local_note":"Host-local endpoints use 127.0.0.1 and do not create process or network isolation."}),
     ))
@@ -60,7 +60,7 @@ pub(super) async fn list_members(
     require_admin(&db, &headers)?;
     let owner = federation::local_server_uuid(&db).map_err(db_error)?;
     let mut stmt=db.prepare("SELECT m.application_id,a.name,m.container_name,m.alias,m.internal_port,m.created_at FROM application_network_members m JOIN application_networks n ON n.id=m.network_id JOIN applications a ON a.id=m.application_id WHERE m.network_id=?1 AND n.owner_server_uuid=?2 ORDER BY a.name COLLATE NOCASE").map_err(db_error)?;
-    let members=stmt.query_map(params![id,owner],|r|Ok(json!({"application_id":r.get::<_,String>(0)?,"application_name":r.get::<_,String>(1)?,"container_name":r.get::<_,String>(2)?,"alias":r.get::<_,String>(3)?,"internal_port":r.get::<_,Option<i64>>(4)?,"created_at":r.get::<_,i64>(5)?}))).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    let members=stmt.query_map(params![id,owner],|r|Ok(json!({"application_id":r.get::<_,String>(0)?,"application_name":r.get::<_,String>(1)?,"container_name":r.get::<_,String>(2)?,"alias":r.get::<_,String>(3)?,"internal_port":r.get::<_,Option<i64>>(4)?,"created_at":r.get::<_,i64>(5)?}))).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     Ok(Json(json!({"members":members})))
 }
 

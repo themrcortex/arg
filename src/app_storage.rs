@@ -83,7 +83,7 @@ pub(super) async fn list(
     let mut stmt = db.prepare("SELECT id,name,description,relative_path,quota_bytes,created_at,usage_bytes,usage_status,measured_at FROM application_volumes WHERE application_id=?1 ORDER BY name COLLATE NOCASE").map_err(db_error)?;
     let volumes = stmt.query_map([app_id], |row| {
         Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"description":row.get::<_,String>(2)?,"relative_path":row.get::<_,String>(3)?,"quota_bytes":row.get::<_,Option<i64>>(4)?,"created_at":row.get::<_,i64>(5)?,"usage_bytes":row.get::<_,Option<i64>>(6)?,"usage_status":row.get::<_,String>(7)?,"measured_at":row.get::<_,Option<i64>>(8)?,"quota_enforced":false}))
-    }).map_err(db_error)?.filter_map(Result::ok).collect::<Vec<_>>();
+    }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     Ok(Json(
         json!({"volumes":volumes,"base":"/shared/data/volumes","note":"برای Node، این مسیر در همهٔ releaseها پایدار است. سقف ثبت‌شده اطلاع‌رسانی است و quota سیستم‌فایلی اعمال نمی‌کند."}),
     ))
@@ -549,8 +549,8 @@ mod tests {
             .unwrap()
             .query_map([], |row| row.get(1))
             .unwrap()
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
         assert!(columns.contains(&"usage_bytes".to_owned()));
         assert!(columns.contains(&"measured_at".to_owned()));
     }
