@@ -286,9 +286,16 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             step TEXT NOT NULL,
             level TEXT NOT NULL DEFAULT 'info',
             message TEXT NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS deployment_job_logs_cursor ON deployment_job_logs(job_id,id);",
+         );",
     )?;
+    ensure_table_columns(db, "deployment_job_logs", &[
+        ("job_id", "TEXT NOT NULL DEFAULT ''"),
+        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("step", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("level", "TEXT NOT NULL DEFAULT 'info'"),
+        ("message", "TEXT NOT NULL DEFAULT ''"),
+    ])?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS deployment_job_logs_cursor ON deployment_job_logs(job_id,id);")?;
     db.execute(
         "INSERT INTO deployment_job_steps(job_id,sequence,step,state,message,started_at,finished_at) SELECT jobs.id,1,'recovered','complete','Job باقی‌مانده از نسخهٔ قبلی بازیابی شد؛ اجرای آن ادامه پیدا می‌کند.',jobs.created_at,jobs.created_at FROM deployment_jobs jobs WHERE jobs.state='queued' AND NOT EXISTS (SELECT 1 FROM deployment_job_steps steps WHERE steps.job_id=jobs.id)",
         [],
@@ -730,7 +737,12 @@ fn list_jobs(db: &Connection, app_id: &str, limit: i64) -> rusqlite::Result<Vec<
     let ids = statement
         .query_map(params![app_id, limit], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    ids.iter().map(|job| read_job(db, job)).collect()
+    ids.iter().map(|job| {
+        read_job(db, job).map_err(|error| {
+            eprintln!("ARG deployment job {job} could not be read from the database: {error}");
+            error
+        })
+    }).collect()
 }
 
 pub(super) async fn create(
@@ -1418,7 +1430,15 @@ pub(super) fn start_worker(state: AppState) {
         recover_interrupted(&state);
         cleanup_stale_upload_temps(&state, &deployment_root());
         loop {
-            if let Some(job_id) = claim_next(&state) {
+            let claimed_job = match claim_next(&state) {
+                Ok(job) => job,
+                Err(error) => {
+                    eprintln!("ARG deployment worker could not claim the queued job: {error}");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    None
+                }
+            };
+            if let Some(job_id) = claimed_job {
                 let heartbeat_state = state.clone();
                 let heartbeat_job = job_id.clone();
                 let heartbeat = tokio::spawn(async move {
@@ -1559,24 +1579,33 @@ fn recover_interrupted_at(state: &AppState, root: &FsPath) {
     }
 }
 
-fn claim_next(state: &AppState) -> Option<String> {
-    let db = state.lock().unwrap();
+fn claim_next(state: &AppState) -> rusqlite::Result<Option<String>> {
+    let mut db = state.lock().unwrap();
+    let transaction = db.transaction()?;
     let at = now();
     let worker = id();
-    let selected:Option<String>=db.query_row("SELECT id FROM deployment_jobs WHERE state='queued' AND cancel_requested=0 ORDER BY created_at LIMIT 1",[],|r|r.get(0)).optional().ok().flatten();
-    let job = selected?;
-    let changed=db.execute("UPDATE deployment_jobs SET state='validating',worker_id=?1,lease_until=?2,heartbeat_at=?3,started_at=COALESCE(started_at,?3),updated_at=?3 WHERE id=?4 AND state='queued'",params![worker,at+30,at,job]).ok()?;
+    let selected: Option<String> = transaction.query_row(
+        "SELECT id FROM deployment_jobs WHERE state='queued' AND cancel_requested=0 ORDER BY created_at LIMIT 1",
+        [],
+        |row| row.get(0),
+    ).optional()?;
+    let Some(job) = selected else { return Ok(None) };
+    let changed = transaction.execute(
+        "UPDATE deployment_jobs SET state='validating',worker_id=?1,lease_until=?2,heartbeat_at=?3,started_at=COALESCE(started_at,?3),updated_at=?3 WHERE id=?4 AND state='queued'",
+        params![worker,at+30,at,job],
+    )?;
     if changed == 0 {
-        return None;
+        return Ok(None);
     }
-    let _ = add_step(
-        &db,
+    add_step(
+        &transaction,
         &job,
         "validating",
         "running",
         "بررسی مالکیت برنامه، فضای مقصد و منبع آغاز شد.",
-    );
-    Some(job)
+    )?;
+    transaction.commit()?;
+    Ok(Some(job))
 }
 
 pub(super) fn progress(state: &AppState, job_id: &str, job_state: &str, step: &str, message: &str) {
@@ -2704,7 +2733,7 @@ mod tests {
     #[test]
     fn legacy_partial_step_and_release_tables_are_migrated_before_use() {
         let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT); CREATE TABLE deployment_job_steps(id INTEGER PRIMARY KEY,job_id TEXT); CREATE TABLE deployment_releases(id TEXT PRIMARY KEY);").unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT); CREATE TABLE deployment_job_steps(id INTEGER PRIMARY KEY,job_id TEXT); CREATE TABLE deployment_releases(id TEXT PRIMARY KEY); CREATE TABLE deployment_job_logs(id INTEGER PRIMARY KEY,job_id TEXT,message TEXT); INSERT INTO deployment_job_logs(id,job_id,message) VALUES(1,'old-job','preserve this legacy event');").unwrap();
         migrate(&db).unwrap();
         db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
         persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git").unwrap();
@@ -2712,6 +2741,23 @@ mod tests {
         assert_eq!(message,"در صف اجرای محدود سرور قرار گرفت.");
         let log_count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'", [], |row| row.get(0)).unwrap();
         assert_eq!(log_count,1);
+        let legacy: (String, String) = db.query_row("SELECT message,level FROM deployment_job_logs WHERE id=1", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(legacy, ("preserve this legacy event".to_owned(), "info".to_owned()));
+    }
+
+    #[test]
+    fn queued_job_claim_rolls_back_when_initial_progress_write_fails() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
+        migrate(&db).unwrap();
+        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
+        persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git").unwrap();
+        db.execute_batch("CREATE TRIGGER reject_claim_step BEFORE INSERT ON deployment_job_steps WHEN NEW.step='validating' BEGIN SELECT RAISE(ABORT,'progress insert rejected'); END;").unwrap();
+        let state = Arc::new(Mutex::new(db));
+        assert!(claim_next(&state).is_err());
+        let db = state.lock().unwrap();
+        let job_state: String = db.query_row("SELECT state FROM deployment_jobs WHERE id='job'", [], |row| row.get(0)).unwrap();
+        assert_eq!(job_state, "queued", "a failed claim must not strand the Job in validating");
     }
 
     #[test]
