@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, ChevronRight, Code2, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Settings2, Shield, Sun, X } from 'lucide-react'
+import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronLeft, ChevronRight, Code2, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Settings2, Shield, Sun, X } from 'lucide-react'
 import { groups, isMarkdownPageLink, navigation, pages, pageNeighbors, pageTrail, readingOrder, resolveMarkdownPageLink, resolvePageId, type DocPage, type Locale } from './catalog'
 import { Badge } from './components/ui/badge'
 import { ARG_VERSION } from './version'
@@ -98,18 +98,6 @@ function parseArticle(source: string, locale: Locale, pageTitle: string) {
   return { html: DOMPurify.sanitize(doc.body.innerHTML), toc }
 }
 
-const initialExpandedGroups = () => {
-  try {
-    const stored = JSON.parse(localStorage.getItem('arg-docs-expanded') || '[]') as unknown
-    if (!Array.isArray(stored)) return new Set<string>()
-    const ids = stored.filter((id): id is string => typeof id === 'string')
-    const subgroup = [...ids].reverse().find((id) => id.includes(':'))
-    if (subgroup) return new Set([subgroup.slice(0, subgroup.indexOf(':')), subgroup])
-    const category = [...ids].reverse().find((id) => !id.includes(':'))
-    return category ? new Set([category]) : new Set<string>()
-  } catch { return new Set<string>() }
-}
-
 const copyText = async (value: string) => {
   try { await navigator.clipboard.writeText(value); return true } catch { return false }
 }
@@ -140,7 +128,6 @@ export default function App() {
   const [readingProgress, setReadingProgress] = useState(0)
   const [targetAnchor, setTargetAnchor] = useState(() => decodeURIComponent(window.location.hash.slice(1)))
   const [selectedCategory, setSelectedCategory] = useState<string>(getInitialCategory)
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(initialExpandedGroups)
   const searchRef = useRef<HTMLInputElement>(null)
   const mobileSearchRef = useRef<HTMLInputElement>(null)
   const previousFocus = useRef<HTMLElement | null>(null)
@@ -271,17 +258,15 @@ export default function App() {
   }, [targetAnchor, articleLoading, page.id])
 
   useEffect(() => {
-    const [category, section] = pageTrail(page.id)
+    const [category] = pageTrail(page.id)
     const categoryId = category?.id || page.group
     setSelectedCategory(categoryId)
-    setExpandedGroups(section ? new Set([`${categoryId}:${section.id}`]) : new Set())
     requestAnimationFrame(() => {
       const sidebar = mobileNav ? '.mobile-sidebar' : '.desktop-sidebar'
       document.querySelector(`${sidebar} .nav-link.active`)?.scrollIntoView({ block: 'nearest' })
     })
   }, [page.group, page.id, mobileNav])
 
-  useEffect(() => { localStorage.setItem('arg-docs-expanded', JSON.stringify([...expandedGroups])) }, [expandedGroups])
   useEffect(() => { localStorage.setItem('arg-docs-category', selectedCategory) }, [selectedCategory])
 
   useEffect(() => {
@@ -332,18 +317,9 @@ export default function App() {
     }, 420)
   }
 
-  function toggleExpanded(id: string) {
-    setExpandedGroups((current) => {
-      return current.has(id) ? new Set() : new Set([id])
-    })
-  }
-
   function selectCategory(id: string) {
     setSelectedCategory(id)
     setQuery('')
-    const category = navigation.find((item) => item.id === id)
-    const firstSection = category?.children[0]
-    setExpandedGroups(firstSection ? new Set([`${id}:${firstSection.id}`]) : new Set())
   }
 
   function focusDocsSearch() {
@@ -380,14 +356,12 @@ export default function App() {
           return <button key={result.id} onClick={() => navigate(target, result.heading?.id)}><small>{groupsList[target.group]}</small><strong>{highlightText(target.title[locale], query.trim())}</strong><span>{highlightText(result.heading?.text || result.excerpt || target.summary[locale], query.trim())}</span></button>
         })}</div> : <p className="empty-search">{isFa ? 'نتیجه‌ای پیدا نشد.' : 'No results found.'}</p> : <p className="empty-search">{isFa ? 'در حال آماده‌سازی جست‌وجو…' : 'Preparing search…'}</p>)}
           {!searching && currentCategory?.children.map((section) => {
-              const key = `${currentCategory.id}:${section.id}`
-              const open = expandedGroups.has(key)
               const sectionIsCurrent = currentCategory.id === page.group && activeSection === section.id
               const sectionContentId = `${idPrefix}section-${currentCategory.id}-${section.id}`
-              return <details key={key} className={`nav-subgroup ${sectionIsCurrent ? 'is-current' : ''}`} open={open}>
-                <summary onClick={(event) => { event.preventDefault(); toggleExpanded(key) }} aria-expanded={open} aria-controls={sectionContentId}><span className="nav-subgroup-title">{section.title[locale]}</span><ChevronDown size={13}/></summary>
-                <div className="nav-group-pages" id={sectionContentId} hidden={!open}>{section.pages.map((item) => <a key={item.id} href={`?page=${item.id}&lang=${locale}`} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(item) }} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</a>)}</div>
-              </details>
+              return <section key={section.id} className={`nav-subgroup ${sectionIsCurrent ? 'is-current' : ''}`}>
+                <h3 className="sidebar-section-title" id={sectionContentId}>{section.title[locale]}</h3>
+                <div className="nav-group-pages" aria-labelledby={sectionContentId}>{section.pages.map((item) => <a key={item.id} href={`?page=${item.id}&lang=${locale}`} className={`nav-link ${item.id === page.id ? 'active' : ''}`} onClick={(event) => { if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(item) }} aria-current={item.id === page.id ? 'page' : undefined}><span className="nav-marker"/><span className="nav-link-text">{item.title[locale]}</span>{item.id === page.id && <ChevronLeft size={14}/>}</a>)}</div>
+              </section>
             })}
         </div>
       </nav>

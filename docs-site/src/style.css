@@ -905,3 +905,23 @@ body { font-family: Inter, Abar, Peyda, Arial, Helvetica, "Segoe UI", Roboto, sa
   .mobile-sidebar .sidebar-category-option > span { font-size: 11px; }
   .mobile-sidebar .sidebar-category-option > small { display: none; }
 }
+
+/* The selected category's contents stay visible; section labels are headings, never dropdowns. */
+.sidebar-panel .nav-subgroup {
+  margin: 0;
+  padding: 9px 0 7px;
+  border-bottom: 1px solid var(--docs-line);
+}
+.sidebar-panel .nav-subgroup:first-of-type { padding-top: 5px; }
+.sidebar-section-title {
+  margin: 0;
+  padding: 5px 9px 6px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.55;
+}
+.sidebar-panel .nav-subgroup.is-current .sidebar-section-title { color: hsl(var(--primary)); }
+.sidebar-panel .nav-group-pages { display: flex; flex-direction: column; gap: 1px; padding: 0 0 2px; padding-inline-start: 6px; }
+.sidebar-panel .nav-group-pages[hidden] { display: none; }
+.sidebar-panel .nav-group-pages .nav-link { min-height: 38px; }
