@@ -1,16 +1,6 @@
 # ARG Change Log
 
-## v0.7.2-dev.1 — 2026-10-27
-
-### Development
-- Development prerelease based on the next patch after main.
-
-## v0.7.1 — 2026-10-27
-
-### Changed
-- Dock the desktop sidebar full-height to the right edge and remove its floating inset, rounded shell, and backdrop blur.
-
-## Unreleased
+## v0.7.2 — 2026-10-28
 
 ### Added
 - Check compatible, fully managed Nodes for new `main` updates on the Nodes page, show per-Node alerts with a direct update action, and retrieve bounded destination update logs through the authenticated Federation protocol.
@@ -42,6 +32,11 @@
 - Let administrators minimize a running panel update into a compact status control; monitoring continues and the full progress view can be reopened without interrupting the update.
 - Rebuild and commit the embedded frontend bundle with UI source changes; CI now fails when `frontend/dist` is stale, preventing Rust releases from silently shipping the previous interface.
 - Fingerprint the service worker from the generated frontend and check for updates when the panel opens, regains focus, or remains active, then reload when a new worker takes control.
+
+## v0.7.1 — 2026-10-27
+
+### Changed
+- Dock the desktop sidebar full-height to the right edge and remove its floating inset, rounded shell, and backdrop blur.
 
 ## v0.7.0 — 2026-10-27
 
