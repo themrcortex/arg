@@ -689,3 +689,53 @@ mark { border-radius:2px; background:hsl(var(--primary) / .25); color:inherit; }
   .page-pager button { width: 50%; min-width: 0; padding: 9px; }
   .page-pager button strong { font-size: 11px; line-height: 1.45; }
 }
+
+/* Improve surface contrast and make the navigation hierarchy easier to scan. */
+:root {
+  --muted-foreground: 222 14% 76%;
+  --docs-line: rgba(255,255,255,.11);
+  --docs-soft: rgba(255,255,255,.055);
+}
+:root[data-theme='light'] {
+  --primary: 249 46% 52%;
+  --muted-foreground: 224 11% 39%;
+  --border: 228 15% 82%;
+  --docs-line: rgba(35,40,60,.12);
+  --docs-soft: rgba(35,40,60,.045);
+}
+.desktop-sidebar { background: hsl(var(--card)); }
+.sidebar-category-rail { background: hsl(var(--muted)); }
+.sidebar-category-option {
+  min-height: 61px;
+  padding-inline: 8px;
+  border-inline-start: 2px solid transparent;
+}
+.sidebar-category-option > span { font-size: 11px; font-weight: 550; line-height: 1.45; }
+.sidebar-category-option > small { font-size: 10px; }
+.sidebar-category-option.is-selected {
+  border-color: transparent;
+  border-inline-start-color: hsl(var(--primary));
+  background: hsl(var(--primary) / .12);
+}
+.sidebar-category-option.is-selected > svg { color: hsl(var(--primary)); }
+.sidebar-panel-heading { background: hsl(var(--card)); }
+.sidebar-panel-heading strong { font-size: 12px; }
+.sidebar-panel .nav-subgroup summary { min-height: 39px; font-size: 11px; font-weight: 550; }
+.sidebar-panel .nav-subgroup .nav-link { min-height: 36px; }
+.sidebar-panel .nav-subgroup .nav-link-text { font-size: 11px; }
+.sidebar-panel .nav-subgroup .nav-link.active { background: hsl(var(--primary) / .13); }
+@media (min-width: 1400px) {
+  .docs-layout { grid-template-columns: 352px minmax(0, 1fr) 208px; }
+  .desktop-sidebar { width: 352px; }
+  .sidebar-category-rail { width: 126px; flex-basis: 126px; }
+}
+@media (max-width: 1399px) and (min-width: 761px) {
+  .docs-layout { grid-template-columns: 318px minmax(0, 1fr); }
+  .desktop-sidebar { width: 318px; }
+  .sidebar-category-rail { width: 112px; flex-basis: 112px; }
+}
+@media (max-width: 760px) {
+  .mobile-sidebar .sidebar-category-rail { width: 102px; flex-basis: 102px; }
+  .mobile-sidebar .sidebar-category-option { min-height: 58px; }
+  .mobile-sidebar .sidebar-category-option > span { font-size: 10px; }
+}
