@@ -6,13 +6,35 @@ use std::{
     os::fd::AsRawFd,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path as FsPath, PathBuf},
+    time::Duration,
 };
 use url::Url;
 
 const SECRET_DIR: &str = "/etc/arg/s3";
 const S3_TRANSFER_DIR: &str = "/var/lib/arg/s3-transfer";
 const MAX_PAGE_SIZE: usize = 1000;
+const MAX_OBJECT_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+const MIN_TRANSFER_FREE_SPACE: u64 = 64 * 1024 * 1024;
+const S3_UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const S3_UPLOAD_MAX_DURATION: Duration = Duration::from_secs(15 * 60);
+const S3_SCAN_MAX_DURATION: Duration = Duration::from_secs(15 * 60);
+const S3_SCAN_MAX_OBJECTS: u64 = 2_000_000;
+const S3_SCAN_QUEUE_CAPACITY: usize = 16;
 static S3_SCAN_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static S3_SCAN_QUEUE: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(S3_SCAN_QUEUE_CAPACITY);
+static S3_UPLOAD_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static S3_DOWNLOAD_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static S3_HELPER_TRANSFER_SEMAPHORE: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(1);
+
+struct TransferPathCleanup(PathBuf);
+
+impl Drop for TransferPathCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 fn invalidate_usage_cache(db: &Connection, connection_id: i64, bucket_name: &str) {
     let _ = db.execute(
@@ -29,6 +51,20 @@ fn usage_scan_allowed(status: Option<&str>, measured_at: Option<i64>, now: i64, 
     if force { return true; }
     let max_age = if status == Some("failed") { 3600 } else { 24 * 3600 };
     age.is_none_or(|seconds| seconds >= max_age)
+}
+
+fn usage_scan_limit_reached(object_count: u64, elapsed: Duration) -> bool {
+    object_count > S3_SCAN_MAX_OBJECTS || elapsed >= S3_SCAN_MAX_DURATION
+}
+
+fn is_s3_transfer_action(action: &str) -> bool {
+    matches!(
+        action,
+        "s3-upload-object"
+            | "s3-download-object"
+            | "s3-upload-local-file"
+            | "s3-download-local-file"
+    )
 }
 
 #[derive(Serialize)]
@@ -509,6 +545,38 @@ fn head_error_means_object_missing(error: &::s3::error::S3Error) -> bool {
     }
 }
 
+fn head_error_confirms_missing_key(error: &::s3::error::S3Error) -> bool {
+    matches!(error, ::s3::error::S3Error::HttpFailWithBody(404, body) if body.to_ascii_lowercase().contains("nosuchkey"))
+}
+
+const VERIFY_MARKER_BODY: &[u8] = b"ARG S3 connection verification marker\n";
+
+#[derive(Debug, PartialEq, Eq)]
+enum VerifyMarkerAction {
+    Create,
+    Reuse,
+    Conflict,
+}
+
+fn verify_marker_action(existing_body: Option<&[u8]>) -> VerifyMarkerAction {
+    match existing_body {
+        None => VerifyMarkerAction::Create,
+        Some(body) if body == VERIFY_MARKER_BODY => VerifyMarkerAction::Reuse,
+        Some(_) => VerifyMarkerAction::Conflict,
+    }
+}
+
+fn verify_marker_bucket(bucket: &Bucket) -> Result<Bucket, String> {
+    let mut headers = bucket.extra_headers.clone();
+    headers.insert(
+        header::IF_NONE_MATCH,
+        axum::http::HeaderValue::from_static("*"),
+    );
+    bucket
+        .with_extra_headers(headers)
+        .map_err(|_| "درخواست امن برای ساخت نشانگر S3 آماده نشد.".to_owned())
+}
+
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     let id = request["id"].as_i64().unwrap_or(0);
     match action {
@@ -892,15 +960,47 @@ fn stop_s3_mount(request: &Value) -> Value {
 
 async fn test_bucket_connection(bucket: &Bucket) -> Value {
     const VERIFY_KEY: &str = "arg-verify";
-    const VERIFY_BODY: &[u8] = b"ARG S3 connection verification marker\n";
 
     let list_objects = bucket
         .list_page(String::new(), Some("/".into()), None, None, Some(1))
         .await
         .is_ok();
 
-    let write_marker = match bucket
-        .put_object_with_content_type(VERIFY_KEY, VERIFY_BODY, "text/plain; charset=utf-8")
+    let existing_marker = match bucket.head_object(VERIFY_KEY).await {
+        Ok((_, status)) if (200..300).contains(&status) => {
+            let mut response = match bucket.get_object_stream(VERIFY_KEY).await {
+                Ok(response) if (200..300).contains(&response.status_code) => response,
+                Ok(_) => return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"Object arg-verify موجود است اما خواندن آن تأیید نشد؛ برای جلوگیری از حذف داده آن را بازنویسی نکردیم."}),
+                Err(error) => return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":format!("Object arg-verify موجود است اما خواندن آن تأیید نشد؛ بازنویسی انجام نشد: {}",helper_error(&error))}),
+            };
+            let mut body = Vec::with_capacity(VERIFY_MARKER_BODY.len());
+            while let Some(chunk) = response.bytes.next().await {
+                let Ok(chunk) = chunk else {
+                    return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"خواندن Object arg-verify ناقص بود؛ برای حفظ داده آن را بازنویسی نکردیم."});
+                };
+                if body.len().saturating_add(chunk.len()) > 1024 {
+                    return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"Object arg-verify بزرگ‌تر از حد انتظار است؛ برای حفظ داده آن را بازنویسی نکردیم."});
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Some(body)
+        }
+        Err(error) if head_error_confirms_missing_key(&error) => None,
+        Ok(_) => return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"وضعیت Object arg-verify قابل‌اعتماد نبود؛ برای جلوگیری از بازنویسی، آزمایش متوقف شد."}),
+        Err(error) => return json!({"ok":false,"status":"failed","checks":{"endpoint":false,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":format!("بررسی امن Object arg-verify ناموفق بود؛ بازنویسی انجام نشد: {}",helper_error(&error))}),
+    };
+    match verify_marker_action(existing_marker.as_deref()) {
+        VerifyMarkerAction::Conflict => return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"marker_persisted":true,"error":"Objectی با نام arg-verify از قبل وجود دارد و محتوای آن با نشانگر ARG فرق می‌کند؛ برای حفظ داده آن را بازنویسی نکردیم."}),
+        VerifyMarkerAction::Reuse => return json!({"ok":true,"status":"degraded","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":true},"marker_key":VERIFY_KEY,"marker_size_bytes":VERIFY_MARKER_BODY.len(),"marker_persisted":true,"message":"نشانگر arg-verify موجود و سالم است؛ دادهٔ موجود حفظ شد. چون نوشتن دوباره انجام نشد، مجوز نوشتن در این آزمایش دوباره بررسی نشده است."}),
+        VerifyMarkerAction::Create => {}
+    }
+
+    let marker_bucket = match verify_marker_bucket(bucket) {
+        Ok(bucket) => bucket,
+        Err(error) => return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":error}),
+    };
+    let write_marker = match marker_bucket
+        .put_object_with_content_type(VERIFY_KEY, VERIFY_MARKER_BODY, "text/plain; charset=utf-8")
         .await
     {
         Ok(response) if response.status_code() < 300 => true,
@@ -937,7 +1037,7 @@ async fn test_bucket_connection(bucket: &Bucket) -> Value {
             "marker_key":VERIFY_KEY,"marker_persisted":true,"error":"فایل arg-verify آپلود شد، اما سرویس‌دهنده مجوز خواندن آن را نداد."
         });
     }
-    let mut body = Vec::with_capacity(VERIFY_BODY.len());
+    let mut body = Vec::with_capacity(VERIFY_MARKER_BODY.len());
     while let Some(chunk) = response.bytes.next().await {
         let Ok(chunk) = chunk else {
             return json!({
@@ -953,7 +1053,7 @@ async fn test_bucket_connection(bucket: &Bucket) -> Value {
         }
         body.extend_from_slice(&chunk);
     }
-    let read_marker = body.as_slice() == VERIFY_BODY;
+    let read_marker = body.as_slice() == VERIFY_MARKER_BODY;
     if !read_marker {
         return json!({
             "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
@@ -976,12 +1076,20 @@ async fn test_bucket_connection(bucket: &Bucket) -> Value {
         "message":message,
         "checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object && (200..300).contains(&head_status),"read_marker":read_marker},
         "marker_key":VERIFY_KEY,
-        "marker_size_bytes":VERIFY_BODY.len(),
+        "marker_size_bytes":VERIFY_MARKER_BODY.len(),
         "marker_persisted":true
     })
 }
 
 async fn execute_network_action(action: &str, request: &Value, secret: &SecretConfig) -> Value {
+    let _transfer_permit = if is_s3_transfer_action(action) {
+        match S3_HELPER_TRANSFER_SEMAPHORE.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => return json!({"ok":false,"error":"یک انتقال S3 دیگر در حال اجراست؛ پس از پایان آن دوباره تلاش کن."}),
+        }
+    } else {
+        None
+    };
     match action {
         "s3-list-buckets" => {
             let (Ok(region), Ok(credentials)) = (s3_region(secret), s3_credentials(secret)) else {
@@ -1048,8 +1156,11 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                 .as_u64()
                 .unwrap_or(200)
                 .clamp(1, MAX_PAGE_SIZE as u64) as usize;
-            if prefix.len() > 1024 || prefix.chars().any(char::is_control) {
-                return json!({"ok":false,"error":"Prefix معتبر نیست."});
+            if prefix.len() > 1024
+                || prefix.chars().any(char::is_control)
+                || token.as_ref().is_some_and(|value| value.len() > 4096 || value.chars().any(char::is_control))
+            {
+                return json!({"ok":false,"error":"Prefix یا صفحهٔ ادامه معتبر نیست."});
             }
             let bucket = match make_bucket(name, secret) {
                 Ok(bucket) => bucket,
@@ -1068,6 +1179,10 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                 Ok((page, _)) => {
                     let key_count =
                         page.contents.len() + page.common_prefixes.as_ref().map_or(0, Vec::len);
+                    let next_token = page.next_continuation_token;
+                    if next_token.as_ref().is_some_and(|value| value.len() > 4096 || value.chars().any(char::is_control)) {
+                        return json!({"ok":false,"error":"توکن صفحهٔ بعد از محدودهٔ امن بزرگ‌تر است."});
+                    }
                     let objects=page.contents.into_iter().map(|object| json!({"key":object.key,"size_bytes":object.size,"last_modified":object.last_modified,"etag":object.e_tag,"storage_class":object.storage_class})).collect::<Vec<_>>();
                     let prefixes = page
                         .common_prefixes
@@ -1075,7 +1190,7 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                         .into_iter()
                         .map(|item| item.prefix)
                         .collect::<Vec<_>>();
-                    json!({"ok":true,"objects":objects,"prefixes":prefixes,"is_truncated":page.is_truncated,"next_token":page.next_continuation_token,"key_count":key_count})
+                    json!({"ok":true,"objects":objects,"prefixes":prefixes,"is_truncated":page.is_truncated,"next_token":next_token,"key_count":key_count})
                 }
                 Err(error) => json!({"ok":false,"error":helper_error(&error)}),
             }
@@ -1091,10 +1206,17 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
             let mut token: Option<String> = None;
             let mut used_bytes: u64 = 0;
             let mut object_count: u64 = 0;
+            let scan_started = tokio::time::Instant::now();
             loop {
+                if usage_scan_limit_reached(object_count, scan_started.elapsed()) {
+                    return json!({"ok":false,"error":"اسکن Bucket به سقف ۲٬۰۰۰٬۰۰۰ Object یا ۱۵ دقیقه رسید؛ آمار ناقص ذخیره نشد."});
+                }
                 match bucket.list_page(String::new(), None, token, None, Some(MAX_PAGE_SIZE)).await {
                     Ok((page, _)) => {
                         for object in page.contents {
+                            if usage_scan_limit_reached(object_count.saturating_add(1), scan_started.elapsed()) {
+                                return json!({"ok":false,"error":"اسکن Bucket به سقف ۲٬۰۰۰٬۰۰۰ Object یا ۱۵ دقیقه رسید؛ آمار ناقص ذخیره نشد."});
+                            }
                             let Some(total) = used_bytes.checked_add(object.size) else {
                                 return json!({"ok":false,"error":"حجم آبجکت‌ها از محدودهٔ قابل محاسبه بیشتر است."});
                             };
@@ -1156,11 +1278,11 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                     value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_graphic())
                 })
                 .unwrap_or("application/octet-stream");
-            let metadata = match validate_transfer_file(path, false) {
+            let metadata = match validate_transfer_file(path, true) {
                 Ok(value) => value,
                 Err(error) => return json!({"ok":false,"error":error}),
             };
-            if metadata.len() > 512 * 1024 * 1024 {
+            if metadata.len() > MAX_OBJECT_UPLOAD_BYTES {
                 return json!({"ok":false,"error":"فایل موقت بارگذاری ناامن یا بزرگ‌تر از حد مجاز است."});
             }
             let bucket = match make_bucket(name, secret) {
@@ -1241,6 +1363,14 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                 size = size.saturating_add(chunk.len() as u64);
                 if size > 2 * 1024 * 1024 * 1024 {
                     return json!({"ok":false,"error":"حجم Object از سقف دانلود 2 GiB بیشتر است."});
+                }
+                if ensure_transfer_space(
+                    FsPath::new(S3_TRANSFER_DIR),
+                    (chunk.len() as u64).saturating_add(MIN_TRANSFER_FREE_SPACE),
+                )
+                .is_err()
+                {
+                    return json!({"ok":false,"error":"برای حفظ ۶۴ MiB فضای امن، ظرفیت کافی برای دانلود S3 وجود ندارد."});
                 }
                 if file.write_all(&chunk).await.is_err() {
                     return json!({"ok":false,"error":"نوشتن فایل دانلود ناموفق بود."});
@@ -1351,10 +1481,17 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                     return json!({"ok":false,"error":"انتقال Object از ارائه‌دهنده قطع شد."});
                 };
                 size = size.saturating_add(chunk.len() as u64);
-                if size > 2 * 1024 * 1024 * 1024 || file.write_all(&chunk).await.is_err() {
+                if size > 2 * 1024 * 1024 * 1024
+                    || ensure_transfer_space(
+                        &parent,
+                        (chunk.len() as u64).saturating_add(MIN_TRANSFER_FREE_SPACE),
+                    )
+                    .is_err()
+                    || file.write_all(&chunk).await.is_err()
+                {
                     drop(file);
                     let _ = fs::remove_file(&target);
-                    return json!({"ok":false,"error":"انتقال از سقف 2 GiB عبور کرد یا نوشتن فایل ناموفق بود."});
+                    return json!({"ok":false,"error":"انتقال از سقف 2 GiB عبور کرد، فضای امن دیسک کافی نبود یا نوشتن فایل ناموفق بود."});
                 }
             }
             if file.sync_all().await.is_err() {
@@ -1385,7 +1522,67 @@ fn prepare_transfer_directory() -> Result<(), String> {
         return Err("پوشهٔ موقت S3 باید یک پوشهٔ واقعی متعلق به سرویس ARG باشد.".into());
     }
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-        .map_err(|_| "تنظیم دسترسی امن پوشهٔ موقت S3 ناموفق بود.".to_string())
+        .map_err(|_| "تنظیم دسترسی امن پوشهٔ موقت S3 ناموفق بود.".to_string())?;
+    cleanup_stale_transfer_files(&directory);
+    Ok(())
+}
+
+fn cleanup_stale_transfer_files(directory: &FsPath) {
+    use std::os::unix::fs::MetadataExt;
+    let now = std::time::SystemTime::now();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.take(64).flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let stale = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > Duration::from_secs(60 * 60));
+        if stale
+            && metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() }
+            && metadata.permissions().mode() & 0o777 == 0o600
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn ensure_transfer_space(path: &FsPath, needed: u64) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("invalid transfer path"))?;
+    let mut stat = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let available = (stat.f_bavail as u128)
+        .saturating_mul(stat.f_frsize as u128)
+        .min(u64::MAX as u128) as u64;
+    if !transfer_space_sufficient(available, needed) {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::StorageFull,
+            "insufficient transfer disk space",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn transfer_space_sufficient(available: u64, incoming_and_reserve: u64) -> bool {
+    available >= incoming_and_reserve
 }
 
 fn validate_transfer_file(path: &str, allow_empty: bool) -> Result<std::fs::Metadata, String> {
@@ -1405,11 +1602,15 @@ fn validate_transfer_file(path: &str, allow_empty: bool) -> Result<std::fs::Meta
     if !metadata.file_type().is_file()
         || metadata.uid() != directory.uid()
         || metadata.permissions().mode() & 0o777 != 0o600
-        || (!allow_empty && metadata.len() == 0)
+        || !transfer_file_size_allowed(metadata.len(), allow_empty)
     {
         return Err("فایل موقت انتقال S3 ناامن یا خالی است.".into());
     }
     Ok(metadata)
+}
+
+fn transfer_file_size_allowed(size: u64, allow_empty: bool) -> bool {
+    allow_empty || size > 0
 }
 
 #[cfg(test)]
@@ -1435,6 +1636,107 @@ mod tests {
             403,
             "AccessDenied".into(),
         )));
+    }
+
+    #[test]
+    fn verify_marker_never_replaces_existing_unrelated_objects() {
+        assert_eq!(verify_marker_action(None), VerifyMarkerAction::Create);
+        assert_eq!(
+            verify_marker_action(Some(VERIFY_MARKER_BODY)),
+            VerifyMarkerAction::Reuse
+        );
+        assert_eq!(
+            verify_marker_action(Some(b"user data")),
+            VerifyMarkerAction::Conflict
+        );
+    }
+
+    #[test]
+    fn verify_marker_upload_uses_an_atomic_create_only_condition() {
+        let credentials = Credentials::new(
+            Some("test-access"),
+            Some("test-secret"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let bucket = Bucket::new(
+            "arg-audit-test",
+            Region::Custom {
+                region: "test-1".into(),
+                endpoint: "https://objects.example.test".into(),
+            },
+            credentials,
+        )
+        .unwrap();
+        let marker_bucket = verify_marker_bucket(&bucket).unwrap();
+        assert_eq!(
+            marker_bucket.extra_headers.get(header::IF_NONE_MATCH).unwrap(),
+            "*"
+        );
+        assert!(bucket.extra_headers.get(header::IF_NONE_MATCH).is_none());
+    }
+
+    #[test]
+    fn verify_marker_requires_explicit_missing_key_evidence_before_creation() {
+        use ::s3::error::S3Error;
+        assert!(head_error_confirms_missing_key(&S3Error::HttpFailWithBody(
+            404,
+            "<Error><Code>NoSuchKey</Code></Error>".into(),
+        )));
+        assert!(!head_error_confirms_missing_key(&S3Error::HttpFailWithBody(
+            404,
+            String::new(),
+        )));
+        assert!(!head_error_confirms_missing_key(&S3Error::HttpFailWithBody(
+            404,
+            "<Error><Code>NoSuchBucket</Code></Error>".into(),
+        )));
+    }
+
+    #[test]
+    fn transfer_space_check_keeps_the_configured_reserve() {
+        assert!(transfer_space_sufficient(
+            MAX_OBJECT_UPLOAD_BYTES + MIN_TRANSFER_FREE_SPACE,
+            MAX_OBJECT_UPLOAD_BYTES + MIN_TRANSFER_FREE_SPACE
+        ));
+        assert!(!transfer_space_sufficient(
+            MAX_OBJECT_UPLOAD_BYTES + MIN_TRANSFER_FREE_SPACE - 1,
+            MAX_OBJECT_UPLOAD_BYTES + MIN_TRANSFER_FREE_SPACE
+        ));
+    }
+
+    #[test]
+    fn transfer_file_size_validation_allows_empty_s3_objects_only_when_requested() {
+        assert!(transfer_file_size_allowed(0, true));
+        assert!(!transfer_file_size_allowed(0, false));
+        assert!(transfer_file_size_allowed(1, false));
+    }
+
+    #[test]
+    fn only_object_transfers_use_the_bounded_helper_transfer_slot() {
+        for action in [
+            "s3-upload-object",
+            "s3-download-object",
+            "s3-upload-local-file",
+            "s3-download-local-file",
+        ] {
+            assert!(is_s3_transfer_action(action));
+        }
+        assert!(!is_s3_transfer_action("s3-list-objects"));
+        assert!(!is_s3_transfer_action("s3-scan-usage"));
+    }
+
+    #[test]
+    fn dropped_transfer_cleanup_removes_temporary_file() {
+        let path = std::env::temp_dir().join(format!("arg-s3-cleanup-{}", token()));
+        std::fs::write(&path, b"temporary").unwrap();
+        {
+            let _cleanup = TransferPathCleanup(path.clone());
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1511,6 +1813,20 @@ mod tests {
         assert!(usage_scan_allowed(Some("measured"), Some(now), now, true));
         assert!(!usage_scan_allowed(Some("scanning"), Some(now - 10), now, true));
         assert!(usage_scan_allowed(Some("scanning"), Some(now - 6 * 3600), now, false));
+    }
+
+    #[test]
+    fn bucket_usage_scan_stops_at_object_and_time_limits() {
+        assert!(!usage_scan_limit_reached(0, Duration::ZERO));
+        assert!(!usage_scan_limit_reached(
+            S3_SCAN_MAX_OBJECTS,
+            S3_SCAN_MAX_DURATION - Duration::from_secs(1)
+        ));
+        assert!(usage_scan_limit_reached(S3_SCAN_MAX_OBJECTS + 1, Duration::ZERO));
+        assert!(usage_scan_limit_reached(
+            0,
+            S3_SCAN_MAX_DURATION
+        ));
     }
 }
 
@@ -1995,6 +2311,18 @@ pub(super) async fn bucket_usage(State(state): State<AppState>, Path(id): Path<i
 }
 
 async fn begin_usage_scan(state: AppState, bucket_id: i64, connection_id: i64, bucket_name: String, force: bool) -> Result<bool, (StatusCode, Json<Value>)> {
+    {
+        let db = state.lock().unwrap();
+        let latest: Option<(String,Option<i64>)> = db.query_row("SELECT scan_status,measured_at FROM s3_usage_snapshots WHERE bucket_id=?1 ORDER BY id DESC LIMIT 1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).ok();
+        if let Some((status, measured_at)) = latest {
+            if !usage_scan_allowed(Some(&status),measured_at,now(),force) { return Ok(false); }
+        } else if !usage_scan_allowed(None,None,now(),force) {
+            return Ok(false);
+        }
+    }
+    let queue_permit = S3_SCAN_QUEUE
+        .try_acquire()
+        .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "صف اسکن مصرف S3 پر است؛ بعداً دوباره تلاش کن."))?;
     let snapshot_id = {
         let db = state.lock().unwrap();
         let latest: Option<(String,Option<i64>)> = db.query_row("SELECT scan_status,measured_at FROM s3_usage_snapshots WHERE bucket_id=?1 ORDER BY id DESC LIMIT 1", [bucket_id], |row| Ok((row.get(0)?,row.get(1)?))).ok();
@@ -2008,7 +2336,15 @@ async fn begin_usage_scan(state: AppState, bucket_id: i64, connection_id: i64, b
         db.last_insert_rowid()
     };
     tokio::spawn(async move {
-        let _scan_permit = S3_SCAN_SEMAPHORE.acquire().await.expect("S3 scan semaphore remains open");
+        let _queue_permit = queue_permit;
+        let _scan_permit = match S3_SCAN_SEMAPHORE.acquire().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                let db = state.lock().unwrap();
+                let _ = db.execute("UPDATE s3_usage_snapshots SET scan_status='failed',measured_at=?1,error='اسکنر در دسترس نیست.' WHERE id=?2", params![now(),snapshot_id]);
+                return;
+            }
+        };
         let result = privileged_request_async(json!({"action":"s3-scan-usage","id":connection_id,"bucket":bucket_name})).await;
         let db = state.lock().unwrap();
         match result {
@@ -2269,6 +2605,9 @@ pub(super) async fn upload_object(
         ));
     }
     prepare_transfer_directory().map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
+    let _upload_permit = S3_UPLOAD_SEMAPHORE
+        .try_acquire()
+        .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "یک انتقال مستقیم S3 در حال اجراست؛ پس از پایان آن دوباره تلاش کن."))?;
     let path = transfer_path();
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -2282,29 +2621,52 @@ pub(super) async fn upload_object(
                 "فایل موقت امن ساخته نشد.",
             )
         })?;
+    let _cleanup = TransferPathCleanup(PathBuf::from(&path));
     let mut stream = body.into_data_stream();
     let mut total = 0u64;
-    while let Some(chunk) = stream.next().await {
+    let upload_started = tokio::time::Instant::now();
+    loop {
+        if upload_started.elapsed() >= S3_UPLOAD_MAX_DURATION {
+            drop(file);
+            return Err(error(StatusCode::REQUEST_TIMEOUT, "بارگذاری S3 از مهلت ۱۵ دقیقه عبور کرد."));
+        }
+        let next = match tokio::time::timeout(S3_UPLOAD_IDLE_TIMEOUT, stream.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                drop(file);
+                return Err(error(StatusCode::REQUEST_TIMEOUT, "برای بارگذاری S3 داده‌ای نرسید؛ دوباره تلاش کن."));
+            }
+        };
+        let Some(chunk) = next else { break };
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(_) => {
                 drop(file);
-                let _ = tokio::fs::remove_file(&path).await;
                 return Err(error(StatusCode::BAD_REQUEST, "دریافت فایل کامل نشد."));
             }
         };
         total = total.saturating_add(chunk.len() as u64);
-        if total > 512 * 1024 * 1024 {
+        if total > MAX_OBJECT_UPLOAD_BYTES {
             drop(file);
-            let _ = tokio::fs::remove_file(&path).await;
             return Err(error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "حداکثر اندازه فایل برای بارگذاری 512 MiB است.",
             ));
         }
+        if ensure_transfer_space(
+            FsPath::new(S3_TRANSFER_DIR),
+            (chunk.len() as u64).saturating_add(MIN_TRANSFER_FREE_SPACE),
+        )
+        .is_err()
+        {
+            drop(file);
+            return Err(error(
+                StatusCode::INSUFFICIENT_STORAGE,
+                "برای حفظ ۶۴ MiB فضای امن، ظرفیت کافی برای بارگذاری S3 وجود ندارد.",
+            ));
+        }
         if file.write_all(&chunk).await.is_err() {
             drop(file);
-            let _ = tokio::fs::remove_file(&path).await;
             return Err(error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ذخیره موقت فایل ناموفق بود.",
@@ -2313,7 +2675,6 @@ pub(super) async fn upload_object(
     }
     if file.sync_all().await.is_err() {
         drop(file);
-        let _ = tokio::fs::remove_file(&path).await;
         return Err(error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "ذخیره موقت فایل کامل نشد.",
@@ -2321,7 +2682,6 @@ pub(super) async fn upload_object(
     }
     drop(file);
     let result=privileged_request_async(json!({"action":"s3-upload-object","id":id,"bucket":query.bucket,"key":query.key,"content_type":query.content_type,"transfer_path":path})).await;
-    let _ = tokio::fs::remove_file(&path).await;
     let result = result?;
     if result["ok"] != true {
         return Err(error(
@@ -2365,6 +2725,9 @@ pub(super) async fn download_object(
         ));
     }
     prepare_transfer_directory().map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
+    let download_permit = S3_DOWNLOAD_SEMAPHORE
+        .try_acquire()
+        .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "یک دانلود مستقیم S3 در حال اجراست؛ پس از پایان آن دوباره تلاش کن."))?;
     let path = transfer_path();
     let file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -2378,17 +2741,14 @@ pub(super) async fn download_object(
                 "فایل موقت امن ساخته نشد.",
             )
         })?;
+    let cleanup = TransferPathCleanup(PathBuf::from(&path));
     drop(file);
     let result=privileged_request_async(json!({"action":"s3-download-object","id":id,"bucket":query.bucket,"key":query.key,"transfer_path":path})).await;
     let result = match result {
         Ok(value) => value,
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&path).await;
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     if result["ok"] != true {
-        let _ = tokio::fs::remove_file(&path).await;
         return Err(error(
             StatusCode::BAD_GATEWAY,
             result["error"]
@@ -2421,7 +2781,11 @@ pub(super) async fn download_object(
         }
     ))
     .unwrap_or_else(|_| header::HeaderValue::from_static("attachment; filename=\"object\""));
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let stream = tokio_util::io::ReaderStream::new(file).map(move |chunk| {
+        let _keep_path_until_stream_drop = &cleanup;
+        let _keep_transfer_permit_until_stream_drop = &download_permit;
+        chunk
+    });
     let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -2443,10 +2807,6 @@ pub(super) async fn download_object(
             ),
         );
     }
-    let cleanup = path.clone();
-    tokio::spawn(async move {
-        let _ = tokio::fs::remove_file(cleanup).await;
-    });
     Ok(response)
 }
 
