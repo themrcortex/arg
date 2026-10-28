@@ -925,3 +925,80 @@ body { font-family: Inter, Abar, Peyda, Arial, Helvetica, "Segoe UI", Roboto, sa
 .sidebar-panel .nav-group-pages { display: flex; flex-direction: column; gap: 1px; padding: 0 0 2px; padding-inline-start: 6px; }
 .sidebar-panel .nav-group-pages[hidden] { display: none; }
 .sidebar-panel .nav-group-pages .nav-link { min-height: 38px; }
+
+/* Once a category is active, keep the category rail compact and float its labels on demand. */
+.sidebar-category-rail.is-collapsed {
+  position: relative;
+  z-index: 4;
+  width: 58px;
+  flex-basis: 58px;
+  gap: 5px;
+  overflow: visible;
+  padding: 10px 7px;
+}
+.sidebar-category-rail.is-collapsed .sidebar-category-option {
+  position: relative;
+  display: grid;
+  width: 42px;
+  min-height: 42px;
+  flex: 0 0 42px;
+  grid-template-columns: 1fr;
+  justify-items: center;
+  padding: 0;
+}
+.sidebar-category-rail.is-collapsed .sidebar-category-option > svg { grid-row: auto; }
+.sidebar-category-rail.is-collapsed .sidebar-category-option > span,
+.sidebar-category-rail.is-collapsed .sidebar-category-option > small {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+.sidebar-category-rail.is-collapsed .sidebar-category-option::after {
+  position: absolute;
+  z-index: 10;
+  top: 50%;
+  inset-inline-start: calc(100% + 9px);
+  width: max-content;
+  max-width: 240px;
+  padding: 8px 11px;
+  transform: translateY(-50%) scale(.97);
+  transform-origin: center;
+  border: 1px solid var(--docs-line);
+  border-radius: 5px;
+  background: hsl(var(--card));
+  box-shadow: 0 8px 24px hsl(220 25% 5% / .2);
+  color: hsl(var(--foreground));
+  content: attr(data-label);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease, transform .12s ease;
+  white-space: nowrap;
+}
+.sidebar-category-rail.is-collapsed .sidebar-category-option:hover::after,
+.sidebar-category-rail.is-collapsed .sidebar-category-option:focus-visible::after {
+  transform: translateY(-50%) scale(1);
+  opacity: 1;
+}
+.sidebar-category-rail.is-collapsed .sidebar-category-option:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+@media (min-width: 1400px) {
+  .docs-layout { grid-template-columns: 352px minmax(0, 1fr) 208px; }
+  .desktop-sidebar { width: 352px; }
+}
+@media (max-width: 1399px) and (min-width: 761px) {
+  .docs-layout { grid-template-columns: 340px minmax(0, 1fr); }
+  .desktop-sidebar { width: 340px; }
+}
+@media (max-width: 760px) {
+  .mobile-sidebar .sidebar-category-rail.is-collapsed { width: 54px; flex-basis: 54px; padding-inline: 5px; }
+  .mobile-sidebar .sidebar-category-rail.is-collapsed .sidebar-category-option { width: 42px; flex-basis: 42px; }
+}

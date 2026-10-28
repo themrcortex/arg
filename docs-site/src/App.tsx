@@ -340,11 +340,11 @@ export default function App() {
       <div className="sidebar-heading"><div className="sidebar-heading-icon"><BookOpen size={17}/></div><div className="sidebar-heading-copy min-w-0"><p>{isFa ? 'راهنمای ARG' : 'ARG docs'}</p><span>{texts.menu} · {readingOrder.length} {texts.allDocs}</span></div><button className="mobile-close" onClick={() => setMobileNav(false)} aria-label={texts.close}><X size={18}/></button></div>
       <label className="side-search"><Search size={15}/><input ref={mobile ? mobileSearchRef : undefined} aria-label={texts.search} placeholder={texts.search} value={query} onChange={(event) => setQuery(event.target.value)}/><kbd>/</kbd></label>
       <nav className="side-nav sidebar-two-stage" aria-label={texts.menu}>
-        <div className="sidebar-category-rail" role="group" aria-label={isFa ? 'انتخاب دسته‌بندی' : 'Choose a category'}>
+        <div className={`sidebar-category-rail ${selectedCategory ? 'is-collapsed' : ''}`} role="group" aria-label={isFa ? 'انتخاب دسته‌بندی' : 'Choose a category'}>
           {navigation.map((category) => {
             const Icon = categoryIcons[category.id as keyof typeof categoryIcons] || BookOpen
             const count = category.children.reduce((total, section) => total + section.pages.length, 0)
-            return <button key={category.id} className={`sidebar-category-option ${selectedCategory === category.id ? 'is-selected' : ''}`} type="button" aria-pressed={selectedCategory === category.id} onClick={() => selectCategory(category.id)}>
+            return <button key={category.id} className={`sidebar-category-option ${selectedCategory === category.id ? 'is-selected' : ''}`} type="button" aria-label={category.title[locale]} title={category.title[locale]} data-label={category.title[locale]} aria-pressed={selectedCategory === category.id} onClick={() => selectCategory(category.id)}>
               <Icon size={15}/><span>{category.title[locale]}</span><small>{count}</small>
             </button>
           })}
