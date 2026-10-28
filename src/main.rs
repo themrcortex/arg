@@ -2694,11 +2694,21 @@ async fn update_user(
     if !input.enabled {
         let _ = db.execute("DELETE FROM sessions WHERE user_id=?1", [id]);
     }
+    let revoked_api_keys = api_keys::revoke_if_owner_ineligible(
+        &db,
+        id,
+        &input.role,
+        input.enabled,
+    )
+    .map_err(db_error)?;
     audit(
         &db,
         &actor.username,
         "user.update",
-        &format!("id={id} role={} enabled={}", input.role, input.enabled),
+        &format!(
+            "id={id} role={} enabled={} revoked_api_keys={revoked_api_keys}",
+            input.role, input.enabled
+        ),
     );
     Ok(Json(json!({"ok":true})))
 }

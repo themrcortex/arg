@@ -48,6 +48,21 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+pub(super) fn revoke_if_owner_ineligible(
+    db: &Connection,
+    user_id: i64,
+    role: &str,
+    enabled: bool,
+) -> rusqlite::Result<usize> {
+    if enabled && role == "admin" {
+        return Ok(0);
+    }
+    db.execute(
+        "UPDATE public_api_keys SET revoked_at=?1 WHERE user_id=?2 AND revoked_at IS NULL",
+        params![now(), user_id],
+    )
+}
+
 pub(super) async fn list(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
@@ -187,7 +202,9 @@ fn authorize(
         })?;
     let hash = session_hash(bearer);
     let record: Option<(i64, String, i64)> = db.query_row(
-        "SELECT id,scopes_json,expires_at FROM public_api_keys WHERE token_hash=?1 AND revoked_at IS NULL",
+        "SELECT k.id,k.scopes_json,k.expires_at FROM public_api_keys k
+         JOIN users u ON u.id=k.user_id AND u.role='admin' AND u.enabled=1
+         WHERE k.token_hash=?1 AND k.revoked_at IS NULL",
         [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).optional().map_err(db_error)?;
     let Some((id, scopes_json, expires_at)) = record else {
@@ -316,7 +333,7 @@ pub(super) async fn openapi() -> Json<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ListQuery, authorize, migrate, pagination};
+    use super::{ListQuery, authorize, migrate, pagination, revoke_if_owner_ineligible};
     use crate::{session_hash, token};
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
     use rusqlite::Connection;
@@ -396,5 +413,44 @@ mod tests {
             })
             .unwrap();
         assert_ne!(persisted, raw);
+    }
+
+    #[test]
+    fn api_keys_are_revoked_when_owner_loses_administrator_access() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT,role TEXT,enabled INTEGER);
+             INSERT INTO users VALUES(1,'admin','admin',1);",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        let raw = format!("arg_live_{}", token());
+        db.execute(
+            "INSERT INTO public_api_keys(user_id,label,token_hash,token_prefix,scopes_json,created_at,expires_at)
+             VALUES(1,'test',?1,'arg_live_test','[\"apps:read\"]',?2,?3)",
+            rusqlite::params![session_hash(&raw), crate::now(), crate::now() + 3600],
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {raw}")).unwrap(),
+        );
+        assert!(authorize(&db, &headers, "apps:read").is_ok());
+
+        db.execute("UPDATE users SET role='viewer' WHERE id=1", [])
+            .unwrap();
+        assert_eq!(revoke_if_owner_ineligible(&db, 1, "viewer", true).unwrap(), 1);
+        assert!(matches!(
+            authorize(&db, &headers, "apps:read"),
+            Err((StatusCode::UNAUTHORIZED, _))
+        ));
+
+        db.execute("UPDATE users SET role='admin',enabled=1 WHERE id=1", [])
+            .unwrap();
+        assert!(matches!(
+            authorize(&db, &headers, "apps:read"),
+            Err((StatusCode::UNAUTHORIZED, _))
+        ));
     }
 }
