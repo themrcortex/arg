@@ -5,7 +5,51 @@ use std::{
 };
 
 const MAX_ENTRIES: usize = 500;
+const MAX_RAW_SCAN_ENTRIES: usize = 10_000;
 const MAX_TEXT_BYTES: usize = 512 * 1024;
+
+struct TreeEntryInfo {
+    name: String,
+    is_directory: bool,
+    is_file: bool,
+    size_bytes: u64,
+}
+
+fn visible_tree_rows(
+    entries: impl IntoIterator<Item = TreeEntryInfo>,
+    prefix: &str,
+    raw_scan_truncated: bool,
+) -> (Vec<Value>, bool) {
+    let mut rows = Vec::new();
+    let mut visible_truncated = false;
+    for entry in entries {
+        if hidden_or_sensitive(&entry.name) || (!entry.is_directory && !entry.is_file) {
+            continue;
+        }
+        if rows.len() >= MAX_ENTRIES {
+            visible_truncated = true;
+            continue;
+        }
+        let relative = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}/{}", entry.name)
+        };
+        rows.push(json!({
+            "name": entry.name,
+            "path": relative,
+            "kind": if entry.is_directory { "directory" } else { "file" },
+            "size_bytes": if entry.is_file { entry.size_bytes } else { 0 }
+        }));
+    }
+    rows.sort_by(|left, right| {
+        left["kind"]
+            .as_str()
+            .cmp(&right["kind"].as_str())
+            .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
+    });
+    (rows, visible_truncated || raw_scan_truncated)
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -126,8 +170,13 @@ pub(super) async fn tree(
     }
     let entries = fs::read_dir(&directory)
         .map_err(|_| error(StatusCode::FORBIDDEN, "فهرست فایل‌های این مسیر خوانده نشد."))?;
-    let mut rows = Vec::new();
-    for entry in entries.take(MAX_ENTRIES + 1) {
+    let mut candidates = Vec::new();
+    let mut raw_scan_truncated = false;
+    for (index, entry) in entries.take(MAX_RAW_SCAN_ENTRIES + 1).enumerate() {
+        if index >= MAX_RAW_SCAN_ENTRIES {
+            raw_scan_truncated = true;
+            break;
+        }
         let entry = entry.map_err(|_| {
             error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -147,24 +196,16 @@ pub(super) async fn tree(
         if !metadata.is_dir() && !metadata.is_file() {
             continue;
         }
-        let relative = if query.path.is_empty() {
-            name.clone()
-        } else {
-            format!("{}/{}", query.path, name)
-        };
-        rows.push(json!({"name":name,"path":relative,"kind":if metadata.is_dir(){"directory"}else{"file"},"size_bytes":if metadata.is_file(){metadata.len()}else{0}}));
+        candidates.push(TreeEntryInfo {
+            name,
+            is_directory: metadata.is_dir(),
+            is_file: metadata.is_file(),
+            size_bytes: metadata.len(),
+        });
     }
-    rows.sort_by(|left, right| {
-        left["kind"]
-            .as_str()
-            .cmp(&right["kind"].as_str())
-            .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
-    });
-    if rows.len() > MAX_ENTRIES {
-        rows.truncate(MAX_ENTRIES);
-    }
+    let (rows, truncated) = visible_tree_rows(candidates, &query.path, raw_scan_truncated);
     Ok(Json(
-        json!({"release_id":release_id,"source_commit":commit,"path":query.path,"entries":rows,"truncated":rows.len()==MAX_ENTRIES,"read_only":true}),
+        json!({"release_id":release_id,"source_commit":commit,"path":query.path,"entries":rows,"truncated":truncated,"read_only":true}),
     ))
 }
 
@@ -203,6 +244,60 @@ pub(super) async fn file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tree_listing_filters_hidden_entries_before_visible_limit_and_sorts() {
+        let hidden = (0..700)
+            .map(|index| TreeEntryInfo {
+                name: format!(".hidden-{index:04}"),
+                is_directory: false,
+                is_file: true,
+                size_bytes: 1,
+            })
+            .collect::<Vec<_>>();
+        let visible = vec![
+            TreeEntryInfo {
+                name: "z-last.txt".into(),
+                is_directory: false,
+                is_file: true,
+                size_bytes: 2,
+            },
+            TreeEntryInfo {
+                name: "a-first.txt".into(),
+                is_directory: false,
+                is_file: true,
+                size_bytes: 3,
+            },
+        ];
+        let (rows, truncated) = visible_tree_rows(hidden.into_iter().chain(visible), "src", false);
+        let names = rows
+            .iter()
+            .filter_map(|row| row["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a-first.txt", "z-last.txt"]);
+        assert_eq!(rows[0]["path"], "src/a-first.txt");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn tree_listing_caps_visible_entries_and_reports_both_truncation_causes() {
+        let visible = (0..=MAX_ENTRIES)
+            .map(|index| TreeEntryInfo {
+                name: format!("file-{index:04}.txt"),
+                is_directory: false,
+                is_file: true,
+                size_bytes: index as u64,
+            })
+            .collect::<Vec<_>>();
+        let (rows, visible_truncated) = visible_tree_rows(visible, "", false);
+        assert_eq!(rows.len(), MAX_ENTRIES);
+        assert!(visible_truncated);
+
+        let (rows, raw_truncated) = visible_tree_rows(Vec::new(), "", true);
+        assert!(rows.is_empty());
+        assert!(raw_truncated);
+    }
+
     #[test]
     fn rejects_traversal_and_hidden_files() {
         assert!(!safe_relative("../etc/passwd"));
