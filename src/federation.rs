@@ -274,9 +274,12 @@ fn validate_endpoint(value: &str) -> Result<url::Url, String> {
             || host.eq_ignore_ascii_case("metadata.google.internal")
             || host.eq_ignore_ascii_case("metadata.google")
             || host.eq_ignore_ascii_case("instance-data.ec2.internal");
-        let blocked_ip = host.parse::<std::net::IpAddr>().ok().is_some_and(|ip| match ip {
-            std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_link_local(),
-            std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_unicast_link_local(),
+        let blocked_ip = host.parse::<std::net::IpAddr>().ok().is_some_and(|ip| {
+            is_cloud_metadata_address(ip)
+                || match ip {
+                    std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_link_local(),
+                    std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_unicast_link_local(),
+                }
         });
         if blocked_name || blocked_ip {
             return Err("آدرس‌های loopback، link-local و metadata برای اتصال Federation مجاز نیستند.".into());
@@ -287,13 +290,64 @@ fn validate_endpoint(value: &str) -> Result<url::Url, String> {
 
 fn address_is_private(address: std::net::IpAddr) -> bool {
     match address {
-        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast(),
+        std::net::IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_broadcast()
+        }
         std::net::IpAddr::V6(ip) => {
             if ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() || ip.is_multicast() || ip.is_unique_local() { return true; }
             if let Some(mapped) = ip.to_ipv4() { return address_is_private(std::net::IpAddr::V4(mapped)); }
             false
         }
     }
+}
+
+fn is_cloud_metadata_address(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(ip) => ip == std::net::Ipv4Addr::new(100, 100, 100, 200),
+        std::net::IpAddr::V6(ip) => {
+            ip == std::net::Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254)
+                || ip.to_ipv4().is_some_and(|mapped| is_cloud_metadata_address(std::net::IpAddr::V4(mapped)))
+        }
+    }
+}
+
+fn validate_resolved_addresses(
+    addresses: &[std::net::SocketAddr],
+    allow_private: bool,
+) -> Result<(), String> {
+    if addresses.is_empty() {
+        return Err("میزبان Node هیچ IP معتبری ندارد.".into());
+    }
+    if addresses
+        .iter()
+        .any(|address| is_cloud_metadata_address(address.ip()))
+    {
+        return Err("نشانی سرویس metadata ابری برای اتصال Federation مسدود است.".into());
+    }
+    if addresses
+        .iter()
+        .any(|address| address_is_private(address.ip()) && !allow_private)
+    {
+        return Err("این نام میزبان به شبکهٔ خصوصی resolve می‌شود؛ اگر Node متعلق به شبکهٔ خصوصی مورداعتماد است، اجازهٔ اتصال خصوصی را فعال کن.".into());
+    }
+    if addresses.iter().any(|address| match address.ip() {
+        std::net::IpAddr::V4(ip) => {
+            ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_multicast()
+        }
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() || ip.is_multicast()
+        }
+    }) {
+        return Err("آدرس loopback، link-local یا metadata برای اتصال Federation مجاز نیست.".into());
+    }
+    Ok(())
 }
 
 async fn resolve_endpoint_addresses(endpoint: &url::Url, allow_private: bool) -> Result<Vec<std::net::SocketAddr>, String> {
@@ -307,16 +361,7 @@ async fn resolve_endpoint_addresses(endpoint: &url::Url, allow_private: bool) ->
             .map_err(|_| "نام میزبان Node به IP تبدیل نشد.".to_owned())?
             .collect::<Vec<_>>()
     };
-    if addresses.is_empty() { return Err("میزبان Node هیچ IP معتبری ندارد.".into()); }
-    if addresses.iter().any(|address| address_is_private(address.ip()) && !allow_private) {
-        return Err("این نام میزبان به شبکهٔ خصوصی resolve می‌شود؛ اگر Node متعلق به شبکهٔ خصوصی مورداعتماد است، اجازهٔ اتصال خصوصی را فعال کن.".into());
-    }
-    if addresses.iter().any(|address| match address.ip() {
-        std::net::IpAddr::V4(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.is_multicast(),
-        std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() || ip.is_multicast(),
-    }) {
-        return Err("آدرس loopback، link-local یا metadata برای اتصال Federation مجاز نیست.".into());
-    }
+    validate_resolved_addresses(&addresses, allow_private)?;
     Ok(addresses)
 }
 
@@ -2361,12 +2406,13 @@ pub(super) async fn sync_controller_public_name(
 #[cfg(test)]
 mod tests {
     use super::{
-        address_is_private, known_capability, node_identity_matches, node_update_route,
+        address_is_private, is_cloud_metadata_address, known_capability, node_identity_matches,
+        node_update_route,
         resolve_workspace_node_id, role_valid, scopes_for_mode, session_scope_for,
         terminal_mode_is_root, workspace_session_scope_for,
         should_forget_node_after_revoke_failure, supported_capabilities, valid_server_uuid,
-        valid_workspace_api_path, validate_endpoint, validate_public_name, workspace_key,
-        NodeUpdateRoute,
+        valid_workspace_api_path, validate_endpoint, validate_public_name,
+        validate_resolved_addresses, workspace_key, NodeUpdateRoute,
     };
     use axum::http::StatusCode;
     use rusqlite::Connection;
@@ -2400,6 +2446,8 @@ mod tests {
         assert!(validate_endpoint("https://node.example.test/api").is_err());
         assert!(validate_endpoint("https://127.0.0.1").is_err());
         assert!(validate_endpoint("https://169.254.169.254").is_err());
+        assert!(validate_endpoint("https://100.100.100.200").is_err());
+        assert!(validate_endpoint("https://[fd00:ec2::254]").is_err());
         assert!(validate_endpoint("https://metadata.google.internal").is_err());
     }
 
@@ -2489,9 +2537,35 @@ mod tests {
         assert!(address_is_private("10.1.2.3".parse().unwrap()));
         assert!(address_is_private("172.16.2.3".parse().unwrap()));
         assert!(address_is_private("192.168.1.2".parse().unwrap()));
+        assert!(address_is_private("100.100.100.201".parse().unwrap()));
         assert!(address_is_private("169.254.169.254".parse().unwrap()));
         assert!(address_is_private("::1".parse().unwrap()));
         assert!(!address_is_private("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn federation_blocks_cloud_metadata_even_for_explicit_private_networks() {
+        let metadata_v4: std::net::IpAddr = "100.100.100.200".parse().unwrap();
+        let metadata_v6: std::net::IpAddr = "fd00:ec2::254".parse().unwrap();
+        let mapped_metadata_v4: std::net::IpAddr = "::ffff:100.100.100.200".parse().unwrap();
+        assert!(is_cloud_metadata_address(metadata_v4));
+        assert!(is_cloud_metadata_address(metadata_v6));
+        assert!(is_cloud_metadata_address(mapped_metadata_v4));
+
+        for ip in [metadata_v4, metadata_v6, mapped_metadata_v4] {
+            let address = std::net::SocketAddr::new(ip, 443);
+            assert!(validate_resolved_addresses(&[address], true).is_err());
+        }
+    }
+
+    #[test]
+    fn federation_private_endpoint_opt_in_does_not_allow_cgnat_by_default() {
+        let private = std::net::SocketAddr::new("100.100.100.201".parse().unwrap(), 8443);
+        let public = std::net::SocketAddr::new("1.1.1.1".parse().unwrap(), 8443);
+        assert!(validate_resolved_addresses(&[private], false).is_err());
+        assert!(validate_resolved_addresses(&[private], true).is_ok());
+        assert!(validate_resolved_addresses(&[public], false).is_ok());
+        assert!(validate_resolved_addresses(&[], true).is_err());
     }
 
     #[test]
