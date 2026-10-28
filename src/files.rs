@@ -3,6 +3,15 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 const MAX_FILE_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EDITOR_FILE_BYTES: usize = 1024 * 1024;
+static DISK_SCAN_LOCK: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
+
+fn try_disk_scan_permit() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    DISK_SCAN_LOCK
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "A disk scan is already running; retry when it finishes.".to_owned())
+}
 
 #[derive(Deserialize)]
 pub(super) struct FileQuery {
@@ -95,6 +104,7 @@ pub(super) async fn scan_disk(
     headers: HeaderMap,
     Json(input): Json<DiskScanInput>,
 ) -> ApiResult {
+    check_origin(&headers)?;
     let actor = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
@@ -113,6 +123,8 @@ pub(super) async fn scan_disk(
     if !["standard", "deep"].contains(&input.mode.as_str()) {
         return Err(error(StatusCode::BAD_REQUEST, "حالت اسکن معتبر نیست."));
     }
+    let _scan_permit = try_disk_scan_permit()
+        .map_err(|message| error(StatusCode::TOO_MANY_REQUESTS, &message))?;
     let response = privileged_request_async(json!({"action":"file-disk-scan", "path":path, "mode":input.mode})).await?;
     if response["ok"] != true {
         return Err(error(
@@ -603,6 +615,14 @@ fn save_file_atomically(target: &std::path::Path, content: &[u8]) -> Result<(), 
 }
 
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
+    let _disk_scan_permit = if action == "file-disk-scan" {
+        match try_disk_scan_permit() {
+            Ok(permit) => Some(permit),
+            Err(error) => return json!({"ok":false,"error":error}),
+        }
+    } else {
+        None
+    };
     let result = match action {
         "file-disk-scan" => request["path"]
             .as_str()
@@ -1244,7 +1264,8 @@ mod tests {
     use super::{
         copy_tree, create_zip_archive, execute_action, extract_zip_archive,
         file_content_limit, file_content_within_limit, max_base64_encoded_bytes, remove_tree,
-        safe_name, scan_disk_usage, valid_mode, BASE64, MAX_FILE_UPLOAD_BYTES,
+        safe_name, scan_disk_usage, try_disk_scan_permit, valid_mode, BASE64,
+        MAX_FILE_UPLOAD_BYTES,
     };
     use base64::Engine;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1313,6 +1334,67 @@ mod tests {
         let encoded_limit = max_base64_encoded_bytes(1024 * 1024);
         assert_eq!(encoded_limit, 1_398_104);
         assert_eq!(file_content_limit("save"), Some(1024 * 1024));
+    }
+
+    #[test]
+    fn only_one_privileged_disk_scan_can_run_at_a_time() {
+        let first = try_disk_scan_permit().expect("first scan should acquire the permit");
+        assert!(try_disk_scan_permit().is_err());
+        drop(first);
+        assert!(try_disk_scan_permit().is_ok());
+    }
+
+    #[tokio::test]
+    async fn disk_scan_requires_same_origin_before_admin_or_helper_work() {
+        use super::{scan_disk, DiskScanInput};
+        use axum::{
+            extract::State,
+            http::{header, HeaderMap, HeaderValue, StatusCode},
+            Json,
+        };
+        use rusqlite::Connection;
+        use std::sync::{Arc, Mutex};
+
+        let state = State(Arc::new(Mutex::new(
+            Connection::open_in_memory().expect("database"),
+        )));
+        let input = || {
+            Json(DiskScanInput {
+                path: "/invalid-for-test".into(),
+                mode: "standard".into(),
+            })
+        };
+        let missing_origin = scan_disk(state.clone(), HeaderMap::new(), input()).await;
+        assert_eq!(
+            missing_origin.expect_err("Origin is required").0,
+            StatusCode::FORBIDDEN
+        );
+
+        let mut foreign_headers = HeaderMap::new();
+        foreign_headers.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
+        foreign_headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example"),
+        );
+        let foreign_origin = scan_disk(state.clone(), foreign_headers, input()).await;
+        assert_eq!(
+            foreign_origin.expect_err("foreign Origin is rejected").0,
+            StatusCode::FORBIDDEN
+        );
+
+        let mut same_origin_headers = HeaderMap::new();
+        same_origin_headers.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
+        same_origin_headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://panel.example.test"),
+        );
+        let unauthenticated = scan_disk(state, same_origin_headers, input()).await;
+        assert_eq!(
+            unauthenticated
+                .expect_err("admin session is still required")
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[test]
