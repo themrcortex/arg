@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 8 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
+Updated through phase 9 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -34,9 +34,12 @@ Updated through phase 8 on `audit/development-hardening`; source baseline `eec27
 | DB-001 | P2 | Fixed | Root password, session revocation, foreign-key cascades and required Audit entry now commit atomically | `root_password_reset_updates_password_revokes_session_grants_and_audits_atomically`; `root_password_reset_rolls_back_if_audit_insert_fails` | `f8539e3` |
 | DB-002 | P2 | Fixed | SQL row/query failures now propagate instead of silently omitting records or reporting false zero summaries | `workspace_project_and_environment_lists_propagate_malformed_row_errors`; `s3_connection_reads_distinguish_missing_rows_from_database_decode_errors`; full Rust suite | `b31c9b7`, `6a98549` |
 | DB-003 | P2 | Audit required | Distributed module migrations are mostly additive/idempotent, but the full startup sequence has no central version ledger or interruption/rollback failure-injection coverage | Existing per-module idempotency tests only; full migration interruption test pending | — |
+| UI-001 | P2 | Fixed | Request epochs prevent stale dashboard ranges, application workspaces, deployment detail and S3 object responses from replacing current state | `an older asynchronous response cannot replace newer page state`; `changing the resource invalidates its in-flight request`; `npm run check` / build | `2d26692` |
+| UI-002 | P2 | Fixed | Deployment Job polling is single-flight, has a 10-second deadline and aborts on unmount | `single-flight polling rejects overlap and stale releases cannot unlock a newer request`; frontend checks/build | `2d26692` |
+| UI-003 | P2 | Audit required | Shared API wrapper has no route-class deadline policy; no unsafe global timeout was applied | Source review; short-read, stream and durable-job timeout classes still need design/tests | — |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - S3 endpoint pinning and privileged file path TOCTOU are open high-priority items. They must be fixed or mitigated and tested before release.
-- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`. No live Cloudflare or Certbot/Nginx host integration was available; phases 9–15 remain unreviewed or incomplete.
+- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`; Phase 9 frontend state, async requests and interaction lifecycles are documented in `09-frontend.md`. No live Cloudflare, Certbot/Nginx host, browser E2E, screen-reader, or multi-Node workspace integration was available; phases 10–15 remain unreviewed or incomplete.

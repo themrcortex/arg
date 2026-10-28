@@ -39,6 +39,9 @@ This is a running index for completed phases only. It is not a statement that th
 | DB-001 | Root password reset could return failure after partially changing account state | CONFIRMED | Fixed atomically in `f8539e3` | [08-database.md](08-database.md) |
 | DB-002 | Database row/query errors were hidden as partial or zero-valued API data | CONFIRMED | Fixed in workspace, monitoring, network, S3, trust-key, Federation, doctor and related list readers (`b31c9b7`, `6a98549`) | [08-database.md](08-database.md) |
 | DB-003 | Startup migrations lack a central version ledger and full-sequence rollback test | AUDIT_REQUIRED | Open; failure-injection and historical-schema rollback compatibility remain unverified | [08-database.md](08-database.md) |
+| UI-001 | Older async responses could replace dashboard, workspace, Job-detail, or S3 object-browser state | CONFIRMED | Fixed with request epochs and response-order regression tests in `2d26692` | [09-frontend.md](09-frontend.md) |
+| UI-002 | Deployment status polling could start overlapping reads when the endpoint exceeded the poll interval | CONFIRMED | Fixed with a tested single-flight gate, timeout, and abort on cleanup in `2d26692` | [09-frontend.md](09-frontend.md) |
+| UI-003 | Shared API wrapper has no route-class timeout policy | AUDIT_REQUIRED | Global change deferred; long streams and job operations need different deadlines | [09-frontend.md](09-frontend.md) |
 
 ## P3 / Low
 
@@ -54,4 +57,4 @@ This is a running index for completed phases only. It is not a statement that th
 
 ## Open audit coverage
 
-Phases 0–8 have been reviewed and documented. Phases 9–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
+Phases 0–9 have been reviewed and documented. Phases 10–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
