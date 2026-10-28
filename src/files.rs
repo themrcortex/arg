@@ -3,6 +3,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 const MAX_FILE_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EDITOR_FILE_BYTES: usize = 1024 * 1024;
+const MAX_SCAN_LARGEST_FILES: usize = 100;
+const MAX_SCAN_LARGEST_DIRECTORIES: usize = 100;
+const MAX_SCAN_DIRECTORY_CHILDREN: usize = 2000;
 static DISK_SCAN_LOCK: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(1)));
 
@@ -375,6 +378,50 @@ fn list_directory(path: &str) -> Result<Value, String> {
     )
 }
 
+struct LargestScanEntries {
+    capacity: usize,
+    entries: std::collections::BinaryHeap<std::cmp::Reverse<(u64, String)>>,
+}
+
+impl LargestScanEntries {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    fn insert(&mut self, path: String, bytes: u64) {
+        let item = (bytes, path);
+        if self.entries.len() < self.capacity {
+            self.entries.push(std::cmp::Reverse(item));
+            return;
+        }
+        if self
+            .entries
+            .peek()
+            .is_some_and(|std::cmp::Reverse(smallest)| &item > smallest)
+        {
+            self.entries.pop();
+            self.entries.push(std::cmp::Reverse(item));
+        }
+    }
+
+    fn into_sorted(self) -> Vec<(String, u64)> {
+        let mut entries = self
+            .entries
+            .into_iter()
+            .map(|std::cmp::Reverse((bytes, path))| (path, bytes))
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left_path, left_bytes), (right_path, right_bytes)| {
+            right_bytes
+                .cmp(left_bytes)
+                .then_with(|| left_path.cmp(right_path))
+        });
+        entries
+    }
+}
+
 struct DiskScanState {
     device: u64,
     entries: usize,
@@ -383,43 +430,49 @@ struct DiskScanState {
     max_duration: std::time::Duration,
     max_depth: usize,
     truncated: bool,
-    files: Vec<(String, u64)>,
-    directories: Vec<(String, u64)>,
+    largest_files: LargestScanEntries,
+    largest_directories: LargestScanEntries,
+    directory_children: LargestScanEntries,
+    directory_children_seen: usize,
     seen_files: std::collections::HashSet<(u64, u64)>,
 }
 
-fn scan_directory_size(path: &std::path::Path, depth: usize, state: &mut DiskScanState) -> u64 {
+fn scan_directory_size(
+    path: &std::path::Path,
+    depth: usize,
+    state: &mut DiskScanState,
+) -> (u64, bool) {
     use std::os::unix::fs::MetadataExt;
     if depth > state.max_depth
         || state.entries >= state.max_entries
         || state.started.elapsed() >= state.max_duration
     {
         state.truncated = true;
-        return 0;
+        return (0, false);
     }
     state.entries += 1;
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return 0;
+        return (0, false);
     };
     if metadata.dev() != state.device || metadata.file_type().is_symlink() {
-        return 0;
+        return (0, false);
     }
     if metadata.is_file() {
         if state.seen_files.insert((metadata.dev(), metadata.ino())) {
             let allocated = metadata.blocks().saturating_mul(512);
             state
-                .files
-                .push((path.to_string_lossy().into_owned(), allocated));
-            return allocated;
+                .largest_files
+                .insert(path.to_string_lossy().into_owned(), allocated);
+            return (allocated, false);
         }
-        return 0;
+        return (0, false);
     }
     if !metadata.is_dir() {
-        return 0;
+        return (0, false);
     }
     let mut total = 0_u64;
     let Ok(entries) = std::fs::read_dir(path) else {
-        return 0;
+        return (0, false);
     };
     for entry in entries {
         if state.entries >= state.max_entries || state.started.elapsed() >= state.max_duration {
@@ -437,13 +490,19 @@ fn scan_directory_size(path: &std::path::Path, depth: usize, state: &mut DiskSca
         {
             continue;
         }
-        let size = scan_directory_size(&child, depth + 1, state);
+        let (size, is_directory) = scan_directory_size(&child, depth + 1, state);
         total = total.saturating_add(size);
+        if depth == 0 && is_directory {
+            state.directory_children_seen = state.directory_children_seen.saturating_add(1);
+            state
+                .directory_children
+                .insert(child.to_string_lossy().into_owned(), size);
+        }
     }
     state
-        .directories
-        .push((path.to_string_lossy().into_owned(), total));
-    total
+        .largest_directories
+        .insert(path.to_string_lossy().into_owned(), total);
+    (total, true)
 }
 
 fn scan_disk_usage(path: &str, mode: &str) -> Result<Value, String> {
@@ -467,11 +526,13 @@ fn scan_disk_usage(path: &str, mode: &str) -> Result<Value, String> {
         max_duration,
         max_depth,
         truncated: false,
-        files: Vec::new(),
-        directories: Vec::new(),
+        largest_files: LargestScanEntries::new(MAX_SCAN_LARGEST_FILES),
+        largest_directories: LargestScanEntries::new(MAX_SCAN_LARGEST_DIRECTORIES),
+        directory_children: LargestScanEntries::new(MAX_SCAN_DIRECTORY_CHILDREN),
+        directory_children_seen: 0,
         seen_files: std::collections::HashSet::new(),
     };
-    let total_bytes = scan_directory_size(&root, 0, &mut state);
+    let (total_bytes, _) = scan_directory_size(&root, 0, &mut state);
     let c_root =
         std::ffi::CString::new(root.as_os_str().as_bytes()).map_err(|_| "مسیر معتبر نیست.")?;
     let mut volume = unsafe { std::mem::zeroed::<libc::statvfs>() };
@@ -486,34 +547,27 @@ fn scan_disk_usage(path: &str, mode: &str) -> Result<Value, String> {
         } else {
             (0, 0, 0)
         };
-    state.files.sort_by(|a, b| b.1.cmp(&a.1));
-    state.directories.sort_by(|a, b| b.1.cmp(&a.1));
-    let mut directory_children = state
-        .directories
-        .iter()
-        .filter(|(child, _)| {
-            std::path::Path::new(child).parent() == Some(root.as_path())
-                && std::path::Path::new(child) != root.as_path()
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    directory_children.sort_by(|left, right| right.1.cmp(&left.1));
-    let directory_children_truncated = directory_children.len() > 2000;
-    directory_children.truncate(2000);
-    let directory_children = directory_children
+    let directory_children_truncated = state.directory_children_seen > MAX_SCAN_DIRECTORY_CHILDREN;
+    let directory_children = std::mem::replace(
+        &mut state.directory_children,
+        LargestScanEntries::new(MAX_SCAN_DIRECTORY_CHILDREN),
+    )
+        .into_sorted()
         .into_iter()
         .map(|(path, bytes)| json!({"path":path,"bytes":bytes}))
         .collect::<Vec<_>>();
-    let largest_files = state
-        .files
+    let largest_files = std::mem::replace(
+        &mut state.largest_files,
+        LargestScanEntries::new(MAX_SCAN_LARGEST_FILES),
+    )
+        .into_sorted()
         .into_iter()
-        .take(100)
         .map(|(path, bytes)| json!({"path":path,"bytes":bytes}))
         .collect::<Vec<_>>();
     let largest_directories = state
-        .directories
+        .largest_directories
+        .into_sorted()
         .into_iter()
-        .take(100)
         .map(|(path, bytes)| json!({"path":path,"bytes":bytes}))
         .collect::<Vec<_>>();
     let usage_percent = if volume_total == 0 {
@@ -1264,7 +1318,7 @@ mod tests {
     use super::{
         copy_tree, create_zip_archive, execute_action, extract_zip_archive,
         file_content_limit, file_content_within_limit, max_base64_encoded_bytes, remove_tree,
-        safe_name, scan_disk_usage, try_disk_scan_permit, valid_mode, BASE64,
+        safe_name, scan_disk_usage, try_disk_scan_permit, valid_mode, LargestScanEntries, BASE64,
         MAX_FILE_UPLOAD_BYTES,
     };
     use base64::Engine;
@@ -1440,6 +1494,32 @@ mod tests {
         assert!(paths.contains(&beta.to_str().unwrap()));
         assert!(!paths.contains(&nested.to_str().unwrap()));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_scan_keeps_only_bounded_top_entries_in_deterministic_order() {
+        let mut entries = LargestScanEntries::new(3);
+        for (path, bytes) in [
+            ("/tmp/a", 10),
+            ("/tmp/b", 20),
+            ("/tmp/c", 30),
+            ("/tmp/e", 30),
+            ("/tmp/d", 15),
+            ("/tmp/f", 5),
+        ] {
+            entries.insert(path.to_owned(), bytes);
+        }
+
+        let sorted = entries.into_sorted();
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(
+            sorted,
+            vec![
+                ("/tmp/c".to_owned(), 30),
+                ("/tmp/e".to_owned(), 30),
+                ("/tmp/b".to_owned(), 20),
+            ]
+        );
     }
 
     #[test]
