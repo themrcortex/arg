@@ -1078,7 +1078,6 @@ pub(super) async fn check_nginx_domains(
     headers: HeaderMap,
     Query(query): Query<NginxDomainCheckQuery>,
 ) -> ApiResult {
-    check_origin(&headers)?;
     {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
@@ -1117,6 +1116,123 @@ pub(super) async fn check_nginx_domains(
         }
     }
     Ok(Json(json!({"domains":results})))
+}
+
+#[cfg(test)]
+mod domain_check_tests {
+    use super::{check_nginx_domains, NginxDomainCheckQuery};
+    use crate::{session_hash, AppState};
+    use axum::{
+        extract::{Query, State},
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+    };
+    use rusqlite::{params, Connection};
+    use std::sync::{Arc, Mutex};
+
+    fn admin_state() -> (AppState, String) {
+        let db = Connection::open_in_memory().expect("in-memory database");
+        db.execute_batch(
+            "CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT,role TEXT,enabled INTEGER);
+             CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER,expires_at INTEGER,last_seen INTEGER);
+             CREATE TABLE audit(id INTEGER PRIMARY KEY,at INTEGER,actor TEXT,action TEXT,detail TEXT);
+             INSERT INTO users VALUES(1,'admin','admin',1);
+             INSERT INTO users VALUES(2,'viewer','viewer',1);",
+        )
+        .expect("minimal auth schema");
+        let raw_token = "nginx-domain-check-test-session".to_owned();
+        db.execute(
+            "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?1,1,?2)",
+            params![session_hash(&raw_token), i64::MAX],
+        )
+        .expect("test session");
+        db.execute(
+            "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?1,2,?2)",
+            params![session_hash("viewer-session"), i64::MAX],
+        )
+        .expect("viewer test session");
+        (Arc::new(Mutex::new(db)), raw_token)
+    }
+
+    #[tokio::test]
+    async fn domain_check_get_works_with_or_without_origin_and_keeps_admin_auth() {
+        let (state, token) = admin_state();
+        let mut without_origin = HeaderMap::new();
+        without_origin.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
+        without_origin.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("arg_session={token}"))
+                .expect("valid test cookie"),
+        );
+        let result = check_nginx_domains(
+            State(state.clone()),
+            without_origin,
+            Query(NginxDomainCheckQuery {
+                hosts: "invalid..example".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("invalid host should be rejected").0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let mut with_origin = HeaderMap::new();
+        with_origin.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
+        with_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://panel.example.test"),
+        );
+        with_origin.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("arg_session={token}"))
+                .expect("valid test cookie"),
+        );
+        let result = check_nginx_domains(
+            State(state),
+            with_origin,
+            Query(NginxDomainCheckQuery {
+                hosts: "invalid..example".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("invalid host should be rejected").0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let (state, _) = admin_state();
+        let result = check_nginx_domains(
+            State(state),
+            HeaderMap::new(),
+            Query(NginxDomainCheckQuery {
+                hosts: "invalid..example".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("anonymous request must be rejected").0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let (state, _) = admin_state();
+        let mut viewer_headers = HeaderMap::new();
+        viewer_headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("arg_session=viewer-session"),
+        );
+        let result = check_nginx_domains(
+            State(state),
+            viewer_headers,
+            Query(NginxDomainCheckQuery {
+                hosts: "invalid..example".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            result.expect_err("viewer request must be rejected").0,
+            StatusCode::FORBIDDEN
+        );
+    }
 }
 
 pub(super) async fn get_nginx_site(
