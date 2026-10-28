@@ -59,7 +59,7 @@ If a lock appears stale, check for a real process or systemd job before clearing
 
 The **main** branch tracks the stable line; **development** receives earlier changes and has higher regression risk. Use main in production. The selected branch is the updater's source for the next revision; inspect the fetched branch/commit and release notes after switching. Choose development only to test a specific fix and keep rollback available.
 
-**Fast update** keeps Rust build artifacts on the server to shorten future builds, at the cost of disk space. **Full update** clears/rebuilds build/cache files; it uses less retained disk but compiles longer. Retained `target` output can consume several GiB. Choose Full on low-disk hosts and Fast for frequent deployments with sufficient free space.
+**Fast update** keeps release artifacts and Rust dependency caches, then incrementally compiles ARG's application crate. Source-only updates are usually shorter, at the cost of disk space. The first Fast build after a **Full update**, an empty cache, or a `Cargo.lock` change can still take a long time while dependencies are compiled. Fast uses a lower optimization level for ARG's application crate; dependencies keep the normal Release profile. **Full update** clears the old cache, makes a fully optimized Release build, then removes the new cache. It takes longer but retains less build data. Retained `target` output can consume several GiB. Choose Full on low-disk hosts and Fast for frequent deployments with sufficient free space.
 
 ## Progress, cancel, and rollback
 

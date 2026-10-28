@@ -13,15 +13,16 @@
 ## Unreleased
 
 ### Added
-- Add configurable Node package build/start scripts (selected by manifest name only) and a per-app HTTP health-check path; running services can be safely regenerated and health-verified.
-- Persist bounded deployment job output and stage events with cursor pagination, including recovery notes for older queued jobs.
-- Show update alerts for managed Nodes, open the matching update dialog from the alert, and transfer bounded remote update logs and stage metadata.
-- Add private GitHub deployment through repository-scoped Ed25519 Deploy Keys, managed SSH keys, and per-application deployment settings.
-- Add an optional ARG Mesh topology widget based on live Node probes, with measured latency, payload and TLS transport details.
-- Add scheduled, integrity-checked database backups with configurable intervals, run history, retention, and audit events.
-- Add configurable HTTPS panel ports with conflict checks, UFW updates, external reachability confirmation, and rollback on failed health checks.
+- Check compatible, fully managed Nodes for new `main` updates on the Nodes page, show per-Node alerts with a direct update action, and retrieve bounded destination update logs through the authenticated Federation protocol.
+- Add an administrator SSH key manager and private GitHub deployment using repository-scoped Ed25519 Deploy Keys; private keys stay on the selected VPS, while public keys can be copied into GitHub.
+- Add an optional, live ARG Mesh topology widget to the multi-server dashboard, with real probe/response animations, latency and response-payload measurements, and TLS transport details.
+- Schedule automatic, integrity-checked ARG database backups with configurable intervals, automatic-only retention, visible run status, and audit events.
+- Change the panel's HTTPS listening port independently of its certificate from Settings; validate port conflicts, update UFW, require browser confirmation of external reachability, and restore the previous port automatically if the new port cannot be reached within 90 seconds.
 
 ### Changed
+- Make Fast updates reuse Rust Release dependency artifacts and incrementally compile the ARG binary crate; keep Complete updates fully optimized and cache-clearing.
+- Make HTTP panel-port changes validate availability and HTTP/HTTPS conflicts, then roll back the configuration if restart, endpoint checks, or the legacy reverse-proxy update fails.
+- Show paired Node and authorized controller names, endpoint origins, compatibility, saved health state, and connection timestamps in ARG Doctor; count the actual `healthy` Federation state as connected.
 - Harden legacy deployment database migrations so existing jobs gain missing runtime columns without losing queued work.
 - Use the minimum Rust optimization level on VPSs with under 2 GiB available memory and provision bounded temporary swap for compilation when disk space and kernel support allow it; remove the swap after the build.
 - Improve legacy Node workspace API compatibility and error handling across application, DNS, database, and diagnostic pages.

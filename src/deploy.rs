@@ -2824,6 +2824,31 @@ mod tests {
         let step: String = db.query_row("SELECT step FROM deployment_job_steps WHERE job_id='old-job'", [], |row| row.get(0)).unwrap();
         assert_eq!(step,"recovered");
     }
+    #[test]
+    fn legacy_deployment_jobs_gain_runtime_columns_without_data_loss() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);
+             CREATE TABLE deployment_jobs (
+                id TEXT PRIMARY KEY, application_id TEXT NOT NULL, owner_server_uuid TEXT NOT NULL,
+                actor TEXT NOT NULL, state TEXT NOT NULL, source_json TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL, created_at INTEGER NOT NULL
+             );
+             INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,created_at)
+             VALUES ('old-job','app','server','admin','queued','{}','key',10);",
+        ).unwrap();
+        migrate(&db).unwrap();
+        let columns = {
+            let mut statement = db.prepare("PRAGMA table_info(deployment_jobs)").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(1)).unwrap()
+                .collect::<Result<std::collections::HashSet<_>, _>>().unwrap()
+        };
+        for column in ["healthcheck_file", "attempt", "cancel_requested", "source_commit", "updated_at"] {
+            assert!(columns.contains(column), "missing migrated column {column}");
+        }
+        let state: String = db.query_row("SELECT state FROM deployment_jobs WHERE id='old-job'", [], |row| row.get(0)).unwrap();
+        assert_eq!(state, "queued");
+    }
 
     #[test]
     fn failed_runtime_activation_restores_only_a_release_inside_the_app_root() {
