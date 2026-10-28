@@ -2519,6 +2519,11 @@ fn nginx_issue_ssl(
                 "دامنهٔ {domain} در server_name همین سایت نیست. ابتدا دامنه‌های سایت را ذخیره و دوباره بررسی کن."
             ));
         }
+        if nginx_domain_is_claimed(domain, name)? {
+            return Err(format!(
+                "دامنهٔ {domain} در فایل Nginx دیگری هم تعریف شده است؛ برای جلوگیری از تغییر server block اشتباه، ابتدا تداخل را برطرف کن."
+            ));
+        }
     }
     let panel_domain = fs::read_to_string("/etc/arg/https-domain")
         .unwrap_or_default()
@@ -3100,34 +3105,55 @@ fn node_proxy_config(app_id: &str, domain: &str, port: u16) -> String {
 }
 
 fn nginx_domain_is_claimed(domain: &str, own_site: &str) -> Result<bool, String> {
-    for directory in [NGINX_AVAILABLE_DIR, "/etc/nginx/conf.d"] {
-        let path = std::path::Path::new(directory);
-        let entries = match fs::read_dir(path) {
+    let directories = [
+        std::path::Path::new(NGINX_AVAILABLE_DIR),
+        std::path::Path::new("/etc/nginx/conf.d"),
+    ];
+    nginx_domain_claimed_in_directories(domain, own_site, &directories)
+}
+
+fn nginx_domain_claimed_in_directories(
+    domain: &str,
+    own_site: &str,
+    directories: &[&std::path::Path],
+) -> Result<bool, String> {
+    for directory in directories {
+        let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.to_string()),
         };
         for entry in entries {
             let entry = entry.map_err(|error| error.to_string())?;
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
             if entry.file_name().to_str() == Some(own_site)
-                || !entry.file_type().map_err(|error| error.to_string())?.is_file()
+                || !(file_type.is_file() || file_type.is_symlink())
             {
                 continue;
             }
             let metadata = entry.metadata().map_err(|error| error.to_string())?;
-            if metadata.len() > 512 * 1024 {
+            if !metadata.is_file() {
                 continue;
             }
+            if metadata.len() > 512 * 1024 {
+                return Err(format!(
+                    "نمی‌توان تداخل دامنه را بررسی کرد؛ فایل Nginx {} از 512 KiB بزرگ‌تر است.",
+                    entry.file_name().to_string_lossy()
+                ));
+            }
             let content = fs::read_to_string(entry.path()).map_err(|error| error.to_string())?;
-            if nginx_server_names(&content)
-                .iter()
-                .any(|name| server_name_overlaps(name, domain))
-            {
+            if nginx_config_claims_domain(&content, domain) {
                 return Ok(true);
             }
         }
     }
     Ok(false)
+}
+
+fn nginx_config_claims_domain(content: &str, domain: &str) -> bool {
+    nginx_server_names(content)
+        .iter()
+        .any(|name| server_name_overlaps(name, domain))
 }
 
 #[cfg(test)]
@@ -3179,6 +3205,68 @@ mod node_proxy_tests {
         assert!(server_name_overlaps("*.example.com", "v1.api.example.com"));
         assert!(!server_name_overlaps("*.other.com", "api.example.com"));
         assert!(!server_name_overlaps("example.com", "api.example.com"));
+    }
+
+    #[test]
+    fn ssl_domain_conflict_detection_covers_literal_and_wildcard_server_names() {
+        assert!(super::nginx_config_claims_domain(
+            "server { server_name api.example.com; }",
+            "api.example.com"
+        ));
+        assert!(super::nginx_config_claims_domain(
+            "server { server_name *.example.com; }",
+            "api.example.com"
+        ));
+        assert!(!super::nginx_config_claims_domain(
+            "server { server_name other.example.com; }",
+            "api.example.com"
+        ));
+    }
+
+    #[test]
+    fn oversized_nginx_config_fails_closed_during_domain_conflict_check() {
+        use std::{fs, time::SystemTime};
+        let directory = std::env::temp_dir().join(format!(
+            "arg-nginx-domain-audit-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("large.conf"), vec![b'#'; 512 * 1024 + 1]).unwrap();
+        let result = super::nginx_domain_claimed_in_directories(
+            "api.example.com",
+            "arg-site",
+            &[directory.as_path()],
+        );
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(result.unwrap_err().contains("512 KiB"));
+    }
+
+    #[test]
+    fn domain_conflict_check_includes_symlinked_nginx_fragments() {
+        use std::{fs, time::SystemTime};
+        let directory = std::env::temp_dir().join(format!(
+            "arg-nginx-domain-symlink-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("target.conf");
+        fs::write(&target, "server { server_name api.example.com; }").unwrap();
+        std::os::unix::fs::symlink(&target, directory.join("linked.conf")).unwrap();
+        let result = super::nginx_domain_claimed_in_directories(
+            "api.example.com",
+            "arg-site",
+            &[directory.as_path()],
+        );
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(result.unwrap());
     }
 }
 
