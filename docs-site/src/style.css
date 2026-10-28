@@ -271,7 +271,6 @@ body { background: hsl(var(--background)); font-size: 15px; }
 .inline-search-results strong { font-size:12px; }
 .inline-search-results span { display:-webkit-box; overflow:hidden; color:hsl(var(--muted-foreground)); font-size:10px; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
 mark { border-radius:2px; background:hsl(var(--primary) / .25); color:inherit; }
-.docs-app[dir='rtl'] .breadcrumbs svg { transform:scaleX(-1); }
 
 /* Documentation sidebar redesign: a distinct glass navigation surface with a readable three-level tree. */
 .desktop-sidebar {
@@ -772,6 +771,9 @@ mark { border-radius:2px; background:hsl(var(--primary) / .25); color:inherit; }
 body { font-family: Inter, Abar, Peyda, Arial, Helvetica, "Segoe UI", Roboto, sans-serif; }
 .docs-app[dir='rtl'] { font-family: Peyda, Abar, "Noto Sans Arabic", Tahoma, Arial, sans-serif; }
 .docs-app[dir='ltr'] { font-family: Inter, Arial, Helvetica, "Segoe UI", Roboto, sans-serif; }
+.breadcrumbs { flex-wrap: wrap; direction: inherit; }
+.breadcrumbs > span { unicode-bidi: isolate; }
+.breadcrumbs > svg { flex: 0 0 auto; }
 .topbar { border-color: var(--docs-line); background: hsl(var(--background) / .98); backdrop-filter: none; }
 .brand-mark { border-radius: 5px; border-color: hsl(var(--primary) / .4); background: transparent; color: hsl(var(--primary)); }
 .brand-name, .hero-copy h1, .article-heading h1, .article-content h2, .article-content h3, .article-content h4 { color: #fffce1; }

@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, Code2, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Settings2, Shield, Sun, X } from 'lucide-react'
+import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BookOpen, Boxes, ChevronDown, ChevronLeft, ChevronRight, Code2, Command, Container, Database, ExternalLink, Github, Globe2, Menu, Moon, Network, Search, Settings2, Shield, Sun, X } from 'lucide-react'
 import { groups, isMarkdownPageLink, navigation, pages, pageNeighbors, pageTrail, readingOrder, resolveMarkdownPageLink, resolvePageId, type DocPage, type Locale } from './catalog'
 import { Badge } from './components/ui/badge'
 import { ARG_VERSION } from './version'
@@ -432,7 +432,7 @@ export default function App() {
     <div className="docs-layout">
       <aside className="desktop-sidebar">{renderSidebar()}</aside>
       <main id="article" className={`article-column ${pageLoading ? 'is-transitioning' : ''}`} key={`${locale}-${page.id}`}>
-        <div className="breadcrumbs"><span>{trail[0]?.title[locale] || groupsList[page.group]}</span><ChevronLeft size={13}/><span>{trail[1]?.title[locale] || page.title[locale]}</span><ChevronLeft size={13}/><span>{page.title[locale]}</span></div>
+        <nav className="breadcrumbs" aria-label={isFa ? 'مسیر صفحه' : 'Breadcrumb'} dir={isFa ? 'rtl' : 'ltr'}><span>{trail[0]?.title[locale] || groupsList[page.group]}</span>{isFa ? <ChevronLeft size={13}/> : <ChevronRight size={13}/>}<span>{trail[1]?.title[locale] || page.title[locale]}</span>{isFa ? <ChevronLeft size={13}/> : <ChevronRight size={13}/>}<span aria-current="page">{page.title[locale]}</span></nav>
         {page.id === 'overview' && <section className="hero-card" aria-labelledby="home-title">
           <div className="hero-copy">
             <p className="hero-kicker"><span className="hero-kicker-mark"><BookOpen size={14}/></span>{isFa ? 'مستندات رسمی ARG' : 'ARG DOCUMENTATION'}</p>
