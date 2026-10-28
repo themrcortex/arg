@@ -1,6 +1,6 @@
 # Audit remediation status
 
-Updated through phase 7 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
+Updated through phase 8 on `audit/development-hardening`; source baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
 
 | ID | Severity | Status | Implemented fix | Regression test | Commit |
 |---|---|---|---|---|---|
@@ -31,9 +31,12 @@ Updated through phase 7 on `audit/development-hardening`; source baseline `eec27
 | DNS-002 | P2 | Fixed | Escaped CAA quote/backslash characters in the presentation string while preserving structured `data.value` | `escapes_caa_presentation_string_without_changing_structured_value` | `f423309` |
 | NGINX-001 | P2 | Fixed | Domain conflict scan includes symlinked regular config fragments, ignores the selected site only in sites-available, and fails closed on oversized candidates | `domain_conflict_check_includes_symlinked_nginx_fragments`; `domain_conflict_check_ignores_own_site_only_in_sites_available`; `oversized_nginx_config_fails_closed_during_domain_conflict_check` | `40ab081`, `df57120` |
 | NGINX-002 | P2 | Likely / mitigated | SSL issuance now rejects names already claimed by another scanned Nginx file; Certbot duplicate-vhost selection still needs VM verification | `ssl_domain_conflict_detection_covers_literal_and_wildcard_server_names` | `40ab081`, `df57120` |
+| DB-001 | P2 | Fixed | Root password, session revocation, foreign-key cascades and required Audit entry now commit atomically | `root_password_reset_updates_password_revokes_session_grants_and_audits_atomically`; `root_password_reset_rolls_back_if_audit_insert_fails` | `f8539e3` |
+| DB-002 | P2 | Fixed | SQL row/query failures now propagate instead of silently omitting records or reporting false zero summaries | `workspace_project_and_environment_lists_propagate_malformed_row_errors`; `s3_connection_reads_distinguish_missing_rows_from_database_decode_errors`; full Rust suite | `b31c9b7`, `6a98549` |
+| DB-003 | P2 | Audit required | Distributed module migrations are mostly additive/idempotent, but the full startup sequence has no central version ledger or interruption/rollback failure-injection coverage | Existing per-module idempotency tests only; full migration interruption test pending | — |
 
 ## Remaining verification
 
 - Real systemd install/upgrade verification is not available in this workspace. PRIV-001 assumes the installer-generated unit name `arg.service` and should be validated on clean Debian and Ubuntu test VMs before release.
 - S3 endpoint pinning and privileged file path TOCTOU are open high-priority items. They must be fixed or mitigated and tested before release.
-- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`. No live Cloudflare or Certbot/Nginx host integration was available; phases 8–15 remain unreviewed or incomplete.
+- Phase 7 was reviewed and documented in `07-nginx-ssl-dns.md`; Phase 8 database work is documented in `08-database.md`. No live Cloudflare or Certbot/Nginx host integration was available; phases 9–15 remain unreviewed or incomplete.

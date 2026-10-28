@@ -36,6 +36,9 @@ This is a running index for completed phases only. It is not a statement that th
 | DNS-002 | CAA presentation strings did not escape quote/backslash characters | CONFIRMED | Fixed in `f423309` | [07-nginx-ssl-dns.md](07-nginx-ssl-dns.md) |
 | NGINX-001 | Domain conflict scan skipped included symlinks and silently ignored oversized configs | CONFIRMED | Fixed in `40ab081`, same-name follow-up in `df57120` | [07-nginx-ssl-dns.md](07-nginx-ssl-dns.md) |
 | NGINX-002 | SSL issuance accepted a domain that another server block might also claim | LIKELY | Added a preflight conflict check; live Certbot behavior still needs a disposable-host test | [07-nginx-ssl-dns.md](07-nginx-ssl-dns.md) |
+| DB-001 | Root password reset could return failure after partially changing account state | CONFIRMED | Fixed atomically in `f8539e3` | [08-database.md](08-database.md) |
+| DB-002 | Database row/query errors were hidden as partial or zero-valued API data | CONFIRMED | Fixed in workspace, monitoring, network, S3, trust-key, Federation, doctor and related list readers (`b31c9b7`, `6a98549`) | [08-database.md](08-database.md) |
+| DB-003 | Startup migrations lack a central version ledger and full-sequence rollback test | AUDIT_REQUIRED | Open; failure-injection and historical-schema rollback compatibility remain unverified | [08-database.md](08-database.md) |
 
 ## P3 / Low
 
@@ -51,4 +54,4 @@ This is a running index for completed phases only. It is not a statement that th
 
 ## Open audit coverage
 
-Phases 0–7 have been reviewed and documented. Phases 8–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
+Phases 0–8 have been reviewed and documented. Phases 9–15 remain unreviewed or incomplete and may add findings. Open P1 audit items remain; this index is not a clean full-project security assessment.
