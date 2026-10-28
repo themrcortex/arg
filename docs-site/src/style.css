@@ -740,17 +740,17 @@ mark { border-radius:2px; background:hsl(var(--primary) / .25); color:inherit; }
   .mobile-sidebar .sidebar-category-option > span { font-size: 10px; }
 }
 
-/* GSAP-inspired docs skin: ink-black surfaces, warm paper text, and a focused green accent. */
+/* Ink surfaces, readable Persian typography, and a clear blue documentation accent. */
 :root {
   color-scheme: dark;
   --background: 150 7% 6%;
   --foreground: 54 14% 69%;
   --card: 150 6% 9%;
-  --primary: 145 100% 45%;
+  --primary: 215 100% 70%;
   --muted: 150 5% 12%;
   --muted-foreground: 54 9% 57%;
   --border: 150 4% 19%;
-  --accent: 145 22% 14%;
+  --accent: 215 28% 15%;
   --docs-line: #282a29;
   --docs-soft: rgba(255,252,225,.045);
   --docs-code: #1c1e1d;
@@ -760,16 +760,18 @@ mark { border-radius:2px; background:hsl(var(--primary) / .25); color:inherit; }
   --background: 54 100% 94%;
   --foreground: 150 6% 16%;
   --card: 54 100% 98%;
-  --primary: 145 100% 31%;
+  --primary: 218 78% 47%;
   --muted: 54 30% 90%;
   --muted-foreground: 150 4% 36%;
   --border: 150 5% 75%;
-  --accent: 145 28% 91%;
+  --accent: 215 55% 92%;
   --docs-line: rgba(22,27,24,.16);
   --docs-soft: rgba(22,27,24,.045);
   --docs-code: #f1efd8;
 }
-body { font-family: Inter, Arial, Helvetica, "Segoe UI", Roboto, sans-serif; }
+body { font-family: Inter, Abar, Peyda, Arial, Helvetica, "Segoe UI", Roboto, sans-serif; }
+.docs-app[dir='rtl'] { font-family: Peyda, Abar, "Noto Sans Arabic", Tahoma, Arial, sans-serif; }
+.docs-app[dir='ltr'] { font-family: Inter, Arial, Helvetica, "Segoe UI", Roboto, sans-serif; }
 .topbar { border-color: var(--docs-line); background: hsl(var(--background) / .98); backdrop-filter: none; }
 .brand-mark { border-radius: 5px; border-color: hsl(var(--primary) / .4); background: transparent; color: hsl(var(--primary)); }
 .brand-name, .hero-copy h1, .article-heading h1, .article-content h2, .article-content h3, .article-content h4 { color: #fffce1; }
@@ -814,3 +816,42 @@ body { font-family: Inter, Arial, Helvetica, "Segoe UI", Roboto, sans-serif; }
 .hero-start-link:hover, .hero-start-link:focus-visible { border-color: hsl(var(--primary) / .35); background: hsl(var(--primary) / .07); }
 .hero-start-number { border-radius: 3px; }
 .hero-facts code { color: hsl(var(--primary)); }
+
+/* Give the two navigation stages enough room and a stronger reading order. */
+.sidebar-category-rail { padding: 10px 9px 14px; }
+.sidebar-category-option {
+  min-height: 66px;
+  grid-template-columns: 21px minmax(0, 1fr);
+  gap: 5px 8px;
+  padding: 8px 9px;
+}
+.sidebar-category-option > svg { width: 17px; height: 17px; }
+.sidebar-category-option > span { font-size: 12px; font-weight: 600; line-height: 1.5; }
+.sidebar-category-option > small { font-size: 10px; }
+.sidebar-category-option.is-selected { background: hsl(var(--primary) / .14); }
+.sidebar-panel { padding-inline: 12px; }
+.sidebar-panel-heading { min-height: 58px; margin-inline: -12px; padding-inline: 14px; }
+.sidebar-panel-heading strong { font-size: 13px; }
+.sidebar-panel-heading span { font-size: 10px; }
+.sidebar-panel .nav-subgroup summary { min-height: 42px; padding-inline: 9px; font-size: 12px; }
+.sidebar-panel .nav-subgroup .nav-group-pages { padding-inline-start: 8px; }
+.sidebar-panel .nav-subgroup .nav-link { min-height: 39px; padding-inline: 9px; }
+.sidebar-panel .nav-subgroup .nav-link-text { font-size: 12px; line-height: 1.55; }
+.sidebar-panel .nav-subgroup .nav-link.active { background: hsl(var(--primary) / .15); }
+@media (min-width: 1400px) {
+  .docs-layout { grid-template-columns: 374px minmax(0, 1fr) 208px; }
+  .desktop-sidebar { width: 374px; }
+  .sidebar-category-rail { width: 138px; flex-basis: 138px; }
+}
+@media (max-width: 1399px) and (min-width: 761px) {
+  .docs-layout { grid-template-columns: 340px minmax(0, 1fr); }
+  .desktop-sidebar { width: 340px; }
+  .sidebar-category-rail { width: 126px; flex-basis: 126px; }
+}
+@media (max-width: 760px) {
+  .mobile-sidebar .sidebar-category-rail { width: 112px; flex-basis: 112px; }
+  .mobile-sidebar .sidebar-category-option { min-height: 62px; padding-inline: 6px; }
+  .mobile-sidebar .sidebar-category-option > span { font-size: 11px; }
+  .mobile-sidebar .sidebar-panel { padding-inline: 9px; }
+  .mobile-sidebar .sidebar-panel-heading { margin-inline: -9px; padding-inline: 10px; }
+}
