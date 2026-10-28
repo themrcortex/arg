@@ -22,7 +22,7 @@ Metric history differs from Audit: metrics store CPU/RAM/disk/network samples; A
 
 ## Panel and host settings
 
-- **Panel port:** change the bind port; the browser must use the new endpoint and provider firewall must be updated.
+- **Panel ports:** HTTP and HTTPS ports are configured separately. HTTP changes run in the background; ARG checks for a free port and an HTTP/HTTPS collision, then probes the new endpoint. If the restart or health check fails, the prior port is restored. When TLS is active, HTTP is the backend listener; continue using the HTTPS address.
 - **Timezone:** an IANA zone such as `Asia/Tehran` for schedules and display; backend timestamps remain epoch/UTC based.
 - **TLS/Certificate:** certificate/key paths, hostname or IP, HTTPS port, and TLS activation. Keep private key files in allowed locations with restricted permissions.
 - **Monitoring:** history enable/disable, sampling interval, and retention.
@@ -33,6 +33,12 @@ Panel profile settings are distinct from host system settings. The ARG password 
 ## Settings and access behavior
 
 Choose a setting section by its label for general preferences, monitoring, version, or TLS. Settings are stored by the backend, not just browser localStorage. After saving, inspect the result and new value; on failure, the old value may remain active.
+
+### Changing the panel ports
+
+Go to **Settings → Panel access** to change the HTTP port. ARG checks availability, rejects a collision with HTTPS, and verifies the service and any legacy reverse proxy after restart. If a local check fails, it restores the previous port and proxy configuration. For a public HTTP listener, open the new port in the VPS provider firewall as well. Change HTTPS separately under **Panel SSL certificates**; the dedicated action keeps the installed certificate and does not require entering its paths again. ARG checks for a port conflict and updates local UFW rules. Once the service restarts, the browser probes the new endpoint and confirms the new session; if the browser cannot reach it within 90 seconds, ARG restores the previous HTTPS port.
+
+For example, if HTTPS currently uses `8443` and Nginx owns `443`, first allow TCP `9443` in the VPS provider firewall, then enter `9443` and choose **Change HTTPS port safely**. The page waits for TLS on the new address, navigates there, and confirms the session. If external access fails, ARG restores the prior port after 90 seconds and the old page reloads. You can select `443` when no other service is listening there. ARG updates local UFW rules automatically; the VPS provider or cloud firewall must be configured separately. HTTP and HTTPS cannot share a port.
 
 - **Timezone:** use an IANA ID such as `Asia/Tehran`. A city name or fixed UTC offset alone does not model daylight-saving transitions. Backend event time is stored in a standard format and displayed in the chosen zone.
 - **Monitoring:** Enabled controls background collection; Interval controls sample frequency and Retention controls how long samples remain. Example: one-minute sampling kept for seven days is lighter than 15-second sampling. Changing values does not fill past history.

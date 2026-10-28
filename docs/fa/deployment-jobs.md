@@ -7,8 +7,9 @@
 از صفحهٔ «اپلیکیشن‌ها»، روی کارت یک اپلیکیشن باز کن و «استقرار منبع» را بزن. سه منبع موجود است:
 
 1. **Git عمومی HTTPS:** مخزن از GitHub، GitLab، Bitbucket یا Codeberg به‌همراه branch، tag یا commit دریافت می‌شود. URL باید بدون نام‌کاربری، رمز یا token باشد.
-2. **پوشهٔ موجود VPS:** پوشه باید زیر `/var/www` یا `/opt/arg/apps` باشد. symlink در هر جای درخت منبع رد می‌شود.
-3. **فایل ZIP:** بارگذاری تا ۲۵۶ MiB است. حجم بازشده حداکثر ۲ GiB و تعداد ورودی‌ها حداکثر ۲۰٬۰۰۰ است.
+2. **Git خصوصی SSH:** مخزن خصوصی GitHub را با Deploy Key مخصوص همان مخزن دریافت کن. روند ساخت کلید، ثبت در GitHub و محدودیت‌ها در [مدیریت کلید SSH و Deploy Key](./ssh-deploy-keys.md) آمده است.
+3. **پوشهٔ موجود VPS:** پوشه باید زیر `/var/www` یا `/opt/arg/apps` باشد. symlink در هر جای درخت منبع رد می‌شود.
+4. **فایل ZIP:** بارگذاری تا ۲۵۶ MiB است. حجم بازشده حداکثر ۲ GiB و تعداد ورودی‌ها حداکثر ۲۰٬۰۰۰ است.
 
 ARG فایل‌ها را در `/var/lib/arg/deployments/apps/<application-id>/releases/<job-id>` نگه می‌دارد. مسیر `current` یک symlink نسبی است که تنها بعد از بررسی release، با rename اتمی عوض می‌شود. release قبلی حفظ می‌شود و از Job موفق می‌توان به release قبلی برگشت.
 
@@ -25,8 +26,9 @@ ARG فایل‌ها را در `/var/lib/arg/deployments/apps/<application-id>/re
 - ZIPهای بزرگ، نسبت فشرده‌سازی مشکوک، traversal مثل `../../etc/passwd`، symlink و فایل device رد می‌شوند.
 - در کپی منبع، symlink و فایل خاص رد می‌شود؛ فایل‌های `.env*`، `.git` و `node_modules` وارد release نمی‌شوند.
 - حجم release سقف ۲ GiB دارد و پیش از کپی/استخراج، فضای آزاد بررسی می‌شود.
-- Git با `argv` ثابت اجرا می‌شود؛ shell command، hook و script پروژه اجرا نمی‌شود. timeout دریافت ۱۸۰ ثانیه است.
-- نصب‌کننده پوشهٔ دادهٔ `/var/lib/arg` را به کاربر سرویس ARG محدود می‌کند؛ سورس و credentialهای Git خصوصی در URL پذیرفته نمی‌شوند.
+- Git با `argv` ثابت اجرا می‌شود؛ hook و script پروژه اجرا نمی‌شود. timeout دریافت ۱۸۰ ثانیه است.
+- در HTTPS عمومی هیچ credentialی در URL مجاز نیست. برای SSH خصوصی، کلید Ed25519 با مجوز محدود زیر `/var/lib/arg/ssh-keys` نگهداری می‌شود و Git با `BatchMode` و بررسی سخت‌گیرانهٔ Host Key اجرا می‌شود.
+- Deploy Key را در GitHub فقط برای مخزن مربوطه و ترجیحاً فقط‌خواندنی ثبت کن. ARG به GitHub دسترسی API برای افزودن کلید ندارد.
 
 ## لغو، Retry و Rollback
 

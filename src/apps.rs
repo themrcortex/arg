@@ -12,7 +12,7 @@ const APP_SOURCES: &[&str] = &[
     "existing-directory",
     "image",
 ];
-static APP_REGISTRY_OPERATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) static APP_REGISTRY_OPERATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize)]
 pub(super) struct AppListQuery {

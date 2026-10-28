@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Layers3, LoaderCircle, Network, Rocket, Save, Trash2 } from 'lucide-react'
-import { api } from './lib/api'
+import { apiControlPlane } from './lib/api'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
@@ -34,7 +34,7 @@ export function FleetManagementPanels({ nodes, notify }: { nodes: Node[]; notify
     setError('')
     try {
       const [groups, appResult, policyResult] = await Promise.all([
-        api<{ nodes: GroupRow[] }>('fleet/groups'), api<{ apps: App[] }>('apps'), api<{ policies: Policy[] }>('private-network/policies'),
+        apiControlPlane<{ nodes: GroupRow[] }>('fleet/groups'), apiControlPlane<{ apps: App[] }>('apps'), apiControlPlane<{ policies: Policy[] }>('private-network/policies'),
       ])
       const byNode: Record<number, string[]> = {}
       for (const row of groups.nodes || []) (byNode[row.node_id] ||= []).push(row.tag)
@@ -48,7 +48,7 @@ export function FleetManagementPanels({ nodes, notify }: { nodes: Node[]; notify
   async function saveTags(node: Node) {
     setBusy(`tags:${node.id}`); setError('')
     try {
-      const result = await api<{ tags: string[] }>(`nodes/${node.id}/tags`, { method: 'PUT', body: JSON.stringify({ tags: (tags[node.id] || '').split(',').map((tag) => tag.trim()).filter(Boolean) }) })
+      const result = await apiControlPlane<{ tags: string[] }>(`nodes/${node.id}/tags`, { method: 'PUT', body: JSON.stringify({ tags: (tags[node.id] || '').split(',').map((tag) => tag.trim()).filter(Boolean) }) })
       setTags((current) => ({ ...current, [node.id]: result.tags.join(', ') })); notify(`برچسب‌های ${node.name} ذخیره شد؛ هیچ تنظیمی در VPS مقصد تغییر نکرد.`); await refresh()
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'ذخیرهٔ برچسب‌ها انجام نشد.') }
     finally { setBusy('') }
@@ -56,7 +56,7 @@ export function FleetManagementPanels({ nodes, notify }: { nodes: Node[]; notify
   async function savePreview() {
     setBusy('rollout'); setError('')
     try {
-      const result = await api<{ id: string; nodes: { id: number; name: string; connection_state: string; will_execute: boolean }[] }>('fleet/rollouts/preview', { method: 'POST', body: JSON.stringify({ branch, version: version.trim(), node_ids: selected, canary_count: Number(canary), health_gate: true }) })
+      const result = await apiControlPlane<{ id: string; nodes: { id: number; name: string; connection_state: string; will_execute: boolean }[] }>('fleet/rollouts/preview', { method: 'POST', body: JSON.stringify({ branch, version: version.trim(), node_ids: selected, canary_count: Number(canary), health_gate: true }) })
       setPreview(result); notify('پیش‌نمایش rollout ثبت شد؛ هیچ به‌روزرسانی روی Nodeها اجرا نشد.')
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'پیش‌نمایش rollout ساخته نشد.') }
     finally { setBusy('') }
@@ -64,7 +64,7 @@ export function FleetManagementPanels({ nodes, notify }: { nodes: Node[]; notify
   async function savePolicy() {
     setBusy('policy'); setError('')
     try {
-      await api('private-network/policies', { method: 'POST', body: JSON.stringify({ source_app_id: sourceApp, destination_node_id: Number(destination), destination_service: service.trim(), port: Number(port), confirmed }) })
+      await apiControlPlane('private-network/policies', { method: 'POST', body: JSON.stringify({ source_app_id: sourceApp, destination_node_id: Number(destination), destination_service: service.trim(), port: Number(port), confirmed }) })
       notify('پیش‌نویس سیاست شبکه ثبت شد؛ هنوز هیچ ترافیکی تغییر نکرده است.'); setConfirmed(false); await refresh()
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'ثبت پیش‌نویس شبکه انجام نشد.') }
     finally { setBusy('') }
@@ -72,7 +72,7 @@ export function FleetManagementPanels({ nodes, notify }: { nodes: Node[]; notify
   async function removePolicy() {
     if (!deletePolicy) return
     setBusy('delete-policy'); setError('')
-    try { await api(`private-network/policies/${encodeURIComponent(deletePolicy.id)}`, { method: 'DELETE' }); setDeletePolicy(null); notify('پیش‌نویس حذف شد؛ پیکربندی شبکه دست‌نخورده ماند.'); await refresh() }
+    try { await apiControlPlane(`private-network/policies/${encodeURIComponent(deletePolicy.id)}`, { method: 'DELETE' }); setDeletePolicy(null); notify('پیش‌نویس حذف شد؛ پیکربندی شبکه دست‌نخورده ماند.'); await refresh() }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'حذف پیش‌نویس انجام نشد.') }
     finally { setBusy('') }
   }

@@ -52,6 +52,7 @@ const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ def
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
 const DnsPage = lazy(() => import('./DnsPage').then((module) => ({ default: module.DnsPage })))
 const ApplicationsPage = lazy(() => import('./ApplicationsPage').then((module) => ({ default: module.ApplicationsPage })))
+const SshKeysPage = lazy(() => import('./SshKeysPage').then((module) => ({ default: module.SshKeysPage })))
 const DashboardPage = lazy(() => import('./pages').then((module) => ({ default: module.DashboardPage })))
 const SystemPage = lazy(() => import('./pages').then((module) => ({ default: module.SystemPage })))
 const NetworkPage = lazy(() => import('./pages').then((module) => ({ default: module.NetworkPage })))
@@ -205,7 +206,7 @@ const developer = (
 
 function Brand({ large = false }: { large?: boolean }) {
   return (
-    <div role="img" aria-label="ARG" className={cn('arg-auth-brand', large && 'arg-auth-brand-large')}>
+    <div role="img" aria-label="ARG Control Center" className={cn('arg-auth-brand', large && 'arg-auth-brand-large')}>
       <img src="/arg/brand/arg-logo-compact.png" alt="" aria-hidden="true" className="arg-auth-logo arg-auth-logo-dark" />
       <img src="/arg/brand/arg-logo-compact-light.png" alt="" aria-hidden="true" className="arg-auth-logo arg-auth-logo-light" />
     </div>
@@ -520,6 +521,36 @@ function UpdateOverlay({ active, stage, startedAt, shared, rollback, branch, bui
   </div>
 }
 
+const documentationTargetForPanelPage: Record<PageId, { page: string; heading: string }> = {
+  dashboard: { page: 'dashboard', heading: 'کارت‌های شاخص' },
+  system: { page: 'system-storage', heading: 'خواندن صفحهٔ سیستم و Mountها' },
+  nodes: { page: 'federation', heading: 'Pairing مرحله‌به‌مرحله' },
+  apps: { page: 'application-registry', heading: 'ثبت رکورد' },
+  'ssh-keys': { page: 'ssh-deploy-keys', heading: 'ساخت و مدیریت کلیدهای SSH' },
+  maintenance: { page: 'maintenance', heading: 'تعمیر، راه‌اندازی مجدد و حذف ARG' },
+  mysql: { page: 'mysql', heading: 'ورود و بخش‌های مدیریت' },
+  network: { page: 'network-firewall', heading: 'رابط‌های شبکه' },
+  ports: { page: 'network-firewall', heading: 'پورت‌ها' },
+  firewall: { page: 'network-firewall', heading: 'UFW' },
+  nginx: { page: 'nginx', heading: 'صفحهٔ سایت‌های Nginx' },
+  docker: { page: 'docker', heading: 'فهرست تب‌ها و عملیات' },
+  files: { page: 'files', heading: 'راهنمای قدم‌به‌قدم مرورگر فایل' },
+  s3: { page: 's3', heading: 'اتصال S3 در پنل، فیلد به فیلد' },
+  dns: { page: 'cloudflare-dns', heading: 'مشاهدهٔ رکوردها' },
+  terminal: { page: 'terminal', heading: 'ترمینال تعاملی' },
+  packages: { page: 'packages-services', heading: 'APT: معنی عملیات و روال امن' },
+  services: { page: 'packages-services', heading: 'سرویس‌های systemd' },
+  users: { page: 'accounts-settings', heading: 'کاربران پنل و نقش‌ها' },
+  audit: { page: 'accounts-settings', heading: 'Audit و تاریخچه' },
+  settings: { page: 'accounts-settings', heading: 'تنظیمات پنل و میزبان' },
+  account: { page: 'accounts-settings', heading: 'حساب شخصی' },
+  'bug-report': { page: 'troubleshooting', heading: 'درخواست پشتیبانی' },
+}
+
+function documentationAnchor(heading: string) {
+  return heading.toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '') || 'section'
+}
+
 function PageHeading({
   title,
   description,
@@ -529,11 +560,19 @@ function PageHeading({
   description: string
   action?: ReactNode
 }) {
+  const panelPage = typeof window === 'undefined' ? 'dashboard' : pageFromHash(window.location.hash)
+  const docTarget = documentationTargetForPanelPage[panelPage]
+  const documentationHref = `https://themrcortex.github.io/arg/?page=${encodeURIComponent(docTarget.page)}&lang=fa#${encodeURIComponent(documentationAnchor(docTarget.heading))}`
   return (
     <header className="arg-page-heading mb-6 flex flex-wrap items-end justify-between gap-4" dir="rtl">
       <div className="min-w-0 text-right" dir="rtl">
         <span className="arg-page-eyebrow inline-flex items-center gap-2 leading-5" dir="ltr" style={{ unicodeBidi: 'isolate' }}><span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"/>SERVER / MANAGEMENT</span>
-        <h1 dir="rtl" className="mt-2 block text-2xl font-bold leading-[1.4] tracking-tight text-foreground md:text-[30px]">{title}</h1>
+        <h1 dir="rtl" className="mt-2 flex flex-wrap items-center gap-x-2 text-2xl font-bold leading-[1.4] tracking-tight text-foreground md:text-[30px]">
+          <span>{title}</span>
+          <a href={documentationHref} target="_blank" rel="noopener noreferrer" aria-label={`راهنمای مستندات دربارهٔ ${title}`} title={`راهنمای استفاده از ${title}`} className="inline-grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-border/70 text-muted-foreground transition hover:border-primary/35 hover:bg-primary/[.08] hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <BookOpen size={16} aria-hidden="true"/>
+          </a>
+        </h1>
         <p dir="rtl" className="mt-1.5 max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
       </div>
       {action && <div className="flex flex-wrap items-center gap-2 sm:pb-1">{action}</div>}
@@ -1105,8 +1144,8 @@ export default function App() {
             {terminalMounted && workspaceNodeId !== 'all' && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
             <div key={currentPage}>
             {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <Suspense fallback={<PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/>}><div className="arg-page-enter">
-            {currentPage === 'apps' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="اپلیکیشن‌ها"/>}><ApplicationsPage Heading={PageHeading} notify={notifyUser} allServers={workspaceNodeId === 'all'} workspaceKey={workspaceNodeId} onOpenWorkspace={openWorkspace}/></Suspense> : workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
-              {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} />}
+            {currentPage === 'ssh-keys' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="کلیدهای SSH"/>}><SshKeysPage Heading={PageHeading} notify={notifyUser}/></Suspense> : currentPage === 'apps' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="اپلیکیشن‌ها"/>}><ApplicationsPage Heading={PageHeading} notify={notifyUser} allServers={workspaceNodeId === 'all'} workspaceKey={workspaceNodeId} onOpenWorkspace={openWorkspace}/></Suspense> : workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
+              {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} workspaceMode={workspaceMode} onOpenWorkspace={openWorkspace} />}
               {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'nodes' && user.role === 'admin' && <NodesPage Heading={PageHeading} notify={notifyUser} workspaceMode={workspaceMode} onWorkspaceModeChange={changeWorkspaceMode} />}
               {currentPage === 'maintenance' && user.role === 'admin' && <MaintenancePage Heading={PageHeading} notify={notifyUser} />}

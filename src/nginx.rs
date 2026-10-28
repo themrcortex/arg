@@ -288,6 +288,15 @@ pub(super) async fn nginx_sites(State(state): State<AppState>, headers: HeaderMa
     if let Some(sites) = result["sites"].as_array_mut() {
         for site in sites {
             if let Some(name) = site["name"].as_str().map(str::to_owned) {
+                if let Some(application_id) = site["application_id"].as_str().map(str::to_owned) {
+                    let db = state.lock().unwrap();
+                    let application_name: Option<String> = db.query_row(
+                        "SELECT name FROM applications WHERE id=?1 AND deleted_at IS NULL",
+                        [&application_id],
+                        |row| row.get(0),
+                    ).optional().unwrap_or(None);
+                    site["application_name"] = json!(application_name);
+                }
                 let (description, snapshot, runtime_configured) = {
                     let db = state.lock().unwrap();
                     let description = db
@@ -2251,6 +2260,7 @@ fn nginx_list_sites() -> Result<Value, String> {
         }
         let enabled = nginx_site_enabled(&name)?;
         let content = fs::read_to_string(&entry.path()).map_err(|error| error.to_string())?;
+        let application_id = nginx_managed_application_id(&content);
         let content_hash = hex::encode(Sha256::digest(content.as_bytes()));
         let server_names = nginx_server_names(&content);
         let ssl_enabled = content.lines().any(|line| {
@@ -2260,10 +2270,21 @@ fn nginx_list_sites() -> Result<Value, String> {
         let maintenance_enabled = nginx_maintenance_paths(&name)
             .map(|(_, _, flag_path)| flag_path.exists())
             .unwrap_or(false);
-        sites.push(json!({"name":name,"enabled":enabled,"maintenance_enabled":maintenance_enabled,"ssl_enabled":ssl_enabled,"bytes":metadata.len(),"content_hash":content_hash,"server_names":server_names}));
+        sites.push(json!({"name":name,"enabled":enabled,"maintenance_enabled":maintenance_enabled,"ssl_enabled":ssl_enabled,"bytes":metadata.len(),"content_hash":content_hash,"server_names":server_names,"application_id":application_id}));
     }
     sites.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
     Ok(json!(sites))
+}
+
+fn nginx_managed_application_id(content: &str) -> Option<String> {
+    let first_line = content.lines().next()?.trim();
+    let marker = [
+        "# ARG managed Laravel site app=",
+        "# Managed by ARG Node runner app=",
+        "# Managed by ARG Static runner app=",
+    ].iter().find_map(|prefix| first_line.strip_prefix(*prefix))?;
+    let candidate = marker.split_ascii_whitespace().next()?;
+    apps::valid_uuid(candidate).then(|| candidate.to_owned())
 }
 
 fn nginx_get_site(name: &str) -> Result<Value, String> {
@@ -2995,7 +3016,18 @@ fn nginx_domain_is_claimed(domain: &str, own_site: &str) -> Result<bool, String>
 
 #[cfg(test)]
 mod node_proxy_tests {
-    use super::{node_proxy_config, safe_static_root_path, server_name_overlaps, static_site_config};
+    use super::{nginx_managed_application_id, node_proxy_config, safe_static_root_path, server_name_overlaps, static_site_config};
+
+    #[test]
+    fn identifies_nginx_sites_owned_by_application_manager() {
+        let app_id = "12345678-1234-4234-8234-123456789abc";
+        assert_eq!(nginx_managed_application_id(&format!("# ARG managed Laravel site app={app_id}\nserver {{")), Some(app_id.to_owned()));
+        assert_eq!(nginx_managed_application_id(&format!("# Managed by ARG Node runner app={app_id} domain=site.example port=3000\nserver {{")), Some(app_id.to_owned()));
+        assert_eq!(nginx_managed_application_id(&format!("# Managed by ARG Static runner app={app_id} domain=site.example spa=true\nserver {{")), Some(app_id.to_owned()));
+        assert_eq!(nginx_managed_application_id("server {\n    listen 80;\n}"), None);
+        assert_eq!(nginx_managed_application_id("# ARG managed Laravel site app=not-a-uuid\nserver {"), None);
+    }
+
     #[test]
     fn static_site_config_has_spa_fallback_and_safe_asset_headers() {
         let spa = static_site_config("12345678-1234-4234-8234-123456789abc", "site.example", std::path::Path::new("/var/lib/arg/current/dist"), true);
@@ -3080,6 +3112,62 @@ fn nginx_delete_site(name: &str) -> Result<Value, String> {
         let _ = fs::remove_file(nginx_maintenance_secret_config_path(name));
     }
     Ok(json!({"message":"فایل سایت حذف شد."}))
+}
+
+pub(super) fn purge_managed_application_sites(app_id: &str) -> Result<Vec<String>, String> {
+    if app_id.len() != 36
+        || app_id.chars().enumerate().any(|(index, value)| {
+            if [8, 13, 18, 23].contains(&index) {
+                value != '-'
+            } else {
+                !value.is_ascii_hexdigit()
+            }
+        })
+    {
+        return Err("شناسهٔ اپلیکیشن برای پاک‌سازی Nginx معتبر نیست.".into());
+    }
+    let _guard = NGINX_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let candidates = [
+        (format!("arg-app-{}", &app_id[..8]), format!("# ARG managed Laravel site app={app_id}")),
+        (format!("arg-node-{}", &app_id[..12]), format!("# Managed by ARG Node runner app={app_id} ")),
+        (format!("arg-static-{}", &app_id[..12]), format!("# Managed by ARG Static runner app={app_id}")),
+    ];
+    let mut removed = Vec::new();
+    for (name, expected_marker) in candidates {
+        let (available, enabled) = nginx_site_paths(&name)?;
+        let metadata = match fs::symlink_metadata(&available) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if fs::symlink_metadata(&enabled).is_ok() {
+                    return Err(format!("پیوند فعال سایت {name} هست اما فایل اصلی پیدا نشد؛ بررسی دستی لازم است."));
+                }
+                continue;
+            }
+            Err(error) => return Err(format!("فایل سایت {name} بررسی نشد: {error}")),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(format!("فایل سایت رزروشدهٔ {name} معمولی نیست؛ دست‌نخورده ماند."));
+        }
+        let content = fs::read_to_string(&available)
+            .map_err(|error| format!("کانفیگ سایت {name} خوانده نشد: {error}"))?;
+        if !content.starts_with(&expected_marker) {
+            return Err(format!("سایت {name} نشان ARG این اپ را ندارد؛ دست‌نخورده ماند."));
+        }
+        if let Ok(link) = fs::symlink_metadata(&enabled) {
+            if !link.file_type().is_symlink()
+                || fs::read_link(&enabled).ok().as_deref()
+                    != Some(std::path::Path::new("../sites-available").join(&name).as_path())
+            {
+                return Err(format!("پیوند فعال سایت {name} به فایل مدیریت‌شدهٔ خودش اشاره نمی‌کند."));
+            }
+        }
+        nginx_delete_site(&name)
+            .map_err(|error| format!("حذف سایت Nginx {name} ناموفق بود: {error}"))?;
+        removed.push(name);
+    }
+    Ok(removed)
 }
 
 fn nginx_rename_site(name: &str, new_name: &str) -> Result<Value, String> {

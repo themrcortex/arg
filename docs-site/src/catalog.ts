@@ -38,6 +38,7 @@ export const pages: DocPage[] = [
   { id: 'static-and-ssr', group: 'applications', title: { fa: 'انتشار Static و اجرای SSR', en: 'Static publishing and SSR' }, summary: { fa: 'تشخیص خودکار و دستی React/Vue/Vite، خروجی Nginx، fallback، Next/Nuxt SSR و Rollback.', en: 'Auto/manual React/Vue/Vite detection, Nginx output, fallback, Next/Nuxt SSR, and rollback.' }, file: 'static-and-ssr' },
   { id: 'app-resources', group: 'applications', title: { fa: 'شبکه و منابع اپلیکیشن', en: 'Application networks and resources' }, summary: { fa: 'شبکهٔ داخلی، مسیر دادهٔ پایدار، اتصال S3 و مشاهدهٔ لاگ‌های journald برای هر اپ.', en: 'Per-app internal networks, durable data paths, S3 references, and journald logs.' }, file: 'app-resources' },
   { id: 'deployment-jobs', group: 'applications', title: { fa: 'استقرار منبع و Jobهای پایدار', en: 'Source deployments & durable jobs' }, summary: { fa: 'دریافت امن Git/ZIP/پوشه، پیگیری Job، لغو، retry و بازگشت release.', en: 'Safe Git/ZIP/directory acquisition, durable progress, cancel, retry, and release rollback.' }, file: 'deployment-jobs' },
+  { id: 'ssh-deploy-keys', group: 'applications', title: { fa: 'کلیدهای SSH و استقرار مخزن خصوصی', en: 'SSH keys and private repository deployment' }, summary: { fa: 'ساخت کلید امن روی VPS، ثبت Deploy Key در GitHub، استفاده برای استقرار و لغو دسترسی.', en: 'Generate server-side keys, register a GitHub deploy key, deploy private repositories, and revoke access.' }, file: 'ssh-deploy-keys' },
 ]
 
 

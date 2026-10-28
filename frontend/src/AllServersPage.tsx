@@ -4,6 +4,7 @@ import { api, type Dashboard } from './lib/api'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Skeleton } from './components/ui/skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Node = { id: number; workspace_key: string; name: string; public_name?: string; server_uuid?: string | null; endpoint: string; last_seen: number | null; workspace_ready?: boolean }
@@ -27,6 +28,7 @@ function formatPayloadBytes(bytes: number) {
 }
 
 export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Heading; onOpen: (workspaceKey: string) => void }) {
+  const [view, setView] = useState('topology')
   const [rows, setRows] = useState<ServerRow[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -112,9 +114,15 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
   return <>
     <PageHeading title="همهٔ سرورها" description="نمای خواندنی وضعیت سرورهای متصل؛ برای انجام عملیات، ابتدا فضای‌کار همان سرور را انتخاب کن." action={action}/>
     {error && <p role="alert" className="mb-4 rounded-xl border border-rose-400/20 bg-rose-400/[.05] p-3 text-sm text-rose-200">{error}</p>}
+    <Tabs value={view} onValueChange={setView} dir="rtl" className="space-y-4">
+      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="نمایش وضعیت همهٔ سرورها">
+        <TabsTrigger value="topology"><Waypoints size={14} className="ml-2"/>نقشهٔ ارتباط</TabsTrigger>
+        <TabsTrigger value="inventory"><Server size={14} className="ml-2"/>فهرست و منابع</TabsTrigger>
+      </TabsList>
+      <TabsContent value="topology" className="min-w-0">
     <Card className="mb-5 overflow-hidden border-border/80 bg-card/45">
       <CardHeader className="flex-row flex-wrap items-start justify-between gap-3 space-y-0 p-4 sm:p-5">
-        <div><CardTitle className="flex items-center gap-2 text-base"><Waypoints size={18} className="text-primary"/>نقشهٔ ارتباط پنل‌ها</CardTitle><CardDescription className="mt-1">هر ۱۵ ثانیه ارتباط امن ARG با Nodeها بررسی می‌شود؛ حرکت هر نقطه پس از دریافت پاسخ واقعی همان سرور آغاز می‌شود.</CardDescription></div>
+        <div><CardTitle className="flex items-center gap-2 text-base"><Waypoints size={18} className="text-primary"/><span>ARG Mesh</span><span className="text-sm font-normal text-muted-foreground">· نقشهٔ ارتباط پنل‌ها</span></CardTitle><CardDescription className="mt-1">هر ۱۵ ثانیه ارتباط HTTPS با Nodeها بررسی می‌شود؛ حرکت هر نقطه بر پایهٔ درخواست یا پاسخ واقعی همان probe است.</CardDescription></div>
         <div className="flex flex-wrap gap-2 text-[10px]"><span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/20 bg-emerald-400/[.06] px-2.5 py-1.5 text-emerald-100"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300"/>پاسخ‌گو: {onlineCount}/{rows.length}</span><span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background/40 px-2.5 py-1.5 text-muted-foreground"><ArrowDownToLine size={12}/>پاسخ دریافت‌شده: {trafficTotals.responses.toLocaleString('fa-IR')} · {formatPayloadBytes(trafficTotals.bytes)}</span></div>
       </CardHeader>
       {loading ? <CardContent className="p-4 pt-0"><Skeleton className="h-72 rounded-xl"/></CardContent> : workers.length === 0 ? <CardContent className="p-5 pt-0"><div className="flex min-h-36 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border text-center"><LockKeyhole size={22} className="text-muted-foreground"/><p className="text-sm font-medium">هنوز Node راه‌دوری متصل نیست</p><p className="text-xs text-muted-foreground">پس از جفت‌سازی سرور، ارتباط آن در این نقشه نمایش داده می‌شود.</p></div></CardContent> : <CardContent className="p-0">
@@ -138,7 +146,7 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
             <div className="absolute inset-x-6 top-3 z-10">
               <div dir="rtl" className="flex min-h-[78px] items-center gap-3 rounded-2xl border border-primary/20 bg-card/95 px-4 py-3 shadow-lg shadow-black/10">
                 <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-primary/25 bg-primary/[.08] text-primary"><ShieldCheck size={21}/></span>
-                <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">ARG Control Plane</p><span className="rounded-full border border-emerald-400/20 bg-emerald-400/[.06] px-2 py-0.5 text-[10px] text-emerald-100">این پنل · آنلاین</span></div><p className="mt-1 truncate text-xs text-muted-foreground">{rows.find((row) => row.local)?.name || 'سرور فعلی'} · هماهنگی امن Nodeها و مدیریت فضای‌کار</p></div>
+                <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">ARG Mesh</p><span className="rounded-full border border-emerald-400/20 bg-emerald-400/[.06] px-2 py-0.5 text-[10px] text-emerald-100">این پنل · آنلاین</span></div><p className="mt-1 truncate text-xs text-muted-foreground">{rows.find((row) => row.local)?.name || 'سرور فعلی'} · پنل هماهنگ‌کنندهٔ Nodeهای جفت‌شده</p></div>
                 <span className="hidden items-center gap-1.5 text-[10px] text-muted-foreground sm:flex"><LockKeyhole size={13}/>TLS</span>
               </div>
             </div>
@@ -157,9 +165,11 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
             </div>
           </div>
         </div>
-        <div className="flex flex-wrap items-start gap-2 border-t border-border/70 px-4 py-3 text-[10px] leading-5 text-muted-foreground"><Activity size={13} className="mt-0.5 shrink-0 text-primary"/><p>نقطهٔ متحرک، پاسخ واقعی بررسی وضعیت Node را از سرور راه‌دور به این Control Plane نشان می‌دهد؛ اندازهٔ تقریبی از payload JSON پاسخ محاسبه می‌شود و سربار TLS/HTTP را شامل نمی‌شود. این نما ترافیک عمومی برنامه‌ها یا تمام بایت‌های شبکهٔ VPS را گزارش نمی‌کند.</p></div>
+        <div className="flex flex-wrap items-start gap-2 border-t border-border/70 px-4 py-3 text-[10px] leading-5 text-muted-foreground"><Activity size={13} className="mt-0.5 shrink-0 text-primary"/><p>نقاط متحرک، درخواست و پاسخ واقعی probe را نشان می‌دهند. اندازهٔ پاسخ فقط از payload JSON برآورد می‌شود و سربار TLS/HTTP یا ترافیک عمومی VPS را شامل نمی‌شود. ارتباط روی HTTPS با گواهی معتبر برقرار می‌شود؛ هر درخواست Node نشست TLS تازه و کلیدهای ترافیکی تازه دارد. این رمزنگاری استاندارد انتقال است و از الگوریتم اختصاصی ARG استفاده نمی‌کند.</p></div>
       </CardContent>}
     </Card>
+      </TabsContent>
+      <TabsContent value="inventory" className="min-w-0 space-y-4">
     <div className="mb-5 grid gap-3 sm:grid-cols-2">
       <Card><CardContent className="flex items-center gap-3 p-4"><Server className="text-primary" size={19}/><div><p className="text-xs text-muted-foreground">سرورهای ثبت‌شده</p><p className="mt-1 font-semibold">{loading ? '—' : rows.length.toLocaleString('fa-IR')}</p></div></CardContent></Card>
       <Card><CardContent className="flex items-center gap-3 p-4"><Activity className="text-emerald-300" size={19}/><div><p className="text-xs text-muted-foreground">پاسخ‌گو در آخرین بررسی</p><p className="mt-1 font-semibold">{loading ? '—' : `${onlineCount.toLocaleString('fa-IR')} از ${rows.length.toLocaleString('fa-IR')}`}</p></div></CardContent></Card>
@@ -180,5 +190,7 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
       })}
     </div>}
     <p className="mt-4 text-xs leading-6 text-muted-foreground">وضعیت سرور راه‌دور فقط نتیجهٔ آخرین بررسی است و پایش پیوسته محسوب نمی‌شود. اگر ارتباط قطع باشد، ARG عملیات آن سرور را به سرور دیگری منتقل نمی‌کند.</p>
+      </TabsContent>
+    </Tabs>
   </>
 }

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Check, Clipboard, KeyRound, RefreshCw, ShieldAlert, ShieldCheck, Trash2, Wrench } from 'lucide-react'
-import { api } from './lib/api'
+import { ApiError, api } from './lib/api'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
 import { Input } from './components/ui/input'
 
-type DoctorCheck = { id: string; label: string; status: 'pass' | 'warn' | 'info'; value?: string | number | string[] | null; available_bytes?: number | null; detail: string; total?: number; connected?: number; connections?: number; buckets?: number; mounted?: number; applications?: number; deployments?: number }
+type DoctorNodeItem = { name: string; endpoint?: string; state?: string; compatibility?: string; last_seen: number | null; last_check?: number | null; last_error?: string | null }
+type DoctorCheck = { id: string; label: string; status: 'pass' | 'warn' | 'info'; value?: string | number | string[] | null; available_bytes?: number | null; detail: string; total?: number; connected?: number; connections?: number; buckets?: number; mounted?: number; applications?: number; deployments?: number; items?: DoctorNodeItem[] }
 type DoctorResult = { read_only: true; generated_at: number; summary: { checks: number; warnings: number }; checks: DoctorCheck[] }
 type ApiKey = { id: number; username: string; label: string; prefix: string; scopes: string[]; created_at: number; expires_at: number; revoked_at: number | null; last_used_at: number | null; requests_this_minute: number }
 type NewApiKey = { id: number; label: string; token: string; prefix: string; scopes: string[]; created_at: number; expires_at: number; notice: string }
@@ -16,32 +17,47 @@ const checkText = (check: DoctorCheck) => {
   if (Array.isArray(check.value)) return check.value.length ? check.value.join('، ') : 'چیزی پیدا نشد'
   if (check.available_bytes != null) return `${(check.available_bytes / 1024 ** 3).toFixed(1)} GiB آزاد`
   if (check.id === 's3') return `${check.connected ?? 0} از ${check.connections ?? 0} اتصال · ${check.buckets ?? 0} باکت · ${check.mounted ?? 0} Mount`
-  if (check.id === 'nodes') return `${check.connected ?? 0} از ${check.total ?? 0} متصل`
+  if (check.id === 'nodes' || check.id === 'controllers') return `${check.connected ?? 0} از ${check.total ?? 0} ${check.id === 'nodes' ? 'Node متصل' : 'پنل مجاز'}`
   if (check.id === 'apps') return `${check.applications ?? 0} اپلیکیشن · ${check.deployments ?? 0} استقرار`
   return check.value == null ? 'بررسی شد' : String(check.value)
 }
+const nodeStateLabel: Record<string, string> = { healthy: 'سالم', connected: 'متصل', degraded: 'نیازمند بررسی', offline: 'قطع', untrusted: 'نامعتبر', incompatible: 'ناسازگار' }
+const compatibilityLabel: Record<string, string> = { compatible: 'سازگار', 'legacy-read-only': 'قدیمی · فقط‌خواندنی', incompatible: 'ناسازگار' }
 
 export function DoctorPanel() {
   const [result, setResult] = useState<DoctorResult | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [apiUnavailable, setApiUnavailable] = useState(false)
   const run = useCallback(async () => {
     setBusy(true); setError('')
-    try { setResult(await api<DoctorResult>('maintenance/doctor')) }
-    catch (value) { setError(value instanceof Error ? value.message : 'گزارش Doctor دریافت نشد') }
+    try {
+      setResult(await api<DoctorResult>('maintenance/doctor'))
+      setApiUnavailable(false)
+    }
+    catch (value) {
+      if (value instanceof ApiError && value.status === 404) {
+        setResult(null)
+        setApiUnavailable(true)
+      } else {
+        setApiUnavailable(false)
+        setError(value instanceof Error ? value.message : 'گزارش Doctor دریافت نشد')
+      }
+    }
     finally { setBusy(false) }
   }, [])
   useEffect(() => { void run() }, [run])
   return <Card className="mt-5 rounded-2xl border-border/80 bg-card/80">
     <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Wrench size={17} className="text-primary"/>ARG Doctor</CardTitle><CardDescription className="mt-1.5">گزارش خواندنی از سازگاری و اتصال‌های ثبت‌شده؛ چیزی نصب یا تغییر داده نمی‌شود.</CardDescription></div><Button variant="outline" size="sm" onClick={() => void run()} disabled={busy}><RefreshCw size={14} className={busy ? 'animate-spin' : ''}/>بررسی دوباره</Button></CardHeader>
     <CardContent>
+      {apiUnavailable && <div role="status" className="mb-3 rounded-xl border border-amber-300/20 bg-amber-300/[.04] p-4 text-xs leading-6 text-amber-100/90"><p className="font-medium">API گزارش ARG Doctor در این سرور موجود نیست</p><p className="mt-1 text-amber-100/75">درخواست با HTTP 404 پاسخ گرفت؛ نسخهٔ ARG روی این VPS یا Node انتخاب‌شده احتمالاً قدیمی است یا هنوز این قابلیت را ندارد. ARG همان سرور را به نسخه‌ای که گزارش Doctor را پشتیبانی می‌کند به‌روزرسانی کن و دوباره بررسی کن.</p><Button className="mt-3" variant="outline" size="sm" onClick={() => void run()} disabled={busy}>{busy ? 'در حال بررسی…' : 'تلاش دوباره'}</Button></div>}
       {error && <p role="alert" className="mb-3 rounded-lg border border-rose-400/20 bg-rose-400/5 p-3 text-sm text-rose-200">{error}</p>}
       {busy && !result ? <div className="grid gap-2 sm:grid-cols-2">{Array.from({ length: 6 }, (_, i) => <div key={i} className="h-20 animate-pulse rounded-xl border border-border/70 bg-secondary/30"/>)}</div> : result && <>
         <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><span>{result.summary.checks} بررسی</span><span>·</span><span>{result.summary.warnings} مورد نیازمند توجه</span><span>·</span><span>آخرین بررسی: {date(result.generated_at)}</span><span className="rounded-full border border-emerald-400/20 bg-emerald-400/5 px-2 py-0.5 text-emerald-200">فقط خواندنی</span></div>
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{result.checks.map((check) => {
           const Icon = check.status === 'pass' ? ShieldCheck : check.status === 'warn' ? ShieldAlert : Wrench
           const color = check.status === 'pass' ? 'text-emerald-300' : check.status === 'warn' ? 'text-amber-200' : 'text-muted-foreground'
-          return <div key={check.id} className="min-w-0 rounded-xl border border-border/70 bg-background/35 p-3"><div className="flex items-center gap-2"><Icon size={15} className={color}/><b className="min-w-0 flex-1 truncate text-sm">{check.label}</b></div><div className="mt-2 break-words text-xs font-medium text-foreground">{checkText(check)}</div><p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">{check.detail}</p></div>
+          return <div key={check.id} className="min-w-0 rounded-xl border border-border/70 bg-background/35 p-3"><div className="flex items-center gap-2"><Icon size={15} className={color}/><b className="min-w-0 flex-1 truncate text-sm">{check.label}</b></div><div className="mt-2 break-words text-xs font-medium text-foreground">{checkText(check)}</div><p className="mt-1.5 text-[11px] leading-5 text-muted-foreground">{check.detail}</p>{check.items && check.items.length > 0 && <div className="mt-2 max-h-48 space-y-1.5 overflow-y-auto border-t border-border/60 pt-2">{check.items.map((item, index) => <div key={`${item.name}-${item.endpoint || index}`} className="rounded-lg border border-border/60 bg-background/35 p-2 text-[10px]"><div className="flex flex-wrap items-center justify-between gap-1"><b className="min-w-0 truncate">{item.name}</b>{item.state && <span className={item.state === 'healthy' || item.state === 'connected' ? 'text-emerald-200' : 'text-amber-200'}>{nodeStateLabel[item.state] || item.state}</span>}</div>{item.endpoint && <code dir="ltr" className="mt-1 block truncate text-left text-muted-foreground">{item.endpoint}</code>}{item.compatibility && <p className="mt-1 text-muted-foreground">سازگاری: {compatibilityLabel[item.compatibility] || item.compatibility}</p>}{item.last_seen != null && <p className="mt-1 text-muted-foreground">آخرین ارتباط موفق: {date(item.last_seen)}</p>}{item.last_check != null && <p className="mt-1 text-muted-foreground">آخرین بررسی: {date(item.last_check)}</p>}{item.last_error && <p className="mt-1 break-words text-amber-100/80">{item.last_error}</p>}</div>)}</div>}</div>
         })}</div>
       </>}
     </CardContent>

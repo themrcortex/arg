@@ -1,6 +1,7 @@
 use super::*;
 
-pub(super) const WIDGETS: &[&str] = &["resources", "history", "operations"];
+pub(super) const WIDGETS: &[&str] = &["resources", "history", "operations", "mesh"];
+const LEGACY_WIDGETS: &[&str] = &["resources", "history", "operations"];
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -14,7 +15,7 @@ pub(super) struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             preset: "devops".into(),
             order: WIDGETS.iter().map(|value| (*value).to_owned()).collect(),
             hidden: Vec::new(),
@@ -33,7 +34,7 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
 }
 
 fn valid(input: &Preferences) -> bool {
-    if input.version != 1
+    if input.version != 2
         || !["minimal", "devops", "hosting", "fleet", "custom"].contains(&input.preset.as_str())
     {
         return false;
@@ -62,6 +63,29 @@ fn valid(input: &Preferences) -> bool {
     hidden.len() == input.hidden.len()
 }
 
+fn normalize(input: Preferences) -> Option<Preferences> {
+    if input.version == 1 {
+        let mut legacy_order = input.order.iter().map(String::as_str).collect::<Vec<_>>();
+        legacy_order.sort_unstable();
+        let mut expected = LEGACY_WIDGETS.to_vec();
+        expected.sort_unstable();
+        let mut hidden = input.hidden.iter().map(String::as_str).collect::<Vec<_>>();
+        hidden.sort_unstable();
+        hidden.dedup();
+        if legacy_order != expected
+            || hidden.len() != input.hidden.len()
+            || input.hidden.iter().any(|widget| !LEGACY_WIDGETS.contains(&widget.as_str()))
+        {
+            return None;
+        }
+        let mut upgraded = input;
+        upgraded.version = 2;
+        upgraded.order.push("mesh".into());
+        return Some(upgraded);
+    }
+    Some(input)
+}
+
 pub(super) async fn read(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     let user = require_user(&db, &headers)?;
@@ -77,6 +101,7 @@ pub(super) async fn read(State(state): State<AppState>, headers: HeaderMap) -> A
         Some((json, updated_at)) => {
             let parsed = serde_json::from_str::<Preferences>(&json)
                 .ok()
+                .and_then(normalize)
                 .filter(valid)
                 .unwrap_or_default();
             (parsed, Some(updated_at))
@@ -94,6 +119,12 @@ pub(super) async fn save(
     Json(input): Json<Preferences>,
 ) -> ApiResult {
     check_origin(&headers)?;
+    let input = normalize(input).ok_or_else(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "چیدمان داشبورد نامعتبر است؛ ترتیب باید شامل هر ویجت پشتیبانی‌شده دقیقاً یک‌بار باشد.",
+        )
+    })?;
     if !valid(&input) {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -153,6 +184,21 @@ mod tests {
         let mut preferences = Preferences::default();
         preferences.hidden = vec!["unknown".into()];
         assert!(!valid(&preferences));
+    }
+
+    #[test]
+    fn upgrades_saved_v1_preferences_without_losing_order_or_visibility() {
+        let legacy = Preferences {
+            version: 1,
+            preset: "custom".into(),
+            order: LEGACY_WIDGETS.iter().map(|widget| (*widget).to_owned()).collect(),
+            hidden: vec!["operations".into()],
+        };
+        let upgraded = normalize(legacy).unwrap();
+        assert_eq!(upgraded.version, 2);
+        assert_eq!(upgraded.order.iter().map(String::as_str).collect::<Vec<_>>(), vec!["resources", "history", "operations", "mesh"]);
+        assert_eq!(upgraded.hidden.iter().map(String::as_str).collect::<Vec<_>>(), vec!["operations"]);
+        assert!(valid(&upgraded));
     }
 
     #[test]

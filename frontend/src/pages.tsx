@@ -6,6 +6,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   Cpu,
+  Clock,
   Database,
   Download,
   Globe,
@@ -35,6 +36,7 @@ import {
   SlidersHorizontal,
   ScrollText,
   ShieldCheck,
+  ShieldAlert,
   UserRound,
   Users,
   Wifi,
@@ -53,6 +55,7 @@ import {
   type User,
   type Role,
 } from './lib/api'
+import { FederationTopologyWidget } from './FederationTopologyWidget'
 import { Badge } from './components/ui/badge'
 import { SiteActionsPanel } from './nginx/SiteActionsPanel'
 import { NginxSiteWorkspace, type NginxSiteTab } from './nginx/NginxSiteWorkspace'
@@ -82,6 +85,7 @@ import { S3OverviewKpi, StorageInventorySection, StorageOverviewKpi } from './co
 import { useConfirmDialog } from './hooks/useConfirmDialog'
 import { EmptyState, FilterBar } from './components/ui/data-views'
 import { SslIssueWizard } from './nginx/SslIssueWizard'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Common = { Heading: Heading; notify: (message: string) => void }
@@ -89,16 +93,25 @@ type Sample = { at: number; time: string; rx: number; tx: number }
 type ResourceSample = { at: number; cpu: number; memory: number; disk: number }
 type StoredSample = { at: number; cpu: number; memory: number; disk: number; rx: number; tx: number; disk_read: number | null; disk_write: number | null; disk_used_bytes: number | null; disk_total_bytes: number | null }
 type HistoryRange = '5m' | '1h' | '24h' | '7d' | '30d' | 'custom'
-type DashboardWidget = 'resources' | 'history' | 'operations'
-type DashboardPreferences = { version: 1; preset: 'minimal' | 'devops' | 'hosting' | 'fleet' | 'custom'; order: DashboardWidget[]; hidden: DashboardWidget[] }
-const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = { version: 1, preset: 'devops', order: ['resources', 'history', 'operations'], hidden: [] }
-const DASHBOARD_WIDGET_LABELS: Record<DashboardWidget, string> = { resources: 'مصرف منابع', history: 'تاریخچهٔ منابع', operations: 'شبکه، پورت، فایروال و Fast Actions' }
+type DashboardWidget = 'resources' | 'history' | 'operations' | 'mesh'
+type DashboardPreferences = { version: 2; preset: 'minimal' | 'devops' | 'hosting' | 'fleet' | 'custom'; order: DashboardWidget[]; hidden: DashboardWidget[] }
+const DEFAULT_DASHBOARD_PREFERENCES: DashboardPreferences = { version: 2, preset: 'devops', order: ['resources', 'history', 'operations', 'mesh'], hidden: [] }
+const DASHBOARD_WIDGET_LABELS: Record<DashboardWidget, string> = { resources: 'مصرف منابع', history: 'تاریخچهٔ منابع', operations: 'شبکه، پورت، فایروال و Fast Actions', mesh: 'شبکهٔ پنل‌ها · ARG Mesh' }
 
 function dashboardPreset(preset: DashboardPreferences['preset']): DashboardPreferences {
-  if (preset === 'minimal') return { version: 1, preset, order: ['resources', 'history', 'operations'], hidden: ['operations'] }
-  if (preset === 'hosting') return { version: 1, preset, order: ['operations', 'resources', 'history'], hidden: [] }
-  if (preset === 'fleet') return { version: 1, preset, order: ['operations', 'history', 'resources'], hidden: [] }
+  if (preset === 'minimal') return { version: 2, preset, order: ['resources', 'history', 'operations', 'mesh'], hidden: ['operations', 'mesh'] }
+  if (preset === 'hosting') return { version: 2, preset, order: ['operations', 'resources', 'history', 'mesh'], hidden: [] }
+  if (preset === 'fleet') return { version: 2, preset, order: ['operations', 'history', 'resources', 'mesh'], hidden: [] }
   return { ...DEFAULT_DASHBOARD_PREFERENCES, preset }
+}
+
+function normalizeDashboardPreferences(value: Partial<DashboardPreferences> | null | undefined): DashboardPreferences {
+  const valid = new Set<DashboardWidget>(['resources', 'history', 'operations', 'mesh'])
+  const order = [...new Set(Array.isArray(value?.order) ? value.order.filter((item): item is DashboardWidget => valid.has(item as DashboardWidget)) : [])]
+  for (const item of DEFAULT_DASHBOARD_PREFERENCES.order) if (!order.includes(item)) order.push(item)
+  const hidden = Array.isArray(value?.hidden) ? value.hidden.filter((item): item is DashboardWidget => valid.has(item as DashboardWidget)) : []
+  const presets = ['minimal', 'devops', 'hosting', 'fleet', 'custom'] as const
+  return { version: 2, preset: presets.includes(value?.preset as (typeof presets)[number]) ? value!.preset as DashboardPreferences['preset'] : 'devops', order, hidden: [...new Set(hidden)] }
 }
 
 function localDateTime(timestamp: number) {
@@ -219,6 +232,7 @@ function Metric({
   detail,
   progress,
   tone = 'copper',
+  direction = 'ltr',
 }: {
   icon: typeof Cpu
   label: string
@@ -226,8 +240,9 @@ function Metric({
   detail: string
   progress?: number
   tone?: 'copper' | 'green' | 'teal' | 'blue' | 'warning'
+  direction?: 'ltr' | 'rtl'
 }) {
-  return <MetricCard label={label} value={value} detail={detail} icon={<Icon size={19} strokeWidth={1.8} />} progress={progress} tone={tone} />
+  return <MetricCard label={label} value={value} detail={detail} icon={<Icon size={19} strokeWidth={1.8} />} progress={progress} tone={tone} direction={direction} />
 }
 function LoadingCards() {
   return (
@@ -321,7 +336,7 @@ function ArgChartPanel({ title, icon, children, description, className = '' }: {
   </section>
 }
 
-export function DashboardPage({ notify, user }: Common & { user: User }) {
+export function DashboardPage({ notify, user, workspaceMode = 'single', onOpenWorkspace = () => {} }: Common & { user: User; workspaceMode?: 'single' | 'multi'; onOpenWorkspace?: (workspaceKey: string) => void }) {
   const { data, history, resourceHistory, cpu, loading, refresh, range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, applyCustomRange, historyEnabled, dashboardError, historyError } = useDashboard(notify)
   const [firewall, setFirewall] = useState<Firewall | null>(null)
   const [ruleCount, setRuleCount] = useState<number | null>(null)
@@ -333,7 +348,7 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
   useEffect(() => {
     let active = true
     void api<{ preferences: DashboardPreferences }>('account/dashboard-preferences')
-      .then((result) => { if (active && result.preferences) setPreferences(result.preferences) })
+      .then((result) => { if (active && result.preferences) setPreferences(normalizeDashboardPreferences(result.preferences)) })
       .catch(() => { /* Dashboard still works with the built-in layout when older servers lack this API. */ })
     return () => { active = false }
   }, [user.id])
@@ -370,7 +385,7 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
     setPreferencesSaving(true)
     try {
       const result = await api<{ preferences: DashboardPreferences }>('account/dashboard-preferences', { method: 'PUT', body: JSON.stringify(preferencesDraft) })
-      setPreferences(result.preferences)
+      setPreferences(normalizeDashboardPreferences(result.preferences))
       setPreferencesOpen(false)
       notify('چیدمان داشبورد برای حساب تو ذخیره شد.')
     } catch (cause) { notify(cause instanceof Error ? cause.message : 'ذخیرهٔ چیدمان داشبورد ناموفق بود.') }
@@ -378,11 +393,12 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
   }
   const presetLabels: Record<DashboardPreferences['preset'], string> = { minimal: 'حداقلی', devops: 'DevOps', hosting: 'میزبانی', fleet: 'Fleet', custom: 'شخصی‌سازی‌شده' }
   return <div className="arg-dashboard flex flex-col gap-5">
-    <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="text-[10px] font-semibold tracking-[.18em] text-primary" dir="ltr">ARG / OVERVIEW</div><h1 className="mt-1 text-2xl font-bold text-foreground md:text-[27px]">نمای کلی سرور</h1></div><div className="flex items-center gap-2"><Dialog open={preferencesOpen} onOpenChange={setPreferencesOpen}><DialogTrigger asChild><Button size="sm" variant="outline"><SlidersHorizontal size={14}/>چیدمان</Button></DialogTrigger><DialogContent className="max-h-[88dvh] max-w-xl overflow-y-auto"><DialogHeader><DialogTitle>شخصی‌سازی داشبورد</DialogTitle><DialogDescription>ترتیب و نمایش بخش‌های فعلی فقط برای حساب کاربری خودت ذخیره می‌شود. این presetها ویجت یا دادهٔ تازه‌ای ایجاد نمی‌کنند.</DialogDescription></DialogHeader><div className="space-y-4"><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{(['minimal','devops','hosting','fleet'] as const).map((preset) => <Button key={preset} type="button" variant={preferencesDraft.preset === preset ? 'default' : 'outline'} size="sm" onClick={() => setPreferencesDraft(dashboardPreset(preset))}>{presetLabels[preset]}</Button>)}</div><div className="space-y-2">{preferencesDraft.order.map((widget, index) => <div key={widget} className="flex flex-wrap items-center gap-3 rounded-xl border border-border/70 bg-background/50 p-3"><div className="flex min-w-0 flex-1 items-center gap-2"><span className="w-6 font-mono text-xs text-muted-foreground" dir="ltr">{index + 1}</span><span className="text-xs">{DASHBOARD_WIDGET_LABELS[widget]}</span></div><div className="flex items-center gap-2"><label className="flex items-center gap-2 text-[11px] text-muted-foreground">نمایش<Switch checked={!preferencesDraft.hidden.includes(widget)} onCheckedChange={(checked) => { const hidden = checked ? preferencesDraft.hidden.filter((item) => item !== widget) : [...preferencesDraft.hidden, widget]; setCustomPreferences({ ...preferencesDraft, hidden }) }}/></label><Button type="button" size="icon" variant="ghost" disabled={index === 0} aria-label="انتقال به بالا" onClick={() => moveWidget(widget, -1)}><ChevronUp size={15}/></Button><Button type="button" size="icon" variant="ghost" disabled={index === preferencesDraft.order.length - 1} aria-label="انتقال به پایین" onClick={() => moveWidget(widget, 1)}><ChevronDown size={15}/></Button></div></div>)}</div><div className="flex flex-wrap justify-between gap-2 border-t border-border pt-3"><Button type="button" variant="ghost" disabled={preferencesSaving} onClick={() => setPreferencesDraft(DEFAULT_DASHBOARD_PREFERENCES)}>بازنشانی</Button><Button type="button" disabled={preferencesSaving} onClick={() => void saveDashboardPreferences()}>{preferencesSaving ? 'در حال ذخیره…' : 'ذخیرهٔ چیدمان'}</Button></div></div></DialogContent></Dialog><RefreshButton label="تازه‌سازی" onRefresh={refresh}/></div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><div><div className="text-[10px] font-semibold tracking-[.18em] text-primary" dir="ltr">ARG / OVERVIEW</div><h1 className="mt-1 text-2xl font-bold text-foreground md:text-[27px]">نمای کلی سرور</h1></div><div className="flex items-center gap-2"><Dialog open={preferencesOpen} onOpenChange={setPreferencesOpen}><DialogTrigger asChild><Button size="sm" variant="outline"><SlidersHorizontal size={14}/>چیدمان</Button></DialogTrigger><DialogContent className="max-h-[88dvh] max-w-xl overflow-y-auto"><DialogHeader><DialogTitle>شخصی‌سازی داشبورد</DialogTitle><DialogDescription>ترتیب و نمایش بخش‌ها فقط برای حساب خودت ذخیره می‌شود؛ تغییر چیدمان عملیاتی روی VPS انجام نمی‌دهد. نقشهٔ ARG Mesh فقط برای مدیر در حالت چندسرور نمایش داده می‌شود.</DialogDescription></DialogHeader><div className="space-y-4"><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{(['minimal','devops','hosting','fleet'] as const).map((preset) => <Button key={preset} type="button" variant={preferencesDraft.preset === preset ? 'default' : 'outline'} size="sm" onClick={() => setPreferencesDraft(dashboardPreset(preset))}>{presetLabels[preset]}</Button>)}</div><div className="space-y-2">{preferencesDraft.order.map((widget, index) => <div key={widget} className="flex flex-wrap items-center gap-3 rounded-xl border border-border/70 bg-background/50 p-3"><div className="flex min-w-0 flex-1 items-center gap-2"><span className="w-6 font-mono text-xs text-muted-foreground" dir="ltr">{index + 1}</span><span className="text-xs">{DASHBOARD_WIDGET_LABELS[widget]}</span></div><div className="flex items-center gap-2"><label className="flex items-center gap-2 text-[11px] text-muted-foreground">نمایش<Switch checked={!preferencesDraft.hidden.includes(widget)} onCheckedChange={(checked) => { const hidden = checked ? preferencesDraft.hidden.filter((item) => item !== widget) : [...preferencesDraft.hidden, widget]; setCustomPreferences({ ...preferencesDraft, hidden }) }}/></label><Button type="button" size="icon" variant="ghost" disabled={index === 0} aria-label="انتقال به بالا" onClick={() => moveWidget(widget, -1)}><ChevronUp size={15}/></Button><Button type="button" size="icon" variant="ghost" disabled={index === preferencesDraft.order.length - 1} aria-label="انتقال به پایین" onClick={() => moveWidget(widget, 1)}><ChevronDown size={15}/></Button></div></div>)}</div><div className="flex flex-wrap justify-between gap-2 border-t border-border pt-3"><Button type="button" variant="ghost" disabled={preferencesSaving} onClick={() => setPreferencesDraft(DEFAULT_DASHBOARD_PREFERENCES)}>بازنشانی</Button><Button type="button" disabled={preferencesSaving} onClick={() => void saveDashboardPreferences()}>{preferencesSaving ? 'در حال ذخیره…' : 'ذخیرهٔ چیدمان'}</Button></div></div></DialogContent></Dialog><RefreshButton label="تازه‌سازی" onRefresh={refresh}/></div></div>
     <section className="arg-dashboard-server-strip flex flex-wrap items-center justify-between gap-4 rounded-xl border px-4 py-3.5" aria-label="مشخصات سرور">
       <div className="flex min-w-0 items-center gap-3"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-primary/15 bg-primary/[.06]"><img src="/arg/icons/metric-app.svg" alt="" aria-hidden="true" className="h-5 w-5"/></span><div className="min-w-0"><p className="text-[10px] text-muted-foreground">سرور تحت مدیریت</p><p dir="ltr" className="truncate font-mono text-sm font-semibold text-foreground">{data?.hostname || 'در حال دریافت مشخصات…'}</p></div></div>
       <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[10px] ${data ? 'border-emerald-400/15 bg-emerald-400/[.04] text-emerald-200' : 'border-white/10 bg-white/[.025] text-muted-foreground'}`}><span className={`h-1.5 w-1.5 rounded-full ${data ? 'bg-emerald-300' : 'bg-muted-foreground'}`}/>{data ? 'وضعیت سیستم دریافت شد' : loading ? 'در حال دریافت وضعیت' : 'داده در دسترس نیست'}</div>
     </section>
+    {workspaceMode === 'multi' && user.role === 'admin' && !widgetHidden('mesh') && <section className="min-w-0" aria-label="نقشهٔ ارتباط پنل‌های ARG" style={{ order: widgetOrder('mesh') }}><FederationTopologyWidget onOpen={onOpenWorkspace}/></section>}
     {(dashboardError || historyError) && <Alert className="border-amber-400/25 bg-amber-400/[.06]"><AlertDescription>{dashboardError && historyError ? 'دریافت وضعیت سرور و تاریخچه ناموفق بود.' : dashboardError ? 'دریافت وضعیت فعلی سرور ناموفق بود.' : 'دریافت تاریخچهٔ منابع ناموفق بود.'} <RefreshButton className="mr-2 inline-flex h-auto border-0 p-0 font-semibold text-primary underline" label="تلاش دوباره" onRefresh={refresh}/></AlertDescription></Alert>}
     <section aria-label="مصرف منابع سرور" className="space-y-3" style={{ order: widgetOrder('resources'), display: widgetHidden('resources') ? 'none' : undefined }}>
       <div className="flex items-end justify-between gap-3"><div><h2 className="text-sm font-bold text-foreground">مصرف منابع</h2><p className="mt-1 text-[11px] text-muted-foreground">شاخص‌های اصلی این سرور</p></div><a href="#/system" className="shrink-0 text-xs text-primary hover:underline">جزئیات سیستم</a></div>
@@ -418,8 +434,14 @@ export function DashboardPage({ notify, user }: Common & { user: User }) {
   </div>
 }
 
-function DataRows({ rows }: { rows: { label: string; value: string; detail?: string }[] }) {
-  return <Table><TableHeader><TableRow><TableHead>شاخص</TableHead><TableHead>مقدار</TableHead><TableHead className="hidden md:table-cell">توضیح</TableHead></TableRow></TableHeader><TableBody>{rows.map((row) => <TableRow key={row.label}><TableCell className="font-medium">{row.label}</TableCell><TableCell><span className="font-mono font-semibold text-white tabular-nums" dir="ltr">{row.value}</span></TableCell><TableCell className="hidden text-xs text-muted-foreground md:table-cell">{row.detail || '—'}</TableCell></TableRow>)}</TableBody></Table>
+function SystemFacts({ rows }: { rows: { label: string; value: string; detail?: string }[] }) {
+  return <dl className="divide-y divide-border/70">
+    {rows.map((row) => <div key={row.label} className="grid grid-cols-[minmax(0,.85fr)_minmax(0,1.15fr)] items-start gap-x-4 gap-y-1 py-3 first:pt-0 last:pb-0">
+      <dt className="text-xs leading-5 text-muted-foreground">{row.label}</dt>
+      <dd dir="auto" className="min-w-0 break-words text-start font-mono text-xs font-medium leading-5 tabular-nums text-foreground">{row.value}</dd>
+      {row.detail && <dd className="col-start-2 min-w-0 text-start text-[10px] leading-5 text-muted-foreground">{row.detail}</dd>}
+    </div>)}
+  </dl>
 }
 
 export function SystemPage({ Heading, notify }: Common) {
@@ -432,17 +454,76 @@ export function SystemPage({ Heading, notify }: Common) {
   const usedDisk = rootVolume?.used_bytes ?? data?.disk_used_bytes ?? (totalDisk !== null && data?.disk_free_bytes != null ? Math.max(0, totalDisk - data.disk_free_bytes) : null)
   const freeDisk = rootVolume?.available_bytes ?? data?.disk_free_bytes ?? null
   const diskPercent = rootVolume?.use_percent ?? (totalDisk && totalDisk > 0 && usedDisk !== null ? usedDisk / totalDisk * 100 : null)
-  const load = (data?.load || '').split(' ')
+  const load = (data?.load || '').trim().split(/\s+/)
   const memoryDetail = data?.memory_details
   return <>
     <Heading title="سیستم و منابع" description="پردازنده، حافظه و دیسک را با جزئیات واقعی سرور بررسی کن." action={<RefreshButton onRefresh={refresh}/>}/>
     {loading && !data ? <LoadingCards/> : <>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3"><Metric icon={Cpu} tone="green" label="پردازنده" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={data ? `بار 1/5/15 دقیقه: ${data.load || '—'}` : 'داده در دسترس نیست'} progress={cpu ?? undefined}/><Metric icon={Database} tone="copper" label="حافظهٔ RAM" value={memoryPercent === null ? '—' : `${formatNumber(memoryPercent)}%`} detail={totalMemory > 0 ? `${formatBytes(totalMemory - availableMemory)} از ${formatBytes(totalMemory)}` : 'داده در دسترس نیست'} progress={memoryPercent ?? undefined}/><Metric icon={HardDrive} tone="teal" label="دیسک ریشه /" value={diskPercent === null ? '—' : `${formatNumber(Math.round(diskPercent * 10) / 10)}%`} detail={usedDisk !== null && totalDisk !== null ? `${formatBytes(usedDisk)} مصرف‌شده · ${formatBytes(totalDisk)} ظرفیت` : 'داده در دسترس نیست'} progress={diskPercent ?? undefined}/></div>
-      <div className="mt-5"><SectionCard title="تاریخچهٔ منابع" description="نمونه‌ها توسط سرویس Rust ذخیره می‌شوند" right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard></div>
-      <div className="mt-5 grid gap-4 xl:grid-cols-2"><ArgChartPanel icon="metric-disk" title="ظرفیت دیسک ریشه /" description="درصد مصرف؛ مقدار کل و مصرف‌شده در جدول پایین آمده است."><TimeSeriesChart samples={diskCapacityHistory} series={[{ key: 'capacity', label: 'مصرف فضای ریشه', color: 'var(--arg-viz-memory)' }]} max={100} unit="%"/></ArgChartPanel><ArgChartPanel icon="metric-disk" title="Disk Read / Write ریشه /" description="سرعت خواندن و نوشتن بلاک‌دیوایس ریشه بر حسب بایت بر ثانیه"><TimeSeriesChart samples={diskIoHistory} series={[{ key: 'read', label: 'Read', color: 'var(--arg-viz-rx)' }, { key: 'write', label: 'Write', color: 'var(--arg-viz-memory)' }]} max={Math.max(1024, ...diskIoHistory.flatMap((sample) => [sample.read, sample.write])) * 1.12} unit="bytes"/></ArgChartPanel></div>
-      <div className="mt-5"><StorageInventorySection inventory={data?.storage} loading={loading && !data} onRefresh={refresh}/></div>
-      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="پردازنده و بار سیستم" description="مقادیر لحظه‌ای و میانگین بار Linux"><DataRows rows={[{ label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین هسته‌ها' }, { label: 'هسته‌های در دسترس', value: data?.cpu_cores == null ? '—' : formatNumber(data.cpu_cores) }, { label: 'بار 1 دقیقه', value: load[0] || '—' }, { label: 'بار 5 دقیقه', value: load[1] || '—' }, { label: 'بار 15 دقیقه', value: load[2] || '—' }, { label: 'زمان روشن‌بودن', value: data ? `${formatNumber(Math.floor(data.uptime_seconds / 86400))}d ${formatNumber(Math.floor((data.uptime_seconds % 86400) / 3600))}h` : '—' }]}/></SectionCard><SectionCard title="حافظه و Swap" description="مقادیر خوانده‌شده از /proc/meminfo"><DataRows rows={[{ label: 'کل RAM', value: data ? formatBytes(totalMemory) : '—' }, { label: 'مصرف‌شده', value: data ? formatBytes(totalMemory - availableMemory) : '—', detail: 'بر اساس MemAvailable' }, { label: 'در دسترس', value: data ? formatBytes(availableMemory) : '—' }, { label: 'Cache', value: memoryDetail?.cached_kib == null ? '—' : formatBytes(memoryDetail.cached_kib * 1024) }, { label: 'Buffer', value: memoryDetail?.buffers_kib == null ? '—' : formatBytes(memoryDetail.buffers_kib * 1024) }, { label: 'Swap کل', value: data?.swap_total_kib == null ? '—' : formatBytes(data.swap_total_kib * 1024) }, { label: 'Swap مصرف‌شده', value: data?.swap_total_kib == null || data.swap_free_kib == null ? '—' : formatBytes((data.swap_total_kib - data.swap_free_kib) * 1024) }]}/></SectionCard></div>
-      <div className="mt-5 grid gap-5 xl:grid-cols-2"><SectionCard title="دیسک ریشه /" description="این اعداد از همان Mount Point ریشه در فهرست فضای ذخیره‌سازی آمده‌اند."><DataRows rows={[{ label: 'ظرفیت کل', value: totalDisk === null ? '—' : formatBytes(totalDisk) }, { label: 'مصرف‌شده', value: usedDisk === null ? '—' : formatBytes(usedDisk) }, { label: 'در دسترس', value: freeDisk === null ? '—' : formatBytes(freeDisk) }, { label: 'رزرو سیستم‌فایل', value: rootVolume?.reserved_bytes == null ? '—' : formatBytes(rootVolume.reserved_bytes) }, { label: 'درصد مصرف', value: diskPercent === null ? '—' : `${formatNumber(Math.round(diskPercent * 10) / 10)}%` }, { label: 'Read / Write فعلی', value: rootVolume?.read_bytes_per_sec == null || rootVolume?.write_bytes_per_sec == null ? 'در انتظار نمونه' : `${formatBytes(rootVolume.read_bytes_per_sec)}/s · ${formatBytes(rootVolume.write_bytes_per_sec)}/s`, detail: 'بلاک‌دیوایس ریشه' }]}/></SectionCard><SectionCard title="مصرف پنل ARG" description="اندازه‌گیری همین فرایند"><DataRows rows={[{ label: 'CPU پنل', value: data ? `${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}%` : '—' }, { label: 'RAM پنل', value: data ? formatBytes(data.process_rss_bytes) : '—', detail: 'حافظهٔ مقیم فرایند (RSS)' }]}/></SectionCard></div>
+      <section aria-label="خلاصهٔ مصرف منابع" className="space-y-2">
+        <div className="flex flex-wrap items-end justify-between gap-2"><div><h2 className="text-sm font-bold text-foreground">وضعیت فعلی</h2><p className="mt-1 text-[11px] text-muted-foreground">مقادیر زندهٔ CPU، حافظه و فضای ریشهٔ سرور</p></div>{data?.cpu_cores != null && <Badge variant="outline">{formatNumber(data.cpu_cores)} هستهٔ CPU</Badge>}</div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <Metric icon={Cpu} tone="green" label="پردازنده" value={cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`} detail={cpu === null ? 'نمونهٔ مصرف در دسترس نیست' : `Load average: ${load.slice(0, 3).join(' · ') || '—'}`} progress={cpu ?? undefined}/>
+          <Metric icon={Database} tone="copper" label="حافظهٔ RAM" value={memoryPercent === null ? '—' : `${formatNumber(memoryPercent)}%`} detail={totalMemory > 0 ? `${formatBytes(totalMemory - availableMemory)} مصرف‌شده از ${formatBytes(totalMemory)}` : 'داده در دسترس نیست'} progress={memoryPercent ?? undefined}/>
+          <Metric icon={HardDrive} tone="teal" label="دیسک ریشه /" value={diskPercent === null ? '—' : `${formatNumber(Math.round(diskPercent * 10) / 10)}%`} detail={usedDisk !== null && totalDisk !== null ? `${formatBytes(usedDisk)} مصرف‌شده از ${formatBytes(totalDisk)}` : 'داده در دسترس نیست'} progress={diskPercent ?? undefined}/>
+          <Metric icon={Clock} tone="blue" label="زمان روشن‌بودن" value={data ? formatUptime(data.uptime_seconds) : '—'} detail="از آخرین راه‌اندازی سیستم" direction="rtl"/>
+        </div>
+      </section>
+      <Tabs defaultValue="trends" className="mt-5" dir="rtl">
+        <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های سیستم و منابع">
+          <TabsTrigger value="trends">نمودارها و روندها</TabsTrigger>
+          <TabsTrigger value="storage">فضاهای ذخیره‌سازی</TabsTrigger>
+          <TabsTrigger value="details">مشخصات و جزئیات</TabsTrigger>
+        </TabsList>
+        <TabsContent value="trends" className="space-y-5">
+          <SectionCard title="روند مصرف منابع" description="CPU، حافظه و ترافیک در بازهٔ زمانی انتخاب‌شده؛ داده‌ها توسط سرویس ARG ثبت می‌شوند." right={<TimeRangeFilter range={range} setRange={setRange} from={customFrom} setFrom={setCustomFrom} to={customTo} setTo={setCustomTo} applyCustom={applyCustomRange}/>}>{!historyEnabled && <HistoryPaused/>}<ResourceChart samples={resourceHistory}/></SectionCard>
+        </TabsContent>
+        <TabsContent value="storage" className="space-y-5">
+          <div className="grid gap-4 xl:grid-cols-2"><ArgChartPanel icon="metric-disk" title="مصرف دیسک ریشه" description="درصد فضای استفاده‌شده از Mount Point ریشهٔ سرور."><TimeSeriesChart samples={diskCapacityHistory} series={[{ key: 'capacity', label: 'مصرف فضای ریشه', color: 'var(--arg-viz-memory)' }]} max={100} unit="%"/></ArgChartPanel><ArgChartPanel icon="metric-disk" title="سرعت خواندن و نوشتن" description="نرخ I/O دیسک ریشه بر حسب بایت در ثانیه؛ مقدار صفر یعنی در آن نمونه فعالیتی ثبت نشده است."><TimeSeriesChart samples={diskIoHistory} series={[{ key: 'read', label: 'خواندن', color: 'var(--arg-viz-rx)' }, { key: 'write', label: 'نوشتن', color: 'var(--arg-viz-memory)' }]} max={Math.max(1024, ...diskIoHistory.flatMap((sample) => [sample.read, sample.write])) * 1.12} unit="bytes"/></ArgChartPanel></div>
+          <StorageInventorySection inventory={data?.storage} loading={loading && !data} onRefresh={refresh}/>
+        </TabsContent>
+        <TabsContent value="details" className="space-y-5">
+          <div className="grid items-start gap-4 xl:grid-cols-2">
+            <SectionCard title="پردازنده و بار سیستم" description="مقادیر پردازنده و میانگین بار Linux">
+              <SystemFacts rows={[
+                { label: 'مصرف CPU', value: cpu === null ? '—' : `${formatNumber(Math.round(cpu))}%`, detail: 'میانگین مصرف هسته‌ها' },
+                { label: 'هسته‌های در دسترس', value: data?.cpu_cores == null ? '—' : formatNumber(data.cpu_cores) },
+                { label: 'Load average · 1 دقیقه', value: load[0] || '—' },
+                { label: 'Load average · 5 دقیقه', value: load[1] || '—' },
+                { label: 'Load average · 15 دقیقه', value: load[2] || '—' },
+                { label: 'زمان روشن‌بودن', value: data ? formatUptime(data.uptime_seconds) : '—' },
+              ]}/>
+            </SectionCard>
+            <SectionCard title="حافظه و Swap" description="RAM قابل استفاده و فضای Swap سیستم">
+              <SystemFacts rows={[
+                { label: 'کل RAM', value: data ? formatBytes(totalMemory) : '—' },
+                { label: 'RAM مصرف‌شده', value: data ? formatBytes(totalMemory - availableMemory) : '—', detail: 'محاسبه بر پایهٔ MemAvailable' },
+                { label: 'RAM در دسترس', value: data ? formatBytes(availableMemory) : '—' },
+                { label: 'Cache', value: memoryDetail?.cached_kib == null ? '—' : formatBytes(memoryDetail.cached_kib * 1024) },
+                { label: 'Buffer', value: memoryDetail?.buffers_kib == null ? '—' : formatBytes(memoryDetail.buffers_kib * 1024) },
+                { label: 'Swap کل', value: data?.swap_total_kib == null ? '—' : formatBytes(data.swap_total_kib * 1024) },
+                { label: 'Swap مصرف‌شده', value: data?.swap_total_kib == null || data.swap_free_kib == null ? '—' : formatBytes((data.swap_total_kib - data.swap_free_kib) * 1024) },
+              ]}/>
+            </SectionCard>
+            <SectionCard title="فضای دیسک ریشه /" description="همان Mount Point ریشه که در فهرست دیسک‌ها نمایش داده می‌شود.">
+              <SystemFacts rows={[
+                { label: 'ظرفیت کل', value: totalDisk === null ? '—' : formatBytes(totalDisk) },
+                { label: 'مصرف‌شده', value: usedDisk === null ? '—' : formatBytes(usedDisk) },
+                { label: 'فضای در دسترس', value: freeDisk === null ? '—' : formatBytes(freeDisk) },
+                { label: 'رزرو سیستم‌فایل', value: rootVolume?.reserved_bytes == null ? '—' : formatBytes(rootVolume.reserved_bytes) },
+                { label: 'درصد مصرف', value: diskPercent === null ? '—' : `${formatNumber(Math.round(diskPercent * 10) / 10)}%` },
+                { label: 'سرعت خواندن', value: rootVolume?.read_bytes_per_sec == null ? 'در انتظار نمونه' : `${formatBytes(rootVolume.read_bytes_per_sec)}/s` },
+                { label: 'سرعت نوشتن', value: rootVolume?.write_bytes_per_sec == null ? 'در انتظار نمونه' : `${formatBytes(rootVolume.write_bytes_per_sec)}/s` },
+              ]}/>
+            </SectionCard>
+            <SectionCard title="فرایند پنل ARG" description="مصرفی که همین فرایند مدیریت پنل دارد">
+              <SystemFacts rows={[
+                { label: 'CPU پنل', value: data ? `${formatNumber(Math.round(data.process_cpu_percent * 10) / 10)}%` : '—' },
+                { label: 'RAM پنل', value: data ? formatBytes(data.process_rss_bytes) : '—', detail: 'حافظهٔ مقیم فرایند (RSS)' },
+              ]}/>
+            </SectionCard>
+          </div>
+        </TabsContent>
+      </Tabs>
     </>}
   </>
 }
@@ -803,22 +884,35 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
   return <>
     <Heading title="فایروال UFW" description="قوانین پنل را بساز، ویرایش کن یا موقتاً غیرفعال کن." action={<div className="flex flex-wrap gap-2"><RefreshButton onRefresh={refresh}/>{user.role === 'admin' && <Button size="sm" onClick={() => openEditor()}><Plus size={15}/> قانون جدید</Button>}</div>}/>
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">وضعیت UFW</div><div className="mt-3 flex items-center gap-2 text-xl font-bold text-white"><span className={`h-2 w-2 rounded-full ${active ? 'bg-emerald-400' : 'bg-amber-400'}`}/>{loading ? 'در حال بررسی' : data?.available ? active ? 'فعال' : 'غیرفعال' : 'نصب نشده'}</div>{user.role === 'admin' && data?.available && <div className="mt-4 flex items-center gap-2 border-t border-white/10 pt-3 text-xs text-muted-foreground"><Switch checked={!!active} disabled={busy} onCheckedChange={() => void toggleFirewall()} aria-label="تغییر وضعیت UFW"/> تغییر وضعیت کلی UFW</div>}{user.role === 'admin' && !data?.available && <div className="mt-4 border-t border-white/10 pt-3"><Button size="sm" disabled={busy} onClick={() => void installFirewall()}>{busy ? 'در حال نصب…' : 'نصب UFW'}</Button><p className="mt-2 text-[11px] leading-5 text-amber-200/80">{data?.error || 'UFW روی این سرور نصب نشده است.'}</p></div>}</div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین فعال پنل</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => rule.enabled).length)}</div></div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین غیرفعال</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => !rule.enabled).length)}</div></div></div>
+    <Tabs defaultValue="access" className="mt-5" dir="rtl">
+      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های فایروال">
+        <TabsTrigger value="access">دسترسی و وضعیت</TabsTrigger>
+        <TabsTrigger value="managed">قوانین ARG</TabsTrigger>
+        <TabsTrigger value="system">قوانین واقعی UFW</TabsTrigger>
+      </TabsList>
+      <TabsContent value="access" className="space-y-5">
     <SectionCard title="پورت‌های باز و محافظت‌شده" description="پورت‌های حیاتی همیشه در فهرست دیده می‌شوند و تغییرشان قفل است؛ دسترسی وب روی 80 و 443 را می‌توانی روشن یا خاموش کنی."><div className="grid gap-3 sm:grid-cols-2">{protectedPorts.map((port) => <div key={`protected-${port}`} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-400/15 bg-emerald-400/[.035] p-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-lg border border-emerald-400/15 bg-emerald-400/[.06] text-emerald-300"><ShieldCheck size={18}/></span><div><div className="flex items-center gap-2 font-semibold">دسترسی محافظت‌شده <span className="font-mono text-xs text-muted-foreground" dir="ltr">:{port}/tcp</span></div><p className="mt-1 text-xs text-muted-foreground">برای جلوگیری از قطع دسترسی SSH یا پنل، قابل تغییر نیست.</p></div></div><div className="flex items-center gap-2"><Switch checked disabled aria-label={`پورت محافظت‌شده ${port} همیشه باز است`}/><Badge variant="success">محافظت‌شده</Badge></div></div>)}{([{ port: 80 as const, name: 'HTTP', description: 'وب‌سایت‌های بدون TLS' }, { port: 443 as const, name: 'HTTPS', description: 'وب‌سایت‌های دارای TLS' }]).map(({ port, name, description }) => { const rule = rules.find((item) => item.port === port && item.protocol === 'tcp'); const allowed = !!rule && rule.enabled && rule.policy === 'allow'; return <div key={port} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-background/40 p-4"><div className="flex items-center gap-3"><span className="grid h-10 w-10 place-items-center rounded-lg border border-primary/20 bg-primary/10 text-primary"><Globe size={18}/></span><div><div className="flex items-center gap-2 font-semibold">{name}<span className="font-mono text-xs text-muted-foreground" dir="ltr">:{port}/tcp</span></div><p className="mt-1 text-xs text-muted-foreground">{description}</p></div></div><div className="flex items-center gap-2"><span className="text-xs text-muted-foreground">{allowed ? 'وصل' : 'قطع'}</span><Switch checked={allowed} disabled={busy || !data?.available || user.role !== 'admin'} onCheckedChange={(checked) => void setWebsitePort(port, checked)} aria-label={`${allowed ? 'قطع' : 'وصل'} دسترسی ${name} روی پورت ${port}`}/></div></div> })}</div>{!data?.available && <p className="mt-3 text-xs text-muted-foreground">برای تغییر دسترسی پورت‌ها ابتدا UFW را نصب کن.</p>}</SectionCard>
+    <Alert><ShieldCheck size={17} className="mb-2 text-primary"/><AlertTitle>حفاظت دسترسی</AlertTitle><AlertDescription>پورت SSH و پورت‌های پنل برای جلوگیری از قطع دسترسی محافظت می‌شوند. پورت‌های HTTP (80) و HTTPS (443) قابل مدیریت‌اند؛ فعال‌سازی UFW آن‌ها را باز می‌گذارد مگر این‌که برایشان قانون مسدودسازی مشخص کرده باشی.</AlertDescription></Alert>
+      </TabsContent>
+      <TabsContent value="managed" className="space-y-5">
     <SectionCard title="قوانین مدیریت‌شده" description="تغییر وضعیت و ویرایش فقط روی قوانین ساخته‌شده توسط پنل اعمال می‌شود" right={<Badge variant="outline">{formatNumber(filtered.length)} قانون</Badge>}>
       <div className="mb-5 flex flex-wrap items-center gap-3"><label className="relative min-w-[180px] flex-1"><span className="sr-only">جست‌وجوی پورت</span><Search size={16} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"/><Input lang="en" inputMode="numeric" value={query} onChange={(event) => setQuery(event.target.value.replace(/[^0-9]/g, ''))} placeholder="جست‌وجوی شمارهٔ پورت" className="pr-9"/></label><div className="flex gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1">{([['all','همه'], ['enabled','فعال'], ['disabled','غیرفعال']] as const).map(([value, label]) => <button key={value} onClick={() => setStatusFilter(value)} aria-pressed={statusFilter === value} className={`rounded-lg px-3 py-2 text-xs transition ${statusFilter === value ? 'bg-primary/20 text-white' : 'text-muted-foreground hover:text-white'}`}>{label}</button>)}</div></div>
       {loading ? <Skeleton className="h-48"/> : filtered.length ? <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>پورت</TableHead><TableHead>پروتکل</TableHead><TableHead>رفتار</TableHead><TableHead>وضعیت</TableHead>{user.role === 'admin' && <TableHead>مدیریت</TableHead>}</TableRow></TableHeader><TableBody>{filtered.map((rule) => <TableRow key={rule.id}><TableCell className="font-mono text-white" dir="ltr">{rule.port}</TableCell><TableCell className="font-mono uppercase">{rule.protocol}</TableCell><TableCell><Badge variant={rule.policy === 'allow' ? 'success' : 'warning'}>{rule.policy === 'allow' ? 'اجازه' : 'مسدود'}</Badge></TableCell><TableCell>{user.role === 'admin' ? <div className="flex items-center gap-2"><Switch checked={rule.enabled} disabled={busy} onCheckedChange={() => void toggle(rule)} aria-label={`${rule.enabled ? 'غیرفعال‌کردن' : 'فعال‌کردن'} قانون ${rule.port}`}/><span className="text-xs text-muted-foreground">{rule.enabled ? 'فعال' : 'غیرفعال'}</span></div> : <Badge variant={rule.enabled ? 'success' : 'outline'}>{rule.enabled ? 'فعال' : 'غیرفعال'}</Badge>}</TableCell>{user.role === 'admin' && <TableCell><div className="flex gap-1"><Button variant="ghost" size="icon" disabled={busy} onClick={() => openEditor(rule)} aria-label={`ویرایش قانون ${rule.port}`}><Pencil size={15}/></Button><Button variant="ghost" size="icon" disabled={busy} onClick={() => void remove(rule)} aria-label={`حذف قانون ${rule.port}`}><Trash2 size={15}/></Button></div></TableCell>}</TableRow>)}</TableBody></Table></div> : <div className="rounded-xl border border-dashed border-white/10 py-12 text-center text-sm text-muted-foreground">{query || statusFilter !== 'all' ? 'قانونی مطابق فیلتر پیدا نشد.' : 'هنوز قانونی در پنل ساخته نشده است.'}</div>}
     </SectionCard>
+      </TabsContent>
+      <TabsContent value="system" className="space-y-5">
     <SectionCard title="قوانین واقعی UFW" description="قوانین ساخته‌شده با ARG و قوانین دستی سیستم را اینجا می‌بینی. حذف هر قانون با شناسه و متن فعلی آن تطبیق داده می‌شود؛ قوانین SSH و پنل محافظت می‌شوند." right={<Badge variant="outline">{formatNumber(externalRules.length)} قانون سیستم</Badge>}>
       {!externalRules.length ? <p className="text-sm text-muted-foreground">UFW قانون شماره‌داری برای نمایش ندارد.</p> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>شناسه</TableHead><TableHead>قانون UFW</TableHead>{user.role === 'admin' && <TableHead>مدیریت</TableHead>}</TableRow></TableHeader><TableBody>{externalRules.map((rule) => <TableRow key={`${rule.number}:${rule.line}`}><TableCell dir="ltr" className="font-mono">{rule.number}</TableCell><TableCell dir="ltr" className="font-mono text-xs">{rule.detail}</TableCell>{user.role === 'admin' && <TableCell>{rule.protected ? <Badge variant="success">محافظت‌شده</Badge> : <Button size="sm" variant="ghost" disabled={busy} onClick={() => void removeExternalRule(rule)}><Trash2 size={14} className="text-destructive"/>حذف قانون</Button>}</TableCell>}</TableRow>)}</TableBody></Table></div>}
       <details className="mt-4 border-t border-white/10 pt-3"><summary className="cursor-pointer text-xs text-muted-foreground">خروجی خام UFW</summary><div className="mt-3 flex justify-end"><Button variant="outline" size="sm" disabled={!data?.status} onClick={() => downloadText('arg-ufw.txt', data?.status || '')}><Download size={14}/>دریافت خروجی</Button></div><pre className="mt-3 max-h-[360px] overflow-auto whitespace-pre-wrap rounded-xl bg-background p-4 text-left font-mono text-xs leading-6 text-muted-foreground" dir="ltr">{data?.status || data?.error || 'UFW unavailable'}</pre></details>
     </SectionCard>
-    <Alert className="mt-5"><ShieldCheck size={17} className="mb-2 text-primary"/><AlertTitle>حفاظت دسترسی</AlertTitle><AlertDescription>پورت SSH و پورت‌های پنل برای جلوگیری از قطع دسترسی محافظت می‌شوند. پورت‌های HTTP (80) و HTTPS (443) قابل مدیریت‌اند؛ فعال‌سازی UFW آن‌ها را باز می‌گذارد مگر این‌که برایشان قانون مسدودسازی مشخص کرده باشی.</AlertDescription></Alert>
+      </TabsContent>
+    </Tabs>
     <Dialog open={dialogOpen} onOpenChange={setDialogOpen}><DialogContent><DialogHeader><DialogTitle>{editing === null ? 'قانون جدید' : 'ویرایش قانون'}</DialogTitle><DialogDescription>قانون در UFW اعمال می‌شود و می‌توانی بعداً آن را غیرفعال کنی.</DialogDescription></DialogHeader><form onSubmit={save} className="space-y-4"><div className="grid grid-cols-2 gap-3"><div className="space-y-2"><Label htmlFor="firewall-port">پورت</Label><Input id="firewall-port" type="number" lang="en" dir="ltr" min={1} max={65535} required value={form.port} onChange={(event) => setForm((old) => ({ ...old, port: event.target.value }))}/></div><div className="space-y-2"><Label>پروتکل</Label><div role="group" aria-label="انتخاب پروتکل شبکه" className="grid grid-cols-3 gap-1 rounded-xl border border-white/10 bg-white/[.025] p-1">{([['tcp','TCP'], ['udp','UDP'], ['both','TCP + UDP']] as const).map(([value,label]) => <button key={value} type="button" aria-pressed={form.protocol === value} onClick={() => setForm((old) => ({ ...old, protocol: value }))} className={`rounded-lg px-2 py-2.5 text-xs font-mono font-semibold transition ${form.protocol === value ? 'bg-primary/25 text-white shadow-sm' : 'text-muted-foreground hover:bg-white/[.04] hover:text-white'}`}>{label}</button>)}</div><p className="text-[11px] text-muted-foreground">{form.protocol === 'both' ? 'دو قانون جداگانه برای TCP و UDP ساخته می‌شود.' : `فقط ترافیک ${form.protocol.toUpperCase()} برای این پورت مدیریت می‌شود.`}</p></div></div><div className="space-y-2"><Label htmlFor="firewall-policy">رفتار</Label><Select value={form.policy} onValueChange={(value) => setForm((old) => ({ ...old, policy: value as 'allow' | 'deny' }))}><SelectTrigger id="firewall-policy"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="allow">اجازه</SelectItem><SelectItem value="deny">مسدود</SelectItem></SelectContent></Select></div><label className="flex items-center justify-between rounded-xl border border-white/10 p-3 text-sm"><span>قانون فعال باشد</span><Switch checked={form.enabled} onCheckedChange={(checked) => setForm((old) => ({ ...old, enabled: checked }))}/></label><Button type="submit" disabled={busy || !form.port} className="w-full">{busy ? 'در حال ذخیره…' : 'ذخیرهٔ قانون'}</Button></form></DialogContent></Dialog>
     {confirmDialog}
   </>
 }
 
-type NginxSite = { name: string; enabled: boolean; maintenance_enabled?: boolean; ssl_enabled?: boolean; runtime_configured?: boolean; bytes?: number; content?: string; db_content?: string; message?: string; description?: string; sync_mismatch?: boolean }
+type NginxSite = { name: string; application_id?: string | null; application_name?: string | null; enabled: boolean; maintenance_enabled?: boolean; ssl_enabled?: boolean; runtime_configured?: boolean; bytes?: number; content?: string; db_content?: string; message?: string; description?: string; sync_mismatch?: boolean }
 const nginxSiteTabs: NginxSiteTab[] = ['overview', 'config', 'domains', 'operations', 'activity']
 function readNginxRoute() {
   const [path, search = ''] = window.location.hash.replace(/^#/, '').split('?')
@@ -995,13 +1089,20 @@ export function NginxPage({ Heading, notify }: Common) {
   const [sslRedirect, setSslRedirect] = useState(true)
   const [sslIssueBusy, setSslIssueBusy] = useState(false)
   const [siteRepository, setSiteRepository] = useState<NginxRepository | null>(null)
+  const [siteRepositorySite, setSiteRepositorySite] = useState<string | null>(null)
   const [repositoryLoading, setRepositoryLoading] = useState(false)
   const [siteTraffic, setSiteTraffic] = useState<NginxTraffic | null>(null)
+  const [siteTrafficSite, setSiteTrafficSite] = useState<string | null>(null)
   const [trafficLoading, setTrafficLoading] = useState(false)
   const [siteLog, setSiteLog] = useState('')
   const [siteLogPath, setSiteLogPath] = useState('')
   const [siteLogKind, setSiteLogKind] = useState<'access' | 'error' | null>(null)
+  const [siteLogSite, setSiteLogSite] = useState<string | null>(null)
   const [siteLogLoading, setSiteLogLoading] = useState(false)
+  const siteLogRequest = useRef(0)
+  const siteActivityEpoch = useRef(0)
+  const siteTrafficRequest = useRef(0)
+  const siteRepositoryRequest = useRef(0)
   const [sitePermissionsBusy, setSitePermissionsBusy] = useState(false)
   const [duplicateNotice, setDuplicateNotice] = useState(false)
   const [builderOpen, setBuilderOpen] = useState(false)
@@ -1051,11 +1152,39 @@ export function NginxPage({ Heading, notify }: Common) {
     return () => window.removeEventListener('hashchange', syncRoute)
   }, [])
   function showNginxList() {
+    siteActivityEpoch.current += 1
+    siteTrafficRequest.current += 1
+    siteRepositoryRequest.current += 1
+    siteLogRequest.current += 1
+    setSiteTraffic(null)
+    setSiteTrafficSite(null)
+    setSiteRepository(null)
+    setSiteRepositorySite(null)
+    setTrafficLoading(false)
+    setRepositoryLoading(false)
+    setSiteLogSite(null)
+    setSiteLogKind(null)
+    setSiteLog('')
     window.location.hash = '#/nginx'
     setSiteRoute({ site: null, tab: 'overview' })
     setToolSite(null)
   }
   function showNginxSite(name: string, tab: NginxSiteTab = 'overview') {
+    if (siteRoute.site !== name) {
+      siteActivityEpoch.current += 1
+      siteTrafficRequest.current += 1
+      siteRepositoryRequest.current += 1
+      siteLogRequest.current += 1
+      setSiteTraffic(null)
+      setSiteTrafficSite(null)
+      setSiteRepository(null)
+      setSiteRepositorySite(null)
+      setTrafficLoading(false)
+      setRepositoryLoading(false)
+      setSiteLogSite(null)
+      setSiteLogKind(null)
+      setSiteLog('')
+    }
     const route = { site: name, tab }
     const query = new URLSearchParams({ site: name, tab })
     window.location.hash = `#/nginx?${query.toString()}`
@@ -1065,6 +1194,21 @@ export function NginxPage({ Heading, notify }: Common) {
   useEffect(() => {
     const name = siteRoute.site
     if (!name || loading || loadError) return
+    siteActivityEpoch.current += 1
+    siteTrafficRequest.current += 1
+    siteRepositoryRequest.current += 1
+    siteLogRequest.current += 1
+    setSiteLogSite(null)
+    setSiteLogKind(null)
+    setSiteLog('')
+    setSiteLogPath('')
+    setSiteLogLoading(false)
+    setSiteTraffic(null)
+    setSiteTrafficSite(null)
+    setSiteRepository(null)
+    setSiteRepositorySite(null)
+    setTrafficLoading(false)
+    setRepositoryLoading(false)
     if (!sites.some((site) => site.name === name)) {
       notify(`سایت «${name}» در فهرست Nginx پیدا نشد.`)
       showNginxList()
@@ -1087,8 +1231,6 @@ export function NginxPage({ Heading, notify }: Common) {
         setDomainAliases(names.slice(1).join(', '))
         setSslDomains(names.join(' '))
         setDomainResults([])
-        setSiteLog('')
-        setSiteLogKind(null)
         setSiteTraffic(null)
         setSiteRepository(null)
       } catch (error) {
@@ -1346,18 +1488,40 @@ export function NginxPage({ Heading, notify }: Common) {
 
   async function loadSiteTraffic() {
     if (!toolSite) return
+    const siteName = toolSite.name
+    showNginxSite(siteName, 'activity')
+    const epoch = siteActivityEpoch.current
+    const requestId = ++siteTrafficRequest.current
+    setSiteTrafficSite(siteName)
+    setSiteTraffic(null)
     setTrafficLoading(true)
-    try { setSiteTraffic(await api<NginxTraffic>(`nginx/sites/${encodeURIComponent(toolSite.name)}/traffic`)) }
-    catch (error) { notify(error instanceof Error ? error.message : 'آمار ترافیک دریافت نشد.') }
-    finally { setTrafficLoading(false) }
+    try {
+      const result = await api<NginxTraffic>(`nginx/sites/${encodeURIComponent(siteName)}/traffic`)
+      if (epoch === siteActivityEpoch.current && requestId === siteTrafficRequest.current) setSiteTraffic(result)
+    } catch (error) {
+      if (epoch === siteActivityEpoch.current && requestId === siteTrafficRequest.current) notify(error instanceof Error ? error.message : 'آمار ترافیک دریافت نشد.')
+    } finally {
+      if (epoch === siteActivityEpoch.current && requestId === siteTrafficRequest.current) setTrafficLoading(false)
+    }
   }
 
   async function loadSiteRepository() {
     if (!toolSite) return
+    const siteName = toolSite.name
+    showNginxSite(siteName, 'activity')
+    const epoch = siteActivityEpoch.current
+    const requestId = ++siteRepositoryRequest.current
+    setSiteRepositorySite(siteName)
+    setSiteRepository(null)
     setRepositoryLoading(true)
-    try { setSiteRepository(await api<NginxRepository>(`nginx/sites/${encodeURIComponent(toolSite.name)}/repository`)) }
-    catch (error) { notify(error instanceof Error ? error.message : 'وضعیت مخزن دریافت نشد.') }
-    finally { setRepositoryLoading(false) }
+    try {
+      const result = await api<NginxRepository>(`nginx/sites/${encodeURIComponent(siteName)}/repository`)
+      if (epoch === siteActivityEpoch.current && requestId === siteRepositoryRequest.current) setSiteRepository(result)
+    } catch (error) {
+      if (epoch === siteActivityEpoch.current && requestId === siteRepositoryRequest.current) notify(error instanceof Error ? error.message : 'وضعیت مخزن دریافت نشد.')
+    } finally {
+      if (epoch === siteActivityEpoch.current && requestId === siteRepositoryRequest.current) setRepositoryLoading(false)
+    }
   }
 
   function domainList() {
@@ -1429,12 +1593,21 @@ export function NginxPage({ Heading, notify }: Common) {
 
   async function loadSiteLog(kind: 'access' | 'error') {
     if (!toolSite) return
+    const siteName = toolSite.name
+    showNginxSite(siteName, 'activity')
+    const epoch = siteActivityEpoch.current
+    const requestId = ++siteLogRequest.current
+    setSiteLogSite(siteName)
     setSiteLogLoading(true); setSiteLogKind(kind); setSiteLog(''); setSiteLogPath('')
     try {
-      const result = await api<{ logs: string; path: string }>(`nginx/sites/${encodeURIComponent(toolSite.name)}/logs`, { method: 'POST', body: JSON.stringify({ kind }) })
+      const result = await api<{ logs: string; path: string }>(`nginx/sites/${encodeURIComponent(siteName)}/logs`, { method: 'POST', body: JSON.stringify({ kind }) })
+      if (epoch !== siteActivityEpoch.current || requestId !== siteLogRequest.current) return
       setSiteLog(result.logs); setSiteLogPath(result.path)
-    } catch (error) { setSiteLog(error instanceof Error ? error.message : 'خواندن لاگ ناموفق بود.') }
-    finally { setSiteLogLoading(false) }
+    } catch (error) {
+      if (epoch === siteActivityEpoch.current && requestId === siteLogRequest.current) setSiteLog(error instanceof Error ? error.message : 'خواندن لاگ ناموفق بود.')
+    } finally {
+      if (epoch === siteActivityEpoch.current && requestId === siteLogRequest.current) setSiteLogLoading(false)
+    }
   }
 
   async function saveSite(event: FormEvent) {
@@ -1501,7 +1674,7 @@ export function NginxPage({ Heading, notify }: Common) {
     <SectionCard title="سایت‌های موجود" description="فعال‌سازی، symlink استاندارد را می‌سازد؛ خاموش‌کردن فقط symlink همان سایت را حذف می‌کند." right={<Badge variant="outline">{formatNumber(sites.length)} سایت</Badge>}>
       {loading ? <Skeleton className="h-48"/> : sites.length ? <div className="grid gap-3 xl:grid-cols-2">{sites.map((site) => <article key={site.name} className="rounded-[14px] border border-white/10 bg-white/[.025] p-4 transition hover:border-primary/25 hover:bg-white/[.04]">
         <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><Globe size={16} className="shrink-0 text-primary"/><h2 className="truncate font-mono text-sm font-semibold text-white" dir="ltr">{site.name}</h2></div><div className="mt-2 flex flex-wrap gap-1.5" aria-label={`وضعیت‌های ${site.name}`}><Badge variant={site.enabled ? 'success' : 'outline'}>{site.enabled ? 'فعال در Nginx' : 'خاموش'}</Badge>{site.maintenance_enabled && <Badge variant="warning">حالت تعمیر</Badge>}{site.ssl_enabled && <Badge variant="default" title="در کانفیگ این سایت listen با SSL تنظیم شده است">HTTPS پیکربندی</Badge>}{site.sync_mismatch && <Badge variant="destructive">اختلاف فایل و دیتابیس</Badge>}{site.runtime_configured && <Badge variant="outline">سرویس منابع متصل</Badge>}</div>{site.description && <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">{site.description}</p>}<p className="mt-2 font-mono text-[11px] text-muted-foreground" dir="ltr">/etc/nginx/sites-available/{site.name}</p><p className="mt-1 text-[11px] text-muted-foreground" dir="ltr">{site.enabled ? `symlink → ../sites-available/${site.name}` : 'بدون symlink فعال'}</p></div></div>
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/[.07] pt-3"><Button size="sm" onClick={() => void openSiteTools(site)}><ArrowLeft size={14}/>ورود به مدیریت سایت</Button><div className="flex items-center gap-3"><Button size="sm" variant="outline" disabled={busy} onClick={() => void toggleSite(site)}><Power size={14}/>{site.enabled ? 'خاموش' : 'روشن'}</Button>{typeof site.bytes === 'number' && <span className="font-mono text-[10px] text-muted-foreground" dir="ltr">{formatNumber(site.bytes)} B</span>}</div></div>
+        {site.application_id && <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/[.045] p-2 text-[11px] leading-5 text-amber-100"><span>مدیریت‌شده در اپلیکیشن‌منیجر{site.application_name ? ` · ${site.application_name}` : ""}؛ تغییر دستی ممکن است با استقرار بعدی بازنویسی شود.</span><Button size="sm" variant="ghost" className="mt-1 h-8" onClick={() => { window.location.hash = `#/apps?app=${encodeURIComponent(site.application_id!)}` }}>بازکردن اپلیکیشن</Button></div>}<div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-white/[.07] pt-3"><Button size="sm" onClick={() => void openSiteTools(site)}><ArrowLeft size={14}/>ورود به مدیریت سایت</Button><div className="flex items-center gap-3"><Button size="sm" variant="outline" disabled={busy} onClick={() => void toggleSite(site)}><Power size={14}/>{site.enabled ? 'خاموش' : 'روشن'}</Button>{typeof site.bytes === 'number' && <span className="font-mono text-[10px] text-muted-foreground" dir="ltr">{formatNumber(site.bytes)} B</span>}</div></div>
       </article>)}</div> : !loadError ? <div className="rounded-xl border border-dashed border-white/10 py-14 text-center"><Globe size={22} className="mx-auto text-muted-foreground"/><p className="mt-3 text-sm font-medium text-white">سایتی پیدا نشد</p><p className="mt-1 text-xs text-muted-foreground">فایل‌های پیکربندی Nginx در مسیر sites-available نمایش داده می‌شوند.</p></div> : null}
     </SectionCard>
     <Alert className="mt-5"><ShieldCheck size={16} className="mb-2 text-primary"/><AlertTitle>اعمال ایمن تنظیمات</AlertTitle><AlertDescription>قبل از ذخیره یا تغییر symlink، دستور <code dir="ltr">nginx -t</code> اجرا می‌شود. اگر تنظیمات معتبر نباشند، تغییر برگردانده می‌شود؛ در صورت روشن‌بودن سرویس، پس از اعتبارسنجی Nginx reload خواهد شد.</AlertDescription></Alert>
@@ -1530,8 +1703,8 @@ export function NginxPage({ Heading, notify }: Common) {
     <Dialog open={logsOpen} onOpenChange={setLogsOpen}><DialogContent className="max-h-[85vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>لاگ سرویس Nginx</DialogTitle><DialogDescription>۱۰۰ رویداد آخر ثبت‌شده در systemd journal</DialogDescription></DialogHeader><pre dir="ltr" className="max-h-[65vh] overflow-auto whitespace-pre-wrap rounded-xl bg-background p-4 text-left font-mono text-[11px] leading-5 text-muted-foreground">{logs || 'لاگی موجود نیست.'}</pre></DialogContent></Dialog>
     <Dialog open={!!siteDeletePending} onOpenChange={(open) => { if (!open && !busy) setSiteDeletePending(null) }}><DialogContent><DialogHeader><DialogTitle>حذف سایت Nginx</DialogTitle><DialogDescription>فایل کانفیگ و symlink فعال این سایت حذف می‌شود. فایل‌های پروژه و دیتابیس آن دست‌نخورده می‌مانند.</DialogDescription></DialogHeader>{siteDeletePending && <div className="rounded-xl border border-rose-300/20 bg-rose-300/[.05] p-4"><p dir="ltr" className="break-all text-left font-mono text-sm text-rose-100">{siteDeletePending.name}</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-[11px] text-muted-foreground">/etc/nginx/sites-available/{siteDeletePending.name}</p></div>}<div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setSiteDeletePending(null)} disabled={busy}>انصراف</Button><Button variant="destructive" onClick={() => siteDeletePending && void deleteSite(siteDeletePending)} disabled={busy || !siteDeletePending}>{busy ? 'در حال حذف…' : 'حذف سایت'}</Button></div></DialogContent></Dialog>
     <Dialog open={siteMetaOpen} onOpenChange={setSiteMetaOpen}><DialogContent><DialogHeader><DialogTitle>مشخصات سایت</DialogTitle><DialogDescription>نام فایل در sites-available تغییر می‌کند؛ اگر سایت روشن باشد symlink فعال نیز هماهنگ می‌شود.</DialogDescription></DialogHeader><form onSubmit={saveSiteMetadata} className="space-y-4"><div className="space-y-2"><Label htmlFor="nginx-site-rename">نام / مسیر کانفیگ</Label><Input id="nginx-site-rename" dir="ltr" value={siteNewName} onChange={(event) => setSiteNewName(event.target.value.replace(/[^a-zA-Z0-9._-]/g, ''))} maxLength={128} required/><p className="text-[11px] text-muted-foreground" dir="ltr">/etc/nginx/sites-available/{siteNewName || 'site-name'}</p></div><div className="space-y-2"><Label htmlFor="nginx-site-description">توضیحات</Label><textarea id="nginx-site-description" maxLength={500} value={siteDescription} onChange={(event) => setSiteDescription(event.target.value)} placeholder="کاربرد این سایت، مالک سرویس یا نکات عملیاتی…" className="min-h-28 w-full rounded-xl border border-white/10 bg-background p-3 text-sm leading-6 text-white outline-none focus:border-primary/50"/><p className="text-left text-[11px] text-muted-foreground" dir="ltr">{siteDescription.length}/500</p></div><Button type="submit" className="w-full" disabled={busy || !siteNewName.trim()}>{busy ? 'در حال ذخیره…' : 'ذخیرهٔ مشخصات'}</Button></form></DialogContent></Dialog>
-    {siteToolsOpen && toolSite && <NginxSiteWorkspace name={toolSite.name} description={toolSite.description} enabled={toolSite.enabled} maintenanceEnabled={toolSite.maintenance_enabled} activeTab={siteRoute.tab} onTabChange={(tab) => showNginxSite(toolSite.name, tab)} onMetadata={() => { setSiteNewName(toolSite.name); setSiteDescription(toolSite.description || ""); setManagedSite(toolSite); setSiteMetaOpen(true) }} onEdit={() => void editSite(toolSite)} onToggle={() => void toggleSite(toolSite)} onDelete={toolSite.name !== "default" ? () => setSiteDeletePending(toolSite) : undefined}><div id="nginx-site-runtime" data-nginx-site-panel="overview" className="scroll-mt-24"><NginxMaintenancePanel siteName={toolSite.name} initialEnabled={toolSite.maintenance_enabled} notify={notify} onStatusChange={() => { void refresh() }}/></div><div data-nginx-site-panel="overview-grid" className="grid gap-5"><div data-nginx-site-panel="overview-cards" className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">دامنه‌ها</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{toolConfig.match(/^\s*server_name\s+([^;]+);/m)?.[1]?.trim() || 'در کانفیگ پیدا نشد'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">Port و TLS</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{[...toolConfig.matchAll(/^\s*listen\s+([^;]+);/gm)].map((match) => match[1].trim()).join(' · ') || 'نامشخص'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">Document root</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{toolConfig.match(/^\s*root\s+([^;]+);/m)?.[1]?.trim() || 'تعریف نشده'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">Upstream / PHP-FPM</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{[toolConfig.match(/^\s*proxy_pass\s+([^;]+);/m)?.[1], toolConfig.match(/^\s*fastcgi_pass\s+([^;]+);/m)?.[1]].filter(Boolean).join(' · ') || 'تعریف نشده'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4 sm:col-span-2"><p className="text-xs text-muted-foreground">گواهی SSL</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{toolConfig.match(/^\s*ssl_certificate\s+([^;]+);/m)?.[1]?.trim() || 'TLS در کانفیگ شناسایی نشد'}</p></div></div><section data-nginx-site-panel="config" className="space-y-3 rounded-xl border border-white/10 bg-card/40 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-white">کانفیگ خام سایت</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">نسخهٔ فعلی فایل پیکربندی را ببین یا برای ویرایش و اعتبارسنجی باز کن.</p></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => downloadText(`${toolSite.name}.conf`, toolConfig)}><Download size={14}/>دریافت فایل</Button><Button size="sm" onClick={() => void editSite(toolSite)}><Pencil size={14}/>ویرایش کانفیگ</Button></div></div><pre dir="ltr" className="max-h-[55vh] overflow-auto rounded-lg border border-white/10 bg-background p-3 text-left font-mono text-[11px] leading-5 text-muted-foreground">{toolConfig || 'محتوای کانفیگ در دسترس نیست.'}</pre></section><section id="nginx-site-actions" data-nginx-site-panel="operations" className="scroll-mt-24 rounded-xl border border-white/10 bg-card/40 p-3"><h3 className="mb-3 text-sm font-semibold text-white">اکشن‌های اختصاصی</h3><SiteActionsPanel siteName={toolSite.name} enabled={toolSite.enabled} notify={notify}/></section><section id="nginx-site-domains" data-nginx-site-panel="domains" className="scroll-mt-24 space-y-3 rounded-xl border border-primary/20 bg-primary/[.04] p-4"><div><h3 className="text-sm font-semibold text-white">مدیریت دامنه‌ها</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">دامنهٔ اصلی و aliasها را تنظیم کن. ذخیره، همهٔ دستورهای server_name این فایل را به‌روزرسانی می‌کند و فقط پس از اعتبارسنجی Nginx اعمال می‌شود.</p></div><div className="grid gap-3 md:grid-cols-2"><div className="space-y-2"><Label htmlFor="nginx-primary-domain">دامنهٔ اصلی</Label><Input id="nginx-primary-domain" dir="ltr" className="text-left" placeholder="example.com" value={domainPrimary} onChange={(event) => setDomainPrimary(event.target.value.trim())}/></div><div className="space-y-2"><Label htmlFor="nginx-domain-aliases">دامنه‌های جایگزین</Label><Input id="nginx-domain-aliases" dir="ltr" className="text-left" placeholder="www.example.com, shop.example.com" value={domainAliases} onChange={(event) => setDomainAliases(event.target.value)}/></div></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={domainChecking || !domainList().length} onClick={() => void checkSiteDomains()}><RefreshCw size={14} className={domainChecking ? 'animate-spin' : ''}/>{domainChecking ? 'در حال بررسی DNS…' : 'بررسی DNS دامنه‌ها'}</Button><Button size="sm" disabled={busy} onClick={() => void saveSiteDomains()}><Save size={14}/>{busy ? 'در حال اعتبارسنجی…' : 'ذخیره دامنه‌ها'}</Button></div>{domainResults.length > 0 && <div className="space-y-2" aria-live="polite">{domainResults.map((item) => <div key={item.host} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[.07] bg-background/60 px-3 py-2"><span dir="ltr" className="font-mono text-xs text-white">{item.host}</span><span dir="ltr" className={`text-left font-mono text-[11px] ${item.resolved ? 'text-emerald-300' : 'text-amber-300'}`}>{item.resolved ? item.addresses.join(' · ') : item.error || 'رکورد DNS پیدا نشد'}</span></div>)}<p className="text-[11px] text-muted-foreground">این بررسی فقط پاسخ DNS را نشان می‌دهد؛ برای اتصال سایت، رکورد A/AAAA را به IP سرور تنظیم کن.</p></div>}</section><section id="nginx-site-ssl" data-nginx-site-panel="domains" className="scroll-mt-24 space-y-3 rounded-xl border border-emerald-300/15 bg-emerald-300/[.025] p-4"><div><h3 className="text-sm font-semibold text-foreground">دریافت و فعال‌سازی SSL</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">پیش‌نیازهای DNS را بررسی کن، دامنه‌ها و redirect را مرور کن، سپس صدور واقعی Certbot را اجرا کن. wildcard پشتیبانی نمی‌شود.</p></div><SslIssueWizard bare domains={sslDomains} onDomainsChange={setSslDomains} email={sslEmail} onEmailChange={setSslEmail} redirect={sslRedirect} onRedirectChange={setSslRedirect} busy={sslIssueBusy || busy} onIssue={() => void issueSiteSsl()}/></section><section id="nginx-site-operations" data-nginx-site-panel="operations" className="space-y-3 rounded-xl border border-white/10 bg-card/35 p-4"><h3 className="text-sm font-semibold text-white">عملیات و عیب‌یابی</h3><div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4"><Button size="sm" variant="outline" disabled={!toolConfig.match(/^\s*root\s+([^;]+);/m)} onClick={() => { const root = toolConfig.match(/^\s*root\s+([^;]+);/m)?.[1]?.trim(); if (root?.startsWith('/')) { window.location.hash = `#/files?path=${encodeURIComponent(root)}` } }}><FolderOpen size={14}/>مدیریت فایل‌های سایت</Button><Button size="sm" variant="outline" disabled={sitePermissionsBusy} onClick={() => void fixSiteWebPermissions()}><ShieldCheck size={14} className={sitePermissionsBusy ? 'animate-pulse' : ''}/>{sitePermissionsBusy ? 'در حال اصلاح دسترسی…' : 'رفع دسترسی 403 از ARG'}</Button><Button size="sm" variant="outline" onClick={() => downloadText(`${toolSite.name}.conf`, toolConfig)}><Download size={14}/>دریافت کانفیگ</Button><Button size="sm" variant="outline" onClick={() => void runAction('test')}><ShieldCheck size={14}/>بررسی کل کانفیگ Nginx</Button><Button size="sm" variant="outline" disabled={!status?.active || busy} onClick={() => void runAction('reload')}><RefreshCw size={14}/>Reload سرویس</Button><Button size="sm" variant="outline" onClick={duplicateSite}><Plus size={14}/>ساخت کپی غیرفعال</Button><Button size="sm" variant="outline" disabled={repositoryLoading} onClick={() => void loadSiteRepository()}><Github size={14} className={repositoryLoading ? 'animate-pulse' : ''}/>بررسی مخزن GitHub</Button><Button size="sm" variant="outline" disabled={trafficLoading} onClick={() => void loadSiteTraffic()}><Activity size={14} className={trafficLoading ? 'animate-pulse' : ''}/>آمار ترافیک</Button><Button size="sm" variant="ghost" onClick={() => void loadSiteLog('access')}>Access log</Button><Button size="sm" variant="ghost" onClick={() => void loadSiteLog('error')}>Error log</Button></div></section>{siteRepository && <section id="nginx-site-repository" data-nginx-site-panel="activity" className="scroll-mt-24 space-y-3 rounded-xl border border-white/10 p-4"><h3 className="text-sm font-semibold text-white">مخزن کد سایت</h3>{siteRepository.available ? <><div className="grid gap-2 sm:grid-cols-2"><div className="rounded-lg bg-background/60 p-3 text-xs">Branch: <code dir="ltr">{siteRepository.branch}</code></div><div className="rounded-lg bg-background/60 p-3 text-xs">تغییرات محلی: <strong dir="ltr">{formatNumber(siteRepository.changes || 0)}</strong></div></div><p dir="ltr" className="break-all text-left font-mono text-[11px] text-muted-foreground">{siteRepository.origin || 'Remote تنظیم نشده است.'}</p><p className="text-xs text-muted-foreground">{siteRepository.differs_from_remote ? 'HEAD محلی با آخرین commit شاخه در GitHub فرق دارد؛ پیش از deploy وضعیت مخزن را بررسی کن.' : siteRepository.remote_commit ? 'HEAD محلی با HEAD شاخهٔ دور یکسان است.' : 'وضعیت شاخهٔ دور قابل بررسی نیست.'}</p><p dir="ltr" className="font-mono text-[10px] text-muted-foreground">{siteRepository.commit}</p></> : <p className="text-xs text-muted-foreground">{siteRepository.message}</p>}</section>}{siteTraffic && <section id="nginx-site-traffic" data-nginx-site-panel="activity" className="scroll-mt-24 space-y-3 rounded-xl border border-white/10 p-4"><h3 className="text-sm font-semibold text-white">ترافیک همین سایت</h3>{siteTraffic.available ? <><p className="text-xs text-muted-foreground">نمونهٔ آخرین {formatNumber(siteTraffic.sample_limit || 5000)} خط access log اختصاصی؛ مجموع دوره یا ترافیک شبکه نیست.</p><div className="grid gap-2 sm:grid-cols-2"><div className="rounded-lg bg-background/60 p-3 text-sm">درخواست‌ها: <strong dir="ltr">{formatNumber(siteTraffic.sample_requests || 0)}</strong></div><div className="rounded-lg bg-background/60 p-3 text-sm">حجم پاسخ: <strong dir="ltr">{formatBytes(siteTraffic.sample_body_bytes || 0)}</strong></div></div><div className="flex flex-wrap gap-2">{(siteTraffic.status_groups || []).map((count, index) => <Badge key={index} variant="outline" dir="ltr">{index + 1}xx: {formatNumber(count)}</Badge>)}</div>{!!siteTraffic.hourly?.length && <div className="space-y-2"><p className="text-xs text-muted-foreground">حجم پاسخ به تفکیک ساعت در همین نمونه</p><div className="flex h-24 items-end gap-1 overflow-x-auto rounded-lg bg-background/60 p-2" dir="ltr">{siteTraffic.hourly.map((row) => <div key={row.hour} title={`${row.hour} · ${formatBytes(row.body_bytes)} · ${formatNumber(row.requests)} requests`} className="group relative flex h-full min-w-4 flex-1 items-end"><div className="w-full rounded-t bg-primary/75 transition-colors group-hover:bg-primary" style={{ height: `${Math.max(4, 100 * row.body_bytes / Math.max(1, ...siteTraffic.hourly!.map((item) => item.body_bytes)))}%` }}/></div>)}</div><div className="flex justify-between text-[10px] text-muted-foreground" dir="ltr"><span>{siteTraffic.hourly[0]?.hour}</span><span>{siteTraffic.hourly.at(-1)?.hour}</span></div></div>}<p dir="ltr" className="break-all text-left font-mono text-[10px] text-muted-foreground">{siteTraffic.path}</p></> : <p className="text-xs text-muted-foreground">{siteTraffic.message}</p>}</section>}{siteLogKind && <section id="nginx-site-logs" data-nginx-site-panel="activity" className="scroll-mt-24 rounded-xl border border-white/10 p-3"><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-white">{siteLogKind === 'access' ? 'Access log' : 'Error log'}</h3><span dir="ltr" className="max-w-full truncate font-mono text-[10px] text-muted-foreground">{siteLogPath}</span></div>{siteLogLoading ? <Skeleton className="h-28"/> : <pre dir="ltr" className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-background p-3 text-left font-mono text-[10px] leading-5 text-muted-foreground">{siteLog || 'لاگی برای نمایش نیست.'}</pre>}</section>}</div></NginxSiteWorkspace>}
-    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>ویرایش سایت <span className="font-mono text-primary" dir="ltr">{editing}</span></DialogTitle><DialogDescription>مسیر فایل: <code dir="ltr">/etc/nginx/sites-available/{editing}</code>. ذخیره فقط پس از موفقیت <code dir="ltr">nginx -t</code> اعمال می‌شود.</DialogDescription></DialogHeader><div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={() => { setEditorOpen(false); openBuilder('edit') }}><Sparkles size={14}/>ساخت با فرم بصری</Button></div><form onSubmit={saveSite} className="space-y-4"><textarea aria-label="تنظیمات Nginx" spellCheck={false} dir="ltr" value={content} onChange={(event) => { setContent(event.target.value); setVisualSettings(null) }} className="min-h-[55vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"/><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">سقف اندازهٔ فایل 512 KB است؛ در صورت خطا نسخهٔ قبلی حفظ می‌شود.</p><Button type="submit" disabled={busy}><Save size={15}/>{busy ? 'در حال اعتبارسنجی…' : 'اعتبارسنجی و ذخیره'}</Button></div></form></DialogContent></Dialog>
+    {siteToolsOpen && toolSite && toolSite.name === siteRoute.site && <NginxSiteWorkspace name={toolSite.name} description={toolSite.description} enabled={toolSite.enabled} maintenanceEnabled={toolSite.maintenance_enabled} activeTab={siteRoute.tab} onTabChange={(tab) => showNginxSite(toolSite.name, tab)} onMetadata={() => { setSiteNewName(toolSite.name); setSiteDescription(toolSite.description || ""); setManagedSite(toolSite); setSiteMetaOpen(true) }} onEdit={() => void editSite(toolSite)} onToggle={() => void toggleSite(toolSite)} onDelete={toolSite.name !== "default" ? () => setSiteDeletePending(toolSite) : undefined}>{toolSite.application_id && <div className="rounded-xl border border-amber-300/25 bg-amber-300/[.06] p-3 text-xs leading-5 text-amber-100"><p className="font-semibold">این سایت توسط اپلیکیشن‌منیجر مدیریت می‌شود{toolSite.application_name ? ` · ${toolSite.application_name}` : ""}.</p><p className="mt-1 text-amber-100/80">ویرایش دستی کانفیگ، دامنه یا وضعیت Nginx ممکن است با استقرار بعدی بازنویسی شود یا سرویس اپ را از هماهنگی خارج کند.</p><Button size="sm" variant="outline" className="mt-2" onClick={() => { window.location.hash = `#/apps?app=${encodeURIComponent(toolSite.application_id!)}` }}>رفتن به مدیریت اپلیکیشن</Button></div>}<div id="nginx-site-runtime" data-nginx-site-panel="overview" className="scroll-mt-24"><NginxMaintenancePanel siteName={toolSite.name} initialEnabled={toolSite.maintenance_enabled} notify={notify} onStatusChange={() => { void refresh() }}/></div><div data-nginx-site-panel="overview-grid" className="grid gap-5"><div data-nginx-site-panel="overview-cards" className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">دامنه‌ها</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{toolConfig.match(/^\s*server_name\s+([^;]+);/m)?.[1]?.trim() || 'در کانفیگ پیدا نشد'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">Port و TLS</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{[...toolConfig.matchAll(/^\s*listen\s+([^;]+);/gm)].map((match) => match[1].trim()).join(' · ') || 'نامشخص'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">Document root</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{toolConfig.match(/^\s*root\s+([^;]+);/m)?.[1]?.trim() || 'تعریف نشده'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4"><p className="text-xs text-muted-foreground">Upstream / PHP-FPM</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{[toolConfig.match(/^\s*proxy_pass\s+([^;]+);/m)?.[1], toolConfig.match(/^\s*fastcgi_pass\s+([^;]+);/m)?.[1]].filter(Boolean).join(' · ') || 'تعریف نشده'}</p></div><div className="rounded-xl border border-white/10 bg-background/50 p-4 sm:col-span-2"><p className="text-xs text-muted-foreground">گواهی SSL</p><p dir="ltr" className="mt-2 break-all text-left font-mono text-xs text-white">{toolConfig.match(/^\s*ssl_certificate\s+([^;]+);/m)?.[1]?.trim() || 'TLS در کانفیگ شناسایی نشد'}</p></div></div><section data-nginx-site-panel="config" className="space-y-3 rounded-xl border border-white/10 bg-card/40 p-4"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-white">کانفیگ خام سایت</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">نسخهٔ فعلی فایل پیکربندی را ببین یا برای ویرایش و اعتبارسنجی باز کن.</p></div><div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => downloadText(`${toolSite.name}.conf`, toolConfig)}><Download size={14}/>دریافت فایل</Button><Button size="sm" onClick={() => void editSite(toolSite)}><Pencil size={14}/>ویرایش کانفیگ</Button></div></div><pre dir="ltr" className="max-h-[55vh] overflow-auto rounded-lg border border-white/10 bg-background p-3 text-left font-mono text-[11px] leading-5 text-muted-foreground">{toolConfig || 'محتوای کانفیگ در دسترس نیست.'}</pre></section><section id="nginx-site-actions" data-nginx-site-panel="operations" className="scroll-mt-24 rounded-xl border border-white/10 bg-card/40 p-3"><h3 className="mb-3 text-sm font-semibold text-white">اکشن‌های اختصاصی</h3><SiteActionsPanel siteName={toolSite.name} enabled={toolSite.enabled} notify={notify}/></section><section id="nginx-site-domains" data-nginx-site-panel="domains" className="scroll-mt-24 space-y-3 rounded-xl border border-primary/20 bg-primary/[.04] p-4"><div><h3 className="text-sm font-semibold text-white">مدیریت دامنه‌ها</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">دامنهٔ اصلی و aliasها را تنظیم کن. ذخیره، همهٔ دستورهای server_name این فایل را به‌روزرسانی می‌کند و فقط پس از اعتبارسنجی Nginx اعمال می‌شود.</p></div><div className="grid gap-3 md:grid-cols-2"><div className="space-y-2"><Label htmlFor="nginx-primary-domain">دامنهٔ اصلی</Label><Input id="nginx-primary-domain" dir="ltr" className="text-left" placeholder="example.com" value={domainPrimary} onChange={(event) => setDomainPrimary(event.target.value.trim())}/></div><div className="space-y-2"><Label htmlFor="nginx-domain-aliases">دامنه‌های جایگزین</Label><Input id="nginx-domain-aliases" dir="ltr" className="text-left" placeholder="www.example.com, shop.example.com" value={domainAliases} onChange={(event) => setDomainAliases(event.target.value)}/></div></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={domainChecking || !domainList().length} onClick={() => void checkSiteDomains()}><RefreshCw size={14} className={domainChecking ? 'animate-spin' : ''}/>{domainChecking ? 'در حال بررسی DNS…' : 'بررسی DNS دامنه‌ها'}</Button><Button size="sm" disabled={busy} onClick={() => void saveSiteDomains()}><Save size={14}/>{busy ? 'در حال اعتبارسنجی…' : 'ذخیره دامنه‌ها'}</Button></div>{domainResults.length > 0 && <div className="space-y-2" aria-live="polite">{domainResults.map((item) => <div key={item.host} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[.07] bg-background/60 px-3 py-2"><span dir="ltr" className="font-mono text-xs text-white">{item.host}</span><span dir="ltr" className={`text-left font-mono text-[11px] ${item.resolved ? 'text-emerald-300' : 'text-amber-300'}`}>{item.resolved ? item.addresses.join(' · ') : item.error || 'رکورد DNS پیدا نشد'}</span></div>)}<p className="text-[11px] text-muted-foreground">این بررسی فقط پاسخ DNS را نشان می‌دهد؛ برای اتصال سایت، رکورد A/AAAA را به IP سرور تنظیم کن.</p></div>}</section><section id="nginx-site-ssl" data-nginx-site-panel="domains" className="scroll-mt-24 space-y-3 rounded-xl border border-emerald-300/15 bg-emerald-300/[.025] p-4"><div><h3 className="text-sm font-semibold text-foreground">دریافت و فعال‌سازی SSL</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">پیش‌نیازهای DNS را بررسی کن، دامنه‌ها و redirect را مرور کن، سپس صدور واقعی Certbot را اجرا کن. wildcard پشتیبانی نمی‌شود.</p></div><SslIssueWizard bare domains={sslDomains} onDomainsChange={setSslDomains} email={sslEmail} onEmailChange={setSslEmail} redirect={sslRedirect} onRedirectChange={setSslRedirect} busy={sslIssueBusy || busy} onIssue={() => void issueSiteSsl()}/></section><section id="nginx-site-operations" data-nginx-site-panel="operations" className="space-y-3 rounded-xl border border-white/10 bg-card/35 p-4"><h3 className="text-sm font-semibold text-white">عملیات و عیب‌یابی</h3><div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4"><Button size="sm" variant="outline" disabled={!toolConfig.match(/^\s*root\s+([^;]+);/m)} onClick={() => { const root = toolConfig.match(/^\s*root\s+([^;]+);/m)?.[1]?.trim(); if (root?.startsWith('/')) { window.location.hash = `#/files?path=${encodeURIComponent(root)}` } }}><FolderOpen size={14}/>مدیریت فایل‌های سایت</Button><Button size="sm" variant="outline" disabled={sitePermissionsBusy} onClick={() => void fixSiteWebPermissions()}><ShieldCheck size={14} className={sitePermissionsBusy ? 'animate-pulse' : ''}/>{sitePermissionsBusy ? 'در حال اصلاح دسترسی…' : 'رفع دسترسی 403 از ARG'}</Button><Button size="sm" variant="outline" onClick={() => downloadText(`${toolSite.name}.conf`, toolConfig)}><Download size={14}/>دریافت کانفیگ</Button><Button size="sm" variant="outline" onClick={() => void runAction('test')}><ShieldCheck size={14}/>بررسی کل کانفیگ Nginx</Button><Button size="sm" variant="outline" disabled={!status?.active || busy} onClick={() => void runAction('reload')}><RefreshCw size={14}/>Reload سرویس</Button><Button size="sm" variant="outline" onClick={duplicateSite}><Plus size={14}/>ساخت کپی غیرفعال</Button></div></section><section id="nginx-site-activity-controls" data-nginx-site-panel="activity" className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-card/35 p-3"><span className="ml-auto text-xs text-muted-foreground">گزارش‌های همین سایت</span><Button size="sm" variant="outline" disabled={repositoryLoading} onClick={() => void loadSiteRepository()}><Github size={14} className={repositoryLoading ? 'animate-pulse' : ''}/>بررسی مخزن GitHub</Button><Button size="sm" variant="outline" disabled={trafficLoading} onClick={() => void loadSiteTraffic()}><Activity size={14} className={trafficLoading ? 'animate-pulse' : ''}/>آمار ترافیک</Button><Button size="sm" variant={siteLogKind === 'access' ? 'default' : 'outline'} disabled={siteLogLoading} onClick={() => void loadSiteLog('access')}><ScrollText size={14}/>Access log</Button><Button size="sm" variant={siteLogKind === 'error' ? 'default' : 'outline'} disabled={siteLogLoading} onClick={() => void loadSiteLog('error')}><ScrollText size={14}/>Error log</Button></section>{siteRepository && siteRepositorySite === toolSite.name && <section id="nginx-site-repository" data-nginx-site-panel="activity" className="scroll-mt-24 space-y-3 rounded-xl border border-white/10 p-4"><h3 className="text-sm font-semibold text-white">مخزن کد سایت</h3>{siteRepository.available ? <><div className="grid gap-2 sm:grid-cols-2"><div className="rounded-lg bg-background/60 p-3 text-xs">Branch: <code dir="ltr">{siteRepository.branch}</code></div><div className="rounded-lg bg-background/60 p-3 text-xs">تغییرات محلی: <strong dir="ltr">{formatNumber(siteRepository.changes || 0)}</strong></div></div><p dir="ltr" className="break-all text-left font-mono text-[11px] text-muted-foreground">{siteRepository.origin || 'Remote تنظیم نشده است.'}</p><p className="text-xs text-muted-foreground">{siteRepository.differs_from_remote ? 'HEAD محلی با آخرین commit شاخه در GitHub فرق دارد؛ پیش از deploy وضعیت مخزن را بررسی کن.' : siteRepository.remote_commit ? 'HEAD محلی با HEAD شاخهٔ دور یکسان است.' : 'وضعیت شاخهٔ دور قابل بررسی نیست.'}</p><p dir="ltr" className="font-mono text-[10px] text-muted-foreground">{siteRepository.commit}</p></> : <p className="text-xs text-muted-foreground">{siteRepository.message}</p>}</section>}{siteTraffic && siteTrafficSite === toolSite.name && <section id="nginx-site-traffic" data-nginx-site-panel="activity" className="scroll-mt-24 space-y-3 rounded-xl border border-white/10 p-4"><h3 className="text-sm font-semibold text-white">ترافیک همین سایت</h3>{siteTraffic.available ? <><p className="text-xs text-muted-foreground">نمونهٔ آخرین {formatNumber(siteTraffic.sample_limit || 5000)} خط access log اختصاصی؛ مجموع دوره یا ترافیک شبکه نیست.</p><div className="grid gap-2 sm:grid-cols-2"><div className="rounded-lg bg-background/60 p-3 text-sm">درخواست‌ها: <strong dir="ltr">{formatNumber(siteTraffic.sample_requests || 0)}</strong></div><div className="rounded-lg bg-background/60 p-3 text-sm">حجم پاسخ: <strong dir="ltr">{formatBytes(siteTraffic.sample_body_bytes || 0)}</strong></div></div><div className="flex flex-wrap gap-2">{(siteTraffic.status_groups || []).map((count, index) => <Badge key={index} variant="outline" dir="ltr">{index + 1}xx: {formatNumber(count)}</Badge>)}</div>{!!siteTraffic.hourly?.length && <div className="space-y-2"><p className="text-xs text-muted-foreground">حجم پاسخ به تفکیک ساعت در همین نمونه</p><div className="flex h-24 items-end gap-1 overflow-x-auto rounded-lg bg-background/60 p-2" dir="ltr">{siteTraffic.hourly.map((row) => <div key={row.hour} title={`${row.hour} · ${formatBytes(row.body_bytes)} · ${formatNumber(row.requests)} requests`} className="group relative flex h-full min-w-4 flex-1 items-end"><div className="w-full rounded-t bg-primary/75 transition-colors group-hover:bg-primary" style={{ height: `${Math.max(4, 100 * row.body_bytes / Math.max(1, ...siteTraffic.hourly!.map((item) => item.body_bytes)))}%` }}/></div>)}</div><div className="flex justify-between text-[10px] text-muted-foreground" dir="ltr"><span>{siteTraffic.hourly[0]?.hour}</span><span>{siteTraffic.hourly.at(-1)?.hour}</span></div></div>}<p dir="ltr" className="break-all text-left font-mono text-[10px] text-muted-foreground">{siteTraffic.path}</p></> : <p className="text-xs text-muted-foreground">{siteTraffic.message}</p>}</section>}{siteLogKind && siteLogSite === toolSite.name && <section id="nginx-site-logs" data-nginx-site-panel="activity" className="scroll-mt-24 rounded-xl border border-white/10 p-3"><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-white">{siteLogKind === 'access' ? 'Access log' : 'Error log'}</h3><span dir="ltr" className="max-w-full truncate font-mono text-[10px] text-muted-foreground">{siteLogPath}</span></div>{siteLogLoading ? <Skeleton className="h-28"/> : <pre dir="ltr" className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-background p-3 text-left font-mono text-[10px] leading-5 text-muted-foreground">{siteLog || 'لاگی برای نمایش نیست.'}</pre>}</section>}</div></NginxSiteWorkspace>}
+    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="max-h-[92vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>ویرایش سایت <span className="font-mono text-primary" dir="ltr">{editing}</span></DialogTitle><DialogDescription>مسیر فایل: <code dir="ltr">/etc/nginx/sites-available/{editing}</code>. ذخیره فقط پس از موفقیت <code dir="ltr">nginx -t</code> اعمال می‌شود.</DialogDescription></DialogHeader>{sites.find((site) => site.name === editing)?.application_id && <Alert className="border-amber-300/25 bg-amber-300/[.05]"><ShieldAlert size={15} className="text-amber-300"/><AlertDescription className="flex flex-wrap items-center gap-x-1 text-amber-100">این سایت توسط اپلیکیشن‌منیجر مدیریت می‌شود؛ تغییر دستی کانفیگ ممکن است با استقرار یا بازسازی تنظیمات اپلیکیشن بازنویسی شود. <Button type="button" variant="link" size="sm" className="h-auto p-0 text-amber-200" onClick={() => { const id = sites.find((site) => site.name === editing)?.application_id; if (id) window.location.hash = `#/apps?app=${encodeURIComponent(id)}` }}>مدیریت اپلیکیشن</Button></AlertDescription></Alert>}<div className="flex justify-end"><Button type="button" variant="outline" size="sm" onClick={() => { setEditorOpen(false); openBuilder('edit') }}><Sparkles size={14}/>ساخت با فرم بصری</Button></div><form onSubmit={saveSite} className="space-y-4"><textarea aria-label="تنظیمات Nginx" spellCheck={false} dir="ltr" value={content} onChange={(event) => { setContent(event.target.value); setVisualSettings(null) }} className="min-h-[55vh] w-full resize-y rounded-xl border border-white/10 bg-background p-4 font-mono text-xs leading-6 text-[#f2f0eb] outline-none transition focus:border-primary/50 focus:ring-2 focus:ring-primary/15"/><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs text-muted-foreground">سقف اندازهٔ فایل 512 KB است؛ در صورت خطا نسخهٔ قبلی حفظ می‌شود.</p><Button type="submit" disabled={busy}><Save size={15}/>{busy ? 'در حال اعتبارسنجی…' : 'اعتبارسنجی و ذخیره'}</Button></div></form></DialogContent></Dialog>
     <Dialog open={builderOpen} onOpenChange={(open) => { if (!busy) { setBuilderOpen(open); if (!open) setFilePickerOpen(false) } }}><DialogContent className="max-h-[94vh] max-w-5xl overflow-y-auto"><DialogHeader><DialogTitle>{filePickerOpen ? 'انتخاب فایل SSL' : 'سازندهٔ بصری کانفیگ'}</DialogTitle><DialogDescription>{filePickerOpen ? 'فقط مسیر و نام فایل نمایش داده می‌شود؛ محتوای گواهی و کلید خصوصی خوانده نمی‌شود.' : 'قالب مناسب را انتخاب کن، فیلدها را پر کن و پیش‌نمایش کانفیگ را وارد ویرایشگر کن.'}</DialogDescription></DialogHeader>
       {filePickerOpen ? <div className="space-y-4"><div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="outline" onClick={() => { setFileListing(null); void browseFiles() }}>پوشه‌های مجاز</Button>{fileListing?.path && fileListing.roots.some((root) => fileListing.path !== root) && <Button type="button" size="sm" variant="outline" onClick={() => { const current = fileListing.path; const parent = current.slice(0, current.lastIndexOf('/')) || '/'; void browseFiles(parent) }}><ChevronUp size={14}/>پوشهٔ بالاتر</Button>}<span dir="ltr" className="min-w-0 flex-1 truncate text-left font-mono text-[11px] text-muted-foreground">{fileListing?.path || 'انتخاب پوشه'}</span><Button type="button" size="sm" variant="ghost" onClick={() => setFilePickerOpen(false)}>بازگشت</Button></div>
         {!fileListing || !fileListing.path ? <div className="grid gap-2 sm:grid-cols-2">{fileListing?.roots.map((root) => <button key={root} type="button" dir="ltr" onClick={() => void browseFiles(root)} className="flex items-center gap-3 rounded-xl border border-white/10 bg-background/50 p-3 text-left font-mono text-xs text-white hover:border-primary/40"><FolderOpen size={16} className="shrink-0 text-primary"/>{root}</button>)}</div> : fileLoading ? <Skeleton className="h-40"/> : <div className="max-h-[45vh] space-y-1 overflow-auto rounded-xl border border-white/10 p-2">{fileListing.entries.map((entry) => <button key={entry.path} type="button" disabled={!entry.directory && (!entry.selectable || (filePickerFor === 'certificateKey' ? !/\.(key|pem)$/i.test(entry.name) : /\.key$/i.test(entry.name)))} onClick={() => entry.directory ? void browseFiles(entry.path) : (setBuilder((old) => ({ ...old, [filePickerFor]: entry.path })), setFilePickerOpen(false))} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-xs text-muted-foreground hover:bg-white/[.04] disabled:cursor-not-allowed disabled:opacity-35"><FolderOpen size={15} className={entry.directory ? 'text-primary' : 'text-muted-foreground'}/><span dir="ltr" className="min-w-0 flex-1 truncate font-mono">{entry.name}</span>{entry.directory ? <span>پوشه</span> : entry.selectable ? <span>انتخاب</span> : null}</button>)}{!fileListing.entries.length && <p className="p-6 text-center text-xs text-muted-foreground">فایل SSL در این پوشه پیدا نشد.</p>}</div>}
@@ -1888,7 +2061,8 @@ export function AuditPage({ Heading, notify }: Common) {
 type MonitoringConfig = { enabled: boolean; interval_seconds: number; retention_days: number; session_hours: number }
 
 type UpdateInfo = { status: 'available' | 'current' | 'unavailable'; local?: string; remote?: string; local_version?: string; remote_version?: string }
-type PanelTlsSettings = { enabled: boolean; certificate_path: string; private_key_path: string; port: number; certificate_present: boolean; private_key_present: boolean; default_certificate_path: string; default_private_key_path: string }
+type PanelTlsSettings = { enabled: boolean; server_name?: string; port_change_pending?: boolean; pending_port?: number | null; certificate_path: string; private_key_path: string; port: number; certificate_present: boolean; private_key_present: boolean; default_certificate_path: string; default_private_key_path: string }
+function panelUrlHost(host: string) { return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host }
 export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, updating, checkingUpdate, panelTimeZone, onTimeZoneChange }: { Heading: Heading; notify: (message: string) => void; user: User; update: UpdateInfo; openUpdateDialog: () => void; updating: boolean; checkingUpdate: boolean; panelTimeZone: string; onTimeZoneChange: (timezone: string) => void }) {
   const [config, setConfig] = useState<MonitoringConfig | null>(null)
   const [port, setPort] = useState(location.port || (location.protocol === 'https:' ? '443' : '80'))
@@ -1902,10 +2076,24 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
   const [tlsServerName, setTlsServerName] = useState(location.hostname)
   const [tlsPort, setTlsPort] = useState('443')
   const [tlsBusy, setTlsBusy] = useState(false)
+  const [tlsPortBusy, setTlsPortBusy] = useState(false)
   const isAdmin = user.role === 'admin'
   useEffect(() => { void api<MonitoringConfig>('monitoring/config').then(setConfig).catch((error) => notify(error instanceof Error ? error.message : 'دریافت تنظیمات ناموفق بود')) }, [notify])
   useEffect(() => { void api<{port: number}>('settings/port').then((result) => setPort(String(result.port))).catch(() => undefined) }, [])
-  useEffect(() => { void api<PanelTlsSettings>('settings/tls').then((result) => { setTls(result); setTlsCertificate(result.certificate_path || result.default_certificate_path); setTlsPrivateKey(result.private_key_path || result.default_private_key_path); setTlsPort(String(result.port || 443)) }).catch((error) => notify(error instanceof Error ? error.message : 'خواندن وضعیت گواهی SSL ناموفق بود')) }, [notify])
+  useEffect(() => { void api<PanelTlsSettings>('settings/tls').then(async (result) => {
+    setTls(result)
+    setTlsCertificate(result.certificate_path || result.default_certificate_path)
+    setTlsPrivateKey(result.private_key_path || result.default_private_key_path)
+    setTlsServerName(result.server_name || location.hostname)
+    setTlsPort(String(result.port || 443))
+    const pagePort = Number(location.port || (location.protocol === 'https:' ? 443 : 80))
+    if (result.port_change_pending && result.pending_port === result.port && pagePort === result.pending_port) {
+      try {
+        await api('settings/tls/port/confirm', { method: 'POST', body: JSON.stringify({ port: result.pending_port }) })
+        notify('اتصال به پورت HTTPS جدید تأیید شد؛ بازگشت خودکار لغو شد.')
+      } catch (error) { notify(error instanceof Error ? error.message : 'تأیید اتصال HTTPS ناموفق بود؛ بازگشت خودکار همچنان فعال است.') }
+    }
+  }).catch((error) => notify(error instanceof Error ? error.message : 'خواندن وضعیت گواهی SSL ناموفق بود')) }, [notify])
   useEffect(() => { setTimezoneDraft(panelTimeZone) }, [panelTimeZone])
   async function saveConfig(event: FormEvent) {
     event.preventDefault()
@@ -1921,8 +2109,43 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
     try {
       const value = Number(port)
       await api('settings/port', { method: 'PUT', body: JSON.stringify({ port: value }) })
-      setScheduledPort(value)
-      notify('تغییر پورت زمان‌بندی شد. پس از راه‌اندازی مجدد، آدرس جدید را باز کن.')
+      notify('درخواست ثبت شد؛ در حال انتظار برای راه‌اندازی و بررسی دسترسی…')
+      let reachable = false
+      if (tls?.enabled || location.protocol === 'https:') {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1000))
+          try {
+            const current = await api<{port: number}>('settings/port')
+            if (current.port === value) { reachable = true; break }
+          } catch {
+            // The TLS listener may briefly restart with the HTTP backend.
+          }
+        }
+        if (!reachable) {
+          notify('پورت HTTP جدید فعال نشد؛ مقدار قبلی باید خودکار برگشته باشد. وضعیت سرویس را بررسی کن.')
+          return
+        }
+        setScheduledPort(value)
+        notify('پورت داخلی HTTP تغییر کرد؛ اتصال امن HTTPS فعلی همچنان فعال است.')
+      } else {
+        const target = `http://${panelUrlHost(location.hostname)}:${value}/api/state`
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1000))
+          try {
+            const response = await fetch(target, { method: 'GET', mode: 'no-cors', cache: 'no-store' })
+            if (response.ok || response.type === 'opaque') { reachable = true; break }
+          } catch {
+            // Wait while the service restarts and switches to the new HTTP port.
+          }
+        }
+        if (!reachable) {
+          notify('پنل روی پورت جدید پاسخ نداد؛ تنظیم قبلی باید خودکار برگشته باشد. نشانی فعلی را دوباره بارگذاری کن.')
+          return
+        }
+        setScheduledPort(value)
+        notify('پورت HTTP جدید پاسخ می‌دهد؛ در حال انتقال به نشانی تازه…')
+        window.setTimeout(() => window.location.assign(`http://${panelUrlHost(location.hostname)}:${value}/${location.hash}`), 800)
+      }
     } catch (error) { notify(error instanceof Error ? error.message : 'تغییر پورت ناموفق بود') }
     finally { setBusy(false) }
   }
@@ -1945,10 +2168,62 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
       notify('گواهی بررسی و تنظیمات HTTPS ذخیره شد؛ ARG تا چند ثانیهٔ دیگر راه‌اندازی می‌شود.')
       window.setTimeout(() => {
         const portPart = result.port === 443 ? '' : `:${result.port}`
-        window.location.assign(`https://${location.hostname}${portPart}/`)
+        const host = tlsServerName.trim() || location.hostname
+        window.location.assign(`https://${panelUrlHost(host)}${portPart}/${location.hash}`)
       }, 3500)
     } catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ تنظیمات گواهی ناموفق بود') }
     finally { setTlsBusy(false) }
+  }
+  async function changeTlsPort() {
+    if (!tls?.enabled) return
+    setTlsPortBusy(true)
+    try {
+      const result = await api<{scheduled: boolean; port: number}>('settings/tls/port', { method: 'PUT', body: JSON.stringify({ port: Number(tlsPort) }) })
+      notify('درخواست ثبت شد؛ در حال انتظار برای راه‌اندازی و بررسی دسترسی HTTPS…')
+      const host = tls.server_name || tlsServerName || location.hostname
+      const portPart = result.port === 443 ? '' : `:${result.port}`
+      const healthUrl = `https://${panelUrlHost(host)}${portPart}/api/state`
+      let reachable = false
+      for (let attempt = 0; attempt < 45; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000))
+        try {
+          const response = await fetch(healthUrl, { method: 'GET', mode: 'no-cors', cache: 'no-store' })
+          if (response.ok || response.type === 'opaque') {
+            reachable = true
+            break
+          }
+        } catch {
+          // Wait through the restart; a TLS/network error means the new endpoint is not ready yet.
+        }
+      }
+      if (!reachable) {
+        notify('از مرورگر به پورت تازه دسترسی نیست؛ در حال انتظار برای بازگشت خودکار پورت قبلی…')
+        const previousHealthUrl = `${location.origin}/api/state`
+        let previousPortReachable = false
+        for (let attempt = 0; attempt < 55; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1000))
+          try {
+            const response = await fetch(previousHealthUrl, { method: 'GET', mode: 'no-cors', cache: 'no-store' })
+            if (response.ok || response.type === 'opaque') { previousPortReachable = true; break }
+          } catch {
+            // Wait for rollback to restart ARG on the previous port.
+          }
+        }
+        if (previousPortReachable) {
+          notify('پورت قبلی برگشت؛ در حال تازه‌سازی صفحه…')
+          window.setTimeout(() => window.location.reload(), 800)
+        } else {
+          notify('بازگشت خودکار هنوز درحال اجراست؛ پس از حدود ۹۰ ثانیه نشانی قبلی را دوباره بارگذاری کن.')
+        }
+        return
+      }
+      setTls((current) => current ? { ...current, port: result.port } : current)
+      notify('HTTPS روی پورت جدید فعال شد.')
+      window.setTimeout(() => {
+        window.location.assign(`https://${panelUrlHost(host)}${portPart}/${location.hash}`)
+      }, 800)
+    } catch (error) { notify(error instanceof Error ? error.message : 'تغییر پورت HTTPS ناموفق بود') }
+    finally { setTlsPortBusy(false) }
   }
   function selector(label: string, key: 'interval_seconds' | 'retention_days' | 'session_hours', values: number[], unit: string) {
     return <label className="space-y-2 text-sm"><span className="block font-medium text-white">{label}</span><Select disabled={!isAdmin} value={String(config?.[key] ?? values[0])} onValueChange={(value) => setConfig((old) => old && { ...old, [key]: Number(value) })}><SelectTrigger dir="ltr"><SelectValue/></SelectTrigger><SelectContent>{values.map((value) => <SelectItem key={value} value={String(value)}>{value} {unit}</SelectItem>)}</SelectContent></Select></label>
@@ -1959,8 +2234,16 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
   })()
   return <>
     <Heading title="تنظیمات" description="زمان نمونه‌برداری، نگه‌داری تاریخچه، امنیت نشست و پورت دسترسی" />
-    <div className="mb-5"><AlertControls user={user} notify={notify}/></div>
-    <div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]">
+    <Tabs defaultValue="monitoring" className="mt-5" dir="rtl">
+      <TabsList className="h-auto w-full flex-wrap justify-start" aria-label="دسته‌بندی تنظیمات پنل">
+        <TabsTrigger value="monitoring">تاریخچه و اعلان‌ها</TabsTrigger>
+        <TabsTrigger value="access">دسترسی و پورت</TabsTrigger>
+        <TabsTrigger value="tls">گواهی HTTPS</TabsTrigger>
+        <TabsTrigger value="timezone">منطقهٔ زمانی</TabsTrigger>
+        <TabsTrigger value="update">نسخه و به‌روزرسانی</TabsTrigger>
+      </TabsList>
+      <TabsContent value="monitoring" className="space-y-5">
+        <AlertControls user={user} notify={notify}/>
       <SectionCard title="ثبت تاریخچه" description="تنظیمات روی سرویس Rust ذخیره و بدون نصب دوباره اعمال می‌شود" right={<Badge variant={config?.enabled ? 'success' : 'outline'}>{config?.enabled ? 'در حال ثبت' : 'متوقف'}</Badge>}>
         {config ? <form onSubmit={saveConfig} className="space-y-5">
           <label className="flex items-center justify-between gap-4 rounded-[14px] border border-primary/20 bg-primary/[.06] p-4"><span><span className="block text-sm font-semibold text-white">ثبت داده‌های CPU، حافظه، دیسک و شبکه</span><span className="mt-1 block text-xs text-muted-foreground">در صورت غیرفعال‌کردن، داده‌های قبلی تا پایان مدت نگه‌داری باقی می‌مانند.</span></span><Switch disabled={!isAdmin} checked={config.enabled} onCheckedChange={(checked) => setConfig((old) => old && { ...old, enabled: checked })}/></label>
@@ -1969,37 +2252,49 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
           {isAdmin && <Button type="submit" disabled={busy}>{busy ? 'در حال ذخیره…' : 'ذخیرهٔ تنظیمات'}</Button>}
         </form> : <Skeleton className="h-48"/>}
       </SectionCard>
-      <SectionCard title="دسترسی به پنل" description="نشانی جاری و تغییر پورت HTTP">
+      </TabsContent>
+      <TabsContent value="access" className="space-y-5">
+      <SectionCard title="دسترسی به پنل" description="نشانی جاری و مدیریت درگاه‌های HTTP و HTTPS">
         <div className="rounded-xl border border-white/10 bg-white/[.03] p-4"><div className="mb-2 text-xs text-muted-foreground">آدرس فعلی</div><div className="break-all font-mono text-sm text-white" dir="ltr">{location.origin}</div></div>
         <Button variant="outline" className="mt-3" onClick={() => void navigator.clipboard.writeText(location.origin).then(() => notify('آدرس پنل کپی شد.')).catch(() => notify('کپی آدرس ناموفق بود.'))}>کپی آدرس</Button>
-        {isAdmin && <form onSubmit={changePort} className="mt-6 space-y-3 border-t border-white/10 pt-5"><Label htmlFor="panel-port">پورت HTTP پنل</Label><div className="flex gap-2"><Input id="panel-port" type="number" min={1024} max={65535} required dir="ltr" lang="en" value={port} onChange={(event) => setPort(event.target.value)}/><Button type="submit" disabled={busy}>تغییر پورت</Button></div><p className="text-xs leading-6 text-muted-foreground">پورت HTTPS مستقل است. پس از تغییر، سرویس دوباره راه‌اندازی می‌شود و اتصال HTTP فعلی قطع خواهد شد.</p></form>}
-        {scheduledPort && <Alert className="mt-4"><AlertDescription>نشانی HTTP جدید: <a className="font-mono text-primary underline" dir="ltr" href={`http://${location.hostname}:${scheduledPort}`}>http://{location.hostname}:{scheduledPort}</a></AlertDescription></Alert>}
+        {isAdmin && <form onSubmit={changePort} className="mt-6 space-y-3 border-t border-white/10 pt-5"><Label htmlFor="panel-port">پورت HTTP پنل</Label><div className="flex gap-2"><Input id="panel-port" type="number" min={1024} max={65535} required dir="ltr" lang="en" value={port} onChange={(event) => setPort(event.target.value)} disabled={busy || tlsPortBusy}/><Button type="submit" disabled={busy || tlsPortBusy}>تغییر پورت</Button></div><p className="text-xs leading-6 text-muted-foreground">پورت HTTPS مستقل است. پس از تغییر، سرویس دوباره راه‌اندازی می‌شود و دسترسی تازه بررسی می‌شود.</p></form>}
+        {scheduledPort && <Alert className="mt-4"><AlertDescription>{tls?.enabled || location.protocol === 'https:'
+          ? <>درگاه داخلی HTTP روی <code dir="ltr" className="font-mono">{scheduledPort}</code> زمان‌بندی شد؛ پنل را از نشانی امن فعلی باز کن: <a className="font-mono text-primary underline" dir="ltr" href={location.origin}>{location.origin}</a></>
+          : <>نشانی HTTP جدید: <a className="font-mono text-primary underline" dir="ltr" href={`http://${location.hostname}:${scheduledPort}`}>http://{location.hostname}:{scheduledPort}</a></>}</AlertDescription></Alert>}
       </SectionCard>
-    </div>
-    <div className="mt-5"><SectionCard title="گواهی‌های SSL پنل" description="گواهی و کلید خصوصی را از فایل‌های سرور تنظیم کن؛ ARG پیش از فعال‌سازی، انقضا و تطبیق کلید را بررسی می‌کند." right={<Badge variant={tls?.enabled ? 'success' : 'warning'}>{tls?.enabled ? 'HTTPS فعال' : 'HTTP ناامن'}</Badge>}>
+      </TabsContent>
+      <TabsContent value="tls" className="space-y-5">
+      <SectionCard title="گواهی‌های SSL پنل" description="گواهی و کلید خصوصی را از فایل‌های سرور تنظیم کن؛ ARG پیش از فعال‌سازی، انقضا و تطبیق کلید را بررسی می‌کند." right={<Badge variant={tls?.enabled ? 'success' : 'warning'}>{tls?.enabled ? 'HTTPS فعال' : 'HTTP ناامن'}</Badge>}>
       {tls ? <form onSubmit={saveTls} className="space-y-4">
         <Alert className={tls.enabled ? 'border-emerald-400/20 bg-emerald-400/[.04]' : 'border-amber-400/25 bg-amber-400/[.05]'}><ShieldCheck size={16}/><AlertDescription>{tls.enabled ? `گواهی از مسیرهای ثبت‌شده خوانده می‌شود. HTTPS روی پورت ${formatNumber(tls.port)} فعال است.` : 'گواهی برای TLS فعال نیست. تا زمان فعال‌سازی HTTPS، ورود و نشست‌ها روی HTTP در معرض شنود شبکه هستند.'}</AlertDescription></Alert>
         <div className="grid gap-4 md:grid-cols-2">
-          <label className="space-y-2 text-sm"><span className="block font-medium text-white">دامنه یا IP پنل</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsServerName} onChange={(event) => setTlsServerName(event.target.value)} placeholder="panel.example.com" disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">باید در SAN گواهی باشد؛ پیش از راه‌اندازی کنترل می‌شود.</span></label>
-          <label className="space-y-2 text-sm"><span className="block font-medium text-white">مسیر گواهی عمومی (fullchain.pem)</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsCertificate} onChange={(event) => setTlsCertificate(event.target.value)} placeholder="/etc/arg/tls/fullchain.pem" disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">گواهی و زنجیرهٔ میانی؛ فایل PEM عمومی است.</span></label>
-          <label className="space-y-2 text-sm"><span className="block font-medium text-white">مسیر کلید خصوصی (privkey.pem)</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsPrivateKey} onChange={(event) => setTlsPrivateKey(event.target.value)} placeholder="/etc/arg/tls/privkey.pem" disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">محتوای کلید هرگز به مرورگر فرستاده یا در پنل نمایش داده نمی‌شود.</span></label>
-          <label className="space-y-2 text-sm"><span className="block font-medium text-white">پورت HTTPS</span><Input type="number" min={1024} max={65535} dir="ltr" lang="en" value={tlsPort} onChange={(event) => setTlsPort(event.target.value)} disabled={!isAdmin || tlsBusy}/><span className="block text-xs text-muted-foreground">پورت 443 پیش‌فرض است؛ اگر اشغال باشد، پورت آزاد دیگری وارد کن.</span></label>
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">دامنه یا IP پنل</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsServerName} onChange={(event) => setTlsServerName(event.target.value)} placeholder="panel.example.com" disabled={!isAdmin || tlsBusy || tlsPortBusy || busy}/><span className="block text-xs text-muted-foreground">باید در SAN گواهی باشد؛ پیش از راه‌اندازی کنترل می‌شود.</span></label>
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">مسیر گواهی عمومی (fullchain.pem)</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsCertificate} onChange={(event) => setTlsCertificate(event.target.value)} placeholder="/etc/arg/tls/fullchain.pem" disabled={!isAdmin || tlsBusy || tlsPortBusy || busy}/><span className="block text-xs text-muted-foreground">گواهی و زنجیرهٔ میانی؛ فایل PEM عمومی است.</span></label>
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">مسیر کلید خصوصی (privkey.pem)</span><Input dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={tlsPrivateKey} onChange={(event) => setTlsPrivateKey(event.target.value)} placeholder="/etc/arg/tls/privkey.pem" disabled={!isAdmin || tlsBusy || tlsPortBusy || busy}/><span className="block text-xs text-muted-foreground">محتوای کلید هرگز به مرورگر فرستاده یا در پنل نمایش داده نمی‌شود.</span></label>
+          <label className="space-y-2 text-sm"><span className="block font-medium text-white">پورت HTTPS</span><Input type="number" min={1024} max={65535} dir="ltr" lang="en" value={tlsPort} onChange={(event) => setTlsPort(event.target.value)} disabled={!isAdmin || tlsBusy || tlsPortBusy || busy}/><span className="block text-xs text-muted-foreground">پورت 443 پیش‌فرض است؛ اگر Nginx یا سرویس دیگری آن را گرفته، یک پورت آزاد مثل 8443 انتخاب کن.</span></label>
         </div>
+        {isAdmin && tls.enabled && <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4"><Button type="button" variant="outline" disabled={busy || tlsBusy || tlsPortBusy || !tls.server_name || !/^\d+$/.test(tlsPort) || Number(tlsPort) === tls.port} onClick={() => void changeTlsPort()}>{tlsPortBusy ? 'در حال بررسی و جابه‌جایی…' : 'تغییر امن پورت HTTPS'}</Button><span className="text-xs leading-6 text-muted-foreground">{tls.server_name ? 'گواهی فعلی حفظ می‌شود؛ پیش از اجرا TCP port تازه را در Firewall ارائه‌دهنده باز کن. ARG پورت را محلی بررسی می‌کند؛ اگر مرورگر در ۹۰ ثانیه به نشانی تازه وصل نشود، پورت قبلی خودکار برمی‌گردد.' : 'برای ثبت نام دامنهٔ گواهی، یک‌بار تنظیمات گواهی را ذخیره کن؛ بعد از آن تغییر پورت مستقل انجام می‌شود.'}</span></div>}
         <div className="rounded-xl border border-border bg-background/45 p-3 text-xs leading-6 text-muted-foreground">صدور خودکار ابتدا از Let’s Encrypt انجام می‌شود و در صورت شکست، ZeroSSL به‌عنوان منبع دوم پیشنهاد می‌شود؛ ZeroSSL برای دامنه به EAB نیاز دارد و گواهی IP خام صادر نمی‌کند. اگر هیچ‌کدام در دسترس نبودند، گواهی را از منبع دیگری بگیر و با SSH/SFTP به مسیرهای زیر منتقل کن؛ از انتقال کلید خصوصی در اتصال HTTP خودداری کن. پس از ذخیره، ARG تطبیق certificate، private key و دامنه/IP را کنترل می‌کند و سرویس را دوباره راه می‌اندازد.
           <div className="mt-2 grid gap-1 font-mono text-[11px] text-foreground" dir="ltr"><span>{tls.default_certificate_path}</span><span>{tls.default_private_key_path}</span></div>
         </div>
-        {isAdmin && <Button type="submit" disabled={tlsBusy || !tlsCertificate.trim() || !tlsPrivateKey.trim() || !tlsServerName.trim() || !/^\d+$/.test(tlsPort)}><ShieldCheck size={15}/>{tlsBusy ? 'در حال بررسی و ذخیره…' : tls.enabled ? 'اعمال گواهی و راه‌اندازی مجدد' : 'فعال‌سازی HTTPS'}</Button>}
+        {isAdmin && <Button type="submit" disabled={tlsBusy || tlsPortBusy || busy || !tlsCertificate.trim() || !tlsPrivateKey.trim() || !tlsServerName.trim() || !/^\d+$/.test(tlsPort)}><ShieldCheck size={15}/>{tlsBusy ? 'در حال بررسی و ذخیره…' : tls.enabled ? 'اعمال گواهی و راه‌اندازی مجدد' : 'فعال‌سازی HTTPS'}</Button>}
       </form> : <Skeleton className="h-48"/>}
-    </SectionCard></div>
-    <div className="mt-5"><SectionCard title="منطقهٔ زمانی پنل" description="زمان تاریخچه، گزارش‌ها، نشست‌ها و تغییر فایل‌ها بر اساس این منطقه نمایش داده می‌شود.">
+    </SectionCard>
+      </TabsContent>
+      <TabsContent value="timezone" className="space-y-5">
+      <SectionCard title="منطقهٔ زمانی پنل" description="زمان تاریخچه، گزارش‌ها، نشست‌ها و تغییر فایل‌ها بر اساس این منطقه نمایش داده می‌شود.">
       <form onSubmit={saveTimezone} className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <label className="min-w-0 space-y-2 text-sm"><span className="block font-medium text-white">شناسهٔ منطقهٔ زمانی (IANA)</span><Input list="arg-timezone-presets" dir="ltr" lang="en" autoComplete="off" spellCheck={false} value={timezoneDraft} onChange={(event) => setTimezoneDraft(event.target.value)} placeholder="Asia/Tehran" disabled={!isAdmin || timezoneBusy}/><datalist id="arg-timezone-presets">{['UTC','Asia/Tehran','Asia/Dubai','Europe/London','Europe/Berlin','America/New_York','America/Los_Angeles','Asia/Tokyo','Australia/Sydney'].map((zone) => <option key={zone} value={zone}/>)}</datalist><span className="block text-xs text-muted-foreground">مثال: <code dir="ltr">Asia/Tehran</code> یا <code dir="ltr">UTC</code>. ساعت تابستانی به‌صورت خودکار اعمال می‌شود.</span><span className="block text-xs text-primary">نمونهٔ زمان اکنون: <b dir="ltr" className="font-mono">{timezonePreview}</b></span></label>
         {isAdmin && <Button type="submit" disabled={timezoneBusy || !timezoneDraft.trim() || timezoneDraft.trim() === panelTimeZone}>{timezoneBusy ? 'در حال ذخیره…' : 'ذخیرهٔ منطقهٔ زمانی'}</Button>}
       </form>
-    </SectionCard></div>
-    <div className="mt-5"><SectionCard title="درباره و به‌روزرسانی" description="وضعیت نصب‌شده را ببین و از یک پنجره نسخهٔ جدید را بررسی یا نصب کن." right={<Badge variant={updating || update.status === 'available' ? 'warning' : update.status === 'current' ? 'success' : 'outline'}>{updating ? 'در حال نصب' : update.status === 'available' ? 'نسخهٔ جدید' : update.status === 'current' ? 'به‌روز' : 'بررسی نشده'}</Badge>}>
+    </SectionCard>
+      </TabsContent>
+      <TabsContent value="update" className="space-y-5">
+      <SectionCard title="درباره و به‌روزرسانی" description="وضعیت نصب‌شده را ببین و از یک پنجره نسخهٔ جدید را بررسی یا نصب کن." right={<Badge variant={updating || update.status === 'available' ? 'warning' : update.status === 'current' ? 'success' : 'outline'}>{updating ? 'در حال نصب' : update.status === 'available' ? 'نسخهٔ جدید' : update.status === 'current' ? 'به‌روز' : 'بررسی نشده'}</Badge>}>
       <div className="flex flex-wrap items-center justify-between gap-4"><div className="grid min-w-0 flex-1 gap-3 sm:grid-cols-2"><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">نسخهٔ نصب‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.local_version ? `v${update.local_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.local || '—'}</div></div><div className="rounded-xl border border-border bg-secondary/35 p-4"><div className="text-xs text-muted-foreground">آخرین نسخهٔ بررسی‌شده</div><div className="mt-2 truncate font-mono text-2xl font-bold tracking-tight text-foreground sm:text-3xl" dir="ltr">{update.remote_version ? `v${update.remote_version}` : '—'}</div><div className="mt-2 truncate font-mono text-[10px] text-muted-foreground" dir="ltr">COMMIT {update.remote || '—'}</div></div></div><div className="flex gap-2"><Button onClick={openUpdateDialog} disabled={updating || checkingUpdate} aria-busy={checkingUpdate || updating}><RefreshCw size={15} className={checkingUpdate || updating ? 'animate-spin' : ''}/>{checkingUpdate ? 'در حال بررسی…' : updating ? 'در حال نصب…' : update.status === 'available' ? 'نصب نسخهٔ جدید' : 'بررسی و به‌روزرسانی'}</Button><a href="https://github.com/themrcortex/arg" target="_blank" rel="noopener noreferrer" className="grid h-10 w-10 place-items-center rounded-[10px] border border-border text-muted-foreground hover:bg-accent" aria-label="مخزن ARG در GitHub"><Github size={17}/></a></div></div>
-    </SectionCard></div>
+    </SectionCard>
+      </TabsContent>
+    </Tabs>
   </>
 }
 
@@ -2041,16 +2336,24 @@ export function AccountPage({ Heading, user, setUser, logout, notify }: { Headin
   }
   return <>
     <Heading title="حساب کاربری" description="اطلاعات ورود، امنیت حساب و نشست‌های فعال خودت را مدیریت کن." />
-    <div className="grid gap-5 xl:grid-cols-[.8fr_1.2fr]">
+    <Tabs defaultValue="profile" className="mt-5" dir="rtl">
+      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های حساب کاربری">
+        <TabsTrigger value="profile">حساب و امنیت</TabsTrigger>
+        <TabsTrigger value="sessions">نشست‌های فعال</TabsTrigger>
+      </TabsList>
+      <TabsContent value="profile" className="grid items-start gap-5 xl:grid-cols-[.8fr_1.2fr]">
       <SectionCard title="مشخصات حساب" description="نام کاربری و سطح دسترسی جاری" right={<UserRound size={18} className="text-primary" />}>
         <div className="mb-5 flex items-center gap-3 rounded-xl border border-border bg-secondary/25 p-4"><div className="grid h-11 w-11 place-items-center rounded-xl border border-primary/20 bg-primary/[.08] text-lg font-bold text-primary">{user.username.slice(0,1).toUpperCase()}</div><div><div className="font-semibold text-foreground">{user.username}</div><div className="mt-1 text-xs text-muted-foreground">{user.role === 'admin' ? 'مدیر سیستم' : user.role === 'operator' ? 'اپراتور' : 'ناظر'}</div></div></div>
         <form onSubmit={(event) => void changeName(event)} className="space-y-3"><div className="space-y-2"><Label htmlFor="account-username">نام کاربری جدید</Label><Input id="account-username" required minLength={3} maxLength={32} pattern="[A-Za-z0-9_-]{3,32}" dir="ltr" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="username-current-password">تأیید با گذرواژهٔ فعلی</Label><Input id="username-current-password" required type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></div><Button disabled={saving || username === user.username}>{saving ? 'در حال ذخیره…' : 'ذخیرهٔ نام کاربری'}</Button></form>
       </SectionCard>
       <div className="space-y-5"><PasswordCard notify={notify}/><SectionCard title="پایان نشست" description="از حساب کاربری در این مرورگر خارج شو." right={<LogOut size={18} className="text-muted-foreground" />}><Button variant="outline" onClick={logout}><LogOut size={15}/>خروج از حساب</Button></SectionCard></div>
-    </div>
-    <div className="mt-5"><SectionCard title="نشست‌های فعال" description="نشست‌ها فقط برای همین حساب نمایش داده می‌شوند؛ بستن نشست روی درخواست بعدی آن اعمال می‌شود." right={<div className="flex gap-2"><Button variant="ghost" size="icon" onClick={() => void loadSessions()} aria-label="بارگذاری دوبارهٔ نشست‌ها"><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/></Button><Button variant="outline" size="sm" disabled={loading || sessions.filter((session) => !session.current).length === 0} onClick={() => void revokeOthers()}>بستن همهٔ نشست‌های دیگر</Button></div>}>
+      </TabsContent>
+      <TabsContent value="sessions" className="space-y-5">
+      <SectionCard title="نشست‌های فعال" description="نشست‌ها فقط برای همین حساب نمایش داده می‌شوند؛ بستن نشست روی درخواست بعدی آن اعمال می‌شود." right={<div className="flex gap-2"><Button variant="ghost" size="icon" onClick={() => void loadSessions()} aria-label="بارگذاری دوبارهٔ نشست‌ها"><RefreshCw size={15} className={loading ? 'animate-spin' : ''}/></Button><Button variant="outline" size="sm" disabled={loading || sessions.filter((session) => !session.current).length === 0} onClick={() => void revokeOthers()}>بستن همهٔ نشست‌های دیگر</Button></div>}>
       {sessionError ? <Alert className="border-rose-400/20 bg-rose-400/[.06] text-rose-100"><AlertDescription>{sessionError}</AlertDescription></Alert> : loading ? <Skeleton className="h-28"/> : !sessions.length ? <div className="rounded-xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">نشست فعالی پیدا نشد.</div> : <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-right text-sm"><thead className="text-xs text-muted-foreground"><tr><th className="px-3 py-3 font-medium">دستگاه و نشانی</th><th className="px-3 py-3 font-medium">ایجاد</th><th className="px-3 py-3 font-medium">آخرین فعالیت</th><th className="px-3 py-3 font-medium">انقضا</th><th className="px-3 py-3"/></tr></thead><tbody>{sessions.map((session) => <tr key={session.id} className="border-t border-border/70"><td className="max-w-[360px] px-3 py-3"><div className="flex flex-wrap items-center gap-2"><span className="font-medium text-foreground">{session.user_agent || 'دستگاه نامشخص'}</span>{session.current && <Badge variant="success">نشست فعلی</Badge>}</div><div className="mt-1 font-mono text-xs text-muted-foreground" dir="ltr">{session.remote_ip || 'IP نامشخص'}</div></td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{session.created_at ? formatPanelDate(session.created_at, timeZone) : 'نامشخص'}</td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{session.last_seen ? formatPanelDate(session.last_seen, timeZone) : 'نامشخص'}</td><td className="px-3 py-3 text-xs text-muted-foreground" dir="ltr">{formatPanelDate(session.expires_at, timeZone)}</td><td className="px-3 py-3 text-left">{!session.current && <Button size="sm" variant="ghost" className="text-rose-200 hover:bg-rose-400/10" onClick={() => void revoke(session.id)}><X size={14}/>بستن</Button>}</td></tr>)}</tbody></table></div>}
-    </SectionCard></div>
+      </SectionCard>
+      </TabsContent>
+    </Tabs>
   </>
 }
 

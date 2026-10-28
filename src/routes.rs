@@ -28,6 +28,9 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/storage/volumes", get(storage_volumes))
         .route("/api/maintenance/system", get(maintenance::system_info))
         .route("/api/maintenance/doctor", get(doctor::read).layer(middleware::from_fn(api_keys::no_store)))
+        .route("/api/ssh-keys", get(ssh_keys::list).post(ssh_keys::create).layer(middleware::from_fn(api_keys::no_store)))
+        .route("/api/ssh-keys/trusted-hosts/github", get(ssh_keys::host_keys).post(ssh_keys::refresh_host_keys).layer(middleware::from_fn(api_keys::no_store)))
+        .route("/api/ssh-keys/{id}", put(ssh_keys::rename).delete(ssh_keys::delete).layer(middleware::from_fn(api_keys::no_store)))
         .route("/api/admin/api-keys", get(api_keys::list).post(api_keys::create).layer(middleware::from_fn(api_keys::no_store)))
         .route("/api/admin/api-keys/{id}", axum::routing::delete(api_keys::revoke).layer(middleware::from_fn(api_keys::no_store)))
         .route("/api/v1/openapi.json", get(api_keys::openapi).layer(middleware::from_fn(api_keys::no_store)))
@@ -41,6 +44,7 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/maintenance/backups",
             get(maintenance::list_backups).post(maintenance::create_backup),
         )
+        .route("/api/maintenance/backup-policy", get(maintenance::get_backup_policy).put(maintenance::save_backup_policy))
         .route(
             "/api/maintenance/backups/upload",
             post(maintenance::upload_backup),
@@ -264,6 +268,7 @@ pub(super) fn router(state: AppState) -> Router {
             get(apps::get).put(apps::update).delete(apps::delete),
         )
         .route("/api/apps/{id}/restore", post(apps::restore))
+        .route("/api/apps/{id}/purge", post(app_cleanup::purge))
         .route("/api/apps/{id}/laravel", get(laravel::inspect))
         .route(
             "/api/apps/{id}/laravel/operations",
@@ -335,6 +340,11 @@ pub(super) fn router(state: AppState) -> Router {
         .route(
             "/api/settings/port",
             get(get_panel_port).put(change_panel_port),
+        )
+        .route("/api/settings/tls/port", put(change_panel_tls_port))
+        .route(
+            "/api/settings/tls/port/confirm",
+            post(confirm_panel_tls_port_change),
         )
         .route(
             "/api/settings/timezone",

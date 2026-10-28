@@ -69,6 +69,7 @@ mod workflow_drafts;
 mod dashboard_preferences;
 mod app_workspaces;
 mod apps;
+mod app_cleanup;
 mod buildpacks;
 mod deploy;
 mod dns;
@@ -90,6 +91,7 @@ mod private_networks;
 mod routes;
 mod runtimes;
 mod s3;
+mod ssh_keys;
 mod security_posture;
 mod secret_vault;
 mod storage_mounts;
@@ -139,7 +141,10 @@ struct User {
 fn error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"error": message})))
 }
-fn db_error(_: rusqlite::Error) -> (StatusCode, Json<Value>) {
+fn db_error(error_value: rusqlite::Error) -> (StatusCode, Json<Value>) {
+    // Keep the browser response generic, but retain the real SQLite cause in
+    // the ARG service journal so deployment failures can be diagnosed.
+    eprintln!("ARG database operation failed: {error_value}");
     error(StatusCode::INTERNAL_SERVER_ERROR, "Database error")
 }
 fn now() -> i64 {
@@ -1040,6 +1045,10 @@ async fn put_monitoring_config(
 struct PanelPortInput {
     port: u16,
 }
+#[derive(Deserialize)]
+struct PanelTlsPortInput {
+    port: u16,
+}
 async fn get_panel_port(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
     let db = state.lock().unwrap();
     require_user(&db, &headers)?;
@@ -1081,10 +1090,12 @@ async fn change_panel_port(
             )
         })?;
     if !output.status.success() {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "Panel port change could not be scheduled; check the port and service logs",
-        ));
+        let message = match output.status.code() {
+            Some(4) => "HTTP and HTTPS cannot use the same port. Choose a different port.",
+            Some(3) => "The restricted panel port helper is unavailable. Update or repair ARG.",
+            _ => "Panel port change could not be scheduled; check the port and service logs.",
+        };
+        return Err(error(StatusCode::BAD_REQUEST, message));
     }
     audit(
         &db,
@@ -1093,6 +1104,84 @@ async fn change_panel_port(
         &format!("scheduled HTTP port {}", input.port),
     );
     Ok(Json(json!({"scheduled": true, "port": input.port})))
+}
+
+async fn change_panel_tls_port(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PanelTlsPortInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !(1024..=65535).contains(&input.port) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "HTTPS port must be between 1024 and 65535",
+        ));
+    }
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?
+    };
+    let result = privileged_request_async(json!({
+        "action": "tls-port-change",
+        "port": input.port
+    }))
+    .await?;
+    if result["ok"].as_bool() != Some(true) {
+        let message = result["error"]
+            .as_str()
+            .unwrap_or("Could not change the panel HTTPS port");
+        return Err(error(StatusCode::BAD_REQUEST, message));
+    }
+    let db = state.lock().unwrap();
+    audit(
+        &db,
+        &actor.username,
+        "panel.tls.port",
+        &format!("scheduled HTTPS port {}", input.port),
+    );
+    Ok(Json(json!({
+        "scheduled": true,
+        "port": input.port,
+        "message": "HTTPS port change scheduled; the previous port is restored if the new endpoint fails health checks."
+    })))
+}
+
+async fn confirm_panel_tls_port_change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PanelTlsPortInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !(1024..=65535).contains(&input.port) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "HTTPS confirmation port is invalid",
+        ));
+    }
+    let actor = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?
+    };
+    let result = privileged_request_async(json!({
+        "action": "tls-port-confirm",
+        "port": input.port
+    }))
+    .await?;
+    if result["ok"].as_bool() != Some(true) {
+        let message = result["error"]
+            .as_str()
+            .unwrap_or("Could not confirm the HTTPS port change");
+        return Err(error(StatusCode::CONFLICT, message));
+    }
+    let db = state.lock().unwrap();
+    audit(
+        &db,
+        &actor.username,
+        "panel.tls.port.confirm",
+        &format!("confirmed HTTPS port {}", input.port),
+    );
+    Ok(Json(json!({"confirmed": true, "port": input.port})))
 }
 #[derive(Deserialize)]
 struct PanelTimezoneInput {
@@ -1213,6 +1302,10 @@ async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMa
         _ => (configured_cert, configured_key),
     };
     let bind = env::var("ARG_TLS_BIND").unwrap_or_else(|_| "0.0.0.0:443".to_owned());
+    let server_name = fs::read_to_string("/etc/arg/https-domain")
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
     let port = bind
         .rsplit(':')
         .next()
@@ -1222,8 +1315,14 @@ async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMa
         !certificate_path.is_empty() && PathBuf::from(&certificate_path).is_file();
     let private_key_present =
         !private_key_path.is_empty() && PathBuf::from(&private_key_path).is_file();
+    let pending_port = fs::read_to_string("/run/arg-tls-port-change.pending")
+        .ok()
+        .and_then(|contents| contents.split_whitespace().nth(1)?.parse::<u16>().ok());
     Ok(Json(json!({
         "enabled": certificate_present && private_key_present,
+        "server_name": server_name,
+        "port_change_pending": pending_port.is_some(),
+        "pending_port": pending_port,
         "certificate_path": certificate_path,
         "private_key_path": private_key_path,
         "port": port,
@@ -3596,6 +3695,40 @@ fn configure_panel_tls(request: &Value) -> Value {
         return failure(format!("Could not activate ARG HTTPS settings: {error}"));
     }
 
+    let domain_file = PathBuf::from("/etc/arg/https-domain");
+    let domain_tmp = PathBuf::from(format!(
+        "/etc/arg/.https-domain.{}.{}.tmp",
+        std::process::id(),
+        token()
+    ));
+    let domain_write = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o640)
+        .open(&domain_tmp)
+        .and_then(|mut file| file.write_all(format!("{server_name}\n").as_bytes()));
+    if let Err(error) = domain_write {
+        let _ = fs::remove_file(&domain_tmp);
+        return failure(format!(
+            "HTTPS was configured, but the panel domain could not be saved: {error}"
+        ));
+    }
+    let domain_owner = std::process::Command::new("chown")
+        .args(["root:arg", domain_tmp.to_string_lossy().as_ref()])
+        .status();
+    if !domain_owner.map(|status| status.success()).unwrap_or(false) {
+        let _ = fs::remove_file(&domain_tmp);
+        return failure(
+            "HTTPS was configured, but the panel domain ownership could not be set.".into(),
+        );
+    }
+    if let Err(error) = fs::rename(&domain_tmp, &domain_file) {
+        let _ = fs::remove_file(&domain_tmp);
+        return failure(format!(
+            "HTTPS was configured, but the panel domain could not be activated: {error}"
+        ));
+    }
+
     if std::process::Command::new("ufw")
         .args(["status"])
         .output()
@@ -3700,6 +3833,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("node-environment-permissions") => "node-environment-permissions",
         Some("node-nginx-proxy") => "node-nginx-proxy",
         Some("node-nginx-static") => "node-nginx-static",
+        Some("application-purge") => "application-purge",
         Some("apt-list") => "apt-list",
         Some("apt-runtime-catalog") => "apt-runtime-catalog",
         Some("apt-preview") => "apt-preview",
@@ -3731,6 +3865,8 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("mysql-service") => "mysql-service",
         Some("mysql-create-user") => "mysql-create-user",
         Some("tls-configure") => "tls-configure",
+        Some("tls-port-change") => "tls-port-change",
+        Some("tls-port-confirm") => "tls-port-confirm",
         Some("s3-secret-write") => "s3-secret-write",
         Some("s3-secret-update-config") => "s3-secret-update-config",
         Some("s3-secret-delete") => "s3-secret-delete",
@@ -3763,6 +3899,48 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     if action == "tls-configure" {
         return configure_panel_tls(request);
+    }
+    if action == "tls-port-change" {
+        let Some(port) = request["port"]
+            .as_u64()
+            .filter(|port| (1024..=65535).contains(port))
+        else {
+            return json!({"ok":false,"error":"HTTPS port must be between 1024 and 65535."});
+        };
+        let output = std::process::Command::new("/usr/local/lib/arg/port-helper")
+            .args(["https", &port.to_string()])
+            .output();
+        return match output {
+            Ok(output) if output.status.success() => json!({"ok":true}),
+            Ok(output) => json!({
+                "ok":false,
+                "error": match output.status.code() {
+                    Some(4) => "The new port conflicts with HTTP or is otherwise reserved. Choose another free port.",
+                    Some(5) => "HTTPS is not active or its certificate configuration is incomplete. Configure HTTPS first.",
+                    _ => "The HTTPS port change could not be scheduled. Check the ARG service logs."
+                }
+            }),
+            Err(_) => json!({"ok":false,"error":"The restricted panel port helper is unavailable. Update or repair ARG."}),
+        };
+    }
+    if action == "tls-port-confirm" {
+        let Some(port) = request["port"]
+            .as_u64()
+            .filter(|port| (1024..=65535).contains(port))
+        else {
+            return json!({"ok":false,"error":"HTTPS confirmation port is invalid."});
+        };
+        let output = std::process::Command::new("/usr/local/bin/arg")
+            .args(["manage", "tls-port-confirm", &port.to_string()])
+            .output();
+        return match output {
+            Ok(output) if output.status.success() => json!({"ok":true}),
+            Ok(_) => json!({"ok":false,"error":"No matching HTTPS port change is pending, or its rollback timer could not be cancelled."}),
+            Err(_) => json!({"ok":false,"error":"The ARG management command is unavailable."}),
+        };
+    }
+    if action == "application-purge" {
+        return app_cleanup::execute_privileged_request(request);
     }
     if action == "maintenance-repair" {
         let branch_output = std::process::Command::new("git")
@@ -4714,6 +4892,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     app_networks::migrate(&db)?;
     app_storage::migrate(&db)?;
     deploy::migrate(&db)?;
+    ssh_keys::migrate(&db)?;
     laravel::migrate(&db)?;
     s3::migrate(&db)?;
     app_s3::migrate(&db)?;
@@ -4730,6 +4909,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dashboard_preferences::migrate(&db)?;
     api_keys::migrate(&db)?;
     extensions::migrate(&db)?;
+    maintenance::migrate(&db)?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
     db.execute(
@@ -4755,6 +4935,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(Mutex::new(db));
     tokio::spawn(collect_metrics(state.clone()));
     tokio::spawn(app_monitoring::run(state.clone()));
+    maintenance::start_backup_scheduler(state.clone());
     deploy::start_worker(state.clone());
     let app = routes::router(state);
     let tls_cert = env::var("ARG_TLS_CERT").ok();

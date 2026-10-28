@@ -1709,6 +1709,54 @@ fn managed_unit(path: &FsPath) -> bool {
             .is_ok_and(|contents| contents.starts_with("# Managed by ARG Node runner;"))
 }
 
+pub(super) fn purge_application_service(app_id: &str) -> Result<bool, String> {
+    if !valid_app_id(app_id) {
+        return Err("شناسهٔ سرویس Node برای حذف معتبر نیست.".into());
+    }
+    let unit = node_unit_name(app_id);
+    let path = PathBuf::from("/etc/systemd/system").join(&unit);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("فایل سرویس Node بررسی نشد: {error}")),
+    };
+    if !metadata.file_type().is_file() {
+        return Err("مسیر سرویس Node فایل معمولی نیست؛ حذف متوقف شد.".into());
+    }
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| format!("محتوای سرویس Node خوانده نشد: {error}"))?;
+    let app_root = deployment_root().join("apps").join(app_id);
+    if !contents.starts_with("# Managed by ARG Node runner;")
+        || !contents.contains(&format!("BindReadOnlyPaths={}/current:/workspace", app_root.display()))
+        || !contents.contains(&format!("BindPaths={}/shared/data:/shared/data", app_root.display()))
+    {
+        return Err("سرویس هم‌نام Node با این اپلیکیشن تطبیق ندارد و دست‌نخورده ماند.".into());
+    }
+    systemctl(&["disable", "--now", &unit])
+        .map_err(|error| format!("توقف سرویس Node ناموفق بود: {error}"))?;
+    fs::remove_file(&path).map_err(|error| format!("حذف فایل سرویس Node ناموفق بود: {error}"))?;
+    systemctl(&["daemon-reload"])
+        .map_err(|error| format!("systemd پس از حذف سرویس Node بارگذاری نشد: {error}"))?;
+
+    let group = app_group(app_id);
+    if let Ok(output) = Command::new("getent").args(["group", &group]).output() {
+        if output.status.success() {
+            let output = Command::new("groupdel")
+                .arg(&group)
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| format!("گروه اختصاصی Node حذف نشد: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "سرویس حذف شد اما گروه اختصاصی {group} حذف نشد: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+        }
+    }
+    Ok(true)
+}
+
 fn helper_environment_keys(request: &Value) -> Value {
     let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
         return json!({"ok":false,"error":"Application ID is invalid"});

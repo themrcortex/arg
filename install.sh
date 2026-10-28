@@ -186,7 +186,7 @@ install_os_dependencies() {
   say "Installing build dependencies"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl git sudo build-essential pkg-config iproute2 ripgrep
+  apt-get install -y --no-install-recommends ca-certificates curl git openssh-client sudo build-essential pkg-config iproute2 ripgrep
 }
 
 ensure_firewall_dependency() {
@@ -748,14 +748,14 @@ sync_ufw_rules() {
   tls_port="${tls_bind##*:}"
   while IFS= read -r rule_id; do
     [[ -n "$rule_id" ]] || continue
-    ufw --force delete "$rule_id" >/dev/null 2>&1 || true
-  done < <(ufw status numbered 2>/dev/null | awk '/# ARG panel|# ARG HTTPS challenge|# DONATELLO panel|# DONATELLO HTTPS challenge/ {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
+    ufw --force delete "$rule_id" >/dev/null 2>&1 || return 1
+  done < <(ufw status numbered 2>/dev/null | awk '/# ARG panel|# ARG HTTPS panel|# ARG HTTPS challenge|# DONATELLO panel|# DONATELLO HTTPS panel|# DONATELLO HTTPS challenge/ {if(match($0,/^[[:space:]]*\[[[:space:]]*[0-9]+\]/)){id=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",id); print id}}' | sort -rn)
   if [[ -s "$DOMAIN_FILE" && -s "$tls_cert" && -s "$tls_key" && -n "$tls_port" ]]; then
     # HTTPS is the public entry point; leave the HTTP backend port closed in UFW.
-    ufw allow 80/tcp comment 'ARG HTTPS challenge' >/dev/null
-    ufw allow "$tls_port/tcp" comment 'ARG HTTPS panel' >/dev/null
+    ufw insert 1 allow 80/tcp comment 'ARG HTTPS challenge' >/dev/null || return 1
+    ufw insert 1 allow "$tls_port/tcp" comment 'ARG HTTPS panel' >/dev/null || return 1
   else
-    ufw allow "$port/tcp" comment 'ARG panel' >/dev/null
+    ufw insert 1 allow "$port/tcp" comment 'ARG panel' >/dev/null || return 1
   fi
 }
 
@@ -1462,23 +1462,201 @@ show_status() {
 
 change_port() {
   require_root manage
+  require_systemd
   [[ -f "$ENV_FILE" ]] || die "Configuration was not found. ARG is not installed."
-  local port
+  local port current_port tls_bind tls_port env_backup domain nginx_backup
   port="${1:-}"
   if [[ -z "$port" ]]; then read -r -p "New panel port (1024-65535): " port; fi
-  [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1024 && port <= 65535 )) || die "Invalid port. Enter a number from 1024 to 65535."
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || die "Invalid port. Enter a number from 1024 to 65535."
+  port=$((10#$port))
+  (( port >= 1024 && port <= 65535 )) || die "Invalid port. Enter a number from 1024 to 65535."
+  current_port="$(panel_port)"
+  tls_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  tls_port="${tls_bind##*:}"
+  [[ -z "$tls_bind" || "$port" != "$tls_port" ]] || die "HTTP and HTTPS cannot use the same port. Choose another port."
+  if [[ "$port" == "$current_port" ]]; then
+    say "HTTP is already using port $port."
+    return 0
+  fi
+  if ss -H -ltn "sport = :$port" 2>/dev/null | rg -q .; then
+    die "Port $port is already in use. Choose a free port."
+  fi
+  env_backup="$(mktemp /etc/arg/.arg.env.http-port-backup.XXXXXX)"
+  cp -p "$ENV_FILE" "$env_backup"
   write_bind_config "0.0.0.0:$port"
-  sync_ufw_rules
-  systemctl restart "$SERVICE_NAME"
-  wait_until_active || die "The service did not start after changing the port."
-  wait_for_panel || die "The service is running but the web panel did not answer on the new port."
-  local domain
+  if ! sync_ufw_rules || ! systemctl restart "$SERVICE_NAME" || ! wait_until_active || ! wait_for_panel; then
+    mv -f "$env_backup" "$ENV_FILE"
+    sync_ufw_rules || warn "The old firewall rules could not be restored automatically."
+    systemctl restart "$SERVICE_NAME" || true
+    wait_until_active || true
+    wait_for_panel || true
+    rm -f "$env_backup"
+    die "The panel did not respond on port $port. The previous port $current_port was restored."
+  fi
   domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
   if [[ -n "$domain" && -f "$LEGACY_NGINX_SITE" ]]; then
+    nginx_backup="$(mktemp /etc/nginx/.arg-panel-proxy-backup.XXXXXX)"
+    if ! cp -p "$LEGACY_NGINX_SITE" "$nginx_backup"; then
+      rm -f "$nginx_backup"
+      mv -f "$env_backup" "$ENV_FILE"
+      sync_ufw_rules || true
+      systemctl restart "$SERVICE_NAME" || true
+      wait_until_active || true
+      wait_for_panel || true
+      die "Could not back up the HTTPS proxy configuration. The previous HTTP port $current_port was restored."
+    fi
     sed -E -i "s#proxy_pass http://127\\.0\\.0\\.1:[0-9]+;#proxy_pass http://127.0.0.1:$port;#" "$LEGACY_NGINX_SITE"
-    nginx -t && systemctl reload nginx || die "The panel port changed, but the legacy HTTPS proxy could not be updated."
+    if ! nginx -t || ! systemctl reload nginx; then
+      mv -f "$nginx_backup" "$LEGACY_NGINX_SITE"
+      nginx -t && systemctl reload nginx || true
+      mv -f "$env_backup" "$ENV_FILE"
+      sync_ufw_rules || true
+      systemctl restart "$SERVICE_NAME" || true
+      wait_until_active || true
+      wait_for_panel || true
+      rm -f "$env_backup"
+      die "The HTTPS proxy could not be updated. The previous HTTP port $current_port was restored."
+    fi
+    rm -f "$nginx_backup"
   fi
+  rm -f "$env_backup"
   say "The panel is publicly listening on port $port"
+}
+
+change_tls_port() {
+  require_root manage
+  require_systemd
+  [[ -f "$ENV_FILE" ]] || die "Configuration was not found. ARG is not installed."
+  local port current_bind current_port cert key domain env_backup confirmation_mode pending_file pending_tmp
+  port="${1:-}"
+  confirmation_mode="${2:-}"
+  [[ -z "$confirmation_mode" || "$confirmation_mode" == web-confirm ]] || die "Invalid HTTPS port confirmation mode."
+  exec 9>/run/arg-tls-port-change.lock
+  flock -n 9 || die "Another ARG port change is already running. Wait for it to finish."
+  if [[ -z "$port" ]]; then read -r -p "New panel HTTPS port (1024-65535): " port; fi
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || die "Invalid port. Enter a number from 1024 to 65535."
+  port=$((10#$port))
+  (( port >= 1024 && port <= 65535 )) || die "Invalid port. Enter a number from 1024 to 65535."
+
+  current_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  [[ -n "$current_bind" ]] || die "HTTPS is not active. Configure a certificate before changing its port."
+  current_port="${current_bind##*:}"
+  cert="$(awk -F= '$1 == "ARG_TLS_CERT" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  key="$(awk -F= '$1 == "ARG_TLS_KEY" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
+  [[ -s "$cert" && -s "$key" && -n "$domain" ]] || die "The active HTTPS certificate or domain is unavailable. Reapply the certificate in Panel Settings first."
+  [[ "$port" != "$(panel_port)" ]] || die "HTTP and HTTPS cannot use the same port. Choose a different port."
+  if [[ "$port" == "$current_port" ]]; then
+    say "HTTPS is already using port $port."
+    return 0
+  fi
+  if ss -H -ltn "sport = :$port" 2>/dev/null | rg -q .; then
+    die "Port $port is already in use. Choose a free port; 443 may be occupied by a website's Nginx listener."
+  fi
+  pending_file=/run/arg-tls-port-change.pending
+  if [[ "$confirmation_mode" == web-confirm && -e "$pending_file" ]]; then
+    die "An earlier HTTPS port change is still awaiting confirmation or rollback."
+  fi
+
+  # Open the new firewall port first so the panel remains reachable during the switch.
+  if has ufw && ufw status 2>/dev/null | rg -q '^Status: active'; then
+    ufw insert 1 allow "$port/tcp" comment 'ARG HTTPS panel' >/dev/null \
+      || die "Could not open HTTPS port $port in UFW; the current port was left unchanged."
+  fi
+
+  env_backup="$(mktemp /etc/arg/.arg.env.tls-port-backup.XXXXXX)"
+  if ! cp -p "$ENV_FILE" "$env_backup"; then
+    rm -f "$env_backup"
+    sync_ufw_rules || true
+    die "Could not back up ARG settings; the current HTTPS port was left unchanged."
+  fi
+  if [[ "$confirmation_mode" == web-confirm ]]; then
+    pending_tmp="$(mktemp /run/.arg-tls-port-change.XXXXXX)"
+    if ! printf '%s %s\n' "$current_port" "$port" > "$pending_tmp" \
+      || ! chown root:"$SERVICE_GROUP" "$pending_tmp" \
+      || ! chmod 0640 "$pending_tmp" \
+      || ! mv -f "$pending_tmp" "$pending_file"; then
+      rm -f "$pending_tmp" "$pending_file" "$env_backup"
+      sync_ufw_rules || true
+      die "Could not prepare automatic HTTPS port rollback; the current port was left unchanged."
+    fi
+    if ! systemd-run --quiet --collect --unit=arg-tls-port-rollback --on-active=90s \
+      /usr/local/bin/arg manage tls-port-rollback; then
+      rm -f "$pending_file" "$env_backup"
+      sync_ufw_rules || true
+      die "Could not schedule automatic HTTPS rollback; the current port was left unchanged."
+    fi
+  fi
+  if ! set_env_value ARG_TLS_BIND "0.0.0.0:$port"; then
+    mv -f "$env_backup" "$ENV_FILE"
+    if [[ "$confirmation_mode" == web-confirm ]]; then
+      systemctl stop arg-tls-port-rollback.timer >/dev/null 2>&1 || true
+      rm -f "$pending_file"
+    fi
+    sync_ufw_rules || true
+    die "Could not save the HTTPS port; the previous configuration was restored."
+  fi
+
+  if ! systemctl restart "$SERVICE_NAME" || ! wait_until_active || ! wait_for_https "$domain" "$port"; then
+    mv -f "$env_backup" "$ENV_FILE"
+    if [[ "$confirmation_mode" == web-confirm ]]; then
+      systemctl stop arg-tls-port-rollback.timer >/dev/null 2>&1 || true
+      rm -f "$pending_file"
+    fi
+    sync_ufw_rules || warn "The old firewall rules could not be restored automatically."
+    systemctl restart "$SERVICE_NAME" || true
+    wait_until_active || true
+    wait_for_https "$domain" "$current_port" || true
+    rm -f "$env_backup"
+    die "HTTPS did not respond on port $port. The previous port $current_port was restored."
+  fi
+
+  rm -f "$env_backup"
+  sync_ufw_rules || warn "HTTPS is working on port $port, but UFW still needs a rule review."
+  say "The panel is reachable over HTTPS on port $port."
+  info "New address: https://$domain:$port"
+  [[ "$confirmation_mode" != web-confirm ]] || info "Keep the panel open and confirm this new address within 90 seconds. If the browser cannot reach it, ARG restores port $current_port automatically."
+}
+
+confirm_tls_port_change() {
+  require_root manage
+  local port old_port new_port
+  port="${1:-}"
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] || die "Invalid HTTPS confirmation port."
+  port=$((10#$port))
+  exec 9>/run/arg-tls-port-change.lock
+  flock -x 9 || die "Could not lock the HTTPS port change."
+  [[ -s /run/arg-tls-port-change.pending ]] || die "There is no HTTPS port change waiting for confirmation."
+  read -r old_port new_port < /run/arg-tls-port-change.pending
+  [[ "$new_port" == "$port" ]] || die "This browser is not connected to the pending HTTPS port."
+  systemctl stop arg-tls-port-rollback.timer >/dev/null 2>&1 || die "Could not cancel the automatic rollback timer."
+  rm -f /run/arg-tls-port-change.pending
+  say "HTTPS port $port is confirmed. Automatic rollback is cancelled."
+}
+
+rollback_tls_port_change() {
+  require_root manage
+  require_systemd
+  local old_port new_port current_bind current_port domain
+  exec 9>/run/arg-tls-port-change.lock
+  flock -x 9 || die "Could not lock the HTTPS rollback operation."
+  [[ -s /run/arg-tls-port-change.pending ]] || return 0
+  read -r old_port new_port < /run/arg-tls-port-change.pending
+  current_bind="$(awk -F= '$1 == "ARG_TLS_BIND" { sub(/^[^=]*=/, ""); print; exit }' "$ENV_FILE" 2>/dev/null || true)"
+  current_port="${current_bind##*:}"
+  if [[ "$current_port" != "$new_port" ]]; then
+    rm -f /run/arg-tls-port-change.pending
+    return 0
+  fi
+  domain="$(cat "$DOMAIN_FILE" 2>/dev/null || true)"
+  [[ -n "$domain" ]] || die "HTTPS rollback cannot find the panel domain; keep the pending state for manual recovery."
+  set_env_value ARG_TLS_BIND "0.0.0.0:$old_port"
+  sync_ufw_rules || die "HTTPS port $new_port is no longer current, but UFW could not be restored to $old_port."
+  systemctl restart "$SERVICE_NAME" || die "Could not restart ARG on the previous HTTPS port $old_port."
+  wait_until_active || die "ARG did not become active on the previous HTTPS port $old_port."
+  wait_for_https "$domain" "$old_port" || die "The previous HTTPS port $old_port did not pass its local health check."
+  rm -f /run/arg-tls-port-change.pending
+  say "The unconfirmed HTTPS change was rolled back to port $old_port."
 }
 
 manage_app() {
@@ -1493,6 +1671,9 @@ manage_app() {
         ;;
       logs) journalctl -u "$SERVICE_NAME" -n "${3:-100}" --no-pager ;;
       port) change_port "${3:-}" ;;
+      tls-port) change_tls_port "${3:-}" "${4:-}" ;;
+      tls-port-confirm) confirm_tls_port_change "${3:-}" ;;
+      tls-port-rollback) rollback_tls_port_change ;;
       ssl) configure_https ;;
       update) update_app "${3:-}" "${4:-}" ;;
       delete) delete_app "${3:-}" ;;

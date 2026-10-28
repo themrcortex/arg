@@ -54,6 +54,12 @@ The firewall summary reports whether UFW is installed, active, and how many ARG-
 
 The dashboard reads the S3 summary independently. Capacity appears only when a reliable measurement or known quota exists. Usage scans may paginate through Objects; do not treat stale usage as today's value. Open **S3 Storage** for provider details and scan time.
 
+## ARG Mesh topology
+
+In multi-server mode, use **Layout** to show or hide the **ARG Mesh · Panel Network** widget and change its dashboard order. It displays this panel's registered Node connections as a hub-and-spoke topology; it does not imply direct links between every VPS. Every 30 seconds the widget sends read-only status probes. Moving dots represent the real probe request and response. Response time is measured, while the displayed byte count is only the JSON response size, not total network traffic or file transfers.
+
+Inter-panel requests use HTTPS with certificate validation and TLS 1.2 or later. Each operation creates a fresh connection, and TLS negotiates traffic keys for that session during the handshake; the next operation does not reuse the connection. This is standard TLS transport encryption, not a custom cipher or a separately scheduled rotating key. See the [Federation guide](federation.md) for details.
+
 ## Fast Actions: create, run, and verify
 
 Fast Actions appears below the banner for administrators. Choose **Add action** to save a constrained operation. Each card runs only its configured operation:

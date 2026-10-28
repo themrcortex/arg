@@ -4,13 +4,19 @@ The **Server & ARG management** page is available to administrators. Before repa
 
 ## Read-only ARG Doctor report
 
-ARG Doctor reads status only. It does not install, repair, or restart anything. It reports the operating-system family, presence of systemd, Docker installation indicators, free root-disk space, configured panel TLS files, and selected executables. It also reads local ARG counts for storage connections and buckets, registered nodes, and application and deployment records.
+ARG Doctor reads status only. It does not install, repair, or restart anything, and it does not actively probe remote servers. It reports the operating-system family, presence of systemd, Docker installation indicators, free root-disk space, configured panel TLS files, and selected executables. For paired Nodes it lists the saved public name, endpoint origin, compatibility, last saved connection state, last successful contact, last check time, and saved error. `healthy` and the legacy `connected` state count as connected. It separately lists enabled controller panels by display name and last contact, without exposing credentials.
 
 This is not a full audit: finding a Docker binary does not prove that the Engine or containers work; finding a runtime does not verify its version or application health; S3 and node status may come from the last saved check. Doctor does not contact providers or read private-key contents. For a fresh result, open the relevant feature page and run its own check.
 
 ## Create, download, and upload a backup
 
 Backups from this page contain the **ARG database**, including accounts, panel settings, history, and connection records. They do not include installation files, TLS certificates or keys, or application files. **Create backup** makes a SQLite copy of the database. Download it and keep it off the server.
+
+## Automatic backup schedule
+
+In **Automatic backup schedule**, enable or disable the scheduler, choose an interval from 1 to 720 hours, and retain between 1 and 100 automatic copies. The first scheduled copy is due after the chosen interval. The worker runs independently of the browser and resumes from the saved due time after an ARG service restart. It validates each SQLite copy before registering it. When the retention limit is exceeded, only files created by the automatic scheduler are removed; manual and uploaded backups remain untouched. The page shows the last attempt, last successful run, next due time, current automatic-copy count, and the latest error. Failed runs are retried after about one hour.
+
+Automatic copies remain on the same VPS in the ARG backup directory. They are useful restore points, not an off-site disaster-recovery copy; download important backups to another server or storage service.
 
 To transfer an existing backup, upload its `.db` file. ARG checks the SQLite format and integrity and verifies that it contains ARG account data. Files larger than `512 MiB` are rejected. Uploading registers a backup; it does not replace the current database.
 

@@ -7,8 +7,9 @@ This page describes ARG's base deployment workflow. ARG acquires source into an 
 Open an application card in **Applications** and choose **Deploy source**. Three source types are available:
 
 1. **Public HTTPS Git:** fetch a GitHub, GitLab, Bitbucket, or Codeberg repository at a branch, tag, or commit. URLs containing usernames, passwords, or tokens are rejected.
-2. **Existing VPS directory:** the canonical path must be beneath `/var/www` or `/opt/arg/apps`. Symlinks anywhere in the source tree are rejected.
-3. **ZIP archive:** uploads are limited to 256 MiB, expanded data to 2 GiB, and entries to 20,000.
+2. **Private SSH Git:** fetch a private GitHub repository with a Deploy Key scoped to that repository. See [SSH keys and Deploy Keys](./ssh-deploy-keys.md) for key generation, GitHub setup, and limitations.
+3. **Existing VPS directory:** the canonical path must be beneath `/var/www` or `/opt/arg/apps`. Symlinks anywhere in the source tree are rejected.
+4. **ZIP archive:** uploads are limited to 256 MiB, expanded data to 2 GiB, and entries to 20,000.
 
 ARG stores releases under `/var/lib/arg/deployments/apps/<application-id>/releases/<job-id>`. `current` is a relative symlink switched with an atomic rename only after release validation. Previous releases remain on disk and a successful job can roll back to the previous release.
 
@@ -25,8 +26,9 @@ Only one job per application may be active, and one worker runs jobs per VPS. Th
 - Large ZIPs, suspicious compression ratios, traversal paths such as `../../etc/passwd`, symlinks, and special device files are rejected.
 - Directory copying rejects symlinks and special files. `.env*`, `.git`, and `node_modules` are excluded.
 - Releases are capped at 2 GiB and free space is checked before copying or extraction.
-- Git is invoked with fixed arguments, without a shell. Project hooks and scripts are never executed; fetch has a 180-second timeout.
-- The installer limits `/var/lib/arg` to the ARG service account. Private Git credentials in a URL are not accepted.
+- Git is invoked with fixed arguments. Project hooks and scripts are never executed; fetch has a 180-second timeout.
+- Public HTTPS URLs cannot contain credentials. Private SSH keys are Ed25519 files under `/var/lib/arg/ssh-keys` with restricted permissions; Git uses batch mode and strict host-key checking.
+- Register a Deploy Key in GitHub for the specific repository and preferably keep it read-only. ARG does not have GitHub API access to add the key automatically.
 
 ## Cancel, retry, and rollback
 

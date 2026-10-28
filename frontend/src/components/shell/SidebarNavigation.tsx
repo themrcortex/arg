@@ -20,7 +20,7 @@ type SidebarNavigationProps = {
 const sections: Array<{ title: string; ids: PageId[] }> = [
   { title: 'نمای کلی', ids: ['dashboard'] },
   { title: 'سرور و شبکه', ids: ['system', 'network', 'ports', 'firewall', 'nodes'] },
-  { title: 'اپلیکیشن‌ها و سرویس‌ها', ids: ['apps', 'nginx', 'docker', 'files', 's3', 'dns'] },
+  { title: 'اپلیکیشن‌ها و سرویس‌ها', ids: ['apps', 'ssh-keys', 'nginx', 'docker', 'files', 's3', 'dns'] },
   { title: 'عملیات سرور', ids: ['terminal', 'packages', 'services', 'mysql', 'maintenance'] },
   { title: 'مدیریت ARG', ids: ['users', 'audit', 'settings', 'account', 'bug-report'] },
 ]
@@ -44,8 +44,8 @@ export function SidebarNavigation({ items, currentPage, collapsed, mobileOpen, d
       <div className="arg-sidebar-pattern" aria-hidden="true" />
       <div className="arg-sidebar-corner" aria-hidden="true" />
       <div className="arg-brand-row relative z-10 flex min-h-[64px] items-center justify-between gap-1">
-        <div className="arg-brand-lockup flex min-w-0 flex-1 items-center" aria-label="ARG">
-          <img src="/arg/brand/arg-logo-compact.png" alt="ARG" className="arg-brand-full arg-brand-full-dark" />
+        <div className="arg-brand-lockup flex min-w-0 flex-1 items-center" aria-label="ARG Control Center">
+          <img src="/arg/brand/arg-logo-compact.png" alt="ARG Control Center" className="arg-brand-full arg-brand-full-dark" />
           <img src="/arg/brand/arg-logo-compact-light.png" alt="" aria-hidden="true" className="arg-brand-full arg-brand-full-light" />
           <img src="/arg/brand/arg-logo-mark.png" alt="" aria-hidden="true" className="arg-brand-mark" />
           <img src="/arg/brand/arg-logo-mark-light.png" alt="" aria-hidden="true" className="arg-brand-mark arg-brand-mark-light" />

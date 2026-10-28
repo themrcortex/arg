@@ -546,6 +546,88 @@ fn installed_php_fpm_versions() -> Vec<String> {
     versions
 }
 
+pub(super) fn purge_application_services_and_pool(app_id: &str) -> Result<(), String> {
+    if !valid_app_id(app_id) {
+        return Err("شناسهٔ سرویس‌های Laravel برای حذف معتبر نیست.".into());
+    }
+    let short = &app_id[..8];
+    let root = deployment_root().join("apps").join(app_id);
+    let mut units = Vec::new();
+    for service in ["queue", "scheduler", "horizon", "reverb", "octane"] {
+        let unit = format!("arg-app-{short}-{service}.service");
+        let path = PathBuf::from("/etc/systemd/system").join(&unit);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("فایل سرویس {service} بررسی نشد: {error}")),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(format!("فایل سرویس {service} معمولی نیست؛ حذف متوقف شد."));
+        }
+        let marker = format!("# ARG managed Laravel service app={app_id} kind={service}\n");
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| format!("فایل سرویس {service} خوانده نشد: {error}"))?;
+        if !contents.starts_with(&marker) || !contents.contains(&root.to_string_lossy().to_string()) {
+            return Err(format!("سرویس هم‌نام {service} متعلق به این اپ نیست و دست‌نخورده ماند."));
+        }
+        units.push((unit, path));
+    }
+
+    let mut pools = Vec::new();
+    let php_root = PathBuf::from("/etc/php");
+    if let Ok(versions) = fs::read_dir(&php_root) {
+        for entry in versions.flatten() {
+            let Some(version) = entry.file_name().to_str().map(str::to_owned) else { continue };
+            if !valid_runtime_version(&version) { continue; }
+            let Ok((pool, _, fpm_unit)) = php_fpm_paths(&version, app_id) else { continue };
+            let metadata = match fs::symlink_metadata(&pool) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("Pool مربوط به PHP {version} بررسی نشد: {error}")),
+            };
+            if !metadata.file_type().is_file() {
+                return Err(format!("فایل Pool مربوط به PHP {version} معمولی نیست؛ حذف متوقف شد."));
+            }
+            let contents = fs::read_to_string(&pool)
+                .map_err(|error| format!("Pool مربوط به PHP {version} خوانده نشد: {error}"))?;
+            let expected_pool = format!("[arg-app-{short}]\n");
+            let expected_root = format!("php_admin_value[open_basedir] = {}:", root.display());
+            if !contents.starts_with(&expected_pool) || !contents.contains(&expected_root) {
+                return Err(format!("Pool هم‌نام PHP {version} متعلق به این اپ نیست و دست‌نخورده ماند."));
+            }
+            pools.push((version, fpm_unit, pool, contents));
+        }
+    }
+
+    for (unit, path) in units {
+        helper_output("systemctl", &["disable", "--now", &unit])
+            .map_err(|error| format!("توقف سرویس {unit} ناموفق بود: {error}"))?;
+        fs::remove_file(&path).map_err(|error| format!("حذف سرویس {unit} ناموفق بود: {error}"))?;
+        helper_output("systemctl", &["daemon-reload"])
+            .map_err(|error| format!("systemd پس از حذف {unit} بارگذاری نشد: {error}"))?;
+    }
+
+    for (version, fpm_unit, pool, contents) in pools {
+        fs::remove_file(&pool)
+            .map_err(|error| format!("حذف Pool اپ از PHP {version} ناموفق بود: {error}"))?;
+        if let Err(problem) = php_fpm_test(&version) {
+            let restore = atomic_write(&pool, contents.as_bytes(), 0o644);
+            let detail = restore.err().map(|error| format!("؛ بازیابی Pool هم شکست خورد: {error}")).unwrap_or_default();
+            return Err(format!("اعتبارسنجی PHP-FPM {version} پس از حذف Pool ناموفق بود: {problem}{detail}"));
+        }
+        if systemd_unit_state(&fpm_unit) == "active" {
+            if let Err(problem) = php_fpm_reload(&fpm_unit) {
+                let restore = atomic_write(&pool, contents.as_bytes(), 0o644);
+                let _ = php_fpm_test(&version);
+                let _ = php_fpm_reload(&fpm_unit);
+                let detail = restore.err().map(|error| format!("؛ بازیابی Pool هم شکست خورد: {error}")).unwrap_or_default();
+                return Err(format!("بارگذاری مجدد {fpm_unit} ناموفق بود: {problem}{detail}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn php_version_key(version: &str) -> Vec<u32> {
     version
         .split('.')

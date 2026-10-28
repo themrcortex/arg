@@ -180,6 +180,12 @@ export function api<T>(path: string, init?: RequestInit): Promise<T> {
   return requestApi<T>(apiUrl(path), path, init)
 }
 
+/** Requests owned by this control plane (fleet metadata, local registry, etc.). */
+export function apiControlPlane<T>(path: string, init?: RequestInit): Promise<T> {
+  const route = path.replace(/^\/+/, '')
+  return requestApi<T>(`/api/${route}`, path, init)
+}
+
 /** Fetch one server's API through the authenticated controller proxy. */
 export function apiForWorkspace<T>(workspaceKey: string, path: string, init?: RequestInit): Promise<T> {
   const route = path.replace(/^\/+/, '')

@@ -192,9 +192,9 @@ pub(super) fn execute_docker_status() -> Value {
             "-a",
             "--no-trunc",
             "--format",
-            "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.State}}",
+            "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.State}}\t{{.Label \"com.arg.application_id\"}}",
         ],
-        &["id", "names", "image", "status", "ports", "state"],
+        &["id", "names", "image", "status", "ports", "state", "application_id"],
     );
     if let Ok(stats) = docker_table(
         &[
@@ -658,4 +658,64 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
         Ok((false, output)) => json!({"ok":false,"error":output}),
         Err(error) => json!({"ok":false,"error":error}),
     }
+}
+
+fn application_container_ids(app_id: &str) -> Result<Vec<String>, String> {
+    if !apps::valid_uuid(app_id) {
+        return Err("شناسهٔ اپلیکیشن Docker معتبر نیست.".into());
+    }
+    let label = format!("label=com.arg.application_id={app_id}");
+    let output = match std::process::Command::new("docker")
+        .args(["ps", "-aq", "--filter", &label])
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("بررسی کانتینرهای اپ ناموفق بود: {error}")),
+    };
+    if !output.status.success() {
+        return Err(format!(
+            "Docker نتوانست کانتینرهای این اپ را فهرست کند: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let ids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if ids.len() > 256
+        || ids.iter().any(|id| {
+            !(12..=64).contains(&id.len()) || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err("فهرست شناسه‌های کانتینر Docker خارج از محدودهٔ امن است.".into());
+    }
+    Ok(ids)
+}
+
+pub(super) fn preflight_application_containers(app_id: &str) -> Result<(), String> {
+    let _ = application_container_ids(app_id)?;
+    Ok(())
+}
+
+pub(super) fn purge_application_containers(app_id: &str) -> Result<Vec<String>, String> {
+    let ids = application_container_ids(app_id)?;
+    if ids.is_empty() { return Ok(ids); }
+    let output = std::process::Command::new("docker")
+        .arg("rm")
+        .arg("-f")
+        .args(&ids)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("حذف کانتینرهای متعلق به اپ ناموفق بود: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Docker نتوانست کانتینرهای اپ را حذف کند: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(ids)
 }

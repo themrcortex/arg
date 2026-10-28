@@ -21,6 +21,8 @@ enum Source {
     Git {
         repository: String,
         reference: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ssh_key_id: Option<String>,
     },
     Directory {
         path: String,
@@ -51,6 +53,140 @@ pub(super) fn deployment_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/var/lib/arg/deployments"))
 }
 
+fn application_tree_for_purge(app_id: &str) -> Result<Option<PathBuf>, String> {
+    if !apps::valid_uuid(app_id) {
+        return Err("شناسهٔ اپلیکیشن معتبر نیست.".into());
+    }
+    let root = deployment_root();
+    let root_metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("ریشهٔ استقرار قابل بررسی نیست: {error}")),
+    };
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err("ریشهٔ استقرار یک پوشهٔ واقعی نیست؛ حذف برای ایمنی متوقف شد.".into());
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("ریشهٔ استقرار قابل resolve نیست: {error}"))?;
+    let apps_path = root.join("apps");
+    let apps_metadata = match fs::symlink_metadata(&apps_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("پوشهٔ اپلیکیشن‌ها قابل بررسی نیست: {error}")),
+    };
+    if !apps_metadata.is_dir() || apps_metadata.file_type().is_symlink() {
+        return Err("پوشهٔ apps یک پوشهٔ واقعی نیست؛ حذف برای ایمنی متوقف شد.".into());
+    }
+    let canonical_apps = apps_path
+        .canonicalize()
+        .map_err(|error| format!("پوشهٔ apps قابل resolve نیست: {error}"))?;
+    if canonical_apps.parent() != Some(canonical_root.as_path()) {
+        return Err("پوشهٔ apps از ریشهٔ استقرار خارج شده است.".into());
+    }
+    let app_path = canonical_apps.join(app_id);
+    let metadata = match fs::symlink_metadata(&app_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("پوشهٔ اپ قابل بررسی نیست: {error}")),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("پوشهٔ اپلیکیشن واقعی نیست یا symlink است؛ حذف برای ایمنی متوقف شد.".into());
+    }
+    let canonical_app = app_path
+        .canonicalize()
+        .map_err(|error| format!("پوشهٔ اپ قابل resolve نیست: {error}"))?;
+    if canonical_app != app_path || !canonical_app.starts_with(&canonical_apps) {
+        return Err("مسیر واقعی اپلیکیشن با مسیر مدیریت‌شدهٔ ARG یکی نیست.".into());
+    }
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|error| format!("Mountهای سیستم قابل بررسی نیستند؛ حذف فایل‌ها متوقف شد: {error}"))?;
+    for line in mountinfo.lines() {
+        let Some(raw_mount) = line.split_whitespace().nth(4) else {
+            continue;
+        };
+        let mount = decode_mountinfo_path(raw_mount);
+        if mount == canonical_app || mount.starts_with(&canonical_app) {
+            return Err(format!(
+                "داخل مسیر اپلیکیشن یک Mount فعال وجود دارد ({})؛ ابتدا آن را جدا کن.",
+                mount.display()
+            ));
+        }
+    }
+    Ok(Some(canonical_app))
+}
+
+fn decode_mountinfo_path(value: &str) -> PathBuf {
+    let mut decoded = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+            let escape = &value[index + 1..index + 4];
+            let character = match escape {
+                "040" => Some(' '),
+                "011" => Some('\t'),
+                "012" => Some('\n'),
+                "134" => Some('\\'),
+                _ => None,
+            };
+            if let Some(character) = character {
+                decoded.push(character);
+                index += 4;
+                continue;
+            }
+        }
+        let character = value[index..].chars().next().unwrap_or_default();
+        decoded.push(character);
+        index += character.len_utf8();
+    }
+    PathBuf::from(decoded)
+}
+
+pub(super) fn preflight_application_purge(app_id: &str) -> Result<(), String> {
+    let _ = application_tree_for_purge(app_id)?;
+    Ok(())
+}
+
+pub(super) fn purge_application_tree(app_id: &str) -> Result<bool, String> {
+    let Some(path) = application_tree_for_purge(app_id)? else {
+        return Ok(false);
+    };
+    fs::remove_dir_all(&path).map_err(|error| format!("حذف پوشهٔ اپ ناموفق بود: {error}"))?;
+    Ok(true)
+}
+
+pub(super) fn purge_application_uploads(job_ids: &[String]) -> Result<Vec<String>, String> {
+    let root = deployment_root();
+    let uploads = root.join("uploads");
+    let metadata = match fs::symlink_metadata(&uploads) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("پوشهٔ ZIPهای استقرار بررسی نشد: {error}")),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("پوشهٔ ZIPهای استقرار واقعی نیست؛ پاک‌سازی متوقف شد.".into());
+    }
+    let mut removed = Vec::new();
+    for job_id in job_ids {
+        if !valid_key(job_id) || job_id.len() != 36 {
+            return Err("شناسهٔ Job برای پاک‌کردن ZIP معتبر نیست.".into());
+        }
+        let path = uploads.join(format!("{job_id}.zip"));
+        let file = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("فایل ZIP استقرار بررسی نشد: {error}")),
+        };
+        if !file.is_file() || file.file_type().is_symlink() {
+            return Err("فایل ZIP استقرار معمولی نیست؛ حذف انجام نشد.".into());
+        }
+        fs::remove_file(&path).map_err(|error| format!("حذف ZIP استقرار ناموفق بود: {error}"))?;
+        removed.push(job_id.clone());
+    }
+    Ok(removed)
+}
+
 pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS deployment_jobs (
@@ -75,18 +211,35 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             state TEXT NOT NULL, source_commit TEXT, created_at INTEGER NOT NULL, activated_at INTEGER);
          CREATE INDEX IF NOT EXISTS deployment_releases_app ON deployment_releases(application_id,created_at DESC);",
     )?;
-    let has_source_commit = {
+    // CREATE TABLE IF NOT EXISTS does not update older deployment databases.
+    // Add fields introduced after the original schema before any endpoint
+    // reads/writes them, otherwise a queued deployment can surface only as a
+    // generic "Database error" on upgraded installations.
+    let columns = {
         let mut statement = db.prepare("PRAGMA table_info(deployment_jobs)")?;
-        let names = statement
-            .query_map([], |r| r.get::<_, String>(1))?
-            .collect::<Result<Vec<_>, _>>()?;
-        names.iter().any(|name| name == "source_commit")
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        columns
     };
-    if !has_source_commit {
-        db.execute(
-            "ALTER TABLE deployment_jobs ADD COLUMN source_commit TEXT",
-            [],
-        )?;
+    for (name, definition) in [
+        ("healthcheck_file", "TEXT"),
+        ("attempt", "INTEGER NOT NULL DEFAULT 1"),
+        ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+        ("worker_id", "TEXT"),
+        ("lease_until", "INTEGER"),
+        ("heartbeat_at", "INTEGER"),
+        ("release_path", "TEXT"),
+        ("previous_release", "TEXT"),
+        ("source_commit", "TEXT"),
+        ("error_summary", "TEXT"),
+        ("started_at", "INTEGER"),
+        ("finished_at", "INTEGER"),
+        ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        if !columns.contains(name) {
+            db.execute(&format!("ALTER TABLE deployment_jobs ADD COLUMN {name} {definition}"), [])?;
+        }
     }
     Ok(())
 }
@@ -219,13 +372,11 @@ fn insert_job(
             ));
         }
     }
-    if let Source::Git {
-        repository,
-        reference,
-    } = &source
-    {
-        if !valid_repo(repository) || !valid_reference(reference) {
-            return Err(api_error(StatusCode::BAD_REQUEST, "مخزن باید HTTPS عمومی از GitHub، GitLab، Bitbucket یا Codeberg و branch/tag/commit معتبر باشد؛ URL دارای credential پذیرفته نمی‌شود."));
+    if let Source::Git { repository, reference, ssh_key_id } = &source {
+        let public_https = valid_repo(repository) && ssh_key_id.is_none();
+        let private_ssh = ssh_keys::is_github_ssh_repository(repository) && ssh_key_id.as_deref().is_some_and(ssh_keys::valid_key_id);
+        if !(public_https || private_ssh) || !valid_reference(reference) {
+            return Err(api_error(StatusCode::BAD_REQUEST, "Git عمومی باید HTTPS معتبر باشد؛ مخزن خصوصی GitHub باید SSH و همراه کلید SSH انتخاب‌شده باشد."));
         }
     }
     if let Source::Directory { path } = &source {
@@ -238,6 +389,10 @@ fn insert_job(
         let actor = require_admin(&db, headers)?.username;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
         ensure_app(&db, app_id, &owner)?;
+        if let Source::Git { repository, ssh_key_id: Some(key_id), .. } = &source {
+            ssh_keys::validate_key_for_deployment(&db, app_id, repository, key_id)
+                .map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))?;
+        }
         if let Some(existing) = db.query_row(
             "SELECT id,source_json,state,healthcheck_file FROM deployment_jobs WHERE application_id=?1 AND idempotency_key=?2",
             params![app_id, key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?)),
@@ -984,10 +1139,11 @@ pub(super) async fn retry(
                 "تنظیمات منبع Job قابل بازیابی نیست.",
             )
         })?;
-        if let (Source::Git { repository, .. }, Some(commit)) = (&source, old.5.as_ref()) {
+        if let (Source::Git { repository, ssh_key_id, .. }, Some(commit)) = (&source, old.5.as_ref()) {
             source = Source::Git {
                 repository: repository.clone(),
                 reference: commit.clone(),
+                ssh_key_id: ssh_key_id.clone(),
             };
         }
         (actor, old, source)
@@ -1440,14 +1596,29 @@ async fn process_job(state: AppState, job_id: String) {
         "منبع در فضای staging مجزا دریافت یا کپی می‌شود؛ هیچ اسکریپت پروژه اجرا نمی‌شود.",
     );
     let source_result = match &source {
-        Source::Git {
-            repository,
-            reference,
-        } => match acquire_git(repository, reference, &work).await {
+        Source::Git { repository, reference, ssh_key_id } => {
+            let key_path = match ssh_key_id.as_deref() {
+                Some(key_id) => {
+                    let db = state.lock().unwrap();
+                    match ssh_keys::deployment_key_path(&db, &app_id, repository, key_id) {
+                        Ok(path) => Some(path),
+                        Err(message) => {
+                            drop(db);
+                            finish(&state, &job_id, "failed", &message);
+                            let _ = fs::remove_dir_all(&stage);
+                            let _ = fs::remove_dir_all(&work);
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            };
+            match acquire_git(repository, reference, key_path.as_deref(), &work).await {
             Ok(revision) => {
                 let pinned = Source::Git {
                     repository: repository.clone(),
                     reference: revision.clone(),
+                    ssh_key_id: ssh_key_id.clone(),
                 };
                 if let Ok(source_json) = serde_json::to_string(&pinned) {
                     let db = state.lock().unwrap();
@@ -1456,7 +1627,8 @@ async fn process_job(state: AppState, job_id: String) {
                 copy_tree(&work, &stage).map(|_| Some(revision))
             }
             Err(message) => Err(message),
-        },
+            }
+        }
         Source::Directory { path } => acquire_directory(path, &stage).map(|_| None),
         Source::Archive { sha256 } => {
             let archive_path = root.join("uploads").join(format!("{job_id}.zip"));
@@ -1911,11 +2083,32 @@ fn ensure_space(path: &FsPath, needed: u64) -> io::Result<()> {
 async fn acquire_git(
     repository: &str,
     reference: &str,
+    private_key: Option<&FsPath>,
     destination: &FsPath,
 ) -> Result<String, String> {
-    if !valid_repo(repository) || !valid_reference(reference) {
+    let is_public = valid_repo(repository) && private_key.is_none();
+    let is_private = ssh_keys::is_github_ssh_repository(repository) && private_key.is_some();
+    if !(is_public || is_private) || !valid_reference(reference) {
         return Err("URL مخزن یا reference مجاز نیست.".into());
     }
+    let ssh_command = if let Some(private_key) = private_key {
+        if !private_key.is_absolute()
+            || private_key.file_name().and_then(OsStr::to_str).map_or(true, |name| !ssh_keys::valid_key_id(name))
+            || !private_key.parent().is_some_and(|parent| parent == FsPath::new("/var/lib/arg/ssh-keys"))
+        {
+            return Err("مسیر کلید SSH با ریشهٔ امن ARG تطبیق ندارد.".into());
+        }
+        let known_hosts = ssh_keys::ensure_github_host_keys().await?;
+        if known_hosts != FsPath::new("/var/lib/arg/ssh-keys/github_known_hosts") {
+            return Err("مسیر Host Keyهای GitHub با مسیر امن ARG تطبیق ندارد.".into());
+        }
+        Some(format!(
+            "ssh -F /dev/null -i /var/lib/arg/ssh-keys/{} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o UserKnownHostsFile=/var/lib/arg/ssh-keys/github_known_hosts -o GlobalKnownHostsFile=/dev/null",
+            private_key.file_name().and_then(OsStr::to_str).unwrap_or_default()
+        ))
+    } else {
+        None
+    };
     fs::create_dir_all(destination).map_err(|e| format!("پوشهٔ Git ساخته نشد: {e}"))?;
     let run = tokio::process::Command::new("git")
         .args([
@@ -1960,6 +2153,7 @@ async fn acquire_git(
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_SSH_COMMAND", ssh_command.as_deref().unwrap_or("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"))
         .kill_on_drop(true)
         .output();
     command_output_bounded(
@@ -2280,6 +2474,14 @@ mod tests {
         assert!(!valid_repo("https://github.com/a/b?token=x"));
     }
     #[test]
+    fn existing_git_deploy_sources_default_to_no_ssh_key() {
+        let source: Source = serde_json::from_str(
+            r#"{"kind":"git","repository":"https://github.com/acme/site.git","reference":"main"}"#,
+        )
+        .unwrap();
+        assert!(matches!(source, Source::Git { ssh_key_id: None, .. }));
+    }
+    #[test]
     fn references_and_health_paths_reject_option_and_traversal() {
         assert!(valid_reference("release/v1.2"));
         assert!(!valid_reference("--upload-pack=x"));
@@ -2299,6 +2501,31 @@ mod tests {
         migrate(&db).unwrap();
         let tables:i64=db.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'deployment_%'",[],|r|r.get(0)).unwrap();
         assert_eq!(tables, 3);
+    }
+    #[test]
+    fn legacy_deployment_jobs_gain_runtime_columns_without_data_loss() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);
+             CREATE TABLE deployment_jobs (
+                id TEXT PRIMARY KEY, application_id TEXT NOT NULL, owner_server_uuid TEXT NOT NULL,
+                actor TEXT NOT NULL, state TEXT NOT NULL, source_json TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL, created_at INTEGER NOT NULL
+             );
+             INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,created_at)
+             VALUES ('old-job','app','server','admin','queued','{}','key',10);",
+        ).unwrap();
+        migrate(&db).unwrap();
+        let columns = {
+            let mut statement = db.prepare("PRAGMA table_info(deployment_jobs)").unwrap();
+            statement.query_map([], |row| row.get::<_, String>(1)).unwrap()
+                .collect::<Result<std::collections::HashSet<_>, _>>().unwrap()
+        };
+        for column in ["healthcheck_file", "attempt", "cancel_requested", "source_commit", "updated_at"] {
+            assert!(columns.contains(column), "missing migrated column {column}");
+        }
+        let state: String = db.query_row("SELECT state FROM deployment_jobs WHERE id='old-job'", [], |row| row.get(0)).unwrap();
+        assert_eq!(state, "queued");
     }
 
     #[test]
@@ -2512,6 +2739,7 @@ mod tests {
             Source::Git {
                 repository: "https://github.com/acme/site".into(),
                 reference: "main".into(),
+                ssh_key_id: None,
             },
             "stable-key".into(),
             None,

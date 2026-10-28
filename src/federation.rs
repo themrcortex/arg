@@ -324,6 +324,12 @@ fn http_client_for_endpoint(endpoint: &url::Url, addresses: &[std::net::SocketAd
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout))
         .connect_timeout(std::time::Duration::from_secs(10))
+        // Federation clients are created per peer operation. Do not retain an idle
+        // connection: the next operation performs a new HTTPS handshake and gets
+        // fresh TLS traffic keys instead of reusing an old session.
+        .https_only(true)
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .pool_max_idle_per_host(0)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("ARG-Node/", env!("CARGO_PKG_VERSION")));
     if let Some(host) = endpoint.host_str().filter(|host| host.parse::<std::net::IpAddr>().is_err()) {
@@ -404,6 +410,11 @@ fn workspace_http_client(endpoint: &url::Url, addresses: &[std::net::SocketAddr]
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(900))
         .connect_timeout(std::time::Duration::from_secs(10))
+        // Workspace proxy operations also use one fresh, authenticated TLS
+        // connection per peer request; long uploads are not transparently retried.
+        .https_only(true)
+        .min_tls_version(reqwest::tls::Version::TLS_1_2)
+        .pool_max_idle_per_host(0)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("ARG-Workspace/", env!("CARGO_PKG_VERSION")));
     if let Some(host) = endpoint.host_str().filter(|host| host.parse::<std::net::IpAddr>().is_err()) {

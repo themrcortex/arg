@@ -1,6 +1,6 @@
-import { AppWindow, Bug, Cloud, Container, Cpu, Files, Globe2, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, type LucideIcon } from 'lucide-react'
+import { AppWindow, Bug, Cloud, Container, Cpu, Files, Globe2, KeyRound, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, type LucideIcon } from 'lucide-react'
 
-export type PageId = 'dashboard' | 'system' | 'nodes' | 'apps' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'dns' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account' | 'bug-report'
+export type PageId = 'dashboard' | 'system' | 'nodes' | 'apps' | 'ssh-keys' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'dns' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account' | 'bug-report'
 export type NavigationItem = { id: PageId; label: string; icon: LucideIcon; admin?: boolean }
 
 export const navigation: NavigationItem[] = [
@@ -8,6 +8,7 @@ export const navigation: NavigationItem[] = [
   { id: 'system', label: 'سیستم و منابع', icon: Cpu },
   { id: 'nodes', label: 'Nodeهای ARG', icon: Server, admin: true },
   { id: 'apps', label: 'اپلیکیشن‌ها', icon: AppWindow, admin: true },
+  { id: 'ssh-keys', label: 'کلیدهای SSH', icon: KeyRound, admin: true },
   { id: 'network', label: 'شبکه', icon: Network },
   { id: 'ports', label: 'پورت‌ها', icon: Radio },
   { id: 'firewall', label: 'فایروال UFW', icon: Shield },

@@ -14,14 +14,22 @@
 
 ### Added
 - Show update alerts for managed Nodes, open the matching update dialog from the alert, and transfer bounded remote update logs and stage metadata.
+- Add private GitHub deployment through repository-scoped Ed25519 Deploy Keys, managed SSH keys, and per-application deployment settings.
+- Add an optional ARG Mesh topology widget based on live Node probes, with measured latency, payload and TLS transport details.
+- Add scheduled, integrity-checked database backups with configurable intervals, run history, retention, and audit events.
+- Add configurable HTTPS panel ports with conflict checks, UFW updates, external reachability confirmation, and rollback on failed health checks.
 
 ### Changed
+- Harden legacy deployment database migrations so existing jobs gain missing runtime columns without losing queued work.
+- Improve legacy Node workspace API compatibility and error handling across application, DNS, database, and diagnostic pages.
+- Improve systemd service automation, app cleanup, and port-change rollback handling.
 - Ship the refreshed ARG logo assets, pure-black dark theme, platform SVG marks and brand-colored application cards; group application controls into tabs.
 - Refine the ARG logo lockup with a shorter emblem, more balanced wordmark proportions, and increased spacing; reduce its displayed height while keeping the cropped mark in the collapsed sidebar.
 - Render the full logo and collapsed sidebar mark in monochrome on the light theme.
 - Use the provided ARG logo in the sign-in screen and sidebar, show its cropped symbol in the collapsed sidebar, and remove the duplicate control-center and LIVE labels.
 
 ### Fixed
+- Keep deployment job status and detailed live stage logs readable after refresh; report database/migration failures with the actual cause.
 - Keep the global ARG updater scoped to the current control panel so an update started for a managed Node cannot lock navigation across the controller workspace.
 - Let administrators minimize a running panel update into a compact status control; monitoring continues and the full progress view can be reopened without interrupting the update.
 - Rebuild and commit the embedded frontend bundle with UI source changes; CI now fails when `frontend/dist` is stale, preventing Rust releases from silently shipping the previous interface.

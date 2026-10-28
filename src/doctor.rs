@@ -51,11 +51,40 @@ pub(super) async fn read(State(state): State<AppState>, headers: HeaderMap) -> A
         .map_err(db_error)?;
     let (nodes, connected_nodes): (i64, i64) = db
         .query_row(
-            "SELECT COUNT(*),SUM(CASE WHEN connection_state='connected' THEN 1 ELSE 0 END) FROM federated_nodes",
+            "SELECT COUNT(*),SUM(CASE WHEN connection_state IN ('healthy','connected') THEN 1 ELSE 0 END) FROM federated_nodes",
             [],
             |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
         )
         .map_err(db_error)?;
+    let node_entries: Vec<Value> = {
+        let mut statement = db.prepare("SELECT COALESCE(NULLIF(public_name,''),NULLIF(name,''),endpoint),endpoint,connection_state,compatibility_state,last_seen,last_check,last_error FROM federated_nodes ORDER BY name COLLATE NOCASE LIMIT 100").map_err(db_error)?;
+        let rows = statement.query_map([], |row| {
+            let name: String = row.get(0)?;
+            let endpoint: String = row.get(1)?;
+            let state: String = row.get(2)?;
+            let compatibility: String = row.get(3)?;
+            let last_seen: Option<i64> = row.get(4)?;
+            let last_check: Option<i64> = row.get(5)?;
+            let last_error: Option<String> = row.get(6)?;
+            let origin = url::Url::parse(&endpoint).ok().and_then(|parsed| {
+                let host = parsed.host_str()?;
+                let port = parsed.port().map(|port| format!(":{port}")).unwrap_or_default();
+                Some(format!("{}://{host}{port}", parsed.scheme()))
+            }).unwrap_or_else(|| "آدرس نامعتبر".to_owned());
+            Ok(json!({"name":name,"endpoint":origin,"state":state,"compatibility":compatibility,"last_seen":last_seen,"last_check":last_check,"last_error":last_error}))
+        }).map_err(db_error)?;
+        rows.filter_map(Result::ok).collect()
+    };
+    let active_controllers: Vec<Value> = {
+        let mut statement = db.prepare("SELECT COALESCE(NULLIF(local_label,''),controller_name),last_seen FROM federation_controllers WHERE enabled=1 ORDER BY created_at DESC LIMIT 100").map_err(db_error)?;
+        let rows = statement.query_map([], |row| Ok(json!({"name":row.get::<_,String>(0)?,"last_seen":row.get::<_,Option<i64>>(1)?}))).map_err(db_error)?;
+        rows.filter_map(Result::ok).collect()
+    };
+    let (controllers, enabled_controllers): (i64, i64) = db.query_row(
+        "SELECT COUNT(*),SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) FROM federation_controllers",
+        [],
+        |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+    ).map_err(db_error)?;
     let (applications, deployments): (i64, i64) = db
         .query_row(
             "SELECT (SELECT COUNT(*) FROM applications WHERE deleted_at IS NULL),
@@ -113,8 +142,14 @@ pub(super) async fn read(State(state): State<AppState>, headers: HeaderMap) -> A
         json!({
             "id":"nodes", "label":"Nodeهای جفت‌شده",
             "status":if nodes == 0 {"info"} else if nodes == connected_nodes {"pass"} else {"warn"},
-            "total":nodes,"connected":connected_nodes,
-            "detail":"وضعیت آخرین ارتباط ذخیره‌شده در ARG؛ این endpoint اتصال تازه برقرار نمی‌کند."
+            "total":nodes,"connected":connected_nodes,"items":node_entries,
+            "detail":"وضعیت آخرین ارتباط ذخیره‌شده در ARG؛ healthy و connected متصل شمرده می‌شوند. برای هر Node نام عمومی، آدرس پنل، سازگاری، آخرین ارتباط و خطای ثبت‌شده آمده است؛ این گزارش خودش اتصال شبکه‌ای تازه برقرار نمی‌کند."
+        }),
+        json!({
+            "id":"controllers", "label":"پنل‌های کنترل‌کنندهٔ مجاز",
+            "status":if enabled_controllers == 0 {"info"} else {"pass"},
+            "total":controllers,"connected":enabled_controllers,"items":active_controllers,
+            "detail":"فهرست پنل‌هایی که روی همین VPS اجازهٔ مدیریت دارند؛ کلیدها و شناسه‌های محرمانه در گزارش نمایش داده نمی‌شوند."
         }),
         json!({
             "id":"apps", "label":"اپلیکیشن‌ها و Deployها", "status":"info",
