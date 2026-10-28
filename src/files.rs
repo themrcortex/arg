@@ -1045,16 +1045,19 @@ fn create_zip_archive(request: &Value) -> Result<Value, String> {
         let root_entry = format!("{base_name}/");
         writer
             .add_directory(&root_entry, options)
-            .map_err(|error| error.to_string())?;
-        archive_directory(
-            &mut writer,
-            &source,
-            &source,
-            base_name,
-            options,
-            &mut count,
-            &mut total,
-        )
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                archive_directory(
+                    &mut writer,
+                    &source,
+                    &source,
+                    base_name,
+                    options,
+                    &mut count,
+                    &mut total,
+                    0,
+                )
+            })
     } else {
         archive_file(
             &mut writer,
@@ -1088,7 +1091,12 @@ fn archive_directory<W: Write + std::io::Seek>(
     options: zip::write::SimpleFileOptions,
     count: &mut usize,
     total: &mut u64,
+    depth: usize,
 ) -> Result<(), String> {
+    const MAX_ARCHIVE_DIRECTORY_DEPTH: usize = 64;
+    if depth > MAX_ARCHIVE_DIRECTORY_DEPTH {
+        return Err("Archive directory nesting is limited to 64 levels.".into());
+    }
     for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
         let entry = entry.map_err(|error| error.to_string())?;
         let path = entry.path();
@@ -1114,7 +1122,7 @@ fn archive_directory<W: Write + std::io::Seek>(
             writer
                 .add_directory(format!("{archive_name}/"), options)
                 .map_err(|error| error.to_string())?;
-            archive_directory(writer, root, &path, archive_prefix, options, count, total)?;
+            archive_directory(writer, root, &path, archive_prefix, options, count, total, depth + 1)?;
         } else if metadata.is_file() {
             archive_file(writer, &path, &archive_name, options, count, total)?;
         } else {
@@ -1348,6 +1356,23 @@ mod tests {
         assert!(valid_mode("755"));
         assert!(!valid_mode("0899"));
         assert!(!valid_mode("77777"));
+    }
+
+    #[test]
+    fn zip_creation_rejects_excessive_directory_depth_and_removes_partial_archive() {
+        let root = test_dir();
+        let tree = root.join("tree");
+        fs::create_dir(&tree).unwrap();
+        let mut current = tree.clone();
+        for index in 0..65 {
+            current.push(format!("d{index}"));
+            fs::create_dir(&current).unwrap();
+        }
+
+        let result = create_zip_archive(&serde_json::json!({"path":tree,"name":"tree.zip"}));
+        assert!(result.unwrap_err().contains("64 levels"));
+        assert!(!root.join("tree.zip").exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
