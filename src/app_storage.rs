@@ -187,6 +187,7 @@ pub(super) async fn scan(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult {
+    check_origin(&headers)?;
     let (actor, app_id, name) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
@@ -486,6 +487,48 @@ pub(super) fn execute_privileged_request(request: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn volume_scan_rejects_missing_and_cross_origin_requests() {
+        let state = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+
+        let missing_origin = scan(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("volume-1".to_owned()),
+        )
+        .await;
+        assert_eq!(missing_origin.unwrap_err().0, StatusCode::FORBIDDEN);
+
+        let mut cross_origin = HeaderMap::new();
+        cross_origin.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
+        cross_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example.test"),
+        );
+        let rejected = scan(
+            State(state.clone()),
+            cross_origin,
+            Path("volume-1".to_owned()),
+        )
+        .await;
+        assert_eq!(rejected.unwrap_err().0, StatusCode::FORBIDDEN);
+
+        let mut same_origin = HeaderMap::new();
+        same_origin.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
+        same_origin.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://panel.example.test"),
+        );
+        let authenticated = scan(
+            State(state),
+            same_origin,
+            Path("volume-1".to_owned()),
+        )
+        .await;
+        assert_eq!(authenticated.unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
     #[test]
     fn volume_names_reject_paths() {
         assert!(valid_volume_name("uploads_1"));
