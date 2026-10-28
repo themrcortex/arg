@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './com
 import { Badge } from './components/ui/badge'
 import { Skeleton } from './components/ui/skeleton'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 import { ApplicationResourcesPanel } from './ApplicationResourcesPanel'
 import { ApplicationMonitoringPanel } from './ApplicationMonitoringPanel'
 import { ApplicationDeveloperTools } from './ApplicationDeveloperTools'
@@ -73,24 +74,24 @@ type AppTemplate = { id: string; version: number; name: string; framework: strin
 const emptyDraft: Draft = { name: '', description: '', framework: 'auto', runtime_version: 'system', build_runtime_version: 'system', static_output_path: 'auto', static_spa_fallback: true, source_type: 'manual', domain: '', listen_port: '', labels: '', desired_state: 'none', environment_id: '' }
 const frameworkLabels: Record<string, string> = { auto: 'تشخیص خودکار', laravel: 'Laravel', node: 'Node.js SSR', next: 'Next.js SSR', nuxt: 'Nuxt SSR', python: 'Python', wordpress: 'WordPress', static: 'فایل‌های استاتیک آماده', react: 'React SPA', vue: 'Vue SPA', vite: 'Vite SPA', custom: 'سفارشی / انتشار release' }
 const sourceLabels: Record<string, string> = { manual: 'ثبت دستی', git: 'مخزن Git', archive: 'فایل آرشیو', docker: 'Docker', 'existing-directory': 'پوشهٔ موجود', image: 'Image' }
-const frameworkIdentity: Record<string, { label: string; mark: string; color: string; background: string }> = {
+const frameworkIdentity: Record<string, { label: string; mark: string; color: string; background: string; logo?: string }> = {
   auto: { label: 'تشخیص خودکار', mark: '?', color: '#c4b5fd', background: 'rgba(139,92,246,.12)' },
-  laravel: { label: 'Laravel', mark: 'L', color: '#ff5b52', background: 'rgba(255,91,82,.12)' },
-  node: { label: 'Node.js', mark: 'JS', color: '#83cd29', background: 'rgba(131,205,41,.12)' },
-  next: { label: 'Next.js', mark: 'N', color: '#f4f4f5', background: 'rgba(255,255,255,.08)' },
-  nuxt: { label: 'Nuxt', mark: 'N', color: '#00dc82', background: 'rgba(0,220,130,.12)' },
-  python: { label: 'Python', mark: 'Py', color: '#ffd343', background: 'rgba(55,118,171,.2)' },
-  wordpress: { label: 'WordPress', mark: 'W', color: '#72aee6', background: 'rgba(33,117,155,.16)' },
-  react: { label: 'React', mark: '⚛', color: '#61dafb', background: 'rgba(97,218,251,.12)' },
-  vue: { label: 'Vue', mark: 'V', color: '#42b883', background: 'rgba(66,184,131,.12)' },
-  vite: { label: 'Vite', mark: 'ϟ', color: '#bd34fe', background: 'rgba(189,52,254,.12)' },
+  laravel: { label: 'Laravel', mark: 'L', logo: '/arg/platforms/laravel.svg', color: '#FF2D20', background: 'rgba(255,45,32,.12)' },
+  node: { label: 'Node.js', mark: 'JS', logo: '/arg/platforms/node.svg', color: '#5FA04E', background: 'rgba(95,160,78,.14)' },
+  next: { label: 'Next.js', mark: 'N', logo: '/arg/platforms/next.svg', color: '#a1a1aa', background: 'rgba(161,161,170,.12)' },
+  nuxt: { label: 'Nuxt', mark: 'N', logo: '/arg/platforms/nuxt.svg', color: '#00dc82', background: 'rgba(0,220,130,.12)' },
+  python: { label: 'Python', mark: 'Py', logo: '/arg/platforms/python.svg', color: '#ffd343', background: 'rgba(55,118,171,.2)' },
+  wordpress: { label: 'WordPress', mark: 'W', logo: '/arg/platforms/wordpress.svg', color: '#21759B', background: 'rgba(33,117,155,.16)' },
+  react: { label: 'React', mark: '⚛', logo: '/arg/platforms/react.svg', color: '#61dafb', background: 'rgba(97,218,251,.12)' },
+  vue: { label: 'Vue', mark: 'V', logo: '/arg/platforms/vue.svg', color: '#42b883', background: 'rgba(66,184,131,.12)' },
+  vite: { label: 'Vite', mark: 'ϟ', logo: '/arg/platforms/vite.svg', color: '#646CFF', background: 'rgba(100,108,255,.14)' },
   static: { label: 'استاتیک', mark: '</>', color: '#7dd3fc', background: 'rgba(56,189,248,.12)' },
   custom: { label: 'سفارشی', mark: '<>', color: '#dda46f', background: 'rgba(221,164,111,.12)' },
 }
 
 function PlatformIcon({ framework, className = 'h-10 w-10' }: { framework: string; className?: string }) {
   const identity = frameworkIdentity[framework] || { label: frameworkLabels[framework] || framework, mark: '<>', color: '#dda46f', background: 'rgba(221,164,111,.12)' }
-  return <span aria-label={identity.label} title={identity.label} className={`inline-grid shrink-0 place-items-center rounded-xl border border-current/20 font-bold ${className}`} style={{ color: identity.color, backgroundColor: identity.background }}>{identity.mark}</span>
+  return <span aria-label={identity.label} title={identity.label} className={`inline-grid shrink-0 place-items-center rounded-xl border border-current/20 font-bold ${className}`} style={{ color: identity.color, backgroundColor: identity.background }}>{identity.logo ? <img src={identity.logo} alt="" aria-hidden="true" className={`h-1/2 w-1/2 object-contain ${framework === 'next' ? 'arg-platform-logo-next' : ''}`} /> : identity.mark}</span>
 }
 
 function asDraft(app?: AppRecord): Draft {
@@ -520,18 +521,32 @@ function ApplicationDetailPage({
     {readOnly && <Card className="mb-5 border-amber-400/20 bg-amber-400/[.04]"><CardContent className="p-4 text-xs leading-6 text-amber-100">نمایش همهٔ VPSها فقط‌خواندنی است. برای انجام عملیات، ابتدا فضای کار VPS میزبان را از انتخاب‌گر بالای پنل باز کن.</CardContent></Card>}
     {app.deleted_at ? <Card className="border-dashed"><CardContent className="p-5 text-sm text-muted-foreground">این اپلیکیشن آرشیو شده است؛ فایل‌ها و سرویس‌های VPS با آرشیو تغییر نمی‌کنند.</CardContent></Card> : !readOnly && <>
       <SectionHeading title="مدیریت اپلیکیشن" description="هر بخش را جداگانه باز کن؛ عملیات این صفحه فقط برای همین اپلیکیشن هدف‌گذاری می‌شوند." icon={Layers3}/>
-      <div className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
-        <DeploymentPanel app={app} notify={notify}/>
-        <ApplicationDeveloperTools app={app} notify={notify}/>
-        {app.source_type === 'docker' && <ApplicationContainersPanel appId={app.id} notify={notify}/>}
-        {app.framework === 'laravel' && <LaravelRunnerPanel app={app} notify={notify}/>}
-        {isNodePlatform(app.framework) && <NodeRunnerPanel app={app} notify={notify}/>}
-        <ApplicationMonitoringPanel app={app}/>
-        <ApplicationResourcesPanel app={app} notify={notify}/>
-        <ApplicationNginxLinkPanel app={app} notify={notify}/>
-        <ApplicationBackupPanel appId={app.id} notify={notify}/>
-        <ApplicationWorkflowDraftPanel appId={app.id} notify={notify}/>
-      </div>
+      <Tabs key={app.id} defaultValue="deploy" dir="rtl" className="space-y-4">
+        <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label={`بخش‌های اپلیکیشن ${app.name}`}>
+          <TabsTrigger value="deploy">انتشار و نسخه‌ها</TabsTrigger>
+          <TabsTrigger value="runtime">Runtime و ابزارها</TabsTrigger>
+          <TabsTrigger value="resources">مانیتورینگ و منابع</TabsTrigger>
+          <TabsTrigger value="integrations">Nginx، پشتیبان و گردش‌کار</TabsTrigger>
+        </TabsList>
+        <TabsContent value="deploy" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
+          <DeploymentPanel app={app} notify={notify}/>
+        </TabsContent>
+        <TabsContent value="runtime" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
+          <ApplicationDeveloperTools app={app} notify={notify}/>
+          {app.source_type === 'docker' && <ApplicationContainersPanel appId={app.id} notify={notify}/>}
+          {app.framework === 'laravel' && <LaravelRunnerPanel app={app} notify={notify}/>}
+          {isNodePlatform(app.framework) && <NodeRunnerPanel app={app} notify={notify}/>}
+        </TabsContent>
+        <TabsContent value="resources" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
+          <ApplicationMonitoringPanel app={app}/>
+          <ApplicationResourcesPanel app={app} notify={notify}/>
+        </TabsContent>
+        <TabsContent value="integrations" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
+          <ApplicationNginxLinkPanel app={app} notify={notify}/>
+          <ApplicationBackupPanel appId={app.id} notify={notify}/>
+          <ApplicationWorkflowDraftPanel appId={app.id} notify={notify}/>
+        </TabsContent>
+      </Tabs>
     </>}
   </>
 }
@@ -804,7 +819,8 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
     </div>
         {loading ? <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{[0,1,2].map((item) => <Skeleton key={item} className="h-56 rounded-2xl" />)}</div> : visibleRows.length === 0 ? <Card className="border-dashed"><CardContent className="flex min-h-48 flex-col items-center justify-center gap-3 p-6 text-center"><Layers3 size={26} className="text-primary"/><p className="font-medium">{showArchived ? 'رکوردی با این فیلتر پیدا نشد' : 'هنوز اپلیکیشنی ثبت نشده است'}</p><p className="max-w-lg text-xs leading-6 text-muted-foreground">اپلیکیشن یک موجودیت مدیریتی جدا از فایل Nginx یا کانتینر Docker است. ابتدا مشخصاتش را ثبت کن؛ سپس از صفحهٔ اختصاصی همان اپ، انتشار و منابعش را مدیریت کن.</p>{!allServers && <Button onClick={beginCreate}><CirclePlus size={15}/>ثبت اولین اپلیکیشن</Button>}</CardContent></Card> : <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{visibleRows.map((row) => {
           const { app, serverName, workspaceKey: ownerWorkspace, local } = row
-          return <Card key={`${app.id}:${app.owner_server_uuid || ''}`} className={`overflow-hidden transition hover:border-primary/25 ${app.deleted_at ? 'opacity-75' : ''}`}>
+          const platform = frameworkIdentity[app.framework] || { color: '#dda46f' }
+          return <Card key={`${app.id}:${app.owner_server_uuid || ''}`} className={`overflow-hidden transition hover:border-primary/25 ${app.deleted_at ? 'opacity-75' : ''}`} style={{ borderColor: `color-mix(in srgb, ${platform.color} 34%, hsl(var(--border)))`, background: `linear-gradient(145deg, color-mix(in srgb, ${platform.color} 13%, hsl(var(--card))), hsl(var(--card)) 82%)` }}>
             <CardHeader className="pb-3"><div className="flex items-start gap-3"><PlatformIcon framework={app.framework} /><div className="min-w-0 flex-1"><CardTitle className="truncate text-base">{app.name}</CardTitle><CardDescription className="mt-1 flex items-center gap-1.5 truncate"><Server size={12}/>{serverName}</CardDescription><p className="mt-1 truncate text-[10px] text-muted-foreground">{frameworkIdentity[app.framework]?.label || frameworkLabels[app.framework] || app.framework}{app.project_name ? ` · ${app.project_name}` : ''}</p></div><Badge variant={app.deleted_at ? 'outline' : app.observed_state === 'running' ? 'success' : app.observed_state === 'failed' ? 'destructive' : 'outline'}>{app.deleted_at ? 'آرشیو' : app.observed_state === 'running' ? 'در حال اجرا' : app.observed_state === 'failed' ? 'خطا' : 'ثبت‌شده'}</Badge></div></CardHeader>
             <CardContent className="space-y-3"><div className="grid grid-cols-2 gap-2 text-xs"><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">Runtime</p><p className="mt-1 truncate" dir="ltr">{app.runtime_version === 'system' ? 'system' : app.runtime_version}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">منبع</p><p className="mt-1 truncate">{sourceLabels[app.source_type] || app.source_type}</p></div></div>{app.domain && <p dir="ltr" className="flex items-center justify-end gap-1.5 truncate text-left font-mono text-xs text-muted-foreground"><Globe2 size={13}/>{app.domain}</p>}{app.listen_port && <p dir="ltr" className="text-left font-mono text-[11px] text-muted-foreground">TCP :{app.listen_port}</p>}{app.description && <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{app.description}</p>}{app.labels.length > 0 && <div className="flex flex-wrap gap-1">{app.labels.map((label) => <Badge key={label} variant="outline" className="text-[10px]">{label}</Badge>)}</div>}
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3">{allServers && !local ? <Button size="sm" className="flex-1" variant="outline" onClick={() => onOpenWorkspace(ownerWorkspace)}>رفتن به VPS میزبان</Button> : <Button size="sm" className="flex-1" variant="outline" onClick={() => openDetails(row)}><Layers3 size={14}/>مدیریت اپلیکیشن</Button>}{!allServers && <div className="flex shrink-0 gap-1">{app.deleted_at ? <Button size="icon" variant="ghost" title="بازیابی رکورد" aria-label="بازیابی رکورد" onClick={() => { setTarget(app); setError(''); setDialog('restore') }}><RotateCcw size={15}/></Button> : <><Button size="icon" variant="ghost" title="ویرایش مشخصات" aria-label="ویرایش مشخصات" onClick={() => beginEdit(row)}><Pencil size={15}/></Button><Button size="icon" variant="ghost" className="text-rose-300" title="آرشیو رکورد" aria-label="آرشیو رکورد" onClick={() => { setTarget(app); setError(''); setDialog('delete') }}><Archive size={15}/></Button></>}</div>}</div>

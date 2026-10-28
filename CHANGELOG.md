@@ -16,6 +16,7 @@
 - Show update alerts for managed Nodes, open the matching update dialog from the alert, and transfer bounded remote update logs and stage metadata.
 
 ### Changed
+- Ship the refreshed ARG logo assets, pure-black dark theme, platform SVG marks and brand-colored application cards; group application controls into tabs.
 - Refine the ARG logo lockup with a shorter emblem, more balanced wordmark proportions, and increased spacing; reduce its displayed height while keeping the cropped mark in the collapsed sidebar.
 - Render the full logo and collapsed sidebar mark in monochrome on the light theme.
 - Use the provided ARG logo in the sign-in screen and sidebar, show its cropped symbol in the collapsed sidebar, and remove the duplicate control-center and LIVE labels.
