@@ -46,6 +46,9 @@ use tokio::{
 const PRIVILEGED_SOCKET: &str = "/run/arg-privileged/manager.sock";
 const UPDATE_STATUS_FILE: &str = "/run/arg-update-in-progress";
 const PRIVILEGED_REQUEST_MAX_BYTES: usize = 4 * 1024 * 1024;
+const PRIVILEGED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+static PRIVILEGED_CONNECTIONS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
 static PRIVILEGED_REQUESTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
 static UPDATE_OPERATION_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
@@ -3311,7 +3314,7 @@ fn privileged_peer_allowed(stream: &UnixStream) -> bool {
         return false;
     }
     static ARG_UID: OnceLock<Option<libc::uid_t>> = OnceLock::new();
-    ARG_UID
+    let expected_uid = ARG_UID
         .get_or_init(|| {
             let user = std::ffi::CString::new("arg").unwrap();
             unsafe {
@@ -3319,7 +3322,24 @@ fn privileged_peer_allowed(stream: &UnixStream) -> bool {
                 (!entry.is_null()).then(|| (*entry).pw_uid)
             }
         })
-        .is_some_and(|expected_uid| credentials.uid == expected_uid)
+        .as_ref()
+        .is_some_and(|expected_uid| credentials.uid == *expected_uid);
+    if !expected_uid || credentials.pid <= 0 {
+        return false;
+    }
+    let Ok(cgroups) = fs::read_to_string(format!("/proc/{}/cgroup", credentials.pid)) else {
+        return false;
+    };
+    process_belongs_to_arg_service(&cgroups)
+}
+
+fn process_belongs_to_arg_service(cgroups: &str) -> bool {
+    cgroups.lines().any(|line| {
+        let Some(path) = line.splitn(3, ':').nth(2) else {
+            return false;
+        };
+        path == "/system.slice/arg.service" || path.starts_with("/system.slice/arg.service/")
+    })
 }
 
 fn valid_terminal_pty_path(path: &str) -> bool {
@@ -4861,32 +4881,57 @@ fn service_resource_properties(cpu_percent: Option<f64>, memory_bytes: Option<u6
     ]
 }
 
+async fn read_privileged_line<R>(
+    reader: R,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<String, &'static str>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut line = String::new();
+    let read_result = tokio::time::timeout(timeout, async {
+        let mut limited = reader.take(max_bytes.saturating_add(1) as u64);
+        AsyncBufReader::new(&mut limited).read_line(&mut line).await
+    })
+    .await
+    .map_err(|_| "request timed out")?
+    .map_err(|_| "request could not be read")?;
+    if read_result == 0 {
+        return Err("request was empty");
+    }
+    if read_result > max_bytes {
+        return Err("request exceeded the size limit");
+    }
+    Ok(line)
+}
+
 async fn serve_privileged_connection(mut stream: UnixStream) {
     if !privileged_peer_allowed(&stream) {
         return;
     }
-    let mut line = String::new();
-    let mut limited = (&mut stream).take((PRIVILEGED_REQUEST_MAX_BYTES + 1) as u64);
-    let read_result = AsyncBufReader::new(&mut limited).read_line(&mut line).await;
-    drop(limited);
-    let response = match read_result {
-        Ok(size) if size > 0 && size <= PRIVILEGED_REQUEST_MAX_BYTES => {
-            match serde_json::from_str::<Value>(&line) {
-                Ok(request) => match PRIVILEGED_REQUESTS.clone().try_acquire_owned() {
-                    Ok(permit) => tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        execute_privileged_request(&request)
-                    })
-                    .await
-                    .unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"})),
-                    Err(_) => {
-                        json!({"ok":false,"error":"Privileged helper is busy; retry shortly"})
-                    }
-                },
-                Err(_) => json!({"ok":false,"error":"Invalid request"}),
-            }
-        }
-        _ => json!({"ok":false,"error":"Invalid request"}),
+    let response = match read_privileged_line(
+        &mut stream,
+        PRIVILEGED_REQUEST_MAX_BYTES,
+        PRIVILEGED_REQUEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(line) => match serde_json::from_str::<Value>(&line) {
+            Ok(request) => match PRIVILEGED_REQUESTS.clone().try_acquire_owned() {
+                Ok(permit) => tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    execute_privileged_request(&request)
+                })
+                .await
+                .unwrap_or_else(|_| json!({"ok":false,"error":"Privileged task failed"})),
+                Err(_) => {
+                    json!({"ok":false,"error":"Privileged helper is busy; retry shortly"})
+                }
+            },
+            Err(_) => json!({"ok":false,"error":"Invalid request"}),
+        },
+        Err(_) => json!({"ok":false,"error":"Invalid request"}),
     };
     let _ = stream.write_all(format!("{}\n", response).as_bytes()).await;
 }
@@ -4900,7 +4945,14 @@ async fn run_privileged_helper() -> Result<(), Box<dyn std::error::Error>> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
     loop {
         let (stream, _) = listener.accept().await?;
-        tokio::spawn(serve_privileged_connection(stream));
+        let Ok(permit) = PRIVILEGED_CONNECTIONS.clone().try_acquire_owned() else {
+            drop(stream);
+            continue;
+        };
+        tokio::spawn(async move {
+            let _permit = permit;
+            serve_privileged_connection(stream).await;
+        });
     }
 }
 
@@ -5118,10 +5170,10 @@ mod update_progress_tests {
     use super::{
         backup_database, default_update_build_mode, ensure_federation_identity_columns,
         ensure_metric_storage_columns, firewall_rule_validation_error, update_progress_payload,
-        parse_systemd_exec_start, parse_systemd_service_commands, valid_apt_install_spec,
-        valid_tls_source_path, valid_update_build_mode, role_has_admin_access,
-        login, login_client_ip, login_throttle_keys, AppState, Connection, Credentials,
-        FirewallRuleInput,
+        login, login_client_ip, login_throttle_keys, parse_systemd_exec_start,
+        parse_systemd_service_commands, process_belongs_to_arg_service, read_privileged_line,
+        role_has_admin_access, valid_apt_install_spec, valid_tls_source_path,
+        valid_update_build_mode, AppState, Connection, Credentials, FirewallRuleInput,
     };
 
     #[test]
@@ -5148,6 +5200,37 @@ mod update_progress_tests {
             login_client_ip(&headers, loopback),
             "203.0.113.9".parse::<std::net::IpAddr>().unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn privileged_socket_reader_rejects_oversized_and_stalled_requests() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(64);
+        writer.write_all(b"123456789\n").await.unwrap();
+        let oversized = read_privileged_line(reader, 8, std::time::Duration::from_secs(1)).await;
+        assert_eq!(oversized, Err("request exceeded the size limit"));
+
+        let (_writer, reader) = tokio::io::duplex(64);
+        let stalled = read_privileged_line(reader, 8, std::time::Duration::from_millis(10)).await;
+        assert_eq!(stalled, Err("request timed out"));
+    }
+
+    #[test]
+    fn privileged_helper_accepts_only_the_panel_systemd_service_cgroup() {
+        assert!(process_belongs_to_arg_service(
+            "0::/system.slice/arg.service\n"
+        ));
+        assert!(process_belongs_to_arg_service(
+            "0::/system.slice/arg.service/worker\n"
+        ));
+        assert!(!process_belongs_to_arg_service(
+            "0::/system.slice/arg-app-12345678-queue.service\n"
+        ));
+        assert!(!process_belongs_to_arg_service(
+            "0::/user.slice/user-1000.slice/arg.service\n"
+        ));
+        assert!(!process_belongs_to_arg_service("invalid cgroup record\n"));
     }
 
     #[tokio::test]
