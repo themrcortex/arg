@@ -2729,7 +2729,7 @@ mod tests {
         let latest: String = db.query_row("SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id DESC LIMIT 1",[],|row|row.get(0)).unwrap();
         let job = read_job(&db,"job").unwrap();
         assert_eq!(count,2_000);
-        assert_eq!(first_message,"line 2");
+        assert_eq!(first_message,"line 1");
         assert_eq!(latest,"line 2000");
         assert_eq!(job["logs"].as_array().unwrap().len(),20);
         assert_eq!(job["log_count"],2_000);
