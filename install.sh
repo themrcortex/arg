@@ -238,13 +238,144 @@ configure_release_build_resources() {
     export CARGO_BUILD_JOBS="${ARG_CARGO_BUILD_JOBS:-1}"
     export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-1}"
     if (( memory_budget_mb < 2048 )); then
-      export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-1}"
-      warn "Available RAM and swap are below 2 GiB; using the conservative release build profile (1 job, opt-level 1, 1 codegen unit)."
+      export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-0}"
+      warn "Available RAM and swap are below 2 GiB; using the minimum-memory release profile (1 job, opt-level 0, 1 codegen unit)."
     else
       export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-2}"
       warn "Available RAM and swap are below 4 GiB; using a lower-memory release build (1 job, opt-level 2, 1 codegen unit)."
     fi
   fi
+}
+
+ARG_BUILD_SWAP_FILE=""
+
+release_build_is_root() {
+  (( EUID == 0 ))
+}
+
+release_build_swap_active() {
+  local swap_file="${1:-}"
+  [[ -n "$swap_file" ]] || return 1
+  swapon --show=NAME --noheadings --raw 2>/dev/null | awk -v path="$swap_file" '$0 == path { found=1 } END { exit !found }'
+}
+
+prepare_release_build_swap() {
+  local memory_budget_mb="${1:-0}" swap_dir="${ARG_BUILD_SWAP_DIR:-/var/tmp}"
+  local swap_size_mb=2048 free_disk_mb swap_path filesystem activation_error="" swap_error_file
+  [[ "$memory_budget_mb" =~ ^[0-9]+$ ]] || memory_budget_mb=0
+  (( memory_budget_mb < 2048 )) || return 0
+
+  if (( memory_budget_mb >= 1024 )); then
+    swap_size_mb=$((3072 - memory_budget_mb))
+  fi
+  (( swap_size_mb >= 512 )) || swap_size_mb=512
+  (( swap_size_mb <= 2048 )) || swap_size_mb=2048
+
+  if ! release_build_is_root || ! command -v swapon >/dev/null 2>&1 || ! command -v swapoff >/dev/null 2>&1 || ! command -v mkswap >/dev/null 2>&1; then
+    warn "Temporary build swap could not be prepared (root privileges or util-linux swap tools are unavailable); continuing with opt-level 0."
+    return 1
+  fi
+  [[ -d "$swap_dir" && -w "$swap_dir" ]] || {
+    warn "Temporary build swap could not be prepared because $swap_dir is not writable; continuing with opt-level 0."
+    return 1
+  }
+  free_disk_mb="$(df -Pm "$swap_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+  [[ "$free_disk_mb" =~ ^[0-9]+$ ]] || free_disk_mb=0
+  if (( free_disk_mb < swap_size_mb + 256 )); then
+    warn "Temporary build swap needs ${swap_size_mb} MiB plus a safety margin, but $swap_dir has only ${free_disk_mb} MiB free; continuing with opt-level 0."
+    return 1
+  fi
+
+  swap_path="$swap_dir/arg-build-${BASHPID}.swap"
+  if [[ -e "$swap_path" ]]; then
+    warn "Temporary build swap path already exists ($swap_path); refusing to overwrite it."
+    return 1
+  fi
+  (umask 077; : > "$swap_path") || {
+    warn "Could not create temporary build swap at $swap_path; continuing with opt-level 0."
+    return 1
+  }
+  ARG_BUILD_SWAP_FILE="$swap_path"
+  chmod 0600 "$swap_path" || { rm -f "$swap_path"; ARG_BUILD_SWAP_FILE=""; warn "Could not secure temporary build swap permissions."; return 1; }
+  filesystem="$(findmnt -n -o FSTYPE --target "$swap_path" 2>/dev/null || true)"
+  case "$filesystem" in
+    ext2|ext3|ext4|xfs|btrfs) ;;
+    *)
+      rm -f "$swap_path"
+      ARG_BUILD_SWAP_FILE=""
+      warn "Temporary swap is disabled on the $filesystem filesystem at $swap_dir; continuing with opt-level 0."
+      return 1
+      ;;
+  esac
+  if [[ "$filesystem" == btrfs ]] && ! chattr +C "$swap_path" 2>/dev/null; then
+    rm -f "$swap_path"
+    ARG_BUILD_SWAP_FILE=""
+    warn "Could not mark the temporary swap file as no-copy-on-write on Btrfs; continuing with opt-level 0."
+    return 1
+  fi
+
+  # fallocate is fast on ext4/xfs. If the filesystem/kernel rejects its extents
+  # for swap, retry with a fully written file; never leave an unactivated file.
+  info "Preparing ${swap_size_mb} MiB of temporary swap for the Rust build."
+  if ! fallocate -l "${swap_size_mb}M" "$swap_path" 2>/dev/null; then
+    if ! truncate -s 0 "$swap_path" 2>/dev/null || ! dd if=/dev/zero of="$swap_path" bs=1M count="$swap_size_mb" conv=fsync status=none 2>/dev/null; then
+      rm -f "$swap_path"
+      ARG_BUILD_SWAP_FILE=""
+      warn "Could not allocate ${swap_size_mb} MiB for temporary build swap; continuing with opt-level 0."
+      return 1
+    fi
+  fi
+  chmod 0600 "$swap_path"
+  if ! mkswap "$swap_path" >/dev/null 2>&1; then
+    rm -f "$swap_path"
+    ARG_BUILD_SWAP_FILE=""
+    warn "The filesystem rejected temporary build swap; continuing with opt-level 0."
+    return 1
+  fi
+  swap_error_file="$(mktemp /tmp/arg-swapon.XXXXXX 2>/dev/null || true)"
+  if [[ -z "$swap_error_file" ]]; then
+    rm -f "$swap_path"
+    ARG_BUILD_SWAP_FILE=""
+    warn "Could not create a temporary error log for swap activation; continuing with opt-level 0."
+    return 1
+  fi
+  if ! swapon "$swap_path" >/dev/null 2>"$swap_error_file"; then
+    activation_error="$(cat "$swap_error_file" 2>/dev/null || true)"
+  fi
+  rm -f "$swap_error_file"
+  if [[ -n "$activation_error" ]] && ! release_build_swap_active "$swap_path"; then
+    if [[ "$activation_error" =~ [Ii]nvalid\ argument|[Hh]oles|[Nn]ot\ supported ]]; then
+      if truncate -s 0 "$swap_path" 2>/dev/null && dd if=/dev/zero of="$swap_path" bs=1M count="$swap_size_mb" conv=fsync status=none 2>/dev/null && mkswap "$swap_path" >/dev/null 2>&1 && swapon "$swap_path" >/dev/null 2>&1 && release_build_swap_active "$swap_path"; then
+        :
+      else
+        rm -f "$swap_path"
+        ARG_BUILD_SWAP_FILE=""
+        warn "The kernel/filesystem rejected the temporary swap layout; continuing with opt-level 0."
+        return 1
+      fi
+    fi
+  fi
+  if ! release_build_swap_active "$swap_path"; then
+    rm -f "$swap_path"
+    ARG_BUILD_SWAP_FILE=""
+    warn "The kernel did not allow temporary swap activation${activation_error:+: $activation_error}; continuing with opt-level 0."
+    return 1
+  fi
+  ARG_BUILD_SWAP_FILE="$swap_path"
+  info "Added ${swap_size_mb} MiB of temporary swap for the Rust build."
+}
+
+cleanup_release_build_swap() {
+  local swap_path="${ARG_BUILD_SWAP_FILE:-}"
+  [[ -n "$swap_path" ]] || return 0
+  if release_build_swap_active "$swap_path" && ! swapoff "$swap_path" >/dev/null 2>&1; then
+    warn "The build finished, but temporary swap is still in use and could not be disabled. It remains safely enabled at $swap_path."
+    ARG_BUILD_SWAP_FILE=""
+    return 1
+  fi
+  rm -f -- "$swap_path" || { warn "Could not remove temporary build swap file $swap_path."; ARG_BUILD_SWAP_FILE=""; return 1; }
+  ARG_BUILD_SWAP_FILE=""
+  info "Removed temporary Rust build swap."
 }
 
 release_build_memory_budget_mb() {
@@ -263,7 +394,7 @@ release_build_disk_space_ok() {
 }
 
 build_release() {
-  local available_disk_mb required_disk_mb=2048
+  local available_disk_mb required_disk_mb=2048 memory_budget_mb compile_result=0
   [[ -f "$SOURCE_DIR/frontend/dist/index.html" ]] || die "Built frontend files are missing. Check the selected ARG branch and repository."
   if [[ "${ARG_UPDATE_CONTEXT:-}" == "update" && "${ARG_UPDATE_MODE:-complete}" == "complete" ]]; then
     run_with_progress "Clearing previous Rust build cache" bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR"
@@ -273,12 +404,23 @@ build_release() {
   if ! release_build_disk_space_ok "$available_disk_mb" "$required_disk_mb"; then
     die "Not enough free disk space to compile ARG safely (${available_disk_mb:-unknown} MiB available; at least ${required_disk_mb} MiB required). Free disk space, then retry."
   fi
-  configure_release_build_resources "$(release_build_memory_budget_mb)"
-  if ! run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"; then
+  memory_budget_mb="$(release_build_memory_budget_mb)"
+  configure_release_build_resources "$memory_budget_mb"
+  trap 'cleanup_release_build_swap; exit 130' INT
+  trap 'cleanup_release_build_swap; exit 143' TERM
+  prepare_release_build_swap "$memory_budget_mb" || true
+  if run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"; then
+    compile_result=0
+  else
+    compile_result=$?
+  fi
+  trap - INT TERM
+  cleanup_release_build_swap || true
+  if (( compile_result != 0 )); then
     if [[ "${ARG_UPDATE_CONTEXT:-}" != "update" ]]; then
       bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR" >/dev/null 2>&1 || warn "The failed first-install build cache could not be removed; free space manually under $SOURCE_DIR/target."
     fi
-    warn "Rust compilation failed before the new ARG binary was installed; the currently active binary, if any, was left untouched. Check available RAM and swap; if the kernel killed rustc, add temporary swap and retry."
+    warn "Rust compilation failed before the new ARG binary was installed; the currently active binary, if any, was left untouched. Review available memory and disk space, then retry the update."
     return 1
   fi
   [[ -x "$SOURCE_DIR/target/release/arg" ]] || die "The ARG binary was not created."

@@ -23,6 +23,7 @@
 
 ### Changed
 - Harden legacy deployment database migrations so existing jobs gain missing runtime columns without losing queued work.
+- Use the minimum Rust optimization level on VPSs with under 2 GiB available memory and provision bounded temporary swap for compilation when disk space and kernel support allow it; remove the swap after the build.
 - Improve legacy Node workspace API compatibility and error handling across application, DNS, database, and diagnostic pages.
 - Improve systemd service automation, app cleanup, and port-change rollback handling.
 - Ship the refreshed ARG logo assets, pure-black dark theme, platform SVG marks and brand-colored application cards; group application controls into tabs.
@@ -33,7 +34,7 @@
 ### Fixed
 - Normalize ZIP uploads with one shared top-level project directory, and commit a deployment job with its first stage atomically so failed stage writes cannot leave a permanently queued row.
 - Keep deployment job status and detailed live stage logs readable after refresh; report database/migration failures with the actual cause.
-- Use lower-memory Rust release build settings on constrained VPSs; keep updater cleanup and rollback state valid after `update_app` exits.
+- Keep updater cleanup and rollback state valid after `update_app` exits, and retain the active binary when constrained-memory compilation fails.
 - Report compiler failures before binary replacement, release the update reservation, and leave the currently running panel binary untouched.
 - Keep the global ARG updater scoped to the current control panel so an update started for a managed Node cannot lock navigation across the controller workspace.
 - Let administrators minimize a running panel update into a compact status control; monitoring continues and the full progress view can be reopened without interrupting the update.

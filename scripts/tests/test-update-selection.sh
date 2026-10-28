@@ -8,6 +8,10 @@ trap 'rm -rf "$tmp"' EXIT
 sed -n '/^select_update_options() {$/,/^}$/p' "$root/install.sh" > "$tmp/functions.sh"
 sed -n '/^installer_script_url() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^configure_release_build_resources() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
+sed -n '/^release_build_is_root() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
+sed -n '/^release_build_swap_active() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
+sed -n '/^prepare_release_build_swap() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
+sed -n '/^cleanup_release_build_swap() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_memory_budget_mb() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_disk_space_ok() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^build_release() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
@@ -33,10 +37,70 @@ configure_release_build_resources 2048
 [[ "$CARGO_BUILD_JOBS" == 1 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 1 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 2 ]]
 unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL
 configure_release_build_resources 1024
-[[ "$CARGO_BUILD_JOBS" == 1 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 1 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 1 ]]
+[[ "$CARGO_BUILD_JOBS" == 1 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 1 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 0 ]]
 unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL
 configure_release_build_resources 8192
 [[ -z "${CARGO_BUILD_JOBS:-}" && -z "${CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-}" && -z "${CARGO_PROFILE_RELEASE_OPT_LEVEL:-}" ]]
+
+# Exercise temporary swap lifecycle with shell mocks. No host swap or disk is changed.
+swap_test_dir="$tmp/swap"
+mkdir -p "$swap_test_dir"
+ARG_BUILD_SWAP_DIR="$swap_test_dir"
+ARG_BUILD_SWAP_FILE=""
+SWAP_TEST_ACTIVE=""
+SWAP_TEST_FAIL_ONCE=0
+SWAP_TEST_FREE_MB=9999
+SWAP_TEST_FS=ext4
+release_build_is_root() { return 0; }
+df() { printf 'Filesystem 1M-blocks Used Available Use%% Mounted on\nmock 10000 1 %s 1%% /tmp\n' "$SWAP_TEST_FREE_MB"; }
+findmnt() { printf '%s\n' "$SWAP_TEST_FS"; }
+fallocate() { truncate -s "$2" "$3"; }
+dd() {
+  local output count
+  for arg in "$@"; do
+    case "$arg" in of=*) output="${arg#of=}" ;; count=*) count="${arg#count=}" ;; esac
+  done
+  truncate -s "${count}M" "$output"
+}
+mkswap() { [[ -f "$1" ]]; }
+swapon() {
+  if [[ "${1:-}" == "--show=NAME" ]]; then
+    [[ -z "$SWAP_TEST_ACTIVE" ]] || printf '%s\n' "$SWAP_TEST_ACTIVE"
+    return 0
+  fi
+  if (( SWAP_TEST_FAIL_ONCE )); then
+    SWAP_TEST_FAIL_ONCE=0
+    printf 'swapon: Invalid argument\n' >&2
+    return 1
+  fi
+  SWAP_TEST_ACTIVE="$1"
+}
+swapoff() { [[ "$SWAP_TEST_ACTIVE" == "$1" ]] || return 1; SWAP_TEST_ACTIVE=""; }
+prepare_release_build_swap 512
+[[ -n "$ARG_BUILD_SWAP_FILE" && "$SWAP_TEST_ACTIVE" == "$ARG_BUILD_SWAP_FILE" && -s "$ARG_BUILD_SWAP_FILE" ]]
+cleanup_release_build_swap
+[[ -z "$ARG_BUILD_SWAP_FILE" && -z "$SWAP_TEST_ACTIVE" ]]
+[[ -z "$(find "$swap_test_dir" -mindepth 1 -maxdepth 1 -type f -print -quit)" ]]
+SWAP_TEST_FAIL_ONCE=1
+prepare_release_build_swap 512
+[[ -n "$ARG_BUILD_SWAP_FILE" && "$SWAP_TEST_ACTIVE" == "$ARG_BUILD_SWAP_FILE" ]]
+cleanup_release_build_swap
+SWAP_TEST_FREE_MB=256
+if prepare_release_build_swap 512; then
+  echo 'temporary swap ignored the free-disk guard' >&2
+  exit 1
+fi
+[[ -z "$ARG_BUILD_SWAP_FILE" && -z "$(find "$swap_test_dir" -mindepth 1 -maxdepth 1 -type f -print -quit)" ]]
+SWAP_TEST_FREE_MB=9999
+SWAP_TEST_FS=tmpfs
+if prepare_release_build_swap 512; then
+  echo 'temporary swap was enabled on tmpfs' >&2
+  exit 1
+fi
+[[ -z "$ARG_BUILD_SWAP_FILE" && -z "$(find "$swap_test_dir" -mindepth 1 -maxdepth 1 -type f -print -quit)" ]]
+SWAP_TEST_FS=ext4
+prepare_release_build_swap 2048
+[[ -z "$ARG_BUILD_SWAP_FILE" && -z "$SWAP_TEST_ACTIVE" ]]
 release_build_disk_space_ok 2048 2048
 if release_build_disk_space_ok 1023 1024; then
   echo 'low disk space was accepted for a complete build' >&2
@@ -60,9 +124,11 @@ run_with_progress() {
     chmod +x "$SOURCE_DIR/target/release/arg"
   fi
 }
+release_build_memory_budget_mb() { printf '512\n'; }
 
 ARG_UPDATE_CONTEXT=update ARG_UPDATE_MODE=complete
 build_release
+[[ -z "$ARG_BUILD_SWAP_FILE" && -z "$SWAP_TEST_ACTIVE" ]]
 [[ "${calls[*]}" == "Clearing previous Rust build cache Compiling the optimized Rust release" ]]
 calls=()
 ARG_UPDATE_CONTEXT=update ARG_UPDATE_MODE=fast
@@ -77,6 +143,7 @@ if build_release; then
   echo 'failed release compilation was reported as successful' >&2
   exit 1
 fi
+[[ -z "$ARG_BUILD_SWAP_FILE" && -z "$SWAP_TEST_ACTIVE" ]]
 grep -q 'known-good-active-binary' "$BINARY"
 unset ARG_TEST_BUILD_FAIL
 
