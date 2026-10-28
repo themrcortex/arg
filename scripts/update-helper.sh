@@ -319,7 +319,7 @@ rollback_update_locked() {
 }
 
 write_update_state() {
-  local state="$1" phase="$2" message="${3:-}" started job_id updated tmp previous_job operation branch build_mode
+  local state="$1" phase="$2" message="${3:-}" started job_id updated tmp previous_job operation branch build_mode previous_phase=""
   job_id="${ARG_UPDATE_JOB_ID:-arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)}"
   started="$(sed -n 's/.*"started_at":\([0-9][0-9]*\).*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
   previous_job="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
@@ -328,6 +328,7 @@ write_update_state() {
     operation="$(sed -n 's/.*"operation":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
     branch="$(sed -n 's/.*"branch":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
     build_mode="$(sed -n 's/.*"build_mode":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
+    previous_phase="$(sed -n 's/.*"phase":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
   fi
   operation="${ARG_UPDATE_OPERATION:-${operation:-update}}"
   branch="${ARG_UPDATE_BRANCH:-${branch:-}}"
@@ -335,13 +336,14 @@ write_update_state() {
   [[ "$operation" == rollback ]] || operation=update
   valid_branch "$branch" || branch=""
   case "$build_mode" in fast|complete) ;; *) build_mode="" ;; esac
+  case "$previous_phase" in scheduled|preparing|building|installing|restarting|verifying|cancelling|rollback|complete|rolled_back|failed|cancelled|idle) ;; *) previous_phase="" ;; esac
   updated="$(date +%s)"
   # Messages are fixed internal strings; strip control characters and JSON quotes defensively.
   message="${message//$'\n'/ }"
   message="${message//\"/}"
   tmp="${update_state_file}.tmp.$$"
-  printf '{"job_id":"%s","state":"%s","phase":"%s","operation":"%s","branch":"%s","build_mode":"%s","started_at":%s,"updated_at":%s,"message":"%s"}\n' \
-    "$job_id" "$state" "$phase" "$operation" "$branch" "$build_mode" "$started" "$updated" "$message" > "$tmp"
+  printf '{"job_id":"%s","state":"%s","phase":"%s","previous_phase":"%s","operation":"%s","branch":"%s","build_mode":"%s","started_at":%s,"updated_at":%s,"message":"%s"}\n' \
+    "$job_id" "$state" "$phase" "${previous_phase:-$phase}" "$operation" "$branch" "$build_mode" "$started" "$updated" "$message" > "$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$update_state_file"
 }

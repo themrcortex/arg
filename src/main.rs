@@ -323,6 +323,7 @@ fn update_guard_exempt(path: &str) -> bool {
             | "/api/update/cancel"
             | "/api/federation/update"
             | "/api/federation/update/progress"
+            | "/api/federation/update/logs"
             | "/api/federation/update/cancel"
             | "/api/federation/update/rollback"
             | "/api/state"
@@ -4861,11 +4862,24 @@ mod update_progress_tests {
     }
 
     #[test]
+    fn update_progress_proxy_preserves_remote_stage_and_rollback_metadata() {
+        let raw = r#"{"job_id":"arg-test","state":"failed","phase":"failed","previous_phase":"building","operation":"update","branch":"main","build_mode":"complete","started_at":10,"updated_at":25,"message":"compile failed"}"#;
+        let payload = update_progress_payload(Some(raw), Some(10), "local-instance");
+        assert_eq!(payload["previous_phase"], "building");
+        assert_eq!(payload["operation"], "update");
+        assert_eq!(payload["updated_at"], 25);
+        assert_eq!(payload["branch"], "main");
+        assert_eq!(payload["build_mode"], "complete");
+        assert_eq!(payload["instance"], "local-instance");
+    }
+
+    #[test]
     fn cancellation_endpoint_remains_available_while_update_lock_is_active() {
         assert!(super::update_guard_exempt("/api/update/cancel"));
         assert!(super::update_guard_exempt("/api/update/progress"));
         assert!(super::update_guard_exempt("/api/federation/update/cancel"));
         assert!(super::update_guard_exempt("/api/federation/update/progress"));
+        assert!(super::update_guard_exempt("/api/federation/update/logs"));
         assert!(!super::update_guard_exempt("/api/update/rollback"));
         assert!(!super::update_guard_exempt("/api/nginx/restart"));
     }

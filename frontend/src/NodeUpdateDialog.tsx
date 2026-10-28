@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Download, LoaderCircle, RefreshCw, RotateCw, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, Download, FileText, LoaderCircle, RefreshCw, RotateCw, X } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
@@ -30,7 +30,10 @@ type UpdateProgress = {
   updating?: boolean
   state?: 'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   phase?: string
+  previous_phase?: string
+  operation?: 'update' | 'rollback'
   started_at?: number | null
+  updated_at?: number | null
   job_id?: string | null
   message?: string
   branch?: Branch
@@ -57,6 +60,8 @@ const phaseTitle: Record<string, string> = {
   cancelled: 'به‌روزرسانی لغو شد',
   rollback: 'در حال بازگشت نسخهٔ قبلی',
   cancelling: 'درخواست لغو ثبت شد؛ بازگشت امن در حال بررسی است',
+  complete: 'به‌روزرسانی با بررسی سلامت کامل شد',
+  rolled_back: 'بازگشت نسخهٔ قبلی کامل و بررسی شد',
   unknown: 'خواندن وضعیت واقعی فرایند',
 }
 
@@ -88,14 +93,21 @@ export function NodeUpdateDialog({
   const [trackingSince, setTrackingSince] = useState<number | null>(null)
   const [reconnecting, setReconnecting] = useState(false)
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null)
+  const [logs, setLogs] = useState('')
+  const [logsOpen, setLogsOpen] = useState(false)
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [logsTruncated, setLogsTruncated] = useState(false)
   const runStarted = useRef<number | null>(null)
   const nodeId = node?.id
-  const latest = useRef({ check, node, notify, onRefresh })
-  latest.current = { check, node, notify, onRefresh }
+  const latest = useRef({ check, node, notify, onRefresh, branch })
+  latest.current = { check, node, notify, onRefresh, branch }
 
   async function refreshCheck(targetId: number, selectedBranch: Branch) {
     setChecking(true)
     setError('')
+    setLogs('')
+    setLogsOpen(false)
+    setLogsTruncated(false)
     try {
       const result = await api<CheckResult>(`nodes/${targetId}/update?branch=${selectedBranch}`)
       setCheck(result)
@@ -147,6 +159,7 @@ export function NodeUpdateDialog({
         setError((previous) => (previous.startsWith('ارتباط هنگام راه‌اندازی مجدد') ? '' : previous))
         const started = runStarted.current || trackingSince || Date.now()
         if (current.state === 'succeeded') {
+          const rollbackSucceeded = current.operation === 'rollback' || current.phase === 'rolled_back'
           setBusy('verifying')
           try {
             const verified = await api<NodeStatus>(`nodes/${nodeId}/status`)
@@ -173,7 +186,8 @@ export function NodeUpdateDialog({
               setProgress({ ...current, state: 'failed', phase: 'failed' })
             } else {
               setTracking(false)
-              setCheck((previous) =>
+              if (rollbackSucceeded) await refreshCheck(nodeId, latest.current.branch)
+              else setCheck((previous) =>
                 previous
                   ? {
                       ...previous,
@@ -183,9 +197,9 @@ export function NodeUpdateDialog({
                   : previous,
               )
               setProgress(current)
-              latest.current.notify(
-                `به‌روزرسانی ${latest.current.node?.public_name || latest.current.node?.name || 'Node'} انجام شد و هویت و ارتباطش دوباره تأیید شد.`,
-              )
+              latest.current.notify(rollbackSucceeded
+                ? `بازگشت نسخهٔ قبلی ${latest.current.node?.public_name || latest.current.node?.name || 'Node'} انجام شد و هویت و ارتباطش دوباره تأیید شد.`
+                : `به‌روزرسانی ${latest.current.node?.public_name || latest.current.node?.name || 'Node'} انجام شد و هویت و ارتباطش دوباره تأیید شد.`)
               latest.current.onRefresh()
             }
           } catch (cause) {
@@ -280,6 +294,7 @@ export function NodeUpdateDialog({
         state: 'running',
         updating: true,
         phase: 'preparing',
+        operation: 'update',
         branch,
         build_mode: buildMode,
         started_at: Math.floor(Date.now() / 1000),
@@ -317,6 +332,7 @@ export function NodeUpdateDialog({
     try {
       await api(`nodes/${nodeId}/update/rollback`, { method: 'POST' })
       setError('بازگشت نسخهٔ قبلی روی Node زمان‌بندی شد؛ وضعیت سرویس و اتصال در حال بررسی است.')
+      setProgress((current) => ({ ...current, operation: 'rollback', state: 'running', phase: 'installing', updating: true, updated_at: Math.floor(Date.now() / 1000) }))
       runStarted.current = Date.now()
       setTrackingSince(Date.now())
       setTracking(true)
@@ -328,11 +344,35 @@ export function NodeUpdateDialog({
     }
   }
 
+  async function refreshLogs() {
+    if (nodeId == null || logsLoading) return
+    setLogsLoading(true)
+    try {
+      const result = await api<{ logs: string; truncated?: boolean }>(`nodes/${nodeId}/update/logs`)
+      setLogs(result.logs || 'گزارشی از Update Helper دریافت نشد.')
+      setLogsTruncated(result.truncated === true)
+    } catch (cause) {
+      setLogs(cause instanceof Error ? cause.message : 'گزارش به‌روزرسانی از Node دریافت نشد.')
+    } finally { setLogsLoading(false) }
+  }
+
+  async function toggleLogs() {
+    if (logsOpen) { setLogsOpen(false); return }
+    setLogsOpen(true)
+    if (!logs) await refreshLogs()
+  }
+
   const update = check?.update
   const active = tracking || progress?.updating || progress?.state === 'running'
   const terminal =
     progress?.state === 'succeeded' || progress?.state === 'failed' || progress?.state === 'cancelled'
   const phase = progress?.phase || (progress?.state === 'running' ? 'unknown' : '')
+  const stageSequence: [string, string][] = progress?.operation === 'rollback'
+    ? [['installing', 'بازگردانی فایل نسخهٔ قبلی'], ['restarting', 'راه‌اندازی سرویس مقصد'], ['verifying', 'بررسی سلامت و هویت Node']]
+    : [['preparing', 'دریافت نسخه و آماده‌سازی'], ['building', 'کامپایل نسخه روی Node'], ['installing', 'نصب نسخهٔ بررسی‌شده'], ['restarting', 'راه‌اندازی سرویس مقصد'], ['verifying', 'بررسی سلامت و هویت Node']]
+  const stagePhase = ['failed', 'cancelled'].includes(phase) ? progress?.previous_phase || phase : phase
+  const activeStageIndex = stageSequence.findIndex(([stage]) => stage === stagePhase)
+  const stagesComplete = progress?.state === 'succeeded' && (phase === 'complete' || phase === 'rolled_back')
 
   return (
     <Dialog
@@ -525,6 +565,7 @@ export function NodeUpdateDialog({
                       Job {progress.job_id}
                     </p>
                   )}
+                  {progress.updated_at && <p className="mt-1 text-[10px] text-muted-foreground">آخرین گزارش دریافتی از Node: {new Date(progress.updated_at * 1000).toLocaleTimeString('fa-IR')}</p>}
                 </div>
               </div>
               {active && (
@@ -532,6 +573,29 @@ export function NodeUpdateDialog({
                   <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" />
                 </div>
               )}
+              {progress.operation && <ol aria-label="مراحل واقعی به‌روزرسانی Node" className="mt-4 grid gap-2 sm:grid-cols-2">
+                {stageSequence.map(([stage, label], index) => {
+                  const failedAtStage = progress.state === 'failed' && stage === stagePhase
+                  const cancelledAtStage = progress.state === 'cancelled' && stage === stagePhase
+                  const completed = stagesComplete || (activeStageIndex >= 0 && index < activeStageIndex) || ((failedAtStage || cancelledAtStage) && index < activeStageIndex)
+                  const currentStage = !stagesComplete && index === activeStageIndex && !failedAtStage && !cancelledAtStage
+                  return <li key={stage} className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-[10px] leading-5 ${failedAtStage ? 'border-destructive/30 bg-destructive/[.06] text-destructive' : cancelledAtStage ? 'border-amber-400/25 bg-amber-400/[.05] text-amber-100' : completed ? 'border-emerald-400/20 bg-emerald-400/[.04] text-emerald-200' : currentStage ? 'border-primary/30 bg-primary/[.06] text-foreground' : 'border-border/60 text-muted-foreground'}`}>
+                    {failedAtStage ? <AlertTriangle size={13}/> : completed ? <CheckCircle2 size={13}/> : currentStage ? <LoaderCircle size={13} className="animate-spin"/> : <span className="inline-block h-3 w-3 rounded-full border border-current/40"/>}
+                    <span>{label}</span>
+                  </li>
+                })}
+              </ol>}
+              <div className="mt-3">
+                <Button variant="outline" size="sm" onClick={() => void toggleLogs()} disabled={logsLoading}>
+                  {logsLoading ? <LoaderCircle size={13} className="animate-spin"/> : <FileText size={13}/>}
+                  {logsOpen ? 'بستن گزارش مراحل' : 'نمایش گزارش واقعی Node'}
+                </Button>
+                {logsOpen && <div className="mt-2 overflow-hidden rounded-lg border border-border/70 bg-black/35">
+                  <div className="flex items-center justify-between gap-2 border-b border-border/60 px-3 py-2 text-[10px] text-muted-foreground"><span>گزارش آخرین عملیات به‌روزرسانی مقصد</span><Button size="sm" variant="ghost" className="h-7 px-2 text-[10px]" onClick={() => void refreshLogs()} disabled={logsLoading}><RefreshCw size={12}/>تازه‌سازی</Button></div>
+                  {logsTruncated && <p className="px-3 pt-2 text-[10px] text-amber-200">فقط انتهای گزارش (حداکثر ۶۴ KiB) منتقل شده است.</p>}
+                  <pre dir="ltr" className="max-h-64 overflow-auto whitespace-pre-wrap break-words p-3 text-left font-mono text-[10px] leading-5 text-foreground">{logsLoading ? 'در حال دریافت گزارش از Node…' : logs || 'گزارش خالی است.'}</pre>
+                </div>}
+              </div>
             </div>
           )}
 

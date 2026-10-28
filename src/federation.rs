@@ -973,6 +973,35 @@ pub(super) async fn remote_update_progress(
     Ok(Json(update_progress_payload(raw.as_deref(), fallback_started, metrics::process_instance_id())))
 }
 
+pub(super) async fn remote_update_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        let identity = authorize_controller(&db, &headers, "node.services.manage")?;
+        audit(&db, &identity.name, "federation.node.update.logs", "read bounded update helper log");
+    }
+    let output = privileged_request_async(json!({"action":"update-logs"})).await?;
+    if output["ok"] != true {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            output["error"].as_str().unwrap_or("گزارش به‌روزرسانی Node در دسترس نیست."),
+        ));
+    }
+    let logs = output["stdout"].as_str().unwrap_or_default();
+    let logs = if logs.len() > 64 * 1024 {
+        let mut start = logs.len() - 64 * 1024;
+        while !logs.is_char_boundary(start) {
+            start += 1;
+        }
+        &logs[start..]
+    } else {
+        logs
+    };
+    Ok(Json(json!({"logs":logs,"truncated":output["stdout"].as_str().is_some_and(|text|text.len()>64*1024)})))
+}
+
 pub(super) async fn remote_update_run(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1493,11 +1522,11 @@ pub(super) async fn node_update_check(
     };
     let (update, progress) = match route {
         NodeUpdateRoute::Federation => (
-            remote_node_request_with_timeout(&state, id, "node.services.manage", reqwest::Method::GET, &format!("api/federation/update?branch={}", query.branch), None, 180).await?,
+            remote_node_request_with_timeout(&state, id, "node.services.manage", reqwest::Method::GET, &format!("api/federation/update?branch={}", query.branch), None, 45).await?,
             remote_node_request(&state, id, "node.services.manage", reqwest::Method::GET, "api/federation/update/progress", None).await?,
         ),
         NodeUpdateRoute::WorkspaceProxy => (
-            remote_workspace_json_request(&state, id, reqwest::Method::GET, &format!("update?branch={}", query.branch), 180).await?,
+            remote_workspace_json_request(&state, id, reqwest::Method::GET, &format!("update?branch={}", query.branch), 45).await?,
             remote_workspace_json_request(&state, id, reqwest::Method::GET, "update/progress", 15).await?,
         ),
     };
@@ -1521,6 +1550,34 @@ pub(super) async fn node_update_progress(
     match ensure_node_update_management(&state, id)? {
         NodeUpdateRoute::Federation => remote_node_request(&state, id, "node.services.manage", reqwest::Method::GET, "api/federation/update/progress", None).await.map(Json),
         NodeUpdateRoute::WorkspaceProxy => remote_workspace_json_request(&state, id, reqwest::Method::GET, "update/progress", 15).await.map(Json),
+    }
+}
+
+pub(super) async fn node_update_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult {
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    match ensure_node_update_management(&state, id)? {
+        NodeUpdateRoute::Federation => remote_node_request(
+            &state,
+            id,
+            "node.services.manage",
+            reqwest::Method::GET,
+            "api/federation/update/logs",
+            None,
+        )
+        .await
+        .map(Json),
+        NodeUpdateRoute::WorkspaceProxy => {
+            remote_workspace_json_request(&state, id, reqwest::Method::GET, "update/logs", 15)
+                .await
+                .map(Json)
+        }
     }
 }
 

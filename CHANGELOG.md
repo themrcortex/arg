@@ -12,6 +12,9 @@
 
 ## Unreleased
 
+### Added
+- Show update alerts for managed Nodes, open the matching update dialog from the alert, and transfer bounded remote update logs and stage metadata.
+
 ### Changed
 - Refine the ARG logo lockup with a shorter emblem, more balanced wordmark proportions, and increased spacing; reduce its displayed height while keeping the cropped mark in the collapsed sidebar.
 - Render the full logo and collapsed sidebar mark in monochrome on the light theme.

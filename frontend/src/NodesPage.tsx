@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import { Activity, Check, Copy, Link2, LoaderCircle, Plus, RefreshCw, Save, Server, Shield, Trash2, Unplug } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Activity, AlertTriangle, Check, Copy, Download, Link2, LoaderCircle, Plus, RefreshCw, Save, Server, Shield, Trash2, Unplug } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
@@ -9,6 +9,7 @@ import { Label } from './components/ui/label'
 import { Skeleton } from './components/ui/skeleton'
 import { FleetManagementPanels } from './FleetManagementPanels'
 import { NodeUpdateDialog } from './NodeUpdateDialog'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
 type Props = { Heading: Heading; notify: (message: string) => void; workspaceMode: 'single' | 'multi'; onWorkspaceModeChange: (mode: 'single' | 'multi') => void }
@@ -16,14 +17,22 @@ type FederationRole = 'standalone' | 'member' | 'controller-capable' | 'both'
 type Node = { id: number; workspace_key: string; name: string; public_name?: string; server_uuid?: string | null; endpoint: string; node_id: string; protocol_version: number; last_seen: number | null; created_at: number; workspace_ready?: boolean; scopes?: string[]; capabilities?: string[]; compatibility_state?: string; connection_state?: string; last_error?: string | null; allow_private_endpoint?: boolean; workspace_token_expires_at?: number | null }
 type Controller = { id: number; name: string; public_name: string; server_uuid?: string | null; created_at: number; last_seen: number | null; scopes?: string[]; token_expires_at?: number | null }
 type NodeStatus = { protocol: string; protocol_version?: number; capabilities_version?: number; node_id: string; server_uuid?: string; public_name?: string; hostname: string; os: string; architecture: string; arg_version: string; uptime_seconds: number; load: string; memory_total_kib: number; memory_available_kib: number; capabilities: string[] }
+type NodeUpdateCheck = { status: 'checking' | 'available' | 'current' | 'unavailable'; remote_version?: string; remote?: string; error?: string }
+type NodeUpdateCheckResponse = { supported: boolean; reason?: string; update?: { status?: 'available' | 'current' | 'unavailable'; remote_version?: string; remote?: string; error?: string } | null }
 type Service = { unit: string; enabled: string; state: string; sub_state: string; description: string }
 type PendingAction = { kind: 'remove-node'; id: number; name: string } | { kind: 'revoke-controller'; id: number; name: string } | { kind: 'rotate-node'; id: number; name: string } | { kind: 'service'; id: number; unit: string; action: string }
 const bytes = (kib: number) => `${(kib / 1024 / 1024).toLocaleString('en-US', { maximumFractionDigits: 1 })} GiB`
 const uptime = (seconds: number) => { const days = Math.floor(seconds / 86400); const hours = Math.floor(seconds % 86400 / 3600); return `${days}d ${hours}h` }
+function canUpdateNode(node: Node) {
+  const fullAccess = node.scopes?.includes('node.services.manage')
+  const hasUpdateApi = node.capabilities?.includes('node.update.manage') || (node.capabilities?.includes('workspace.api.proxy') && node.scopes?.includes('workspace.write'))
+  return node.compatibility_state === 'compatible' && fullAccess && hasUpdateApi
+}
 
 export function NodesPage({ Heading, notify, workspaceMode, onWorkspaceModeChange }: Props) {
   const [nodes, setNodes] = useState<Node[]>([])
   const [controllers, setControllers] = useState<Controller[]>([])
+  const [nodeUpdateChecks, setNodeUpdateChecks] = useState<Record<number, NodeUpdateCheck>>({})
   const [publicName, setPublicName] = useState('')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
@@ -43,18 +52,66 @@ export function NodesPage({ Heading, notify, workspaceMode, onWorkspaceModeChang
   const [accessMode, setAccessMode] = useState<'full' | 'read-only'>('full')
   const [allowPrivateEndpoint, setAllowPrivateEndpoint] = useState(false)
   const [updateTarget, setUpdateTarget] = useState<Node | null>(null)
+  const nodesRef = useRef<Node[]>([])
+  const notifiedNodeVersions = useRef(new Map<number, string>())
+  const updateCheckInFlight = useRef(false)
+  const notifyRef = useRef(notify)
+  nodesRef.current = nodes
+  notifyRef.current = notify
+
+  const checkNodeUpdates = useCallback(async (targetNodes: Node[]) => {
+    const targets = targetNodes.filter(canUpdateNode)
+    if (!targets.length || updateCheckInFlight.current) return
+    updateCheckInFlight.current = true
+    setNodeUpdateChecks((current) => Object.fromEntries([
+      ...Object.entries(current).filter(([id]) => !targets.some((node) => String(node.id) === id)),
+      ...targets.map((node) => [String(node.id), { status: 'checking' as const }]),
+    ]))
+    let cursor = 0
+    const worker = async () => {
+      while (cursor < targets.length) {
+        const node = targets[cursor++]
+        try {
+          const result = await api<NodeUpdateCheckResponse>(`nodes/${node.id}/update?branch=main`)
+          const update = result.update
+          const status: NodeUpdateCheck = !result.supported || !update
+            ? { status: 'unavailable', error: result.reason }
+            : { status: update.status || 'unavailable', remote_version: update.remote_version, remote: update.remote, error: update.error }
+          setNodeUpdateChecks((current) => ({ ...current, [node.id]: status }))
+          if (status.status === 'available') {
+            const version = status.remote_version || status.remote || 'latest'
+            if (notifiedNodeVersions.current.get(node.id) !== version) {
+              notifiedNodeVersions.current.set(node.id, version)
+              notifyRef.current(`برای Node «${node.public_name || node.name}» نسخهٔ ARG ${status.remote_version ? `v${status.remote_version}` : version} آماده است؛ از همین صفحه می‌توانی به‌روزرسانی‌اش کنی.`)
+            }
+          }
+        } catch (cause) {
+          setNodeUpdateChecks((current) => ({ ...current, [node.id]: { status: 'unavailable', error: cause instanceof Error ? cause.message : 'بررسی نسخه انجام نشد.' } }))
+        }
+      }
+    }
+    try {
+      await Promise.all(Array.from({ length: Math.min(2, targets.length) }, worker))
+    } finally {
+      updateCheckInFlight.current = false
+    }
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true); setError('')
-    try { const result = await api<{ nodes: Node[]; controllers: Controller[]; public_name: string; role?: FederationRole }>('nodes'); setNodes(result.nodes); setControllers(result.controllers); setPublicName(result.public_name || ''); if (result.role) { setRole(result.role); setNextRole(result.role) } }
+    try { const result = await api<{ nodes: Node[]; controllers: Controller[]; public_name: string; role?: FederationRole }>('nodes'); setNodes(result.nodes); setControllers(result.controllers); setPublicName(result.public_name || ''); if (result.role) { setRole(result.role); setNextRole(result.role) } void checkNodeUpdates(result.nodes) }
     catch (cause) { const message = cause instanceof Error ? cause.message : 'فهرست Nodeها خوانده نشد.'; setError(message) }
     finally { setLoading(false) }
-  }, [])
+  }, [checkNodeUpdates])
   const refreshAfterNodeUpdate = useCallback(() => {
     void load()
     window.dispatchEvent(new Event('arg-nodes-changed'))
   }, [load])
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const timer = window.setInterval(() => void checkNodeUpdates(nodesRef.current), 15 * 60_000)
+    return () => window.clearInterval(timer)
+  }, [checkNodeUpdates])
 
   async function generateCode() {
     setBusy('pair-code'); setError('')
@@ -129,14 +186,27 @@ export function NodesPage({ Heading, notify, workspaceMode, onWorkspaceModeChang
   }
   const copyCode = async () => { if (!localCode) return; await navigator.clipboard.writeText(localCode.code); notify('کد اتصال کپی شد.') }
   const headerAction = <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading || !!busy}><RefreshCw size={14} className={loading ? 'animate-spin' : ''}/>تازه‌سازی</Button>
+  const availableNodeUpdates = nodes.filter((node) => nodeUpdateChecks[node.id]?.status === 'available')
 
   return <>
     <Heading title="Nodeهای ARG" description="پنل‌های ARG را با پروتکل امن اختصاصی جفت کن و وضعیت سرورها و سرویس‌هایشان را از اینجا مدیریت کن." action={headerAction}/>
-    <FleetManagementPanels nodes={nodes} notify={notify}/>
+    <Tabs defaultValue="nodes" className="mt-4" dir="rtl">
+      <TabsList className="h-auto w-full flex-wrap justify-start" aria-label="بخش‌های مدیریت Nodeها">
+        <TabsTrigger value="nodes">سرورها و سرویس‌ها</TabsTrigger>
+        <TabsTrigger value="pairing">جفت‌سازی</TabsTrigger>
+        <TabsTrigger value="settings">فضای‌کار و هویت</TabsTrigger>
+        <TabsTrigger value="fleet">مدیریت ناوگان</TabsTrigger>
+      </TabsList>
+      <TabsContent value="fleet" className="space-y-5">
+        <FleetManagementPanels nodes={nodes} notify={notify}/>
+      </TabsContent>
+      <TabsContent value="settings" className="space-y-4">
     <Card className="mt-4"><CardHeader><CardTitle className="text-base">حالت فضای‌کار</CardTitle><CardDescription>این انتخاب فقط شکل مدیریت را عوض می‌کند و هیچ Node یا داده‌ای را حذف نمی‌کند.</CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2"><Button variant={workspaceMode === 'single' ? 'default' : 'outline'} onClick={() => onWorkspaceModeChange('single')}><Server size={14}/>تک‌سرور</Button><Button variant={workspaceMode === 'multi' ? 'default' : 'outline'} onClick={() => onWorkspaceModeChange('multi')}><Activity size={14}/>چندسرور</Button><span className="basis-full text-xs leading-5 text-muted-foreground">در حالت چندسرور، از نوار بالا سرور محلی، یک Node یا نمای همهٔ سرورها را انتخاب کن.</span></CardContent></Card>
     <Card className="mt-4"><CardHeader><CardTitle className="text-base">نقش Federation این سرور</CardTitle><CardDescription>تغییر نقش، اتصال‌های موجود را حذف نمی‌کند. اگر نقش جدید با اتصال‌های فعلی ناسازگار باشد، تغییر متوقف و تعداد وابستگی‌ها گزارش می‌شود.</CardDescription></CardHeader><CardContent className="flex flex-wrap items-end gap-3"><div className="min-w-[220px] flex-1 space-y-1.5"><Label htmlFor="federation-role">نقش</Label><select id="federation-role" value={nextRole} onChange={(event) => setNextRole(event.target.value as FederationRole)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="standalone">Standalone · مستقل</option><option value="member">Member · فقط مقصد مدیریت</option><option value="controller-capable">Controller-capable · فقط مدیریت Nodeها</option><option value="both">Both · کنترل‌کننده و مقصد</option></select></div><Button variant="outline" onClick={() => setRoleConfirmOpen(true)} disabled={!!busy || nextRole === role}>{busy === 'role' ? <LoaderCircle size={14} className="animate-spin"/> : <Save size={14}/>}ذخیرهٔ نقش</Button><p className="basis-full text-[10px] leading-5 text-muted-foreground">نقش فعلی: <strong>{role}</strong>. نقش Federation بر کارکرد مستقل سایر قابلیت‌های ARG اثر ندارد.</p></CardContent></Card>
     {error && <p role="alert" className="mt-4 rounded-xl border border-rose-400/20 bg-rose-400/[.05] p-3 text-xs text-rose-200">{error}</p>}
     <Card className="mt-4"><CardHeader><CardTitle className="text-base">نام عمومی این سرور</CardTitle><CardDescription>این نام به پنل‌های جفت‌شده ارسال می‌شود؛ تغییرش hostname سیستم را عوض نمی‌کند. برچسب محلی هر پنل جداگانه تنظیم می‌شود.</CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2"><Input aria-label="نام عمومی این سرور" value={publicName} maxLength={80} onChange={(event) => setPublicName(event.target.value)} placeholder="مثلاً IR-PARSPACK-MAJID"/><Button onClick={() => void savePublicName()} disabled={!!busy || !publicName.trim()}>{busy === 'public-name' ? <LoaderCircle size={14} className="animate-spin"/> : <Save size={14}/>}ذخیره و همگام‌سازی</Button></CardContent></Card>
+      </TabsContent>
+      <TabsContent value="pairing" className="space-y-5">
     <div className="mt-4 grid gap-4 xl:grid-cols-2">
       <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Link2 size={17} className="text-primary"/>اتصال این پنل به پنل دیگر</CardTitle><CardDescription>این پنل، سرور مقصد را به فهرست Nodeهای خودش اضافه می‌کند.</CardDescription></CardHeader><CardContent className="space-y-4">
         <ol className="list-inside list-decimal space-y-1 rounded-lg border border-border/70 bg-background/30 p-3 text-xs leading-5 text-muted-foreground"><li>در پنل ARG سرور مقصد، بخش «Nodeها» را باز کن و در کارت «اجازهٔ مدیریت این سرور» کد اتصال بساز.</li><li>کد 5 دقیقه اعتبار دارد؛ آن را کپی کن و به همین پنل برگرد.</li><li>آدرس HTTPS پنل مقصد و کد را در فرم زیر وارد و جفت‌سازی را اجرا کن.</li></ol>
@@ -144,15 +214,19 @@ export function NodesPage({ Heading, notify, workspaceMode, onWorkspaceModeChang
       </CardContent></Card>
       <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Shield size={17} className="text-primary"/>اجازهٔ مدیریت این سرور</CardTitle><CardDescription>این سرور مقصد اتصال است؛ کد را از اینجا می‌گیری و در پنل کنترل‌کننده وارد می‌کنی.</CardDescription></CardHeader><CardContent className="space-y-3"><ol className="list-inside list-decimal space-y-1 text-xs leading-5 text-muted-foreground"><li>کد بساز و فقط به مدیر پنلی بده که به آن اعتماد داری.</li><li>در پنل دیگر، بخش «Nodeها» و فرم «اتصال این پنل به پنل دیگر» را باز کنند.</li><li>کد 5 دقیقه اعتبار دارد و پس از اتصال موفق فوراً باطل می‌شود.</li></ol><div className="space-y-1.5"><Label htmlFor="pair-access-mode">سطح دسترسی کنترل‌کننده</Label><select id="pair-access-mode" value={accessMode} onChange={(event) => setAccessMode(event.target.value as 'full' | 'read-only')} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="read-only">فقط‌خواندنی · مشاهدهٔ وضعیت و منابع</option><option value="full">کامل · مدیریت سرویس، فضای کار و ترمینال</option></select><p className="text-[10px] leading-5 text-muted-foreground">این مجوز در سمت سرور مقصد بررسی می‌شود. برای تغییر سطح دسترسی، اتصال را لغو و دوباره جفت‌سازی کن.</p></div><Button onClick={() => void generateCode()} disabled={!!busy}><Plus size={15}/>{busy === 'pair-code' ? 'در حال ساخت…' : 'ساخت کد اتصال'}</Button>{localCode && <div className="space-y-2 rounded-xl border border-amber-400/20 bg-amber-400/[.04] p-3"><p className="text-xs text-amber-100">این کد فقط یک بار قابل‌استفاده است و تا 5 دقیقه اعتبار دارد.</p><div className="flex gap-2"><Input readOnly value={localCode.code} dir="ltr" className="font-mono text-left"/><Button variant="outline" size="icon" onClick={() => void copyCode()} aria-label="کپی کد"><Copy size={14}/></Button></div><p className="text-[10px] text-muted-foreground">با استفادهٔ موفق، کد فوراً باطل می‌شود.</p></div>}<div className="rounded-lg border border-border/70 p-3 text-[10px] leading-5 text-muted-foreground">کلیدها روی دیسک سرور نگهداری می‌شوند. اتصال‌های ناسازگار با نسخه‌های قدیمی به حالت محدود وارد می‌شوند؛ تونل کامل فقط وقتی فعال است که هر دو سمت مجوزها و قابلیت‌ها را مذاکره کنند.</div></CardContent></Card>
     </div>
-
+      </TabsContent>
+      <TabsContent value="nodes" className="space-y-5">
+    {availableNodeUpdates.length > 0 && <Card role="status" className="border-amber-400/30 bg-amber-400/[.06]"><CardContent className="flex flex-wrap items-center gap-3 p-4"><AlertTriangle size={18} className="shrink-0 text-amber-300"/><div className="min-w-0 flex-1"><p className="text-sm font-semibold text-amber-100">برای {availableNodeUpdates.length} Node به‌روزرسانی ARG موجود است</p><p className="mt-1 text-xs leading-5 text-amber-100/75">نسخهٔ شاخهٔ main بررسی شده؛ هر Node را جداگانه به‌روزرسانی و سلامت اتصالش را پس از راه‌اندازی دوباره تأیید کن.</p></div><div className="flex flex-wrap gap-2">{availableNodeUpdates.map((node) => <Button key={node.id} size="sm" variant="outline" className="border-amber-300/25" onClick={() => setUpdateTarget(node)}><Download size={13}/>به‌روزرسانی {node.public_name || node.name}{nodeUpdateChecks[node.id]?.remote_version ? ` · v${nodeUpdateChecks[node.id].remote_version}` : ''}</Button>)}</div></CardContent></Card>}
     <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
-      <Card><CardHeader><CardTitle className="text-base">Nodeهای متصل</CardTitle><CardDescription>کلیدهای دسترسی در فایل خصوصی همین سرور نگهداری می‌شوند.</CardDescription></CardHeader><CardContent className="space-y-2">{loading ? Array.from({ length: 2 }, (_, index) => <Skeleton key={index} className="h-20 rounded-xl"/>) : nodes.length ? nodes.map((node) => <div key={node.id} className={`rounded-xl border p-3 transition ${selected === node.id ? 'border-primary/40 bg-primary/[.04]' : 'border-border/80 bg-background/30'}`}><div className="flex items-start justify-between gap-2"><button type="button" className="min-w-0 flex-1 text-right" onClick={() => void selectNode(node)}><span className="flex items-center gap-2 font-medium"><Server size={15} className="text-primary"/>{node.public_name || node.name}{node.public_name && node.name !== node.public_name ? <span className="text-xs text-muted-foreground">· {node.name}</span> : null}</span><span dir="ltr" className="mt-1 block truncate text-left font-mono text-[10px] text-muted-foreground">{node.endpoint}</span><span className="mt-1 block text-[10px] text-muted-foreground">ARG Node v{node.protocol_version} · {node.last_seen ? `آخرین ارتباط ${new Date(node.last_seen * 1000).toLocaleString('en-GB')}` : 'هنوز بررسی نشده'}</span><span className="mt-1 block text-[10px] text-muted-foreground">وضعیت اتصال: {node.connection_state || 'بررسی‌نشده'} · سازگاری: {node.compatibility_state || 'نامشخص'} · سطح دسترسی: {node.scopes?.includes('workspace.write') ? 'کامل' : 'فقط‌خواندنی'}</span>{node.workspace_token_expires_at && <span className="mt-1 block text-[10px] text-muted-foreground">انقضای نشست فضای‌کار: {new Date(node.workspace_token_expires_at * 1000).toLocaleString('fa-IR')}</span>}{node.last_error && <span className="mt-2 block rounded-md border border-rose-400/20 bg-rose-400/[.04] p-2 text-[10px] leading-5 text-rose-100">{node.last_error}</span>}{!node.workspace_ready && <span className="mt-2 block rounded-md border border-amber-400/20 bg-amber-400/[.04] p-2 text-[10px] leading-5 text-amber-100">برای سوییچ کامل فضای کار، اتصال قدیمی را حذف و Node را دوباره جفت‌سازی کن.</span>}</button><div className="flex shrink-0 gap-1"><Button size="icon" variant="ghost" aria-label="بررسی Node" title="بررسی Node" onClick={() => void selectNode(node)} disabled={!!busy}>{busy === 'inspect' && selected === node.id ? <LoaderCircle size={14} className="animate-spin"/> : <RefreshCw size={14}/>}</Button><Button size="icon" variant="ghost" aria-label="چرخش کلید اتصال" title="چرخش کلید اتصال" onClick={() => setPending({ kind: 'rotate-node', id: node.id, name: node.name })} disabled={!!busy || !node.scopes?.includes('server.credential.rotate')}>{busy === `rotate:${node.id}` ? <LoaderCircle size={14} className="animate-spin"/> : <Shield size={14}/>}</Button><Button size="icon" variant="ghost" className="text-destructive" aria-label="لغو اتصال" title="لغو اتصال" onClick={() => setPending({ kind: 'remove-node', id: node.id, name: node.name })} disabled={!!busy}><Unplug size={14}/></Button></div></div></div>) : <div className="rounded-xl border border-dashed border-border p-6 text-center text-xs text-muted-foreground">هنوز Node دیگری به این پنل متصل نشده است.</div>}</CardContent></Card>
+      <Card><CardHeader><CardTitle className="text-base">Nodeهای متصل</CardTitle><CardDescription>کلیدهای دسترسی در فایل خصوصی همین سرور نگهداری می‌شوند.</CardDescription></CardHeader><CardContent className="space-y-2">{loading ? Array.from({ length: 2 }, (_, index) => <Skeleton key={index} className="h-20 rounded-xl"/>) : nodes.length ? nodes.map((node) => <div key={node.id} className={`rounded-xl border p-3 transition ${selected === node.id ? 'border-primary/40 bg-primary/[.04]' : 'border-border/80 bg-background/30'}`}><div className="flex items-start justify-between gap-2"><button type="button" className="min-w-0 flex-1 text-right" onClick={() => void selectNode(node)}><span className="flex items-center gap-2 font-medium"><Server size={15} className="text-primary"/>{node.public_name || node.name}{node.public_name && node.name !== node.public_name ? <span className="text-xs text-muted-foreground">· {node.name}</span> : null}</span><span dir="ltr" className="mt-1 block truncate text-left font-mono text-[10px] text-muted-foreground">{node.endpoint}</span><span className="mt-1 block text-[10px] text-muted-foreground">ARG Node v{node.protocol_version} · {node.last_seen ? `آخرین ارتباط ${new Date(node.last_seen * 1000).toLocaleString('en-GB')}` : 'هنوز بررسی نشده'}</span><span className="mt-1 block text-[10px] text-muted-foreground">وضعیت اتصال: {node.connection_state || 'بررسی‌نشده'} · سازگاری: {node.compatibility_state || 'نامشخص'} · سطح دسترسی: {node.scopes?.includes('workspace.write') ? 'کامل' : 'فقط‌خواندنی'}</span>{nodeUpdateChecks[node.id]?.status === 'checking' && <span className="mt-2 inline-flex items-center gap-1.5 text-[10px] text-muted-foreground"><LoaderCircle size={12} className="animate-spin"/>در حال بررسی نسخهٔ main…</span>}{nodeUpdateChecks[node.id]?.status === 'available' && <span className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-400/25 bg-amber-400/[.06] px-2 py-1 text-[10px] text-amber-100"><AlertTriangle size={12}/>نسخهٔ جدید {nodeUpdateChecks[node.id].remote_version ? `v${nodeUpdateChecks[node.id].remote_version}` : 'برای Node آماده است'}</span>}{node.workspace_token_expires_at && <span className="mt-1 block text-[10px] text-muted-foreground">انقضای نشست فضای‌کار: {new Date(node.workspace_token_expires_at * 1000).toLocaleString('fa-IR')}</span>}{node.last_error && <span className="mt-2 block rounded-md border border-rose-400/20 bg-rose-400/[.04] p-2 text-[10px] leading-5 text-rose-100">{node.last_error}</span>}{!node.workspace_ready && <span className="mt-2 block rounded-md border border-amber-400/20 bg-amber-400/[.04] p-2 text-[10px] leading-5 text-amber-100">برای سوییچ کامل فضای کار، اتصال قدیمی را حذف و Node را دوباره جفت‌سازی کن.</span>}</button><div className="flex shrink-0 gap-1"><Button size="icon" variant="ghost" aria-label="بررسی Node" title="بررسی Node" onClick={() => void selectNode(node)} disabled={!!busy}>{busy === 'inspect' && selected === node.id ? <LoaderCircle size={14} className="animate-spin"/> : <RefreshCw size={14}/>}</Button>{nodeUpdateChecks[node.id]?.status === 'available' && <Button size="sm" variant="outline" className="h-8 border-amber-400/25 px-2 text-[10px]" aria-label={`به‌روزرسانی ${node.public_name || node.name}`} onClick={() => setUpdateTarget(node)}><Download size={13}/>به‌روزرسانی</Button>}<Button size="icon" variant="ghost" aria-label="چرخش کلید اتصال" title="چرخش کلید اتصال" onClick={() => setPending({ kind: 'rotate-node', id: node.id, name: node.name })} disabled={!!busy || !node.scopes?.includes('server.credential.rotate')}>{busy === `rotate:${node.id}` ? <LoaderCircle size={14} className="animate-spin"/> : <Shield size={14}/>}</Button><Button size="icon" variant="ghost" className="text-destructive" aria-label="لغو اتصال" title="لغو اتصال" onClick={() => setPending({ kind: 'remove-node', id: node.id, name: node.name })} disabled={!!busy}><Unplug size={14}/></Button></div></div></div>) : <div className="rounded-xl border border-dashed border-border p-6 text-center text-xs text-muted-foreground">هنوز Node دیگری به این پنل متصل نشده است.</div>}</CardContent></Card>
       <div className="space-y-4">
         {nodeStatus && <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Activity size={17} className="text-primary"/>{nodeStatus.hostname || 'وضعیت Node'}</CardTitle><CardDescription>{nodeStatus.os} · {nodeStatus.architecture} · ARG v{nodeStatus.arg_version}</CardDescription></CardHeader><CardContent><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{[['Uptime', uptime(nodeStatus.uptime_seconds)], ['Load average', nodeStatus.load], ['RAM کل', bytes(nodeStatus.memory_total_kib)], ['RAM آزاد', bytes(nodeStatus.memory_available_kib)]].map(([label, value]) => <div key={label} className="rounded-lg border border-border/70 bg-background/30 p-3"><div className="text-[10px] text-muted-foreground">{label}</div><div dir="ltr" className="mt-1 truncate text-left font-mono text-xs">{value}</div></div>)}</div><div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/70 bg-background/25 p-3"><p className="max-w-2xl text-[10px] leading-5 text-muted-foreground">به‌روزرسانی از راه دور فقط برای اتصال‌های سازگار و دارای دسترسی کامل فعال است. پیش از اجرا، نسخه، شاخه و سلامت ارتباط بررسی می‌شوند.</p><Button size="sm" variant="outline" onClick={() => setUpdateTarget(nodes.find((item) => item.id === selected) || null)} disabled={!!busy}><RefreshCw size={14}/>بررسی و به‌روزرسانی Node</Button></div></CardContent></Card>}
         {selected !== null && <Card><CardHeader><CardTitle className="text-base">سرویس‌های Node</CardTitle><CardDescription>عملیات متوقف‌سازی سرویس‌های حیاتی ARG، SSH و شبکه از پروتکل مسدود است.</CardDescription></CardHeader><CardContent className="space-y-2">{busy === 'inspect' && !services.length ? <Skeleton className="h-24 rounded-xl"/> : services.length ? services.filter((service) => service.state === 'active' || service.enabled !== 'disabled').slice(0, 80).map((service) => <div key={service.unit} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border/70 bg-background/25 p-3"><div className="min-w-0"><div dir="ltr" className="truncate text-left font-mono text-xs">{service.unit}</div><p className="mt-1 truncate text-[10px] text-muted-foreground">{service.description} · {service.state}/{service.sub_state} · {service.enabled}</p></div><div className="flex gap-1"><Button size="sm" variant="outline" onClick={() => void runServiceAction(selected, service, 'start')} disabled={!!busy}><Check size={12}/>Start</Button><Button size="sm" variant="outline" onClick={() => void runServiceAction(selected, service, 'restart')} disabled={!!busy}><RefreshCw size={12}/>Restart</Button><Button size="sm" variant="ghost" onClick={() => void runServiceAction(selected, service, 'status')} disabled={!!busy}>Status</Button></div></div>) : <p className="rounded-lg border border-dashed border-border p-5 text-center text-xs text-muted-foreground">Node را انتخاب کن تا سرویس‌ها بارگیری شوند.</p>}</CardContent></Card>}
       </div>
     </div>
     <Card className="mt-5"><CardHeader><CardTitle className="text-sm">پنل‌هایی که اجازهٔ مدیریت این سرور را دارند</CardTitle><CardDescription>نام عمومی از پنل مقابل همگام می‌شود؛ برچسب محلی فقط در همین پنل تغییر می‌کند. لغو دسترسی، کلید کنترل‌کننده را باطل می‌کند.</CardDescription></CardHeader><CardContent className="space-y-2">{controllers.length ? controllers.map((controller) => <div key={controller.id} className="flex flex-wrap items-end justify-between gap-3 rounded-lg border border-border/70 p-3"><div className="min-w-0 flex-1 space-y-2"><Label htmlFor={`controller-name-${controller.id}`}>برچسب محلی این پنل</Label><div className="flex gap-2"><Input id={`controller-name-${controller.id}`} value={controllerNames[controller.id] ?? controller.name} maxLength={80} onChange={(event) => setControllerNames((rows) => ({ ...rows, [controller.id]: event.target.value }))}/><Button size="icon" variant="outline" aria-label="ذخیره برچسب محلی" title="ذخیره برچسب محلی" disabled={!!busy || (controllerNames[controller.id] ?? controller.name).trim() === controller.name} onClick={() => void saveControllerName(controller)}>{busy === `rename:${controller.id}` ? <LoaderCircle size={14} className="animate-spin"/> : <Save size={14}/>}</Button></div><p className="text-[10px] text-muted-foreground">نام عمومی پنل مقابل: <strong>{controller.public_name || controller.name}</strong> · آخرین ارتباط: {controller.last_seen ? new Date(controller.last_seen * 1000).toLocaleString('en-GB') : 'هنوز ارتباطی ثبت نشده'}</p></div><Button size="sm" variant="outline" className="text-destructive" onClick={() => setPending({ kind: 'revoke-controller', id: controller.id, name: controller.public_name || controller.name })}><Trash2 size={13}/>لغو دسترسی</Button></div>) : <p className="rounded-lg border border-dashed border-border p-4 text-xs text-muted-foreground">هیچ پنل دیگری به این سرور دسترسی ندارد.</p>}</CardContent></Card>
+      </TabsContent>
+    </Tabs>
 
     <Dialog open={roleConfirmOpen} onOpenChange={(open) => { if (!busy) setRoleConfirmOpen(open) }}><DialogContent><DialogHeader><DialogTitle>تأیید تغییر نقش سرور</DialogTitle><DialogDescription>نقش از «{role}» به «{nextRole}» تغییر می‌کند. این درخواست اتصال‌های ناسازگار را خودکار حذف نمی‌کند و در صورت وجود وابستگی، با خطا متوقف خواهد شد.</DialogDescription></DialogHeader><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setRoleConfirmOpen(false)} disabled={!!busy}>انصراف</Button><Button onClick={() => void saveRole()} disabled={!!busy}>{busy === 'role' ? <LoaderCircle size={14} className="animate-spin"/> : <Shield size={14}/>}تأیید نقش</Button></div></DialogContent></Dialog>
     <Dialog open={!!pending} onOpenChange={(open) => { if (!open && !busy) setPending(null) }}><DialogContent><DialogHeader><DialogTitle>تأیید عملیات Node</DialogTitle><DialogDescription>{pending?.kind === 'remove-node' ? `اتصال «${pending.name}» از این پنل و کلیدهای محلی حذف می‌شود. اگر مقصد Credential را نامعتبر یا باطل بداند، حذف محلی انجام می‌شود ولی لغو سمت مقصد قابل تأیید نیست. خطای شبکه/TLS یا نداشتن مجوز لغو، حذف را متوقف می‌کند.` : pending?.kind === 'revoke-controller' ? `دسترسی پنل «${pending.name}» به این سرور فوراً لغو می‌شود.` : pending?.kind === 'rotate-node' ? `کلید اتصال Node «${pending.name}» چرخانده می‌شود. در صورت قطع ارتباط، کلید pending برای تلاش دوباره حفظ خواهد شد.` : pending ? `عملیات ${pending.action} روی سرویس ${pending.unit} در سرور راه‌دور اجرا می‌شود.` : ''}</DialogDescription></DialogHeader><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setPending(null)} disabled={!!busy}>انصراف</Button><Button variant="destructive" onClick={() => void runConfirmedAction()} disabled={!!busy}>{busy === 'action' ? <LoaderCircle size={14} className="animate-spin"/> : pending?.kind === 'rotate-node' ? <Shield size={14}/> : <Trash2 size={14}/>}{pending?.kind === 'rotate-node' ? 'تأیید چرخش کلید' : pending?.kind === 'remove-node' ? 'حذف اتصال' : pending?.kind === 'revoke-controller' ? 'لغو دسترسی' : 'تأیید و اجرا'}</Button></div></DialogContent></Dialog>

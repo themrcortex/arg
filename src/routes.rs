@@ -82,6 +82,10 @@ pub(super) fn router(state: AppState) -> Router {
             get(federation::node_update_progress),
         )
         .route(
+            "/api/nodes/{id}/update/logs",
+            get(federation::node_update_logs).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
             "/api/nodes/{id}/update/cancel",
             post(federation::node_update_cancel),
         )
@@ -120,6 +124,10 @@ pub(super) fn router(state: AppState) -> Router {
         .route(
             "/api/federation/update/progress",
             get(federation::remote_update_progress),
+        )
+        .route(
+            "/api/federation/update/logs",
+            get(federation::remote_update_logs).layer(middleware::from_fn(api_keys::no_store)),
         )
         .route(
             "/api/federation/update/cancel",
