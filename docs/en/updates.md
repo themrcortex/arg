@@ -7,7 +7,7 @@ The selected branch determines which GitHub ref is fetched and which version/API
 
 ## Build cache modes
 
-- **Fast:** retains Rust `target` and compilation cache. Future updates are often faster, but disk remains occupied.
+- **Fast:** retains Rust `target` and incrementally compiles ARG's application crate. The first build after a complete update, an empty cache, or changed Rust dependencies can still take a while because changed dependencies must be rebuilt. Later builds are usually shorter while dependencies stay unchanged. This mode keeps build artifacts on disk.
 - **Complete:** clears the old cache before building and removes the new cache after build completion. Compilation still needs temporary disk space; this reduces persistent cache at the cost of longer updates.
 
 Cache size depends on Rust target, architecture, and dependencies; there is no universal fixed value. Complete mode does not delete source, installed binary, or rollback files.

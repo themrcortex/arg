@@ -115,9 +115,11 @@ mkdir -p "$SOURCE_DIR/frontend/dist"
 printf 'known-good-active-binary\n' > "$BINARY"
 df() { printf 'Filesystem 1M-blocks Used Available Use%% Mounted on\nmock 10000 1 9999 1%% /tmp\n'; }
 calls=()
+commands=()
 run_with_progress() {
   calls+=("$1")
-  if [[ "$1" == "Compiling the optimized Rust release" ]]; then
+  commands+=("$*")
+  if [[ "$1" == "Compiling the optimized Rust release" || "$1" == "Fast update: incrementally compiling the ARG application" ]]; then
     [[ "${ARG_TEST_BUILD_FAIL:-0}" != 1 ]] || return 137
     mkdir -p "$SOURCE_DIR/target/release"
     touch "$SOURCE_DIR/target/release/arg"
@@ -131,10 +133,15 @@ build_release
 [[ -z "$ARG_BUILD_SWAP_FILE" && -z "$SWAP_TEST_ACTIVE" ]]
 [[ "${calls[*]}" == "Clearing previous Rust build cache Compiling the optimized Rust release" ]]
 calls=()
+commands=()
 ARG_UPDATE_CONTEXT=update ARG_UPDATE_MODE=fast
 build_release
-[[ "${calls[*]}" == "Compiling the optimized Rust release" ]]
+[[ "${calls[*]}" == "Fast update: incrementally compiling the ARG application" ]]
+[[ "${commands[*]}" == *'cargo +stable rustc --locked --release --bin arg -- -C opt-level="$3" -C incremental="$2"'* ]]
+[[ "${commands[*]}" == *"$SOURCE_DIR/target/release/incremental/arg-fast 0"* ]]
+[[ "${commands[*]}" == *"CARGO_INCREMENTAL=0"* ]]
 calls=()
+commands=()
 ARG_UPDATE_CONTEXT= ARG_UPDATE_MODE=complete
 build_release
 [[ "${calls[*]}" == "Compiling the optimized Rust release" ]]
@@ -144,6 +151,14 @@ if build_release; then
   exit 1
 fi
 [[ -z "$ARG_BUILD_SWAP_FILE" && -z "$SWAP_TEST_ACTIVE" ]]
+grep -q 'known-good-active-binary' "$BINARY"
+unset ARG_TEST_BUILD_FAIL
+ARG_UPDATE_MODE=fast
+ARG_TEST_BUILD_FAIL=1
+if build_release; then
+  echo 'failed fast compilation was reported as successful' >&2
+  exit 1
+fi
 grep -q 'known-good-active-binary' "$BINARY"
 unset ARG_TEST_BUILD_FAIL
 

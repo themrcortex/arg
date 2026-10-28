@@ -409,7 +409,19 @@ build_release() {
   trap 'cleanup_release_build_swap; exit 130' INT
   trap 'cleanup_release_build_swap; exit 143' TERM
   prepare_release_build_swap "$memory_budget_mb" || true
-  if run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"; then
+  if [[ "${ARG_UPDATE_CONTEXT:-}" == "update" && "${ARG_UPDATE_MODE:-complete}" == "fast" ]]; then
+    local incremental_dir="$SOURCE_DIR/target/release/incremental/arg-fast"
+    local app_opt_level="${CARGO_PROFILE_RELEASE_OPT_LEVEL:-1}"
+    mkdir -p "$incremental_dir"
+    # Keep dependency fingerprints identical to a regular Release build. Only
+    # ARG's final binary crate gets faster codegen and a persistent incremental cache.
+    if run_with_progress "Fast update: incrementally compiling the ARG application" \
+      env CARGO_INCREMENTAL=0 bash -c 'cd "$1" && cargo +stable rustc --locked --release --bin arg -- -C opt-level="$3" -C incremental="$2"' _ "$SOURCE_DIR" "$incremental_dir" "$app_opt_level"; then
+      compile_result=0
+    else
+      compile_result=$?
+    fi
+  elif run_with_progress "Compiling the optimized Rust release" bash -c 'cd "$1" && cargo +stable build --locked --release' _ "$SOURCE_DIR"; then
     compile_result=0
   else
     compile_result=$?
@@ -1430,7 +1442,7 @@ select_update_options() {
   [[ "$default_mode" == fast || "$default_mode" == complete ]] || default_mode="complete"
   if [[ -z "$requested_mode" ]]; then
     if [[ -r /dev/tty && -t 1 && "${ARG_UPDATE_RESERVED:-0}" != "1" ]]; then
-      info "Fast keeps Rust build cache on disk for quicker future updates. Complete clears it before and after compilation; builds take longer."
+      info "Fast retains Rust build artifacts and incrementally compiles ARG; the first build after cache/dependency changes can still be long. Complete clears the cache and takes longer."
       local default_choice=2
       [[ "$default_mode" == fast ]] && default_choice=1
       read_answer "Build mode [1=fast / 2=complete] [$default_choice]: " answer "$default_choice"

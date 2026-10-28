@@ -32,6 +32,7 @@
 - Use the provided ARG logo in the sign-in screen and sidebar, show its cropped symbol in the collapsed sidebar, and remove the duplicate control-center and LIVE labels.
 
 ### Fixed
+- Make fast Rust updates incrementally compile ARG while retaining dependency artifacts, and clarify the cold-cache/dependency-change time cost.
 - Normalize ZIP uploads with one shared top-level project directory, and commit a deployment job with its first stage atomically so failed stage writes cannot leave a permanently queued row.
 - Keep deployment job status and detailed live stage logs readable after refresh; report database/migration failures with the actual cause.
 - Keep updater cleanup and rollback state valid after `update_app` exits, and retain the active binary when constrained-memory compilation fails.
