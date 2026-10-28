@@ -921,15 +921,14 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let db_path = env::var("ARG_DB").unwrap_or_else(|_| "data/arg.db".into());
-    let db = Connection::open(db_path)?;
+    let mut db = Connection::open(db_path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
-    let user_id = db.query_row(
-        "SELECT id FROM users WHERE username=?1 AND enabled=1",
-        [&username],
-        |row| row.get::<_, i64>(0),
-    );
-    let user_id = match user_id {
-        Ok(user_id) => user_id,
+    let new_hash = Argon2::default()
+        .hash_password(new_password.as_bytes(), &SaltString::generate(&mut OsRng))
+        .map_err(|_| io::Error::other("Password hashing failed"))?
+        .to_string();
+    match reset_account_password(&mut db, &username, &new_hash) {
+        Ok(()) => {}
         Err(rusqlite::Error::QueryReturnedNoRows) => {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -938,24 +937,41 @@ fn change_password_cli() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
         Err(error) => return Err(error.into()),
-    };
-    let new_hash = Argon2::default()
-        .hash_password(new_password.as_bytes(), &SaltString::generate(&mut OsRng))
-        .map_err(|_| io::Error::other("Password hashing failed"))?
-        .to_string();
-    db.execute(
-        "UPDATE users SET password_hash=?1 WHERE id=?2",
-        params![new_hash, user_id],
-    )?;
-    db.execute("DELETE FROM sessions WHERE user_id=?1", [user_id])?;
-    audit(
-        &db,
-        &username,
-        "account.password",
-        "Password reset by root; all sessions revoked",
-    );
+    }
     println!("Password reset successfully. Sign in again with the new password.");
     Ok(())
+}
+
+fn reset_account_password(
+    db: &mut Connection,
+    username: &str,
+    password_hash: &str,
+) -> rusqlite::Result<()> {
+    // This CLI opens its own connection, so enable the per-connection FK behavior
+    // explicitly before beginning the transaction. Revoking sessions must also
+    // revoke session-scoped grants through their declared ON DELETE CASCADE rules.
+    db.pragma_update(None, "foreign_keys", "ON")?;
+    let tx = db.transaction()?;
+    let user_id = tx.query_row(
+        "SELECT id FROM users WHERE username=?1 AND enabled=1",
+        [username],
+        |row| row.get::<_, i64>(0),
+    )?;
+    tx.execute(
+        "UPDATE users SET password_hash=?1 WHERE id=?2",
+        params![password_hash, user_id],
+    )?;
+    tx.execute("DELETE FROM sessions WHERE user_id=?1", [user_id])?;
+    tx.execute(
+        "INSERT INTO audit (at,actor,action,detail) VALUES (?1,?2,?3,?4)",
+        params![
+            now(),
+            username,
+            "account.password",
+            "Password reset by root; all sessions revoked"
+        ],
+    )?;
+    tx.commit()
 }
 async fn logout(
     State(state): State<AppState>,
@@ -5225,6 +5241,82 @@ mod update_progress_tests {
         valid_tls_source_path, valid_update_build_mode, AppState, Connection, Credentials,
         FirewallRuleInput,
     };
+
+    fn password_reset_test_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT UNIQUE,password_hash TEXT,enabled INTEGER);
+             CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE);
+             CREATE TABLE mysql_authorizations(session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);
+             CREATE TABLE audit(id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);
+             INSERT INTO users VALUES(1,'admin','old-hash',1);
+             INSERT INTO sessions VALUES('session-hash',1);
+             INSERT INTO mysql_authorizations VALUES('session-hash',1,1);",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn root_password_reset_updates_password_revokes_session_grants_and_audits_atomically() {
+        let mut db = password_reset_test_db();
+        super::reset_account_password(&mut db, "admin", "new-hash").unwrap();
+
+        let password_hash: String = db
+            .query_row("SELECT password_hash FROM users WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let session_count: i64 = db
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let mysql_authorization_count: i64 = db
+            .query_row("SELECT count(*) FROM mysql_authorizations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let audit_count: i64 = db
+            .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(password_hash, "new-hash");
+        assert_eq!(session_count, 0);
+        assert_eq!(mysql_authorization_count, 0);
+        assert_eq!(audit_count, 1);
+    }
+
+    #[test]
+    fn root_password_reset_rolls_back_if_audit_insert_fails() {
+        let mut db = password_reset_test_db();
+        db.execute_batch(
+            "CREATE TRIGGER reject_password_audit BEFORE INSERT ON audit
+             BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;",
+        )
+        .unwrap();
+
+        assert!(super::reset_account_password(&mut db, "admin", "new-hash").is_err());
+        let password_hash: String = db
+            .query_row("SELECT password_hash FROM users WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let session_count: i64 = db
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let mysql_authorization_count: i64 = db
+            .query_row("SELECT count(*) FROM mysql_authorizations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let audit_count: i64 = db
+            .query_row("SELECT count(*) FROM audit", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(password_hash, "old-hash");
+        assert_eq!(session_count, 1);
+        assert_eq!(mysql_authorization_count, 1);
+        assert_eq!(audit_count, 0);
+    }
 
     #[test]
     fn login_throttles_are_scoped_to_the_client_ip_and_only_trust_forwarded_ip_from_loopback() {
