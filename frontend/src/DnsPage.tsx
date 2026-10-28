@@ -72,7 +72,11 @@ export function DnsPage({ Heading: PageHeading, notify }: { Heading: Heading; no
       if (requestId !== recordsRequestRef.current) return
       const totalPages = Math.max(1, Math.min(10_000, result.pagination?.total_pages || 1))
       setTotalRecordPages(totalPages)
-      if (page > totalPages) { setRecordPage(totalPages); return }
+      if (page > totalPages) {
+        setRecords([])
+        setRecordPage(totalPages)
+        return
+      }
       setRecords(result.records || [])
     } catch (cause) {
       if (requestId === recordsRequestRef.current) throw cause
@@ -84,7 +88,10 @@ export function DnsPage({ Heading: PageHeading, notify }: { Heading: Heading; no
     setLoading(true); setError(''); setApiUnavailable(false)
     try { await loadConnections() } catch (cause) {
       if (cause instanceof ApiError && cause.status === 404) {
+        selectedRef.current = ''
+        recordsRequestRef.current += 1
         setConnections([]); setSelected(''); setRecords([]); setApiUnavailable(true)
+        setRecordPage(1); setTotalRecordPages(1)
       } else setError(cause instanceof Error ? cause.message : 'اتصال‌های DNS بارگذاری نشدند.')
     }
     finally { setLoading(false) }
