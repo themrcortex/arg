@@ -21,6 +21,10 @@
 - Render the full logo and collapsed sidebar mark in monochrome on the light theme.
 - Use the provided ARG logo in the sign-in screen and sidebar, show its cropped symbol in the collapsed sidebar, and remove the duplicate control-center and LIVE labels.
 
+### Fixed
+- Rebuild and commit the embedded frontend bundle with UI source changes; CI now fails when `frontend/dist` is stale, preventing Rust releases from silently shipping the previous interface.
+- Fingerprint the service worker from the generated frontend and check for updates when the panel opens, regains focus, or remains active, then reload when a new worker takes control.
+
 ## v0.7.0 — 2026-10-27
 
 ### Added

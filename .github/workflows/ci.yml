@@ -37,6 +37,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+      - run: bash ../scripts/verify-embedded-frontend.sh
 
   documentation:
     name: Documentation site
