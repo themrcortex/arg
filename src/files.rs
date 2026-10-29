@@ -1,8 +1,16 @@
 use super::*;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use std::{
+    ffi::CString,
+    fs::File,
+    io::Read,
+    os::{fd::{AsRawFd, FromRawFd}, unix::ffi::OsStrExt},
+    path::Component,
+};
 
 const MAX_FILE_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
 const MAX_EDITOR_FILE_BYTES: usize = 1024 * 1024;
+const FILE_OPERATION_FREE_SPACE_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SCAN_LARGEST_FILES: usize = 100;
 const MAX_SCAN_LARGEST_DIRECTORIES: usize = 100;
 const MAX_SCAN_DIRECTORY_CHILDREN: usize = 2000;
@@ -248,28 +256,214 @@ pub(super) async fn file_action(
     Ok(Json(response["data"].clone()))
 }
 
-fn canonical_existing(path: &str) -> Result<std::path::PathBuf, String> {
+fn validated_absolute_path(path: &str) -> Result<std::path::PathBuf, String> {
     if path.len() > 4096 || !path.starts_with('/') || path.split('/').any(|part| part == "..") {
         return Err("Use a valid absolute path without parent-directory segments.".into());
     }
+    Ok(std::path::PathBuf::from(path))
+}
+
+fn canonical_existing(path: &str) -> Result<std::path::PathBuf, String> {
+    let path = validated_absolute_path(path)?;
     std::fs::canonicalize(path).map_err(|error| format!("Could not open path: {error}"))
 }
 
-fn lexical_existing(path: &str) -> Result<std::path::PathBuf, String> {
-    if path.len() > 4096 || !path.starts_with('/') || path.split('/').any(|part| part == "..") {
-        return Err("Use a valid absolute path without parent-directory segments.".into());
+struct AnchoredEntry {
+    parent: File,
+    name: CString,
+    path: std::path::PathBuf,
+}
+
+fn c_name(name: &std::ffi::OsStr) -> Result<CString, String> {
+    CString::new(name.as_bytes()).map_err(|_| "Path contains a NUL byte.".to_owned())
+}
+
+fn openat_file(parent: &File, name: &CString, flags: i32, mode: u32) -> std::io::Result<File> {
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags, mode as libc::mode_t) };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { File::from_raw_fd(fd) })
     }
-    let requested = std::path::Path::new(path);
-    let parent = requested.parent().ok_or("Invalid path")?;
-    let name = requested
-        .file_name()
-        .ok_or("Cannot modify a filesystem root")?;
-    let parent = std::fs::canonicalize(parent)
-        .map_err(|error| format!("Could not access parent directory: {error}"))?;
-    let target = parent.join(name);
-    std::fs::symlink_metadata(&target)
-        .map_err(|error| format!("Could not access path: {error}"))?;
-    Ok(target)
+}
+
+fn open_directory_descriptor(path: &std::path::Path) -> Result<File, String> {
+    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
+        return Err("Use a valid absolute directory path.".into());
+    }
+    let root = CString::new("/").map_err(|error| error.to_string())?;
+    let root_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if root_fd < 0 { return Err(std::io::Error::last_os_error().to_string()); }
+    let mut current = unsafe { File::from_raw_fd(root_fd) };
+    for component in path.components() {
+        let Component::Normal(name) = component else { continue };
+        let name = c_name(name)?;
+        current = openat_file(
+            &current,
+            &name,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+        ).map_err(|error| format!("Could not securely open directory component: {error}"))?;
+    }
+    Ok(current)
+}
+
+fn anchor_directory(path: &str) -> Result<(std::path::PathBuf, File), String> {
+    let requested = validated_absolute_path(path)?;
+    let descriptor = open_directory_descriptor(&requested)?;
+    if !descriptor.metadata().map_err(|error| error.to_string())?.is_dir() {
+        return Err("The destination is not a directory.".into());
+    }
+    let actual = std::fs::canonicalize(format!("/proc/self/fd/{}", descriptor.as_raw_fd()))
+        .map_err(|error| format!("Could not resolve the opened destination directory: {error}"))?;
+    Ok((actual, descriptor))
+}
+
+fn anchor_existing_entry(path: &str) -> Result<AnchoredEntry, String> {
+    let requested = validated_absolute_path(path)?;
+    let parent_path = requested.parent().ok_or("Cannot operate on the filesystem root")?;
+    let parent = open_directory_descriptor(parent_path)?;
+    let name = c_name(requested.file_name().ok_or("Invalid file name")?)?;
+    entry_metadata(&parent, &name).map_err(|error| format!("Could not access path securely: {error}"))?;
+    let actual_parent = std::fs::canonicalize(format!("/proc/self/fd/{}", parent.as_raw_fd()))
+        .map_err(|error| format!("Could not resolve the opened parent directory: {error}"))?;
+    Ok(AnchoredEntry { parent, name: name.clone(), path: actual_parent.join(std::ffi::OsStr::from_bytes(name.as_bytes())) })
+}
+
+fn entry_metadata(parent: &File, name: &CString) -> std::io::Result<std::fs::Metadata> {
+    let entry = openat_file(parent, name, libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0)?;
+    entry.metadata()
+}
+
+fn open_readonly_entry(parent: &File, name: &CString) -> std::io::Result<File> {
+    openat_file(parent, name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK, 0)
+}
+
+fn available_bytes_for_fd(fd: std::os::fd::RawFd) -> Result<u64, String> {
+    let mut stats = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    if unsafe { libc::fstatvfs(fd, &mut stats) } != 0 {
+        return Err(format!("Could not check destination free space: {}", std::io::Error::last_os_error()));
+    }
+    let block_size = if stats.f_frsize == 0 { stats.f_bsize } else { stats.f_frsize } as u64;
+    Ok((stats.f_bavail as u64).saturating_mul(block_size))
+}
+
+fn copy_space_sufficient(available: u64, incoming_bytes: u64) -> bool {
+    incoming_bytes
+        .checked_add(FILE_OPERATION_FREE_SPACE_RESERVE_BYTES)
+        .is_some_and(|required| available >= required)
+}
+
+fn ensure_copy_space(directory: &File, incoming_bytes: u64) -> Result<(), String> {
+    ensure_copy_space_fd(directory.as_raw_fd(), incoming_bytes)
+}
+
+fn ensure_copy_space_fd(fd: std::os::fd::RawFd, incoming_bytes: u64) -> Result<(), String> {
+    let available = available_bytes_for_fd(fd)?;
+    if copy_space_sufficient(available, incoming_bytes) {
+        Ok(())
+    } else {
+        Err("The operation would consume the 64 MiB free-space reserve; free space on the destination first.".into())
+    }
+}
+
+fn dir_entry_names(directory: &File) -> Result<Vec<std::ffi::OsString>, String> {
+    let descriptor_path = format!("/proc/self/fd/{}", directory.as_raw_fd());
+    std::fs::read_dir(descriptor_path)
+        .map_err(|error| error.to_string())?
+        .map(|entry| entry.map(|entry| entry.file_name()).map_err(|error| error.to_string()))
+        .collect()
+}
+
+fn open_or_create_directory(parent: &File, name: &CString) -> Result<File, String> {
+    match openat_file(parent, name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0) {
+        Ok(directory) => Ok(directory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let result = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o755) };
+            if result != 0 {
+                let create_error = std::io::Error::last_os_error();
+                if create_error.kind() != std::io::ErrorKind::AlreadyExists { return Err(create_error.to_string()); }
+            }
+            openat_file(parent, name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0)
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn ensure_zip_parent(root: &File, relative_parent: &std::path::Path) -> Result<(File, CString), String> {
+    let components = relative_parent.components().collect::<Vec<_>>();
+    let mut current = root.try_clone().map_err(|error| error.to_string())?;
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        let Component::Normal(name) = component else { return Err("Archive contains an unsafe directory path.".into()); };
+        let name = c_name(name)?;
+        current = open_or_create_directory(&current, &name)?;
+    }
+    let last = components.last().and_then(|component| match component { Component::Normal(name) => Some(name), _ => None }).ok_or("Archive entry has an invalid file name")?;
+    Ok((current, c_name(last)?))
+}
+
+fn unlinkat_entry(parent: &File, name: &CString, flags: i32) -> std::io::Result<()> {
+    let result = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+fn renameat_noreplace(source_parent: &File, source: &CString, destination_parent: &File, destination: &CString) -> std::io::Result<()> {
+    let result = unsafe { libc::syscall(libc::SYS_renameat2, source_parent.as_raw_fd(), source.as_ptr(), destination_parent.as_raw_fd(), destination.as_ptr(), libc::RENAME_NOREPLACE) };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+fn renameat_exchange(parent: &File, left: &CString, right: &CString) -> std::io::Result<()> {
+    let result = unsafe { libc::syscall(libc::SYS_renameat2, parent.as_raw_fd(), left.as_ptr(), parent.as_raw_fd(), right.as_ptr(), libc::RENAME_EXCHANGE) };
+    if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+fn remove_entry_tree(parent: &File, name: &CString, depth: usize) -> Result<(), String> {
+    if depth > 256 { return Err("Directory nesting is too deep for safe removal.".into()); }
+    let metadata = entry_metadata(parent, name).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        return unlinkat_entry(parent, name, 0).map_err(|error| error.to_string());
+    }
+    if !metadata.is_dir() { return Err("Unsupported filesystem object.".into()); }
+    let directory = openat_file(parent, name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0)
+        .map_err(|error| error.to_string())?;
+    for child in dir_entry_names(&directory)? {
+        let child = c_name(&child)?;
+        remove_entry_tree(&directory, &child, depth + 1)?;
+    }
+    unlinkat_entry(parent, name, libc::AT_REMOVEDIR).map_err(|error| error.to_string())
+}
+
+fn copy_entry_tree(source_parent: &File, source: &CString, destination_parent: &File, destination: &CString, depth: usize, count: &mut usize) -> Result<(), String> {
+    if depth > 64 { return Err("Directory nesting is too deep to copy safely.".into()); }
+    *count += 1;
+    if *count > 10_000 { return Err("A copy operation is limited to 10,000 filesystem entries.".into()); }
+    let metadata = entry_metadata(source_parent, source).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() { return Err("Copying symbolic links is disabled to prevent copying files outside the selected tree.".into()); }
+    if metadata.is_file() {
+        let input = open_readonly_entry(source_parent, source).map_err(|error| error.to_string())?;
+        let input_metadata = input.metadata().map_err(|error| error.to_string())?;
+        if !input_metadata.is_file() { return Err("Only regular files can be copied.".into()); }
+        ensure_copy_space(destination_parent, input_metadata.len())?;
+        let mut output = openat_file(destination_parent, destination, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600)
+            .map_err(|error| error.to_string())?;
+        let copied = std::io::copy(&mut input.take(input_metadata.len()), &mut output).map_err(|error| error.to_string())?;
+        if copied != input_metadata.len() { return Err("The source file changed size during copy; the partial copy was discarded.".into()); }
+        output.sync_all().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    if !metadata.is_dir() { return Err("Only regular files and directories can be copied.".into()); }
+    let result = unsafe { libc::mkdirat(destination_parent.as_raw_fd(), destination.as_ptr(), 0o700) };
+    if result != 0 { return Err(std::io::Error::last_os_error().to_string()); }
+    let source_dir = openat_file(source_parent, source, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0)
+        .map_err(|error| error.to_string())?;
+    let destination_dir = openat_file(destination_parent, destination, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0)
+        .map_err(|error| error.to_string())?;
+    for child in dir_entry_names(&source_dir)? {
+        let child_name = c_name(&child)?;
+        copy_entry_tree(&source_dir, &child_name, &destination_dir, &child_name, depth + 1, count)?;
+    }
+    Ok(())
 }
 
 fn safe_name(name: &str) -> bool {
@@ -296,18 +490,6 @@ fn is_protected_system_root(path: &std::path::Path) -> bool {
             .file_name()
             .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|name| protected.contains(&name))
-}
-
-fn copy_tree_transactional(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> Result<(), String> {
-    let mut count = 0;
-    if let Err(error) = copy_tree(source, destination, 0, &mut count) {
-        let _ = remove_tree(destination);
-        return Err(error);
-    }
-    Ok(())
 }
 
 fn path_metadata(path: &std::path::Path, name: String) -> Value {
@@ -580,6 +762,7 @@ fn scan_disk_usage(path: &str, mode: &str) -> Result<Value, String> {
     )
 }
 
+#[cfg(test)]
 fn copy_tree(
     source: &std::path::Path,
     destination: &std::path::Path,
@@ -617,51 +800,50 @@ fn copy_tree(
     Ok(())
 }
 
+#[cfg(test)]
 fn remove_tree(path: &std::path::Path) -> Result<(), String> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(path).map_err(|error| error.to_string())
-    } else if metadata.is_dir() {
-        std::fs::remove_dir_all(path).map_err(|error| error.to_string())
-    } else {
-        Err("Unsupported filesystem object.".into())
-    }
+    let entry = anchor_existing_entry(path.to_str().ok_or("Invalid path")?)?;
+    remove_entry_tree(&entry.parent, &entry.name, 0)
 }
 
-fn save_file_atomically(target: &std::path::Path, content: &[u8]) -> Result<(), String> {
+fn save_file_atomically(entry: &AnchoredEntry, content: &[u8]) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::metadata(target).map_err(|error| error.to_string())?;
-    let parent = target.parent().ok_or("Invalid file path")?;
+    let original = open_readonly_entry(&entry.parent, &entry.name).map_err(|error| error.to_string())?;
+    let metadata = original.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() { return Err("Only regular files can be edited.".into()); }
     for _ in 0..8 {
-        let temporary = parent.join(format!(
-            ".arg-edit-{}-{:016x}",
-            std::process::id(),
-            rand::random::<u64>()
-        ));
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-        {
+        let temp_name = CString::new(format!(".arg-edit-{}-{:016x}", std::process::id(), rand::random::<u64>())).map_err(|error| error.to_string())?;
+        let mut file = match openat_file(&entry.parent, &temp_name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.to_string()),
         };
+        let mut displaced_target_at_temp = false;
         let result = (|| {
             file.write_all(content).map_err(|error| error.to_string())?;
             file.sync_all().map_err(|error| error.to_string())?;
-            drop(file);
-            let path = std::ffi::CString::new(temporary.to_string_lossy().as_bytes())
-                .map_err(|_| "Invalid temporary file path")?;
-            if unsafe { libc::chown(path.as_ptr(), metadata.uid(), metadata.gid()) } != 0 {
+            if unsafe { libc::fchown(file.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
                 return Err(std::io::Error::last_os_error().to_string());
             }
-            std::fs::set_permissions(&temporary, metadata.permissions())
-                .map_err(|error| error.to_string())?;
-            std::fs::rename(&temporary, target).map_err(|error| error.to_string())
+            if unsafe { libc::fchmod(file.as_raw_fd(), metadata.permissions().mode()) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            file.sync_all().map_err(|error| error.to_string())?;
+            drop(file);
+            renameat_exchange(&entry.parent, &temp_name, &entry.name).map_err(|error| error.to_string())?;
+            displaced_target_at_temp = true;
+            let displaced = entry_metadata(&entry.parent, &temp_name).map_err(|error| error.to_string())?;
+            if displaced.dev() != metadata.dev() || displaced.ino() != metadata.ino() {
+                renameat_exchange(&entry.parent, &temp_name, &entry.name).map_err(|error| format!("The file changed during save, and restoring it failed: {error}"))?;
+                displaced_target_at_temp = false;
+                return Err("The file changed while it was being saved; no replacement was applied.".into());
+            }
+            unlinkat_entry(&entry.parent, &temp_name, 0).map_err(|error| error.to_string())?;
+            displaced_target_at_temp = false;
+            Ok(())
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
+        if result.is_err() && !displaced_target_at_temp {
+            let _ = unlinkat_entry(&entry.parent, &temp_name, 0);
         }
         return result;
     }
@@ -696,23 +878,27 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
             .as_str()
             .ok_or_else(|| "A file path is required.".to_owned())
             .and_then(|path| {
-                let path = canonical_existing(path)?;
-                let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+                let entry = anchor_existing_entry(path)?;
+                let file = open_readonly_entry(&entry.parent, &entry.name).map_err(|error| error.to_string())?;
+                let metadata = file.metadata().map_err(|error| error.to_string())?;
                 if !metadata.is_file() {
                     return Err("Select a regular file to download.".into());
                 }
                 if metadata.len() > 16 * 1024 * 1024 {
                     return Err("Downloads are limited to 16 MiB.".into());
                 }
-                let content = std::fs::read(path).map_err(|error| error.to_string())?;
+                let mut content = Vec::with_capacity(metadata.len() as usize);
+                file.take(16 * 1024 * 1024 + 1).read_to_end(&mut content).map_err(|error| error.to_string())?;
+                if content.len() > 16 * 1024 * 1024 { return Err("Downloads are limited to 16 MiB.".into()); }
                 Ok(json!({"content":BASE64.encode(content)}))
             }),
         "file-read" => request["path"]
             .as_str()
             .ok_or_else(|| "A file path is required.".to_owned())
             .and_then(|path| {
-                let path = canonical_existing(path)?;
-                let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+                let entry = anchor_existing_entry(path)?;
+                let file = open_readonly_entry(&entry.parent, &entry.name).map_err(|error| error.to_string())?;
+                let metadata = file.metadata().map_err(|error| error.to_string())?;
                 if !metadata.is_file() {
                     return Err("Select a regular file to open in the editor.".into());
                 }
@@ -722,9 +908,11 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
                             .into(),
                     );
                 }
-                let content = std::fs::read_to_string(path).map_err(|error| {
+                let mut content = String::new();
+                file.take(1024 * 1024 + 1).read_to_string(&mut content).map_err(|error| {
                     format!("This file is binary or is not valid UTF-8: {error}")
                 })?;
+                if content.len() > 1024 * 1024 { return Err("The editor is limited to 1 MiB per file. Use Download for larger files.".into()); }
                 Ok(json!({"content":content}))
             }),
         "file-action" => execute_action(request),
@@ -744,27 +932,24 @@ fn execute_action(request: &Value) -> Result<Value, String> {
         "zip" => create_zip_archive(request),
         "unzip" => extract_zip_archive(request),
         "mkdir" | "create" | "upload" => {
-            let directory = canonical_existing(
+            let (directory, directory_fd) = anchor_directory(
                 request["path"]
                     .as_str()
                     .ok_or("A parent directory is required")?,
             )?;
-            if !directory.is_dir() {
-                return Err("The destination is not a directory.".into());
-            }
             let name = request["name"].as_str().ok_or("A file name is required")?;
             if !safe_name(name) {
                 return Err("Use a simple file name without slashes or control characters.".into());
             }
+            let name_c = CString::new(name).map_err(|error| error.to_string())?;
             let target = directory.join(name);
             match operation {
-                "mkdir" => std::fs::create_dir(&target).map_err(|error| error.to_string())?,
+                "mkdir" => {
+                    let result = unsafe { libc::mkdirat(directory_fd.as_raw_fd(), name_c.as_ptr(), 0o755) };
+                    if result != 0 { return Err(std::io::Error::last_os_error().to_string()); }
+                }
                 "create" => {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&target)
-                        .map_err(|error| error.to_string())?;
+                    openat_file(&directory_fd, &name_c, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644).map_err(|error| error.to_string())?;
                 }
                 _ => {
                     let encoded = request["content"].as_str().ok_or("Missing upload data")?;
@@ -774,24 +959,20 @@ fn execute_action(request: &Value) -> Result<Value, String> {
                     if content.len() > MAX_FILE_UPLOAD_BYTES {
                         return Err("Uploads are limited to 2 MiB per file.".into());
                     }
-                    let mut file = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&target)
-                        .map_err(|error| error.to_string())?;
+                    let mut file = openat_file(&directory_fd, &name_c, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644).map_err(|error| error.to_string())?;
                     if let Err(error) = file.write_all(&content) {
                         drop(file);
-                        let _ = std::fs::remove_file(&target);
+                        let _ = unlinkat_entry(&directory_fd, &name_c, 0);
                         return Err(error.to_string());
                     }
+                    file.sync_all().map_err(|error| error.to_string())?;
                 }
             }
             Ok(path_metadata(&target, name.into()))
         }
         "save" => {
-            let target =
-                canonical_existing(request["path"].as_str().ok_or("A file path is required")?)?;
-            if !target.is_file() {
+            let entry = anchor_existing_entry(request["path"].as_str().ok_or("A file path is required")?)?;
+            if !open_readonly_entry(&entry.parent, &entry.name).map_err(|error| error.to_string())?.metadata().map_err(|error| error.to_string())?.is_file() {
                 return Err("Only regular files can be edited.".into());
             }
             let encoded = request["content"].as_str().ok_or("Missing file content")?;
@@ -801,10 +982,10 @@ fn execute_action(request: &Value) -> Result<Value, String> {
             if content.len() > MAX_EDITOR_FILE_BYTES {
                 return Err("The editor is limited to 1 MiB per file.".into());
             }
-            save_file_atomically(&target, &content)?;
+            save_file_atomically(&entry, &content)?;
             Ok(path_metadata(
-                &target,
-                target
+                &entry.path,
+                entry.path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
@@ -812,12 +993,12 @@ fn execute_action(request: &Value) -> Result<Value, String> {
             ))
         }
         "rename" => {
-            let source = lexical_existing(
+            let source = anchor_existing_entry(
                 request["path"]
                     .as_str()
                     .ok_or("A source path is required")?,
             )?;
-            if is_protected_system_root(&source) {
+            if is_protected_system_root(&source.path) {
                 return Err("Renaming a top-level system directory is blocked.".into());
             }
             let new_name = request["new_name"]
@@ -826,25 +1007,22 @@ fn execute_action(request: &Value) -> Result<Value, String> {
             if !safe_name(new_name) {
                 return Err("Use a simple file name without slashes or control characters.".into());
             }
-            let destination = source
-                .parent()
-                .ok_or("Cannot rename this filesystem root")?
-                .join(new_name);
-            if destination.exists() {
-                return Err("A file with that name already exists.".into());
-            }
-            std::fs::rename(&source, &destination).map_err(|error| error.to_string())?;
+            let new_name_c = CString::new(new_name).map_err(|error| error.to_string())?;
+            renameat_noreplace(&source.parent, &source.name, &source.parent, &new_name_c).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists { "A file with that name already exists.".to_owned() } else { error.to_string() }
+            })?;
+            let destination = source.path.parent().ok_or("Cannot rename this filesystem root")?.join(new_name);
             Ok(path_metadata(&destination, new_name.into()))
         }
         "symlink-update" => {
-            use std::os::unix::fs::symlink;
-            let source = lexical_existing(
+            use std::os::unix::fs::MetadataExt;
+            let source = anchor_existing_entry(
                 request["path"].as_str().ok_or("A symbolic link path is required")?,
             )?;
-            if is_protected_system_root(&source) {
+            if is_protected_system_root(&source.path) {
                 return Err("Editing a symbolic link in a protected system location is blocked.".into());
             }
-            let metadata = std::fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
+            let metadata = entry_metadata(&source.parent, &source.name).map_err(|error| error.to_string())?;
             if !metadata.file_type().is_symlink() {
                 return Err("The selected entry is no longer a symbolic link.".into());
             }
@@ -852,27 +1030,36 @@ fn execute_action(request: &Value) -> Result<Value, String> {
             if target.is_empty() || target.len() > 4096 || target.chars().any(char::is_control) {
                 return Err("The link target must be between 1 and 4096 bytes and contain no control characters.".into());
             }
-            let parent = source.parent().ok_or("Invalid symbolic link path")?;
-            let file_name = source.file_name().ok_or("Invalid symbolic link name")?.to_string_lossy();
+            let file_name = source.path.file_name().ok_or("Invalid symbolic link name")?.to_string_lossy();
             let mut temporary = None;
             for _ in 0..100 {
-                let candidate = parent.join(format!(".arg-link-{:016x}", rand::random::<u64>()));
-                match symlink(target, &candidate) {
-                    Ok(()) => { temporary = Some(candidate); break; }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(format!("Could not prepare the new symbolic link: {error}")),
+                let candidate = CString::new(format!(".arg-link-{:016x}", rand::random::<u64>())).map_err(|error| error.to_string())?;
+                let target_c = CString::new(target).map_err(|error| error.to_string())?;
+                let result = unsafe { libc::symlinkat(target_c.as_ptr(), source.parent.as_raw_fd(), candidate.as_ptr()) };
+                if result == 0 {
+                    temporary = Some(candidate);
+                    break;
+                }
+                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err("Could not prepare the new symbolic link.".into());
                 }
             }
             let temporary = temporary.ok_or("Could not allocate a temporary symbolic link name")?;
-            if let Err(error) = std::fs::rename(&temporary, &source) {
-                let _ = std::fs::remove_file(&temporary);
+            if let Err(error) = renameat_exchange(&source.parent, &temporary, &source.name) {
+                let _ = unlinkat_entry(&source.parent, &temporary, 0);
                 return Err(format!("Could not replace the symbolic link: {error}"));
             }
-            Ok(path_metadata(&source, file_name.into_owned()))
+            let displaced = entry_metadata(&source.parent, &temporary).map_err(|error| error.to_string())?;
+            if displaced.dev() != metadata.dev() || displaced.ino() != metadata.ino() {
+                renameat_exchange(&source.parent, &temporary, &source.name).map_err(|error| format!("The link changed during update and restoring it failed: {error}"))?;
+                let _ = unlinkat_entry(&source.parent, &temporary, 0);
+                return Err("The symbolic link changed while it was being updated; no replacement was applied.".into());
+            }
+            unlinkat_entry(&source.parent, &temporary, 0).map_err(|error| error.to_string())?;
+            Ok(path_metadata(&source.path, file_name.into_owned()))
         }
         "chmod" => {
-            use std::os::unix::fs::PermissionsExt;
-            let source = lexical_existing(request["path"].as_str().ok_or("A path is required")?)?;
+            let source = anchor_existing_entry(request["path"].as_str().ok_or("A path is required")?)?;
             let mode = request["permissions"]
                 .as_str()
                 .ok_or("A permission mode is required")?;
@@ -881,28 +1068,22 @@ fn execute_action(request: &Value) -> Result<Value, String> {
                     "Enter permissions as 3 or 4 octal digits, for example 644 or 0755.".into(),
                 );
             }
-            if source == std::path::Path::new("/") || is_protected_system_root(&source) {
+            if source.path == std::path::Path::new("/") || is_protected_system_root(&source.path) {
                 return Err(
                     "Changing permissions on a top-level system directory is blocked.".into(),
                 );
             }
-            if std::fs::symlink_metadata(&source)
-                .map_err(|error| error.to_string())?
-                .file_type()
-                .is_symlink()
-            {
+            let file = open_readonly_entry(&source.parent, &source.name).map_err(|error| error.to_string())?;
+            if file.metadata().map_err(|error| error.to_string())?.file_type().is_symlink() {
                 return Err("Changing permissions on symbolic links is not supported.".into());
             }
-            std::fs::set_permissions(
-                &source,
-                std::fs::Permissions::from_mode(
-                    u32::from_str_radix(mode, 8).map_err(|error| error.to_string())?,
-                ),
-            )
-            .map_err(|error| error.to_string())?;
+            let mode = u32::from_str_radix(mode, 8).map_err(|error| error.to_string())?;
+            if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
             Ok(path_metadata(
-                &source,
-                source
+                &source.path,
+                source.path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
@@ -910,68 +1091,71 @@ fn execute_action(request: &Value) -> Result<Value, String> {
             ))
         }
         "delete" => {
-            let source = lexical_existing(request["path"].as_str().ok_or("A path is required")?)?;
+            let source = anchor_existing_entry(request["path"].as_str().ok_or("A path is required")?)?;
             if request["confirmed"] != true {
                 return Err("Confirm deletion before continuing.".into());
             }
-            if source.parent().is_none() {
+            if source.path.parent().is_none() {
                 return Err("The filesystem root cannot be deleted.".into());
             }
-            if is_protected_system_root(&source) {
+            if is_protected_system_root(&source.path) {
                 return Err("Deleting a top-level system directory is blocked.".into());
             }
-            let name = source
+            let name = source.path
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            remove_tree(&source)?;
+            remove_entry_tree(&source.parent, &source.name, 0)?;
             Ok(json!({"deleted":name}))
         }
         "paste" => {
-            let source = lexical_existing(
+            let source = anchor_existing_entry(
                 request["source"]
                     .as_str()
                     .ok_or("A source path is required")?,
             )?;
-            let destination_dir = canonical_existing(
+            let (destination_dir, destination_fd) = anchor_directory(
                 request["destination"]
                     .as_str()
                     .ok_or("A destination directory is required")?,
             )?;
-            if !destination_dir.is_dir() {
-                return Err("The destination is not a directory.".into());
-            }
-            if destination_dir.starts_with(&source) {
+            if destination_dir.starts_with(&source.path) {
                 return Err(
                     "A directory cannot be copied into itself or one of its descendants.".into(),
                 );
             }
-            let name = source
+            let name = source.path
                 .file_name()
                 .ok_or("Cannot copy this filesystem root")?;
             let destination = destination_dir.join(name);
-            if destination.exists() {
-                return Err("An item with that name already exists in the destination.".into());
-            }
+            let destination_name = c_name(name)?;
             let operation = request["mode"].as_str().unwrap_or("copy");
             if operation == "move" {
                 if request["confirmed"] != true {
                     return Err("Confirm moving this item before continuing.".into());
                 }
-                if is_protected_system_root(&source) {
+                if is_protected_system_root(&source.path) {
                     return Err("Moving a top-level system directory is blocked.".into());
                 }
-                match std::fs::rename(&source, &destination) {
+                match renameat_noreplace(&source.parent, &source.name, &destination_fd, &destination_name) {
                     Ok(()) => {}
                     Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
-                        copy_tree_transactional(&source, &destination)?;
-                        remove_tree(&source)?;
+                        let mut count = 0;
+                        if let Err(copy_error) = copy_entry_tree(&source.parent, &source.name, &destination_fd, &destination_name, 0, &mut count) {
+                            let _ = remove_entry_tree(&destination_fd, &destination_name, 0);
+                            return Err(copy_error);
+                        }
+                        remove_entry_tree(&source.parent, &source.name, 0)?;
                     }
                     Err(error) => return Err(error.to_string()),
                 }
             } else if operation == "copy" {
-                copy_tree_transactional(&source, &destination)?;
+                let mut count = 0;
+                if let Err(copy_error) = copy_entry_tree(&source.parent, &source.name, &destination_fd, &destination_name, 0, &mut count) {
+                    let _ = remove_entry_tree(&destination_fd, &destination_name, 0);
+                    return Err(copy_error);
+                }
             } else {
                 return Err("Choose copy or move.".into());
             }
@@ -985,28 +1169,20 @@ fn execute_action(request: &Value) -> Result<Value, String> {
 }
 
 fn create_zip_archive(request: &Value) -> Result<Value, String> {
-    use std::os::unix::fs::OpenOptionsExt;
     use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
-    let requested_source = std::path::Path::new(
-        request["path"]
-            .as_str()
-            .ok_or("A source path is required")?,
-    );
-    let requested_metadata = std::fs::symlink_metadata(requested_source)
-        .map_err(|error| error.to_string())?;
-    if requested_metadata.file_type().is_symlink() {
+    let source = anchor_existing_entry(request["path"].as_str().ok_or("A source path is required")?)?;
+    let metadata = entry_metadata(&source.parent, &source.name).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
         return Err("Symbolic links cannot be archived directly.".into());
     }
-    let source = canonical_existing(requested_source.to_str().ok_or("Invalid source path")?)?;
-    if source == std::path::Path::new("/") || is_protected_system_root(&source) {
+    if source.path == std::path::Path::new("/") || is_protected_system_root(&source.path) {
         return Err("Creating an archive from a protected system root is blocked.".into());
     }
-    let metadata = std::fs::symlink_metadata(&source).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() || !(metadata.is_dir() || metadata.is_file()) {
+    if !(metadata.is_dir() || metadata.is_file()) {
         return Err("Select a regular file or directory to archive.".into());
     }
-    let base_name = source
+    let base_name = source.path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .ok_or("The source name is not UTF-8")?;
@@ -1023,17 +1199,10 @@ fn create_zip_archive(request: &Value) -> Result<Value, String> {
     if !safe_name(&archive_name) || !archive_name.to_ascii_lowercase().ends_with(".zip") {
         return Err("Enter a safe archive name ending in .zip.".into());
     }
-    let parent = source.parent().ok_or("Cannot archive a filesystem root")?;
-    let archive_path = parent.join(&archive_name);
-    if archive_path.exists() {
-        return Err("An item with that archive name already exists.".into());
-    }
-    let output = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&archive_path)
-        .map_err(|error| error.to_string())?;
+    let archive_name_c = CString::new(archive_name.as_str()).map_err(|error| error.to_string())?;
+    let output = openat_file(&source.parent, &archive_name_c, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600)
+        .map_err(|error| if error.kind() == std::io::ErrorKind::AlreadyExists { "An item with that archive name already exists.".to_owned() } else { error.to_string() })?;
+    let archive_path = source.path.parent().ok_or("Cannot archive a filesystem root")?.join(&archive_name);
     let mut writer = ZipWriter::new(output);
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
@@ -1043,38 +1212,23 @@ fn create_zip_archive(request: &Value) -> Result<Value, String> {
     let mut total = 0u64;
     let result = if metadata.is_dir() {
         let root_entry = format!("{base_name}/");
-        writer
-            .add_directory(&root_entry, options)
-            .map_err(|error| error.to_string())
-            .and_then(|()| {
-                archive_directory(
-                    &mut writer,
-                    &source,
-                    &source,
-                    base_name,
-                    options,
-                    &mut count,
-                    &mut total,
-                    0,
-                )
-            })
+        let root = openat_file(&source.parent, &source.name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0).map_err(|error| error.to_string());
+        match root {
+            Ok(root) => writer.add_directory(&root_entry, options).map_err(|error| error.to_string()).and_then(|()| archive_directory(&mut writer, &root, base_name, options, &mut count, &mut total, 0)),
+            Err(error) => Err(error),
+        }
     } else {
-        archive_file(
-            &mut writer,
-            &source,
-            base_name,
-            options,
-            &mut count,
-            &mut total,
-        )
+        open_readonly_entry(&source.parent, &source.name)
+            .map_err(|error| error.to_string())
+            .and_then(|file| archive_file_opened(&mut writer, file, base_name, options, &mut count, &mut total))
     };
     if let Err(error) = result {
         let _ = writer.finish();
-        let _ = std::fs::remove_file(&archive_path);
+        let _ = unlinkat_entry(&source.parent, &archive_name_c, 0);
         return Err(error);
     }
     if let Err(error) = writer.finish() {
-        let _ = std::fs::remove_file(&archive_path);
+        let _ = unlinkat_entry(&source.parent, &archive_name_c, 0);
         return Err(error.to_string());
     }
     let display = archive_path.to_string_lossy().into_owned();
@@ -1083,10 +1237,9 @@ fn create_zip_archive(request: &Value) -> Result<Value, String> {
     )
 }
 
-fn archive_directory<W: Write + std::io::Seek>(
+fn archive_directory<W: Write + std::io::Seek + std::os::fd::AsRawFd>(
     writer: &mut zip::ZipWriter<W>,
-    root: &std::path::Path,
-    directory: &std::path::Path,
+    directory: &File,
     archive_prefix: &str,
     options: zip::write::SimpleFileOptions,
     count: &mut usize,
@@ -1097,23 +1250,17 @@ fn archive_directory<W: Write + std::io::Seek>(
     if depth > MAX_ARCHIVE_DIRECTORY_DEPTH {
         return Err("Archive directory nesting is limited to 64 levels.".into());
     }
-    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    for name in dir_entry_names(directory)? {
+        let display_name = name.to_str().ok_or("Archive paths must be valid UTF-8")?;
+        if !safe_name(display_name) || display_name.contains('\\') {
+            return Err("Archive paths cannot contain control characters or backslashes.".into());
+        }
+        let name_c = c_name(&name)?;
+        let metadata = entry_metadata(directory, &name_c).map_err(|error| error.to_string())?;
         if metadata.file_type().is_symlink() {
             return Err("Symbolic links are skipped for archive safety; remove the link or archive its target explicitly.".into());
         }
-        let relative = path
-            .strip_prefix(root)
-            .map_err(|_| "Archive path escaped its source directory")?;
-        let relative = relative
-            .to_str()
-            .ok_or("Archive paths must be valid UTF-8")?;
-        if relative.contains('\\') || relative.chars().any(char::is_control) {
-            return Err("Archive paths cannot contain control characters or backslashes.".into());
-        }
-        let archive_name = format!("{archive_prefix}/{relative}");
+        let archive_name = format!("{archive_prefix}/{display_name}");
         if metadata.is_dir() {
             *count += 1;
             if *count > 50_000 {
@@ -1122,9 +1269,11 @@ fn archive_directory<W: Write + std::io::Seek>(
             writer
                 .add_directory(format!("{archive_name}/"), options)
                 .map_err(|error| error.to_string())?;
-            archive_directory(writer, root, &path, archive_prefix, options, count, total, depth + 1)?;
+            let child = openat_file(directory, &name_c, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0).map_err(|error| error.to_string())?;
+            archive_directory(writer, &child, &archive_name, options, count, total, depth + 1)?;
         } else if metadata.is_file() {
-            archive_file(writer, &path, &archive_name, options, count, total)?;
+            let file = open_readonly_entry(directory, &name_c).map_err(|error| error.to_string())?;
+            archive_file_opened(writer, file, &archive_name, options, count, total)?;
         } else {
             return Err("Special files cannot be included in an archive.".into());
         }
@@ -1132,22 +1281,27 @@ fn archive_directory<W: Write + std::io::Seek>(
     Ok(())
 }
 
-fn archive_file<W: Write + std::io::Seek>(
+fn archive_file_opened<W: Write + std::io::Seek + std::os::fd::AsRawFd>(
     writer: &mut zip::ZipWriter<W>,
-    path: &std::path::Path,
+    file: File,
     archive_name: &str,
     options: zip::write::SimpleFileOptions,
     count: &mut usize,
     total: &mut u64,
 ) -> Result<(), String> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
         return Err("Only regular files may be archived.".into());
     }
     *total = total.saturating_add(metadata.len());
     if *total > 2 * 1024 * 1024 * 1024 {
         return Err("Archive input is limited to 2 GiB.".into());
     }
+    let output_fd = writer
+        .get_ref()
+        .ok_or("The archive output is no longer available.")?
+        .as_raw_fd();
+    ensure_copy_space_fd(output_fd, metadata.len())?;
     *count += 1;
     if *count > 50_000 {
         return Err("An archive can contain at most 50,000 items.".into());
@@ -1155,31 +1309,29 @@ fn archive_file<W: Write + std::io::Seek>(
     writer
         .start_file(archive_name, options)
         .map_err(|error| error.to_string())?;
-    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    std::io::copy(&mut file, writer).map_err(|error| error.to_string())?;
+    let copied = std::io::copy(&mut file.take(metadata.len()), writer).map_err(|error| error.to_string())?;
+    if copied != metadata.len() { return Err("The source file changed size while the archive was being created.".into()); }
     Ok(())
 }
 
 fn extract_zip_archive(request: &Value) -> Result<Value, String> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use zip::ZipArchive;
 
     if request["confirmed"] != true {
         return Err("Confirm ZIP extraction before continuing.".into());
     }
-    let archive_path =
-        canonical_existing(request["path"].as_str().ok_or("A ZIP file is required")?)?;
-    let destination = canonical_existing(
+    let archive = anchor_existing_entry(request["path"].as_str().ok_or("A ZIP file is required")?)?;
+    let archive_path = &archive.path;
+    let (destination, destination_fd) = anchor_directory(
         request["destination"]
             .as_str()
             .ok_or("A destination directory is required")?,
     )?;
-    if !archive_path.is_file()
+    if !entry_metadata(&archive.parent, &archive.name).map_err(|error| error.to_string())?.is_file()
         || !archive_path
             .extension()
             .and_then(std::ffi::OsStr::to_str)
             .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
-        || !destination.is_dir()
     {
         return Err("Choose a .zip file and an existing destination directory.".into());
     }
@@ -1194,16 +1346,23 @@ fn extract_zip_archive(request: &Value) -> Result<Value, String> {
         return Err("ZIP filename cannot be used as a destination folder name.".into());
     }
     let output_root = destination.join(folder_name);
-    std::fs::create_dir(&output_root).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            "The extraction folder already exists; choose another destination or rename it first."
-                .into()
-        } else {
-            error.to_string()
+    let output_root_name = CString::new(folder_name).map_err(|error| error.to_string())?;
+    let made_root = unsafe { libc::mkdirat(destination_fd.as_raw_fd(), output_root_name.as_ptr(), 0o700) };
+    if made_root != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(if error.kind() == std::io::ErrorKind::AlreadyExists {
+            "The extraction folder already exists; choose another destination or rename it first.".into()
+        } else { error.to_string() });
+    }
+    let output_root_fd = match openat_file(&destination_fd, &output_root_name, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0) {
+        Ok(directory) => directory,
+        Err(error) => {
+            let _ = remove_entry_tree(&destination_fd, &output_root_name, 0);
+            return Err(error.to_string());
         }
-    })?;
+    };
     let result = (|| -> Result<(usize, u64), String> {
-        let file = std::fs::File::open(&archive_path).map_err(|error| error.to_string())?;
+        let file = open_readonly_entry(&archive.parent, &archive.name).map_err(|error| error.to_string())?;
         let mut archive = ZipArchive::new(file)
             .map_err(|_| "The ZIP archive is invalid or encrypted.".to_owned())?;
         if archive.len() > 50_000 {
@@ -1244,39 +1403,29 @@ fn extract_zip_archive(request: &Value) -> Result<Value, String> {
             if total > 2 * 1024 * 1024 * 1024 {
                 return Err("Expanded ZIP content is limited to 2 GiB.".into());
             }
-            let target = output_root.join(&enclosed);
-            let parent = target.parent().ok_or("Invalid archive entry path")?;
-            create_safe_directories(&output_root, parent)?;
+            let (parent, name) = ensure_zip_parent(&output_root_fd, &enclosed)?;
             if entry.is_dir() {
-                if target.exists() {
-                    let meta =
-                        std::fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
-                    if meta.file_type().is_symlink() || !meta.is_dir() {
-                        return Err(
-                            "A destination item conflicts with an archive directory.".into()
-                        );
-                    }
-                } else {
-                    std::fs::create_dir(&target).map_err(|error| error.to_string())?;
-                }
+                open_or_create_directory(&parent, &name).map_err(|_| "A destination item conflicts with an archive directory.")?;
             } else {
                 let expected_size = entry.size();
-                let mut output = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&target).map_err(|error| if error.kind()==std::io::ErrorKind::AlreadyExists { "An extracted file already exists; existing files are never overwritten.".into() } else { error.to_string() })?;
+                ensure_copy_space(&parent, expected_size)?;
+                let mut output = openat_file(&parent, &name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o644).map_err(|error| if error.kind()==std::io::ErrorKind::AlreadyExists { "An extracted file already exists; existing files are never overwritten.".into() } else { error.to_string() })?;
                 let copied = match std::io::copy(&mut entry.take(expected_size), &mut output) {
                     Ok(copied) if copied == expected_size => copied,
                     Ok(_) => {
-                        let _ = std::fs::remove_file(&target);
+                        let _ = unlinkat_entry(&parent, &name, 0);
                         return Err("ZIP entry size did not match its directory record.".into());
                     }
                     Err(error) => {
-                        let _ = std::fs::remove_file(&target);
+                        let _ = unlinkat_entry(&parent, &name, 0);
                         return Err(error.to_string());
                     }
                 };
                 if copied != expected_size {
-                    let _ = std::fs::remove_file(&target);
+                    let _ = unlinkat_entry(&parent, &name, 0);
                     return Err("ZIP entry size did not match its directory record.".into());
                 }
+                output.sync_all().map_err(|error| error.to_string())?;
                 extracted += 1;
             }
         }
@@ -1284,41 +1433,20 @@ fn extract_zip_archive(request: &Value) -> Result<Value, String> {
     })();
     match result {
         Ok((files, bytes)) => {
-            std::fs::set_permissions(&output_root, std::fs::Permissions::from_mode(0o755))
-                .map_err(|error| error.to_string())?;
+            if unsafe { libc::fchmod(output_root_fd.as_raw_fd(), 0o755) } != 0 {
+                let error = std::io::Error::last_os_error().to_string();
+                let _ = remove_entry_tree(&destination_fd, &output_root_name, 0);
+                return Err(error);
+            }
             Ok(
                 json!({"destination":output_root.to_string_lossy(),"files":files,"expanded_bytes":bytes}),
             )
         }
         Err(error) => {
-            let _ = remove_tree(&output_root);
+            let _ = remove_entry_tree(&destination_fd, &output_root_name, 0);
             Err(error)
         }
     }
-}
-
-fn create_safe_directories(root: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
-    let relative = target
-        .strip_prefix(root)
-        .map_err(|_| "Archive path escaped its destination")?;
-    let mut current = root.to_path_buf();
-    for component in relative.components() {
-        let std::path::Component::Normal(name) = component else {
-            return Err("Archive contains an unsafe directory path.".into());
-        };
-        current.push(name);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err("A destination directory is unsafe or conflicts with a file.".into())
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current).map_err(|error| error.to_string())?
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1328,6 +1456,8 @@ mod tests {
         file_content_limit, file_content_within_limit, max_base64_encoded_bytes, remove_tree,
         safe_name, scan_disk_usage, try_disk_scan_permit, valid_mode, LargestScanEntries, BASE64,
         MAX_FILE_UPLOAD_BYTES,
+        anchor_directory, openat_file, c_name, anchor_existing_entry, remove_entry_tree,
+        copy_space_sufficient,
     };
     use base64::Engine;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1356,6 +1486,76 @@ mod tests {
         assert!(valid_mode("755"));
         assert!(!valid_mode("0899"));
         assert!(!valid_mode("77777"));
+    }
+
+    #[test]
+    fn file_copy_preserves_the_free_space_reserve() {
+        let reserve = super::FILE_OPERATION_FREE_SPACE_RESERVE_BYTES;
+        assert!(copy_space_sufficient(reserve + 1024, 1024));
+        assert!(!copy_space_sufficient(reserve + 1023, 1024));
+        assert!(!copy_space_sufficient(u64::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn anchored_file_operation_keeps_the_open_directory_when_the_path_is_swapped() {
+        let root = test_dir();
+        let selected = root.join("selected");
+        let moved = root.join("selected-original");
+        let outside = root.join("outside");
+        fs::create_dir(&selected).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(selected.join("editable.txt"), b"original").unwrap();
+        fs::write(outside.join("editable.txt"), b"outside").unwrap();
+        fs::write(outside.join("outside-marker"), b"outside").unwrap();
+        let editable = anchor_existing_entry(selected.join("editable.txt").to_str().unwrap()).unwrap();
+        let (_, directory) = anchor_directory(selected.to_str().unwrap()).unwrap();
+        fs::rename(&selected, &moved).unwrap();
+        symlink(&outside, &selected).unwrap();
+
+        let filename = c_name(std::ffi::OsStr::new("created.txt")).unwrap();
+        let mut file = openat_file(&directory, &filename, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600).unwrap();
+        use std::io::Write as _;
+        file.write_all(b"anchored").unwrap();
+        super::save_file_atomically(&editable, b"saved through anchor").unwrap();
+
+        assert_eq!(fs::read(moved.join("created.txt")).unwrap(), b"anchored");
+        assert_eq!(fs::read(moved.join("editable.txt")).unwrap(), b"saved through anchor");
+        assert_eq!(fs::read(outside.join("editable.txt")).unwrap(), b"outside");
+        assert!(!outside.join("created.txt").exists());
+        assert!(anchor_directory(selected.to_str().unwrap()).is_err(), "a path whose parent was replaced by a symlink must be rejected");
+        let entry = anchor_existing_entry(selected.join("outside-marker").to_str().unwrap());
+        assert!(entry.is_err(), "an untrusted symlink parent must not be traversed");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn anchored_recursive_delete_removes_a_symlink_without_touching_its_target() {
+        let root = test_dir();
+        let target = root.join("target");
+        let tree = root.join("tree");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&tree).unwrap();
+        fs::write(target.join("keep.txt"), b"keep").unwrap();
+        symlink(&target, tree.join("external")).unwrap();
+        let entry = anchor_existing_entry(tree.join("external").to_str().unwrap()).unwrap();
+        remove_entry_tree(&entry.parent, &entry.name, 0).unwrap();
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
+        assert!(!tree.join("external").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_editor_replacement_does_not_follow_a_symlink_target() {
+        let root = test_dir();
+        let outside = root.join("outside.txt");
+        let link = root.join("link.txt");
+        fs::write(&outside, b"original").unwrap();
+        symlink(&outside, &link).unwrap();
+        let entry = anchor_existing_entry(link.to_str().unwrap()).unwrap();
+        assert!(super::save_file_atomically(&entry, b"replaced").is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"original");
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
