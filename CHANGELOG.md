@@ -3,7 +3,8 @@
 ## v0.7.5-dev.1 — 2026-10-29
 
 ### Development
-- Development prerelease based on the next patch after main.
+- Keep the Fast updater's Rust dependency profile stable per VPS so changes in free RAM no longer trigger unnecessary rebuilds.
+- Scale Fast Cargo parallelism to available memory and CPU capacity, and preserve successfully compiled dependencies after a failed update for faster retries.
 
 ## v0.7.4 — 2026-10-29
 

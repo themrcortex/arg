@@ -8,6 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 sed -n '/^select_update_options() {$/,/^}$/p' "$root/install.sh" > "$tmp/functions.sh"
 sed -n '/^installer_script_url() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_cpu_count() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
+sed -n '/^release_build_memory_capacity_mb() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^configure_release_build_resources() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_is_root() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_swap_active() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
@@ -20,6 +21,7 @@ sed -n '/^cleanup_update_build_cache() {$/,/^}$/p' "$root/install.sh" >> "$tmp/f
 sed -n '/^cleanup_update_reservation() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 source "$tmp/functions.sh"
 release_build_cpu_count() { printf '16\n'; }
+release_build_memory_capacity_mb() { printf '%s\n' "${BUILD_CAPACITY_MB:-8192}"; }
 
 BRANCH=main
 ARG_UPDATE_MODE=complete
@@ -51,6 +53,20 @@ ARG_CARGO_BUILD_JOBS=20
 configure_release_build_resources 8192
 [[ "$CARGO_BUILD_JOBS" == 2 ]]
 unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
+
+# Fast mode holds Cargo's profile steady as free RAM changes, while scheduling
+# more independent crates when the host has enough memory and CPU capacity.
+ARG_UPDATE_CONTEXT=update ARG_UPDATE_MODE=fast
+BUILD_CAPACITY_MB=8192
+configure_release_build_resources 8192
+[[ "$CARGO_BUILD_JOBS" == 4 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 4 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 2 ]]
+fast_profile="$CARGO_PROFILE_RELEASE_OPT_LEVEL/$CARGO_PROFILE_RELEASE_CODEGEN_UNITS"
+configure_release_build_resources 2048
+[[ "$CARGO_BUILD_JOBS" == 1 && "$fast_profile" == "$CARGO_PROFILE_RELEASE_OPT_LEVEL/$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" ]]
+ARG_CARGO_BUILD_JOBS=20
+configure_release_build_resources 8192
+[[ "$CARGO_BUILD_JOBS" == 4 ]]
+unset ARG_UPDATE_CONTEXT ARG_UPDATE_MODE BUILD_CAPACITY_MB ARG_CARGO_BUILD_JOBS CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
 
 # Exercise temporary swap lifecycle with shell mocks. No host swap or disk is changed.
 swap_test_dir="$tmp/swap"
@@ -148,7 +164,7 @@ ARG_UPDATE_CONTEXT=update ARG_UPDATE_MODE=fast
 build_release
 [[ "${calls[*]}" == "Fast update: incrementally compiling the ARG application" ]]
 [[ "${commands[*]}" == *'cargo +stable rustc --locked --release --bin arg -- -C opt-level="$3" -C incremental="$2"'* ]]
-[[ "${commands[*]}" == *"$SOURCE_DIR/target/release/incremental/arg-fast 0"* ]]
+[[ "${commands[*]}" == *"$SOURCE_DIR/target/release/incremental/arg-fast 1"* ]]
 [[ "${commands[*]}" == *"CARGO_INCREMENTAL=0"* ]]
 calls=()
 commands=()
@@ -234,6 +250,15 @@ grep -q '+stable clean' "$ARG_TEST_CARGO_LOG"
   UPDATE_CLEANUP_BUILD_STARTED=1
   SOURCE_DIR="$tmp/source"
   cleanup_update_build_cache 1
+)
+[[ "$(grep -c '+stable clean' "$ARG_TEST_CARGO_LOG")" == 1 ]]
+
+(
+  export PATH="$cleanup_dir/bin:$PATH"
+  ARG_UPDATE_MODE=complete
+  UPDATE_CLEANUP_BUILD_STARTED=1
+  SOURCE_DIR="$tmp/source"
+  cleanup_update_build_cache 0
 )
 [[ "$(grep -c '+stable clean' "$ARG_TEST_CARGO_LOG")" == 2 ]]
 

@@ -244,12 +244,92 @@ release_build_cpu_count() {
   printf '%s\n' "$count"
 }
 
+release_build_memory_capacity_mb() {
+  local total_kb capacity_mb limit_bytes limit_mb path cgroup_v2="" cgroup_v1="" cgroup_dir hierarchy controllers group
+  total_kb="$(awk '$1 == "MemTotal:" { print $2; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || true)"
+  [[ "$total_kb" =~ ^[0-9]+$ ]] || total_kb=0
+  capacity_mb=$((total_kb / 1024))
+
+  # Use the process/container memory limit when ARG runs under cgroups. Unlike
+  # MemAvailable, this capacity is stable between updates and can safely shape
+  # the Fast profile without invalidating Cargo's cache as load changes. Walk
+  # from this process's cgroup to the root so parent service/container limits
+  # are honored too.
+  while IFS=: read -r hierarchy controllers group; do
+    if [[ "$hierarchy" == 0 && -z "$controllers" ]]; then
+      cgroup_v2="$group"
+    elif [[ ",$controllers," == *,memory,* ]]; then
+      cgroup_v1="$group"
+    fi
+  done < /proc/self/cgroup 2>/dev/null || true
+
+  for cgroup_dir in "/sys/fs/cgroup${cgroup_v2}" /sys/fs/cgroup; do
+    [[ -d "$cgroup_dir" ]] || continue
+    while [[ "$cgroup_dir" == /sys/fs/cgroup* ]]; do
+      path="$cgroup_dir/memory.max"
+      if [[ -r "$path" ]]; then
+        read -r limit_bytes < "$path" || limit_bytes=max
+        if [[ "$limit_bytes" =~ ^[0-9]+$ ]]; then
+          limit_mb=$((limit_bytes / 1024 / 1024))
+          if (( limit_mb > 0 && (capacity_mb == 0 || limit_mb < capacity_mb) )); then
+            capacity_mb="$limit_mb"
+          fi
+        fi
+      fi
+      [[ "$cgroup_dir" == /sys/fs/cgroup ]] && break
+      cgroup_dir="${cgroup_dir%/*}"
+    done
+  done
+  for cgroup_dir in "/sys/fs/cgroup/memory${cgroup_v1}" /sys/fs/cgroup/memory; do
+    [[ -d "$cgroup_dir" ]] || continue
+    while [[ "$cgroup_dir" == /sys/fs/cgroup/memory* ]]; do
+      path="$cgroup_dir/memory.limit_in_bytes"
+      if [[ -r "$path" ]]; then
+        read -r limit_bytes < "$path" || limit_bytes=0
+        if [[ "$limit_bytes" =~ ^[0-9]+$ ]]; then
+          limit_mb=$((limit_bytes / 1024 / 1024))
+          if (( limit_mb > 0 && (capacity_mb == 0 || limit_mb < capacity_mb) )); then
+            capacity_mb="$limit_mb"
+          fi
+        fi
+      fi
+      [[ "$cgroup_dir" == /sys/fs/cgroup/memory ]] && break
+      cgroup_dir="${cgroup_dir%/*}"
+    done
+  done
+  (( capacity_mb > 0 )) || capacity_mb=2048
+  printf '%s\n' "$capacity_mb"
+}
+
 configure_release_build_resources() {
-  local memory_budget_mb="${1:-0}" cpu_count max_jobs requested_jobs codegen_units
+  local memory_budget_mb="${1:-0}" memory_capacity_mb cpu_count max_jobs requested_jobs codegen_units fast_update=0
   [[ "$memory_budget_mb" =~ ^[0-9]+$ ]] || memory_budget_mb=0
   cpu_count="$(release_build_cpu_count)"
 
-  if (( memory_budget_mb < 2048 )); then
+  [[ "${ARG_UPDATE_CONTEXT:-}" == update && "${ARG_UPDATE_MODE:-}" == fast ]] && fast_update=1
+  if (( fast_update )); then
+    # Keep Cargo's release profile identical across Fast runs. Only the number
+    # of concurrent jobs follows available resources, so changing free RAM does
+    # not invalidate cached dependency artifacts. Fast's root crate gets its
+    # lower optimization level from the explicit rustc flag in build_release.
+    memory_capacity_mb="$(release_build_memory_capacity_mb)"
+    if (( memory_budget_mb < 4096 )); then
+      max_jobs=1
+    else
+      max_jobs=$((memory_budget_mb / 2048))
+      (( max_jobs > cpu_count )) && max_jobs="$cpu_count"
+      (( max_jobs > 0 )) || max_jobs=1
+    fi
+    codegen_units=$((memory_capacity_mb / 2048))
+    (( codegen_units > cpu_count )) && codegen_units="$cpu_count"
+    (( codegen_units > 16 )) && codegen_units=16
+    (( codegen_units > 0 )) || codegen_units=1
+    # Fast dependency artifacts use a fixed, faster-than-full Release profile.
+    # Available RAM changes only Cargo scheduling; capacity-based codegen stays
+    # stable and avoids invalidating the cache on the next update.
+    export CARGO_PROFILE_RELEASE_OPT_LEVEL=2
+    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="$codegen_units"
+  elif (( memory_budget_mb < 2048 )); then
     max_jobs=1
     codegen_units=1
     export CARGO_PROFILE_RELEASE_OPT_LEVEL="${ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL:-0}"
@@ -290,9 +370,13 @@ configure_release_build_resources() {
     requested_jobs=$((10#$requested_jobs))
   fi
   export CARGO_BUILD_JOBS="$requested_jobs"
-  export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-$codegen_units}"
+  if (( ! fast_update )); then
+    export CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS:-$codegen_units}"
+  fi
 
-  if (( memory_budget_mb >= 4096 )); then
+  if (( fast_update )); then
+    info "Fast Rust build profile is stable (opt-level 2, $CARGO_PROFILE_RELEASE_CODEGEN_UNITS codegen unit(s)); using $CARGO_BUILD_JOBS Cargo job(s) across $cpu_count CPU core(s), capped by currently available memory."
+  elif (( memory_budget_mb >= 4096 )); then
     info "Rust build will use $CARGO_BUILD_JOBS Cargo job(s) with up to $CARGO_PROFILE_RELEASE_CODEGEN_UNITS codegen unit(s) per job across $cpu_count available CPU core(s)."
   fi
 }
@@ -429,12 +513,92 @@ cleanup_release_build_swap() {
 }
 
 release_build_memory_budget_mb() {
-  local available_kb swap_free_kb
+  local available_kb swap_free_kb budget_mb capacity_kb swap_free_mb total_bytes
+  local hierarchy controllers group cgroup_v2="" cgroup_v1="" cgroup_dir
+  local limit_bytes usage_bytes swap_limit_bytes swap_usage_bytes ram_headroom_mb swap_headroom_mb candidate_mb memsw_limit_bytes memsw_usage_bytes
   available_kb="$(awk '$1 == "MemAvailable:" { print $2; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || true)"
   swap_free_kb="$(awk '$1 == "SwapFree:" { print $2; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || true)"
   [[ "$available_kb" =~ ^[0-9]+$ ]] || available_kb=0
   [[ "$swap_free_kb" =~ ^[0-9]+$ ]] || swap_free_kb=0
-  printf '%s\n' "$(((available_kb + swap_free_kb) / 1024))"
+  budget_mb=$(((available_kb + swap_free_kb) / 1024))
+  swap_free_mb=$((swap_free_kb / 1024))
+  capacity_kb="$(awk '$1 == "MemTotal:" { print $2; found=1 } END { if (!found) print 0 }' /proc/meminfo 2>/dev/null || true)"
+  [[ "$capacity_kb" =~ ^[0-9]+$ ]] || capacity_kb=0
+  total_bytes=$((capacity_kb * 1024))
+
+  # /proc/meminfo reports host-wide values in containers. Constrain the budget
+  # by every finite cgroup ancestor, so Cargo cannot mistake host RAM for ARG's
+  # actual allowance and launch enough rustc processes to be OOM-killed.
+  while IFS=: read -r hierarchy controllers group; do
+    if [[ "$hierarchy" == 0 && -z "$controllers" ]]; then
+      cgroup_v2="$group"
+    elif [[ ",$controllers," == *,memory,* ]]; then
+      cgroup_v1="$group"
+    fi
+  done < /proc/self/cgroup 2>/dev/null || true
+
+  for cgroup_dir in "/sys/fs/cgroup${cgroup_v2}" /sys/fs/cgroup; do
+    [[ -d "$cgroup_dir" ]] || continue
+    while [[ "$cgroup_dir" == /sys/fs/cgroup* ]]; do
+      if [[ -r "$cgroup_dir/memory.max" && -r "$cgroup_dir/memory.current" ]]; then
+        read -r limit_bytes < "$cgroup_dir/memory.max" || limit_bytes=max
+        read -r usage_bytes < "$cgroup_dir/memory.current" || usage_bytes=0
+        if [[ "$limit_bytes" =~ ^[0-9]+$ && "$usage_bytes" =~ ^[0-9]+$ ]] && (( limit_bytes < total_bytes )); then
+          (( usage_bytes < limit_bytes )) || usage_bytes="$limit_bytes"
+          ram_headroom_mb=$(((limit_bytes - usage_bytes) / 1024 / 1024))
+          swap_headroom_mb="$swap_free_mb"
+          if [[ -r "$cgroup_dir/memory.swap.max" ]]; then
+            read -r swap_limit_bytes < "$cgroup_dir/memory.swap.max" || swap_limit_bytes=max
+            if [[ "$swap_limit_bytes" =~ ^[0-9]+$ ]]; then
+              if [[ -r "$cgroup_dir/memory.swap.current" ]]; then
+                read -r swap_usage_bytes < "$cgroup_dir/memory.swap.current" || swap_usage_bytes=0
+                [[ "$swap_usage_bytes" =~ ^[0-9]+$ ]] || swap_usage_bytes="$swap_limit_bytes"
+              else
+                swap_usage_bytes="$swap_limit_bytes"
+              fi
+              (( swap_usage_bytes < swap_limit_bytes )) || swap_usage_bytes="$swap_limit_bytes"
+              swap_headroom_mb=$(((swap_limit_bytes - swap_usage_bytes) / 1024 / 1024))
+            fi
+          fi
+          candidate_mb=$((ram_headroom_mb + swap_headroom_mb))
+          (( candidate_mb < budget_mb )) && budget_mb="$candidate_mb"
+        fi
+      fi
+      [[ "$cgroup_dir" == /sys/fs/cgroup ]] && break
+      cgroup_dir="${cgroup_dir%/*}"
+    done
+  done
+
+  for cgroup_dir in "/sys/fs/cgroup/memory${cgroup_v1}" /sys/fs/cgroup/memory; do
+    [[ -d "$cgroup_dir" ]] || continue
+    while [[ "$cgroup_dir" == /sys/fs/cgroup/memory* ]]; do
+      if [[ -r "$cgroup_dir/memory.limit_in_bytes" && -r "$cgroup_dir/memory.usage_in_bytes" ]]; then
+        read -r limit_bytes < "$cgroup_dir/memory.limit_in_bytes" || limit_bytes=0
+        read -r usage_bytes < "$cgroup_dir/memory.usage_in_bytes" || usage_bytes=0
+        if [[ "$limit_bytes" =~ ^[0-9]+$ && "$usage_bytes" =~ ^[0-9]+$ ]] && (( limit_bytes < total_bytes )); then
+          (( usage_bytes < limit_bytes )) || usage_bytes="$limit_bytes"
+          ram_headroom_mb=$(((limit_bytes - usage_bytes) / 1024 / 1024))
+          candidate_mb="$ram_headroom_mb"
+          if [[ -r "$cgroup_dir/memory.memsw.limit_in_bytes" && -r "$cgroup_dir/memory.memsw.usage_in_bytes" ]]; then
+            read -r memsw_limit_bytes < "$cgroup_dir/memory.memsw.limit_in_bytes" || memsw_limit_bytes=0
+            read -r memsw_usage_bytes < "$cgroup_dir/memory.memsw.usage_in_bytes" || memsw_usage_bytes=0
+            if [[ "$memsw_limit_bytes" =~ ^[0-9]+$ && "$memsw_usage_bytes" =~ ^[0-9]+$ ]] && (( memsw_limit_bytes < total_bytes + swap_free_kb * 1024 )); then
+              (( memsw_usage_bytes < memsw_limit_bytes )) || memsw_usage_bytes="$memsw_limit_bytes"
+              candidate_mb=$(((memsw_limit_bytes - memsw_usage_bytes) / 1024 / 1024))
+            else
+              candidate_mb=$((ram_headroom_mb + swap_free_mb))
+            fi
+          else
+            candidate_mb=$((ram_headroom_mb + swap_free_mb))
+          fi
+          (( candidate_mb < budget_mb )) && budget_mb="$candidate_mb"
+        fi
+      fi
+      [[ "$cgroup_dir" == /sys/fs/cgroup/memory ]] && break
+      cgroup_dir="${cgroup_dir%/*}"
+    done
+  done
+  printf '%s\n' "$budget_mb"
 }
 
 release_build_disk_space_ok() {
@@ -461,10 +625,10 @@ build_release() {
   prepare_release_build_swap "$memory_budget_mb" || true
   if [[ "${ARG_UPDATE_CONTEXT:-}" == "update" && "${ARG_UPDATE_MODE:-complete}" == "fast" ]]; then
     local incremental_dir="$SOURCE_DIR/target/release/incremental/arg-fast"
-    local app_opt_level="${CARGO_PROFILE_RELEASE_OPT_LEVEL:-1}"
+    local app_opt_level=1
     mkdir -p "$incremental_dir"
-    # Keep dependency fingerprints identical to a regular Release build. Only
-    # ARG's final binary crate gets faster codegen and a persistent incremental cache.
+    # Reuse the stable Fast dependency profile. ARG's final crate gets a faster
+    # optimization level and a persistent incremental cache for source updates.
     if run_with_progress "Fast update: incrementally compiling the ARG application" \
       env CARGO_INCREMENTAL=0 bash -c 'cd "$1" && cargo +stable rustc --locked --release --bin arg -- -C opt-level="$3" -C incremental="$2"' _ "$SOURCE_DIR" "$incremental_dir" "$app_opt_level"; then
       compile_result=0
@@ -1536,7 +1700,10 @@ select_update_options() {
 cleanup_update_build_cache() {
   local exit_code="${1:-0}"
   (( UPDATE_CLEANUP_BUILD_STARTED )) || return 0
-  [[ "$ARG_UPDATE_MODE" == "complete" || "$exit_code" != 0 ]] || return 0
+  # Fast keeps successful dependency artifacts even after a failed app build so
+  # retrying does not compile the dependency graph again. Complete is the mode
+  # that deliberately discards the target to reclaim disk space.
+  [[ "$ARG_UPDATE_MODE" == "complete" ]] || return 0
   if bash -c 'cd "$1" && cargo +stable clean' _ "$SOURCE_DIR" >/dev/null 2>&1; then
     info "Removed the Rust build cache to reclaim disk space."
   elif (( exit_code == 0 )); then
