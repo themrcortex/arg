@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.6 — 2026-10-29
+
+### Fixed
+- Refresh the installer from the selected branch before compilation, so an older installed updater applies current build, cache, cancellation, and recovery logic on the first update.
+
 ## v0.7.6-dev.2 — 2026-10-29
 
 ### Development
