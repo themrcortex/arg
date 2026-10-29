@@ -1,5 +1,18 @@
 # ARG Change Log
 
+## v0.7.3 — 2026-10-29
+
+### Added
+- Show the detected application framework, confidence, ambiguity and proposed dependency/build plan before deployment. The plan remains advisory until an administrator chooses and confirms it.
+- Configure automatic panel-certificate renewal when Settings uses a Certbot lineage, including a persistent timer, an exact-lineage deployment hook and visible renewal status.
+
+### Changed
+- Check Nginx as a deployment stage for Node SSR apps, preserve and validate existing virtual hosts, and create an ARG-managed reverse proxy when the domain has no existing owner.
+- Let the complete website setup flow configure the runtime service, Nginx and SSL together, while requiring explicit confirmation before transferring a domain from an existing standalone site.
+
+### Fixed
+- Read deployment `finished_at` as SQLite integer data, including `NULL`, so completed deployment details load on existing databases.
+
 ## v0.7.3-dev.1 — 2026-10-28
 
 ### Development
@@ -11,8 +24,6 @@
 - Persist Git and live Node install/build output per deployment Job, show it in a follow-tail process details dialog, and surface the underlying database cause when job status cannot be read or claimed.
 - Add ordered, custom pre-deploy commands for Git, directory and ZIP releases. Commands run as argv (without shell interpretation) in the resource-limited staging sandbox, and each command's live output is retained in the deployment Job.
 - Add a one-click Node/static website setup flow that checks DNS, enables and health-checks the app service, configures Nginx, and requests SSL when the hostname has no matching certificate; display resolved DNS addresses and require explicit confirmation before safely taking a hostname from one supported standalone Nginx file.
-- Check Nginx during Node SSR deployment, validate and preserve existing virtual hosts, and create/enable an ARG-managed reverse proxy when the hostname has no existing owner.
-- Configure panel certificate renewal from Settings when a Certbot lineage is selected, with a lineage-specific deploy hook, a persistent twice-daily renewal timer, and visible renewal status.
 - Check Nginx during Node SSR deployment, validate and preserve existing virtual hosts, and create/enable an ARG-managed reverse proxy when the hostname has no existing owner.
 - Configure panel certificate renewal from Settings when a Certbot lineage is selected, with a lineage-specific deploy hook, a persistent twice-daily renewal timer, and visible renewal status.
 
