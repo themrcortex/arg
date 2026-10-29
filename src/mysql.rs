@@ -91,6 +91,7 @@ struct MysqlPreset {
 }
 
 const MANAGER_CONFIG: &str = "/etc/arg/mysql-manager.cnf";
+const MANAGER_PENDING_CONFIG: &str = "/etc/arg/mysql-manager.cnf.pending";
 const MYSQL_USER_CATALOG_QUERY: &str =
     "SELECT user,host,plugin,account_locked FROM mysql.user ORDER BY user,host";
 const MYSQL_USER_CATALOG_FALLBACK_QUERY: &str =
@@ -247,6 +248,125 @@ fn validate_mysql_setting(name: &str, value: &str) -> Result<(), String> {
 fn safe_mysql_config_value(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
+
+fn manager_account_grants_allow_recovery(output: &str) -> bool {
+    let grants: Vec<String> = output
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        })
+        .collect();
+    grants.len() == 1
+        && grants[0].contains("grant all privileges on *.* to 'arg_manager'@'localhost'")
+        && grants[0].contains("with grant option")
+}
+
+fn manager_config_contents_valid(contents: &str) -> bool {
+    let mut lines = contents.lines();
+    lines.next() == Some("[client]")
+        && lines.next() == Some("user=\"arg_manager\"")
+        && lines
+            .next()
+            .is_some_and(|line| line.starts_with("password=\"") && line.ends_with('"'))
+        && lines.next() == Some("protocol=socket")
+        && lines.next().is_none()
+        && contents
+            .lines()
+            .nth(2)
+            .and_then(|line| line.strip_prefix("password=\"")?.strip_suffix('"'))
+            .is_some_and(|password| {
+                password.len() == 64
+                    && password
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+}
+
+#[cfg(unix)]
+fn manager_config_is_valid(path: &str) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let parent_is_safe = std::path::Path::new(path)
+        .parent()
+        .and_then(|parent| fs::symlink_metadata(parent).ok())
+        .is_some_and(|metadata| {
+            metadata.file_type().is_dir()
+                && metadata.uid() == 0
+                && metadata.permissions().mode() & 0o022 == 0
+        });
+    fs::symlink_metadata(path).is_ok_and(|metadata| {
+        parent_is_safe
+            && metadata.file_type().is_file()
+            && metadata.uid() == 0
+            && metadata.permissions().mode() & 0o077 == 0
+            && fs::read_to_string(path).is_ok_and(|contents| manager_config_contents_valid(&contents))
+            && run_mysql_with_config("SELECT 1;", None, false, path).is_ok()
+    })
+}
+
+#[cfg(not(unix))]
+fn manager_config_is_valid(_path: &str) -> bool {
+    false
+}
+
+fn write_manager_pending_config(secret: &str) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let directory = PathBuf::from(MANAGER_PENDING_CONFIG)
+        .parent()
+        .ok_or("Invalid ARG MySQL config path")?
+        .to_path_buf();
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+    let metadata = fs::symlink_metadata(&directory).map_err(|e| e.to_string())?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o022 != 0
+    {
+        return Err("پوشهٔ تنظیمات ARG باید واقعی، متعلق به root و بدون مجوز نوشتن برای دیگران باشد.".into());
+    }
+
+    let temporary = format!("{MANAGER_PENDING_CONFIG}.{}.tmp", &token()[..12]);
+    let config = format!(
+        "[client]\nuser=\"arg_manager\"\npassword=\"{}\"\nprotocol=socket\n",
+        safe_mysql_config_value(secret)
+    );
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|e| format!("Could not create private MySQL credential file: {e}"))?;
+    let cleanup = RemoveCredentialFile(PathBuf::from(&temporary));
+    file.write_all(config.as_bytes())
+        .map_err(|e| format!("Could not write private MySQL credentials: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("Could not sync private MySQL credentials: {e}"))?;
+    fs::rename(&temporary, MANAGER_PENDING_CONFIG)
+        .map_err(|e| format!("Could not stage private MySQL credentials: {e}"))?;
+    std::mem::drop(cleanup);
+    fs::File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| format!("Could not sync MySQL credential directory: {e}"))?;
+    Ok(())
+}
+
+fn activate_pending_manager_config() -> Result<(), String> {
+    let directory = PathBuf::from(MANAGER_CONFIG)
+        .parent()
+        .ok_or("Invalid ARG MySQL config path")?
+        .to_path_buf();
+    fs::rename(MANAGER_PENDING_CONFIG, MANAGER_CONFIG)
+        .map_err(|e| format!("Could not activate private MySQL credentials: {e}"))?;
+    fs::File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|e| format!("Could not sync MySQL credential directory: {e}"))?;
+    Ok(())
+}
+
 struct RemoveCredentialFile(PathBuf);
 impl Drop for RemoveCredentialFile {
     fn drop(&mut self) {
@@ -468,22 +588,16 @@ fn run_mysql_with_config(
     Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
-fn ensure_manager_account() -> Result<(), String> {
+fn ensure_manager_account() -> Result<bool, String> {
     let _bootstrap_guard = MYSQL_MANAGER_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if let Ok(metadata) = fs::symlink_metadata(MANAGER_CONFIG) {
-            if metadata.file_type().is_file()
-                && metadata.uid() == 0
-                && metadata.permissions().mode() & 0o077 == 0
-                && run_mysql_with_config("SELECT 1;", None, false, MANAGER_CONFIG).is_ok()
-            {
-                return Ok(());
-            }
-        }
+    if manager_config_is_valid(MANAGER_CONFIG) {
+        return Ok(false);
+    }
+    if manager_config_is_valid(MANAGER_PENDING_CONFIG) {
+        activate_pending_manager_config()?;
+        return Ok(true);
     }
     let existing = run_mysql(
         "SELECT COUNT(*) FROM mysql.user WHERE user='arg_manager' AND host='localhost';",
@@ -492,44 +606,44 @@ fn ensure_manager_account() -> Result<(), String> {
         None,
         true,
     )?;
-    if existing
+    let account_exists = existing
         .lines()
         .nth(1)
-        .is_some_and(|count| count.trim() != "0")
-    {
-        return Err("حساب arg_manager از قبل وجود دارد اما فایل امن اعتبار آن موجود یا معتبر نیست؛ برای جلوگیری از تغییر حسابی که متعلق به ARG نیست، آن را خودکار بازنویسی نکردم.".into());
-    }
+        .is_some_and(|count| count.trim() != "0");
     let secret = token();
     let literal = mysql_password_literal(&secret)?;
-    let bootstrap = format!("CREATE USER 'arg_manager'@'localhost' IDENTIFIED BY {literal}; GRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;");
-    run_mysql(&bootstrap, "root", "", None, false).map_err(|e| format!("راه‌اندازی دسترسی مدیریتی ARG ناموفق بود؛ احراز هویت root از Unix socket در دسترس نیست: {e}"))?;
-    let manager_path = PathBuf::from(MANAGER_CONFIG);
-    let directory = manager_path
-        .parent()
-        .ok_or("Invalid ARG MySQL config path")?;
-    fs::create_dir_all(directory).map_err(|e| e.to_string())?;
-    let temporary = format!("{MANAGER_CONFIG}.{}.tmp", &token()[..12]);
-    let config = format!(
-        "[client]\nuser=\"arg_manager\"\npassword=\"{}\"\nprotocol=socket\n",
-        safe_mysql_config_value(&secret)
-    );
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|e| e.to_string())?;
-        file.write_all(config.as_bytes())
-            .map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
+    if account_exists {
+        let grants = run_mysql(
+            "SHOW GRANTS FOR 'arg_manager'@'localhost';",
+            "root",
+            "",
+            None,
+            true,
+        )?;
+        if !manager_account_grants_allow_recovery(&grants) {
+            let _ = fs::remove_file(MANAGER_PENDING_CONFIG);
+            return Err("حساب arg_manager از قبل وجود دارد اما مجوزهای آن با حساب داخلی ARG تطبیق ندارد؛ برای جلوگیری از تغییر حسابی که متعلق به ARG نیست، آن را بازنویسی نکردم.".into());
+        }
+        write_manager_pending_config(&secret)?;
+        let rotate = format!(
+            "ALTER USER 'arg_manager'@'localhost' IDENTIFIED BY {literal}; FLUSH PRIVILEGES;"
+        );
+        run_mysql(&rotate, "root", "", None, false).map_err(|e| {
+            format!("بازیابی اعتبار داخلی MySQL ناموفق بود؛ فایل امن موقت نگه داشته شد تا پس از رفع مشکل دوباره بررسی شود: {e}")
+        })?;
+    } else {
+        write_manager_pending_config(&secret)?;
+        let bootstrap = format!("CREATE USER 'arg_manager'@'localhost' IDENTIFIED BY {literal}; GRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;");
+        run_mysql(&bootstrap, "root", "", None, false).map_err(|e| format!("راه‌اندازی دسترسی مدیریتی ARG ناموفق بود؛ احراز هویت root از Unix socket در دسترس نیست: {e}"))?;
     }
-    fs::rename(&temporary, MANAGER_CONFIG).map_err(|e| {
-        let _ = fs::remove_file(&temporary);
-        e.to_string()
+    run_mysql_with_config("SELECT 1;", None, false, MANAGER_PENDING_CONFIG).map_err(|e| {
+        format!("اعتبار داخلی MySQL پس از تنظیم آزمایش نشد؛ فایل امن موقت برای تلاش مجدد نگه داشته شد: {e}")
     })?;
-    run_mysql_with_config("SELECT 1;", None, false, MANAGER_CONFIG).map(|_| ())
+    activate_pending_manager_config()?;
+    if !manager_config_is_valid(MANAGER_CONFIG) {
+        return Err("اعتبار داخلی MySQL فعال نشد؛ فایل امن برای بازیابی باقی مانده است.".into());
+    }
+    Ok(account_exists)
 }
 
 fn mysql_create_user_sql(input: &CreateUserRequest) -> Result<String, String> {
@@ -652,6 +766,7 @@ pub(super) async fn unlock(
                 .is_ok_and(|o| o.status.success());
         (actor, hash, installed)
     };
+    let mut manager_credentials_recovered = false;
     if installed {
         let result = privileged_request_async(json!({"action":"mysql-ensure-manager"})).await?;
         if result["ok"] != true {
@@ -662,6 +777,22 @@ pub(super) async fn unlock(
                     .unwrap_or("ساخت دسترسی مدیریتی MySQL ناموفق بود."),
             ));
         }
+        manager_credentials_recovered = result["recovered"].as_bool().unwrap_or(false);
+        let db = state.lock().unwrap();
+        audit(
+            &db,
+            &actor.username,
+            if manager_credentials_recovered {
+                "mysql.manager.credentials.recovered"
+            } else {
+                "mysql.manager.credentials.verified"
+            },
+            if manager_credentials_recovered {
+                "repaired or reactivated the reserved ARG manager credential after local validation"
+            } else {
+                "verified the ARG manager account and credential file"
+            },
+        );
     }
     let db = state.lock().unwrap();
     db.execute("INSERT INTO mysql_authorizations(session_hash,user_id,authorized_at) VALUES (?1,?2,?3) ON CONFLICT(session_hash) DO UPDATE SET user_id=excluded.user_id,authorized_at=excluded.authorized_at", params![hash, actor.id, now()]).map_err(db_error)?;
@@ -671,7 +802,7 @@ pub(super) async fn unlock(
         "mysql.unlock",
         "panel password re-authenticated once for this login session",
     );
-    Ok(Json(json!({"authorized":true})))
+    Ok(Json(json!({"authorized":true,"manager_credentials_recovered":manager_credentials_recovered})))
 }
 pub(super) async fn install(
     State(state): State<AppState>,
@@ -1193,7 +1324,7 @@ pub(super) async fn create_user(
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     match action {
         "mysql-ensure-manager" => match ensure_manager_account() {
-            Ok(()) => json!({"ok":true,"ready":true}),
+            Ok(recovered) => json!({"ok":true,"ready":true,"recovered":recovered}),
             Err(error) => json!({"ok":false,"error":error}),
         },
         "mysql-status" => {
@@ -1417,8 +1548,46 @@ mod tests {
     use super::{
         mysql_password_literal, safe_mysql_config_value, valid_identifier, valid_mysql_credentials,
         validate_sql, validate_mysql_setting, valid_application_database, valid_mysql_host,
-        mysql_sql_requires_confirmation, MYSQL_USER_CATALOG_FALLBACK_QUERY, MYSQL_USER_CATALOG_QUERY,
+        mysql_sql_requires_confirmation, manager_account_grants_allow_recovery,
+        manager_config_contents_valid, MYSQL_USER_CATALOG_FALLBACK_QUERY,
+        MYSQL_USER_CATALOG_QUERY,
     };
+
+    #[test]
+    fn manager_account_recovery_requires_the_reserved_full_global_grant_only() {
+        assert!(manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' WITH GRANT OPTION\n"
+        ));
+        assert!(manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' IDENTIFIED BY PASSWORD 'redacted' WITH GRANT OPTION\n"
+        ));
+        assert!(!manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT SELECT ON *.* TO 'arg_manager'@'localhost'\n"
+        ));
+        assert!(!manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' WITH GRANT OPTION\nGRANT PROXY ON ''@'' TO 'arg_manager'@'localhost' WITH GRANT OPTION\n"
+        ));
+        assert!(!manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON `app`.* TO 'arg_manager'@'localhost' WITH GRANT OPTION\n"
+        ));
+    }
+
+    #[test]
+    fn manager_credential_file_accepts_only_the_expected_arg_config_shape() {
+        assert!(manager_config_contents_valid(
+            "[client]\nuser=\"arg_manager\"\npassword=\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nprotocol=socket\n"
+        ));
+        assert!(!manager_config_contents_valid(
+            "[client]\nuser=\"root\"\npassword=\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nprotocol=socket\n"
+        ));
+        assert!(!manager_config_contents_valid(
+            "[client]\nuser=\"arg_manager\"\npassword=\"short\"\nprotocol=socket\n"
+        ));
+        assert!(!manager_config_contents_valid(
+            "[client]\nuser=\"arg_manager\"\npassword=\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\nprotocol=socket\n!include /etc/mysql/debian.cnf\n"
+        ));
+    }
+
     #[test]
     fn mysql_inputs_are_bounded_and_quoted() {
         assert!(valid_mysql_credentials("root", "secret"));

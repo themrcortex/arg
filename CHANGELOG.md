@@ -5,6 +5,10 @@
 ### Development
 - Development prerelease based on the next patch after main.
 
+### Fixed
+- Recover the reserved ARG MySQL manager credential after validating its exact global grant, instead of leaving MySQL access locked when its protected credential file is missing or stale.
+- Report successful internal credential recovery in the MySQL page and audit trail; reject unrelated accounts with different grants.
+
 ## v0.7.3 — 2026-10-29
 
 ### Added

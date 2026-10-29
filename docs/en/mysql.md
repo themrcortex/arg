@@ -27,6 +27,7 @@ Results may be truncated or constrained by row/time limits; a success status doe
 ## Troubleshooting
 
 - `unknown option '--defaults-extra-file'`: the option must be directly joined to its path with `=`, e.g. `--defaults-extra-file=/path/file.cnf`; the current manager uses this form.
+- If ARG's internal credential file is missing or invalid, ARG checks the reserved `arg_manager@localhost` account's grants through local root access. It rotates the password only when that account has exactly ARG's expected global grant, tests a root-only credential file, then activates it. Accounts with different grants are left untouched.
 - Access denied: check service state, socket, local authentication method, and root grants.
 - New password fails: inspect exact `user@host`, auth plugin, application secret, and connection pool.
 - Installation fails: check `apt-get update`, `/var` capacity, OS repositories, and service logs.

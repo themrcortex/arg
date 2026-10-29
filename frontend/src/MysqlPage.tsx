@@ -98,8 +98,8 @@ export function MysqlPage({ Heading, notify }: Common) {
     if (!adminPassword) { notify('رمز پنل را وارد کن.'); return }
     setBusy('unlock'); setError('')
     try {
-      await api('mysql/access', { method: 'POST', body: JSON.stringify({ password: adminPassword }) })
-      setAdminPassword(''); setAuthorized(true); notify('دسترسی MySQL برای نشست فعلی فعال شد.'); await refresh()
+      const result = await api<{ authorized: boolean; manager_credentials_recovered?: boolean }>('mysql/access', { method: 'POST', body: JSON.stringify({ password: adminPassword }) })
+      setAdminPassword(''); setAuthorized(true); notify(result.manager_credentials_recovered ? 'اعتبار داخلی MySQL به‌شکل امن بازیابی شد؛ دسترسی برای نشست فعلی فعال است.' : 'دسترسی MySQL برای نشست فعلی فعال شد.'); await refresh()
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 404) { setMysqlApiUnavailable(true); setError('API مدیریت MySQL در نسخهٔ ARG این Node پیدا نشد؛ ابتدا Node را به‌روزرسانی کن.') }
       else { const message = cause instanceof Error ? cause.message : 'تأیید رمز پنل ناموفق بود.'; setError(message); notify(`خطا: ${message}`) }
