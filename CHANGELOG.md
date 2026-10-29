@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.8-dev.2 — 2026-10-29
+
+### Development
+- Fix MySQL manager authorization checks to recognize MySQL's backtick-quoted `SHOW GRANTS` output and the inert global `USAGE` row, while still rejecting unexpected grants.
+
 ## v0.7.8-dev.1 — 2026-10-29
 
 ### Development
