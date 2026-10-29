@@ -1,3 +1,5 @@
+import { createRequestDeadline, requestTimeoutMs } from './request-policy.mjs'
+
 export type Role = 'admin' | 'operator' | 'viewer'
 export type User = { id: number; username: string; role: Role; enabled: boolean }
 export type Interface = {
@@ -144,36 +146,49 @@ export function terminalSocketUrl(path: string) {
 }
 
 async function requestApi<T>(url: string, path: string, init?: RequestInit): Promise<T> {
-  let response: Response
+  const callerSignal = init?.signal
+  const deadline = createRequestDeadline(requestTimeoutMs(path), callerSignal)
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
       ...init,
+      signal: deadline.signal,
     })
+    let result: unknown
+    try {
+      result = await response.json()
+    } catch (cause) {
+      if (deadline.signal.aborted) throw cause
+      result = null
+    }
+    if (!response.ok) {
+      const payload = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+      const diagnostic = payload.diagnostic && typeof payload.diagnostic === 'object'
+        ? payload.diagnostic as ApiDiagnostic
+        : undefined
+      const report: ApiFailureReport = {
+        message: typeof payload.error === 'string' ? payload.error : `HTTP ${response.status}`,
+        path,
+        status: response.status,
+        at: new Date().toISOString(),
+        diagnostic,
+      }
+      recordApiFailure(report)
+      throw new ApiError(report)
+    }
+    return result as T
   } catch (cause) {
-    const message = cause instanceof Error ? cause.message : 'Network request failed'
+    if (cause instanceof ApiError) throw cause
+    const message = deadline.timedOut()
+      ? 'درخواست بیش از مهلت مجاز طول کشید؛ وضعیت عملیات را دوباره بررسی کن.'
+      : cause instanceof Error ? cause.message : 'Network request failed'
     const report = { message, path, status: 0, at: new Date().toISOString() }
     recordApiFailure(report)
     throw new ApiError(report)
+  } finally {
+    deadline.dispose()
   }
-  const result: unknown = await response.json().catch(() => null)
-  if (!response.ok) {
-    const payload = result && typeof result === 'object' ? result as Record<string, unknown> : {}
-    const diagnostic = payload.diagnostic && typeof payload.diagnostic === 'object'
-      ? payload.diagnostic as ApiDiagnostic
-      : undefined
-    const report: ApiFailureReport = {
-      message: typeof payload.error === 'string' ? payload.error : `HTTP ${response.status}`,
-      path,
-      status: response.status,
-      at: new Date().toISOString(),
-      diagnostic,
-    }
-    recordApiFailure(report)
-    throw new ApiError(report)
-  }
-  return result as T
 }
 
 export function api<T>(path: string, init?: RequestInit): Promise<T> {
