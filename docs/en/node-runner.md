@@ -48,9 +48,13 @@ The form changes runtime variables, not build-time configuration. Deploy again w
 
 ## Service controls and reverse proxy
 
-Choose **Activate service** after a successful deployment. ARG creates a fixed per-app systemd unit named from the application UUID. It uses `DynamicUser`, a restricted filesystem, loopback `HOST`, the reserved `PORT`, `Restart=on-failure`, a 30-second graceful-stop window, and fixed resource ceilings. It does not accept an arbitrary systemd unit or shell command from the form.
+After a successful deployment, choose **Set up complete website**. ARG resolves DNS, enables the app's fixed systemd unit and checks its health endpoint, creates/enables its Nginx site, then requests an SSL certificate with Certbot and redirects HTTP to HTTPS when SSL is not configured for this hostname. Enter a renewal email only when a new certificate is needed. The dialog shows the DNS addresses it resolved; make sure they point to this VPS and that inbound port 80 is reachable.
 
-When the app has a domain, ARG can create a dedicated, ARG-managed Nginx reverse-proxy site. It refuses to overwrite an unrelated site or an existing site whose domain/port no longer matches the generated configuration. It validates and reloads Nginx before reporting success. WebSocket upgrade headers and proxy timeouts are included. SSL issuance and HTTP-to-HTTPS policy remain managed from the Nginx page; the runner does not issue a certificate implicitly. Without a domain, the process can be managed locally but ARG does not create a public route.
+If another Nginx file already claims the hostname, moving it to this app requires a separate confirmation. ARG only proceeds when it finds exactly one simple regular file under `sites-available` that it can safely parse. It writes a root-only backup of the entire file to `/var/backups/arg/nginx-domain-takeovers`, removes only the selected hostname from the old `server_name` directives, and preserves other aliases. Wildcard claims, multiple conflicting files, `conf.d`, the default site, and sites owned by another ARG app are not changed automatically. If setup fails before the new Nginx site is complete, ARG attempts to restore the old configuration and reports a restore failure and backup location.
+
+ARG creates a fixed per-app systemd unit named from the application UUID. It uses `DynamicUser`, a restricted filesystem, loopback `HOST`, the reserved `PORT`, `Restart=on-failure`, a 30-second graceful-stop window, and fixed resource ceilings. It does not accept an arbitrary systemd unit or shell command from the form.
+
+If the app has no domain, its service can be managed locally but ARG does not create a public route. Nginx configuration is validated with `nginx -t` and reloaded only after validation succeeds. The proxy includes WebSocket upgrade headers and proxy timeouts. SSL setup is part of the app's complete website flow.
 
 Service status is based on systemd and the actual listening socket. Before reporting activation as successful, ARG checks that the reserved port is listening only on loopback, then probes the configured health path. Any status outside 2xx, an invalid response, a public bind, or a missing listener fails verification and stops a newly enabled service. Use **Execution logs** to inspect recent bounded service output.
 
@@ -78,6 +82,8 @@ ARG does not manage Node clusters, staging promotion, package-manager auto-insta
 | No loopback listener / health check is not 2xx | Check the selected runtime script, health path, app logs, required environment keys, and whether the app honors `HOST` and `PORT`. |
 | A Job stays queued or shows a database error | Open **View process details** on the Job card. The dialog shows the original SQLite cause and worker log; transient claim errors are retried and retained in the Job report. Real Git and Node install/build output is streamed and stored with bounded pagination. |
 | Nginx proxy rejected | Review the existing site's `server_name` and configuration. ARG will not replace a manually changed or unrelated site. |
+| Domain is already used by another site | In the complete website flow, explicitly confirm moving the hostname after reviewing the warning. Only one simple `sites-available` file is eligible for automatic takeover; inspect other cases from the Nginx page. |
+| Certbot or HTTP-01 failed | Compare the displayed DNS addresses with the VPS address, expose inbound port 80, and check CDN/proxy settings. The dialog shows the error; Nginx may remain available over HTTP. |
 | Service stopped after failed activation | The runner stopped a newly created service after verification failed. Correct the cause and activate again. |
 
 ## API and authorization

@@ -2158,13 +2158,13 @@ async fn process_job(state: AppState, job_id: String) {
     let app_settings = {
         let db = state.lock().unwrap();
         db.query_row(
-            "SELECT framework,build_runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json,node_build_script,node_start_script FROM applications WHERE id=?1",
+            "SELECT framework,build_runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json,node_build_script,node_start_script,listen_port FROM applications WHERE id=?1",
             [&app_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, String>(5)?, row.get::<_,String>(6)?, row.get::<_,String>(7)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, String>(5)?, row.get::<_,String>(6)?, row.get::<_,String>(7)?, row.get::<_,Option<i64>>(8)?.and_then(|port| u16::try_from(port).ok()))),
         )
         .optional()
     };
-    let (framework, build_runtime_version, domain, static_output_path, static_spa_fallback, build_environment_json, node_build_script, node_start_script) = match app_settings {
+    let (framework, build_runtime_version, domain, static_output_path, static_spa_fallback, build_environment_json, node_build_script, node_start_script, listen_port) = match app_settings {
         Ok(Some(settings)) => settings,
         Ok(None) => {
             let _ = fs::remove_dir_all(&stage);
@@ -2433,6 +2433,115 @@ async fn process_job(state: AppState, job_id: String) {
             finish(&state, &job_id, "failed", &message);
             return;
         }
+        let configured_domain = domain.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        if let Some(domain) = configured_domain {
+            progress(
+                &state,
+                &job_id,
+                "verifying",
+                "nginx",
+                "تنظیم Nginx برای دامنه بررسی می‌شود؛ اگر پیکربندی موجود نباشد، reverse proxy اپ ساخته و فعال خواهد شد.",
+            );
+            if let Some(port) = listen_port {
+                match privileged_request_async(json!({
+                    "action":"node-nginx-deploy-proxy",
+                    "application_id":app_id,
+                    "domain":domain,
+                    "port":port
+                })).await {
+                    Ok(value) if value["ok"] == true => {
+                        if value["data"]["preserved_existing"] == true {
+                            record_output(
+                                &state,
+                                &job_id,
+                                "nginx",
+                                "برای این دامنه کانفیگ Nginx موجود و معتبر بود؛ بدون بازنویسی حفظ شد.",
+                            );
+                        } else if let (Some(name), Some(content)) = (
+                            value["data"]["site_name"].as_str(),
+                            value["data"]["content"].as_str(),
+                        ) {
+                            nginx_snapshot = Some((name.to_owned(), content.to_owned()));
+                            record_output(
+                                &state,
+                                &job_id,
+                                "nginx",
+                                &format!("کانفیگ Nginx اپ {name} بررسی و فعال شد."),
+                            );
+                        } else {
+                            record_output(
+                                &state,
+                                &job_id,
+                                "nginx",
+                                "کانفیگ Nginx بررسی شد؛ خروجی موجودی آن برای Snapshot در دسترس نبود.",
+                            );
+                        }
+                    }
+                    Ok(value) => {
+                        let message = value["error"]
+                            .as_str()
+                            .unwrap_or("بررسی یا ساخت کانفیگ Nginx ناموفق بود.")
+                            .to_owned();
+                        let restored = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                        let service_recovered = if restored.is_ok() {
+                            node::refresh_after_deploy(&app_id, previous.as_deref()).await.is_ok()
+                        } else {
+                            false
+                        };
+                        let detail = format!(
+                            "{message} {}",
+                            if service_recovered {
+                                "release قبلی برگشت و سرویس دوباره بررسی شد."
+                            } else if restored.is_ok() {
+                                "release قبلی برگشت؛ وضعیت سرویس را بررسی کن."
+                            } else {
+                                "بازگرداندن release قبلی ناموفق بود؛ مسیر current را بررسی کن."
+                            }
+                        );
+                        finish(&state, &job_id, "failed", &detail);
+                        return;
+                    }
+                    Err((_, body)) => {
+                        let message = body["error"]
+                            .as_str()
+                            .unwrap_or("ارتباط با helper برای بررسی Nginx برقرار نشد.")
+                            .to_owned();
+                        let restored = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                        let service_recovered = if restored.is_ok() {
+                            node::refresh_after_deploy(&app_id, previous.as_deref()).await.is_ok()
+                        } else {
+                            false
+                        };
+                        let detail = format!(
+                            "{message} {}",
+                            if service_recovered {
+                                "release قبلی برگشت و سرویس دوباره بررسی شد."
+                            } else if restored.is_ok() {
+                                "release قبلی برگشت؛ وضعیت سرویس را بررسی کن."
+                            } else {
+                                "بازگرداندن release قبلی ناموفق بود؛ مسیر current را بررسی کن."
+                            }
+                        );
+                        finish(&state, &job_id, "failed", &detail);
+                        return;
+                    }
+                }
+            } else {
+                record_output(
+                    &state,
+                    &job_id,
+                    "nginx",
+                    "دامنه ثبت شده اما پورت اجرای Node مشخص نیست؛ کانفیگ خودکار ساخته نشد. پورت Listen را در مشخصات اپ ثبت کن.",
+                );
+            }
+        } else {
+            record_output(
+                &state,
+                &job_id,
+                "nginx",
+                "برای اپ دامنه‌ای ثبت نشده است؛ ساخت کانفیگ Nginx لازم نبود.",
+            );
+        }
     }
     let db = state.lock().unwrap();
     let at = now();
@@ -2452,10 +2561,10 @@ async fn process_job(state: AppState, job_id: String) {
     let success_message = snapshot_warning.map_or_else(
         || match framework.as_str() {
             "laravel" => "release فعال شد؛ کانفیگ وب و سرویس‌های Laravel بررسی شدند. Migration دیتابیس خودکار اجرا نمی‌شود.".to_owned(),
-            "node" | "next" | "nuxt" => "release SSR فعال شد؛ سرویس Node در صورت فعال‌بودن restart و سلامت loopback آن بررسی شد.".to_owned(),
+            "node" | "next" | "nuxt" => "release SSR فعال شد؛ سرویس Node بررسی شد و تنظیم Nginx در صورت ثبت دامنه و پورت بررسی یا ساخته شد.".to_owned(),
             "static" | "react" | "vue" | "vite" => "خروجی سایت Static ساخته و از طریق Nginx منتشر شد؛ برای این سایت process جداگانه اجرا نمی‌شود.".to_owned(),
             "auto" if static_site => "چارچوب از manifest تشخیص داده شد؛ خروجی Static از طریق Nginx منتشر شد و process جداگانه‌ای اجرا نمی‌شود.".to_owned(),
-            "auto" => "چارچوب از manifest تشخیص داده شد؛ release SSR فعال و سرویس Node بررسی شد.".to_owned(),
+            "auto" => "چارچوب از manifest تشخیص داده شد؛ release SSR فعال شد و سرویس Node و تنظیم Nginx بررسی شدند.".to_owned(),
             _ => "release فعال شد و اشاره‌گر جاری به‌صورت اتمی جابه‌جا شد.".to_owned(),
         },
         |warning| format!("release فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),

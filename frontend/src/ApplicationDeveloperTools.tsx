@@ -6,7 +6,7 @@ import { Badge } from './components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 
 type Application = { id: string; name: string }
-type BuildPlan = { id: string; release_id: string; source_commit?: string | null; created_at: number; plan: { framework: string; confidence: number; ambiguous: boolean; build_mode: string; commands: string[]; warnings: string[]; executes_commands: boolean } }
+type BuildPlan = { id: string; release_id: string; source_commit?: string | null; created_at: number; plan: { framework: string; confidence: number; ambiguous: boolean; override?: boolean; candidates?: { framework: string; confidence: number; reason: string }[]; build_mode: string; commands: string[]; warnings: string[]; executes_commands: boolean } }
 type FileEntry = { name: string; path: string; kind: 'directory' | 'file'; size_bytes: number }
 type Snapshot = { id: string; label: string; sha256: string; created_at: number; source_commit?: string | null; restorable: boolean }
 
@@ -15,6 +15,7 @@ export function ApplicationDeveloperTools({ app, notify }: { app: Application; n
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [plans, setPlans] = useState<BuildPlan[]>([])
+  const [frameworkChoices, setFrameworkChoices] = useState<Record<string, string>>({})
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [path, setPath] = useState('')
   const [file, setFile] = useState<{ path: string; content: string; source_commit?: string | null } | null>(null)
@@ -46,11 +47,11 @@ export function ApplicationDeveloperTools({ app, notify }: { app: Application; n
     return () => { active = false }
   }, [open, app.id])
 
-  async function analyze() {
+  async function analyze(frameworkOverride?: string) {
     setBusy('plan'); setError('')
     try {
-      const result = await api<{ plan: BuildPlan['plan'] }>(`apps/${encodeURIComponent(app.id)}/build-plans`, { method: 'POST', body: JSON.stringify({}) })
-      await loadPlans(); notify(`Build Plan آماده شد: ${result.plan.framework} · ${result.plan.confidence}%`)
+      const result = await api<{ plan: BuildPlan['plan'] }>(`apps/${encodeURIComponent(app.id)}/build-plans`, { method: 'POST', body: JSON.stringify(frameworkOverride ? { framework_override: frameworkOverride } : {}) })
+      await loadPlans(); notify(frameworkOverride ? `انتخاب دستی ثبت شد: ${result.plan.framework}` : `Build Plan آماده شد: ${result.plan.framework} · ${result.plan.confidence}%`)
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'تحلیل پروژه انجام نشد.') }
     finally { setBusy('') }
   }
@@ -74,15 +75,15 @@ export function ApplicationDeveloperTools({ app, notify }: { app: Application; n
 
   return <Card className="mt-3 border-border/70 bg-background/35">
     <CardHeader className="flex-row items-center justify-between gap-3 py-3">
-      <div><CardTitle className="flex items-center gap-2 text-sm"><GitBranch size={15} className="text-primary"/>سورس، Build Plan و Snapshot</CardTitle><CardDescription className="mt-1 text-[10px]">ابزارهای خواندنی روی آخرین release موفق؛ هیچ build یا ویرایش خودکاری اجرا نمی‌شود.</CardDescription></div>
+      <div><CardTitle className="flex items-center gap-2 text-sm"><GitBranch size={15} className="text-primary"/>سورس، Build Plan و Snapshot</CardTitle><CardDescription className="mt-1 text-[10px]">این بخش فقط تحلیل و مرور می‌کند؛ برای اجرای واقعی، فرم «استقرار منبع» در کارت بالاتر را باز کن.</CardDescription></div>
       <Button variant="outline" size="sm" onClick={() => setOpen(!open)} aria-expanded={open}>{open ? 'بستن' : 'بازکردن'}{open ? <ChevronDown size={14}/> : <ChevronLeft size={14}/>}</Button>
     </CardHeader>
     {open && <CardContent className="space-y-4 pt-1">
       {error && <p role="alert" className="rounded-lg border border-rose-300/20 bg-rose-400/5 p-2 text-xs text-rose-200">{error}</p>}
       <div className="grid gap-3 xl:grid-cols-2">
         <section className="space-y-2 rounded-xl border border-border/70 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2"><div><h4 className="text-xs font-semibold">تشخیص و Build Plan</h4><p className="mt-1 text-[10px] text-muted-foreground">فقط manifestها بررسی و پیشنهاد ذخیره می‌شود.</p></div><Button size="sm" onClick={() => void analyze()} disabled={Boolean(busy)}><WandSparkles size={14}/>{busy === 'plan' ? 'در حال تحلیل' : 'تحلیل release'}</Button></div>
-          {plans.slice(0, 3).map((item) => <div key={item.id} className="space-y-2 rounded-lg bg-muted/30 p-2.5"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{item.plan.framework}</Badge><span className="text-[10px] text-muted-foreground">اطمینان {item.plan.confidence}%</span>{item.plan.ambiguous && <Badge variant="destructive">انتخاب مبهم</Badge>}</div><p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{item.plan.commands.length ? item.plan.commands.join('  →  ') : 'No automatic build command'}</p>{item.plan.warnings.map((warning) => <p key={warning} className="text-[10px] leading-5 text-amber-100">{warning}</p>)}<p className="flex items-center gap-1 text-[9px] text-muted-foreground"><ShieldCheck size={11}/>اجرا نمی‌شود · release {item.release_id.slice(0, 8)}</p></div>)}
+          <div className="flex flex-wrap items-center justify-between gap-2"><div><h4 className="text-xs font-semibold">تشخیص و Build Plan</h4><p className="mt-1 text-[10px] text-muted-foreground">manifestها فقط بررسی و پیشنهاد ذخیره می‌شوند؛ هیچ Build یا Deploy از این بخش اجرا نمی‌شود.</p></div><Button size="sm" onClick={() => void analyze()} disabled={Boolean(busy)}><WandSparkles size={14}/>{busy === 'plan' ? 'در حال تحلیل' : 'تحلیل release'}</Button></div>
+          {plans.slice(0, 3).map((item) => <div key={item.id} className="space-y-2 rounded-lg bg-muted/30 p-2.5"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{item.plan.framework}</Badge><span className="text-[10px] text-muted-foreground">اطمینان {item.plan.confidence}%</span>{item.plan.ambiguous && <Badge variant="destructive">انتخاب مبهم</Badge>}{item.plan.override && <Badge variant="success">انتخاب مدیر</Badge>}</div><p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{item.plan.commands.length ? item.plan.commands.join('  →  ') : 'No automatic build command'}</p>{item.plan.warnings.map((warning) => <p key={warning} className="text-[10px] leading-5 text-amber-100">{warning}</p>)}{item.plan.ambiguous && <div className="flex flex-wrap items-end gap-2 rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-2"><label className="min-w-40 flex-1 space-y-1 text-[10px] text-muted-foreground">چارچوب درست را انتخاب کن<select value={frameworkChoices[item.id] ?? item.plan.framework} onChange={(event) => setFrameworkChoices((current) => ({ ...current, [item.id]: event.target.value }))} className="h-9 w-full rounded-md border border-input bg-background px-2 text-xs text-foreground">{(item.plan.candidates || []).map((candidate) => <option key={candidate.framework} value={candidate.framework}>{candidate.framework} · {candidate.confidence}%</option>)}</select></label><Button size="sm" variant="outline" onClick={() => void analyze(frameworkChoices[item.id] ?? item.plan.framework)} disabled={Boolean(busy)}>{busy === 'plan' ? 'در حال ثبت…' : 'تأیید انتخاب برای تحلیل'}</Button><p className="w-full text-[10px] leading-5 text-muted-foreground">این تأیید فقط تحلیل را به‌روز می‌کند و هیچ دستوری اجرا نمی‌شود. برای Deploy واقعی از فرم بالای همین صفحه استفاده کن.</p></div>}<p className="flex items-center gap-1 text-[9px] text-muted-foreground"><ShieldCheck size={11}/>فقط تحلیل؛ دستوری اجرا نمی‌شود · release {item.release_id.slice(0, 8)}</p></div>)}
           {!plans.length && <p className="rounded-lg border border-dashed border-border p-3 text-center text-[10px] text-muted-foreground">برای این اپ Build Plan ذخیره نشده است.</p>}
         </section>
         <section className="space-y-2 rounded-xl border border-border/70 p-3">

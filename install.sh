@@ -35,6 +35,7 @@ readonly UPDATE_CANCEL_FILE="/run/arg-update-cancel-requested"
 readonly ENV_DIR="/etc/arg"
 readonly ENV_FILE="/etc/arg/arg.env"
 readonly DOMAIN_FILE="/etc/arg/https-domain"
+readonly CERT_LINEAGE_FILE="/etc/arg/https-cert-lineage"
 readonly LEGACY_NGINX_SITE="/etc/nginx/sites-available/arg"
 readonly LEGACY_NGINX_SITE_LINK="/etc/nginx/sites-enabled/arg"
 readonly TLS_DIR="/etc/arg/tls"
@@ -1015,12 +1016,21 @@ write_cert_deploy_hook() {
 #!/bin/sh
 set -eu
 domain_file=/etc/arg/https-domain
-[ -s "$domain_file" ] || exit 0
-domain=$(cat "$domain_file")
-case " ${RENEWED_DOMAINS:-} " in
-  *" $domain "*) ;;
-  *) exit 0 ;;
-esac
+lineage_file=/etc/arg/https-cert-lineage
+if [ -e "$lineage_file" ]; then
+  expected_lineage=$(cat "$lineage_file")
+  [ -n "$expected_lineage" ] || exit 0
+  [ "${RENEWED_LINEAGE:-}" = "$expected_lineage" ] || exit 0
+else
+  [ -s "$domain_file" ] || exit 0
+  domain=$(cat "$domain_file")
+  case " ${RENEWED_DOMAINS:-} " in
+    *" $domain "*) ;;
+    *) exit 0 ;;
+  esac
+fi
+[ -s "${RENEWED_LINEAGE:-}/fullchain.pem" ] || exit 1
+[ -s "${RENEWED_LINEAGE:-}/privkey.pem" ] || exit 1
 install -o root -g arg -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/arg/tls/fullchain.pem
 install -o root -g arg -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/arg/tls/privkey.pem
 systemctl restart arg.service
@@ -1253,6 +1263,16 @@ configure_https() {
     return 0
   fi
   rm -f "$env_backup"
+  lineage_tmp="$(mktemp "$ENV_DIR/.https-cert-lineage.XXXXXX")" || lineage_tmp=""
+  if [[ -n "$lineage_tmp" ]] \
+    && printf '/etc/letsencrypt/live/%s\n' "$CERT_NAME" > "$lineage_tmp" \
+    && chown root:root "$lineage_tmp" && chmod 0600 "$lineage_tmp" \
+    && mv -f "$lineage_tmp" "$CERT_LINEAGE_FILE"; then
+    :
+  else
+    [[ -z "$lineage_tmp" ]] || rm -f "$lineage_tmp"
+    warn "HTTPS is active, but panel certificate lineage could not be recorded; the compatibility renewal hook will continue matching the panel domain."
+  fi
   say "HTTPS is active"
   if [[ "$port" == "443" ]]; then
     info "Panel URL: https://$host"

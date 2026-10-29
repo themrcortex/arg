@@ -10,6 +10,11 @@
 - Scale Cargo's parallel build jobs to available CPU and memory, while balancing per-job Rust code generation parallelism to use the available cores without running several memory-heavy Cargo jobs at once.
 - Persist Git and live Node install/build output per deployment Job, show it in a follow-tail process details dialog, and surface the underlying database cause when job status cannot be read or claimed.
 - Add ordered, custom pre-deploy commands for Git, directory and ZIP releases. Commands run as argv (without shell interpretation) in the resource-limited staging sandbox, and each command's live output is retained in the deployment Job.
+- Add a one-click Node/static website setup flow that checks DNS, enables and health-checks the app service, configures Nginx, and requests SSL when the hostname has no matching certificate; display resolved DNS addresses and require explicit confirmation before safely taking a hostname from one supported standalone Nginx file.
+- Check Nginx during Node SSR deployment, validate and preserve existing virtual hosts, and create/enable an ARG-managed reverse proxy when the hostname has no existing owner.
+- Configure panel certificate renewal from Settings when a Certbot lineage is selected, with a lineage-specific deploy hook, a persistent twice-daily renewal timer, and visible renewal status.
+- Check Nginx during Node SSR deployment, validate and preserve existing virtual hosts, and create/enable an ARG-managed reverse proxy when the hostname has no existing owner.
+- Configure panel certificate renewal from Settings when a Certbot lineage is selected, with a lineage-specific deploy hook, a persistent twice-daily renewal timer, and visible renewal status.
 
 ## v0.7.2 — 2026-10-28
 
@@ -39,6 +44,7 @@
 - Keep deployment job status and detailed live stage logs readable after refresh; report database/migration failures with the actual cause.
 - Keep updater cleanup and rollback state valid after `update_app` exits, and retain the active binary when constrained-memory compilation fails.
 - Report compiler failures before binary replacement, release the update reservation, and leave the currently running panel binary untouched.
+- Back up a standalone Nginx site before moving an exact hostname to an ARG-managed Node app, preserve other aliases, reject ambiguous/wildcard or multi-file conflicts, and report rollback failures with the protected backup path.
 - Keep the global ARG updater scoped to the current control panel so an update started for a managed Node cannot lock navigation across the controller workspace.
 - Let administrators minimize a running panel update into a compact status control; monitoring continues and the full progress view can be reopened without interrupting the update.
 - Rebuild and commit the embedded frontend bundle with UI source changes; CI now fails when `frontend/dist` is stale, preventing Rust releases from silently shipping the previous interface.

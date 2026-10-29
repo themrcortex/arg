@@ -38,6 +38,8 @@ pub(super) struct NodeRuntimeSettingsRequest {
 #[serde(deny_unknown_fields)]
 pub(super) struct ServiceRequest {
     enabled: bool,
+    #[serde(default)]
+    takeover_domain_conflict: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -1362,14 +1364,23 @@ pub(super) async fn set_service(
         ));
     }
     let mut nginx_snapshot: Option<(String, String)> = None;
+    let mut takeover_backup: Option<String> = None;
     if input.enabled {
         if let (Some(domain), Some(port)) = (domain.as_deref(), port) {
-            let proxy = privileged_request_async(json!({"action":"node-nginx-proxy","application_id":app_id,"domain":domain,"port":port})).await;
+            let proxy = privileged_request_async(json!({
+                "action": "node-nginx-proxy",
+                "application_id": app_id,
+                "domain": domain,
+                "port": port,
+                "takeover_domain_conflict": input.takeover_domain_conflict
+            }))
+            .await;
             match proxy {
                 Ok(value) if value["ok"] == true => {
                     if let (Some(name), Some(content)) = (value["data"]["site_name"].as_str(), value["data"]["content"].as_str()) {
                         nginx_snapshot = Some((name.to_owned(), content.to_owned()));
                     }
+                    takeover_backup = value["data"]["takeover_backup"].as_str().map(str::to_owned);
                 }
                 Ok(value) => {
                     let message = value["error"].as_str().unwrap_or("تنظیم reverse proxy در Nginx ناموفق بود.");
@@ -1402,11 +1413,28 @@ pub(super) async fn set_service(
         "node.service.change",
         &format!("app={app_id}; enabled={}; unit={unit}", input.enabled),
     );
-    if let Some((site_name, content)) = nginx_snapshot {
-        db.execute("INSERT OR IGNORE INTO nginx_site_metadata(name,description) VALUES (?1,?2)", params![site_name, format!("Node application {app_id}")]).map_err(db_error)?;
-        nginx::store_nginx_snapshot(&db, &site_name, &content, None).map_err(db_error)?;
+    if let (Some(domain), Some(backup)) = (domain.as_deref(), takeover_backup.as_deref()) {
+        audit(
+            &db,
+            &actor,
+            "node.service.domain_takeover",
+            &format!(
+                "app={app_id}; domain={domain}; backup={backup}"
+            ),
+        );
     }
-    Ok(Json(result["data"].clone()))
+    if let Some((site_name, content)) = nginx_snapshot.as_ref() {
+        db.execute("INSERT OR IGNORE INTO nginx_site_metadata(name,description) VALUES (?1,?2)", params![site_name, format!("Node application {app_id}")]).map_err(db_error)?;
+        nginx::store_nginx_snapshot(&db, site_name, content, None).map_err(db_error)?;
+    }
+    let mut response = result["data"].clone();
+    if let Some((site_name, _)) = nginx_snapshot.as_ref() {
+        response["nginx_site"] = json!(site_name);
+    }
+    if let Some(backup) = takeover_backup {
+        response["domain_takeover_backup"] = json!(backup);
+    }
+    Ok(Json(response))
 }
 
 pub(super) async fn save_environment(
@@ -1644,6 +1672,7 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
         "node-environment-keys" => helper_environment_keys(request),
         "node-environment-permissions" => helper_environment_permissions(request),
         "node-nginx-proxy" => helper_node_nginx_proxy(request),
+        "node-nginx-deploy-proxy" => helper_node_nginx_deploy_proxy(request),
         "node-nginx-static" => helper_node_nginx_static(request),
         _ => json!({"ok":false,"error":"Node helper operation is not allowlisted"}),
     }
@@ -1694,7 +1723,30 @@ fn helper_node_nginx_proxy(request: &Value) -> Value {
     let Some(port) = request["port"].as_u64().filter(|port| (1024..=65535).contains(port)) else {
         return json!({"ok":false,"error":"Node port is invalid"});
     };
-    match nginx::configure_node_proxy(app_id, domain, port as u16) {
+    match nginx::configure_node_proxy(
+        app_id,
+        domain,
+        port as u16,
+        request["takeover_domain_conflict"]
+            .as_bool()
+            .unwrap_or(false),
+    ) {
+        Ok(data) => json!({"ok":true,"data":data}),
+        Err(message) => json!({"ok":false,"error":message}),
+    }
+}
+
+fn helper_node_nginx_deploy_proxy(request: &Value) -> Value {
+    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+        return json!({"ok":false,"error":"Application ID is invalid"});
+    };
+    let Some(domain) = request["domain"].as_str() else {
+        return json!({"ok":false,"error":"Application domain is missing"});
+    };
+    let Some(port) = request["port"].as_u64().filter(|port| (1024..=65535).contains(port)) else {
+        return json!({"ok":false,"error":"Node port is invalid"});
+    };
+    match nginx::ensure_node_proxy_for_deployment(app_id, domain, port as u16) {
         Ok(data) => json!({"ok":true,"data":data}),
         Err(message) => json!({"ok":false,"error":message}),
     }
@@ -2899,6 +2951,13 @@ fn parse_node_http_status(response: &[u8]) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deployment_nginx_helper_rejects_invalid_app_before_touching_nginx() {
+        let result = execute_privileged_request("node-nginx-deploy-proxy", &json!({}));
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"], "Application ID is invalid");
+    }
+
     #[test]
     fn build_runner_streams_each_real_output_line_to_its_job_log() {
         let path = std::env::temp_dir().join(format!("arg-build-live-log-{}.log", rand::random::<u64>()));

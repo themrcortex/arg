@@ -90,6 +90,69 @@ fn has(names: &std::collections::HashSet<String>, file: &str) -> bool {
     names.contains(file)
 }
 
+fn build_commands(framework: &str, names: &std::collections::HashSet<String>) -> Vec<&'static str> {
+    match framework {
+        "laravel" => vec!["composer install --no-dev --prefer-dist --no-interaction"],
+        "node" | "next" | "nuxt" | "react" | "vue" | "vite" => {
+            if has(names, "pnpm-lock.yaml") {
+                vec!["pnpm install --frozen-lockfile", "pnpm run build"]
+            } else if has(names, "yarn.lock") {
+                vec!["yarn install --immutable", "yarn build"]
+            } else if has(names, "package-lock.json") {
+                vec!["npm ci", "npm run build"]
+            } else {
+                Vec::new()
+            }
+        }
+        "python" => {
+            vec!["Review requirements.txt or pyproject.toml before selecting an isolated runner"]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn apply_framework_override(
+    plan: &mut Value,
+    framework: &str,
+    names: &std::collections::HashSet<String>,
+) {
+    let commands = build_commands(framework, names);
+    plan["framework"] = json!(framework);
+    plan["override"] = json!(true);
+    plan["ambiguous"] = json!(false);
+    plan["commands"] = json!(commands);
+    plan["artifact"] = json!(if framework == "laravel" {
+        "release source"
+    } else if matches!(framework, "react" | "vue" | "vite") {
+        "dist"
+    } else {
+        "runtime"
+    });
+    plan["port"] = if matches!(framework, "node" | "next" | "nuxt") {
+        json!(3000)
+    } else {
+        Value::Null
+    };
+    plan["healthcheck"] = json!(if matches!(framework, "node" | "next" | "nuxt") {
+        "/"
+    } else {
+        ""
+    });
+
+    if let Some(warnings) = plan["warnings"].as_array_mut() {
+        warnings.retain(|warning| {
+            warning.as_str() != Some("چند چارچوب نزدیک به هم شناسایی شد؛ انتخاب را دستی تأیید کن.")
+                && warning.as_str()
+                    != Some("دستور ساخت خودکار تعیین نشد؛ پیش از Deploy تنظیمات را بازبینی کن.")
+        });
+        if commands.is_empty() {
+            warnings.push(json!(
+                "دستور ساخت خودکار تعیین نشد؛ پیش از Deploy تنظیمات را بازبینی کن."
+            ));
+        }
+    }
+}
+
 fn json_file(path: &FsPath) -> serde_json::Value {
     fs::metadata(path)
         .ok()
@@ -176,24 +239,7 @@ fn detect(root: &FsPath, names: &std::collections::HashSet<String>) -> serde_jso
     } else {
         "host_runner_review"
     };
-    let commands = match framework {
-        "laravel" => vec!["composer install --no-dev --prefer-dist --no-interaction"],
-        "node" | "next" | "nuxt" | "react" | "vue" | "vite" => {
-            if has(names, "pnpm-lock.yaml") {
-                vec!["pnpm install --frozen-lockfile", "pnpm run build"]
-            } else if has(names, "yarn.lock") {
-                vec!["yarn install --immutable", "yarn build"]
-            } else if has(names, "package-lock.json") {
-                vec!["npm ci", "npm run build"]
-            } else {
-                Vec::new()
-            }
-        }
-        "python" => {
-            vec!["Review requirements.txt or pyproject.toml before selecting an isolated runner"]
-        }
-        _ => Vec::new(),
-    };
+    let commands = build_commands(framework, names);
     let mut warnings = Vec::new();
     if ambiguous {
         warnings.push("چند چارچوب نزدیک به هم شناسایی شد؛ انتخاب را دستی تأیید کن.");
@@ -306,8 +352,7 @@ pub(super) async fn analyze(
     let names = names_for(&target).map_err(|message| error(StatusCode::BAD_REQUEST, &message))?;
     let mut plan = detect(&target, &names);
     if let Some(framework) = input.framework_override.as_deref() {
-        plan["framework"] = json!(framework);
-        plan["override"] = json!(true);
+        apply_framework_override(&mut plan, framework, &names);
     }
     if let Some(mode) = input.build_mode.as_deref().filter(|mode| *mode != "auto") {
         plan["build_mode"] = json!(mode);
@@ -385,6 +430,37 @@ mod tests {
         docker_files.insert("Dockerfile".into());
         let docker = detect(&root, &docker_files);
         assert_eq!(docker["build_mode"], "dockerfile_review");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manual_framework_selection_rebuilds_plan_and_clears_ambiguity() {
+        let root =
+            std::env::temp_dir().join(format!("arg-buildplan-override-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"express":"*"},"scripts":{"start":"node server.js"}}"#,
+        )
+        .unwrap();
+        let names = names(&["package.json", "package-lock.json", "Dockerfile"]);
+        let mut plan = detect(&root, &names);
+        assert_eq!(plan["framework"], "node");
+        assert_eq!(plan["ambiguous"], true);
+
+        apply_framework_override(&mut plan, "react", &names);
+
+        assert_eq!(plan["framework"], "react");
+        assert_eq!(plan["override"], true);
+        assert_eq!(plan["ambiguous"], false);
+        assert_eq!(plan["commands"][0], "npm ci");
+        assert_eq!(plan["commands"][1], "npm run build");
+        assert_eq!(plan["artifact"], "dist");
+        assert!(!plan["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning.as_str() == Some("چند چارچوب نزدیک به هم شناسایی شد؛ انتخاب را دستی تأیید کن.")
+        }));
+        assert_eq!(plan["build_mode"], "dockerfile_review");
+        assert_eq!(plan["executes_commands"], false);
         let _ = fs::remove_dir_all(root);
     }
     #[test]

@@ -79,7 +79,7 @@ type GeneratedDeploymentKey = DeploymentKey & { private_key_saved_on_server: boo
 const emptyDraft: Draft = { name: '', description: '', framework: 'auto', runtime_version: 'system', build_runtime_version: 'system', static_output_path: 'auto', static_spa_fallback: true, source_type: 'manual', domain: '', listen_port: '', labels: '', desired_state: 'none', environment_id: '' }
 const frameworkLabels: Record<string, string> = { auto: 'تشخیص خودکار', laravel: 'Laravel', node: 'Node.js SSR', next: 'Next.js SSR', nuxt: 'Nuxt SSR', python: 'Python', wordpress: 'WordPress', static: 'فایل‌های استاتیک آماده', react: 'React SPA', vue: 'Vue SPA', vite: 'Vite SPA', custom: 'سفارشی / انتشار release' }
 const sourceLabels: Record<string, string> = { manual: 'ثبت دستی', git: 'مخزن Git', archive: 'فایل آرشیو', docker: 'Docker', 'existing-directory': 'پوشهٔ موجود', image: 'Image' }
-const deploymentStepLabels: Record<string, string> = { queued: 'ثبت Job', validating: 'اعتبارسنجی ورودی و مالکیت', recovered: 'بازیابی پس از راه‌اندازی مجدد', acquiring: 'دریافت منبع', 'node-build': 'آماده‌سازی پروژه Node', 'node-install': 'نصب وابستگی‌ها', 'node-build-script': 'اجرای اسکریپت Build', 'laravel-persistent-data': 'آماده‌سازی داده‌های پایدار', verifying: 'بررسی و فعال‌سازی', activating: 'فعال‌سازی release', succeeded: 'استقرار کامل شد', failed: 'استقرار ناموفق بود', cancelled: 'استقرار لغو شد', database: 'دسترسی پایگاه‌داده' }
+const deploymentStepLabels: Record<string, string> = { queued: 'ثبت Job', validating: 'اعتبارسنجی ورودی و مالکیت', recovered: 'بازیابی پس از راه‌اندازی مجدد', acquiring: 'دریافت منبع', 'node-build': 'آماده‌سازی پروژه Node', 'node-install': 'نصب وابستگی‌ها', 'node-build-script': 'اجرای اسکریپت Build', 'laravel-persistent-data': 'آماده‌سازی داده‌های پایدار', nginx: 'بررسی تنظیمات Nginx', verifying: 'بررسی و فعال‌سازی', activating: 'فعال‌سازی release', succeeded: 'استقرار کامل شد', failed: 'استقرار ناموفق بود', cancelled: 'استقرار لغو شد', database: 'دسترسی پایگاه‌داده' }
 const frameworkIdentity: Record<string, { label: string; mark: string; color: string; background: string; logo?: string }> = {
   auto: { label: 'تشخیص خودکار', mark: '?', color: '#c4b5fd', background: 'rgba(139,92,246,.12)' },
   laravel: { label: 'Laravel', mark: 'L', logo: '/arg/platforms/laravel.svg', color: '#FF2D20', background: 'rgba(255,45,32,.12)' },
@@ -659,6 +659,13 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [publishOpen, setPublishOpen] = useState(false)
+  const [publishBusy, setPublishBusy] = useState(false)
+  const [publishStage, setPublishStage] = useState<'idle' | 'dns' | 'service' | 'nginx' | 'ssl'>('idle')
+  const [publishError, setPublishError] = useState('')
+  const [publishEmail, setPublishEmail] = useState('')
+  const [publishDnsAddresses, setPublishDnsAddresses] = useState<string[]>([])
+  const [takeoverDomainConflict, setTakeoverDomainConflict] = useState(false)
   const [environmentBusy, setEnvironmentBusy] = useState(false)
   const [buildEnvironmentBusy, setBuildEnvironmentBusy] = useState(false)
   const [runtimeSettingsBusy, setRuntimeSettingsBusy] = useState(false)
@@ -668,6 +675,7 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   const [newValue, setNewValue] = useState('')
   const [newBuildKey, setNewBuildKey] = useState('')
   const [newBuildValue, setNewBuildValue] = useState('')
+  const staticProject = inspection?.framework === 'static'
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -702,6 +710,66 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
       await load()
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'تغییر وضعیت سرویس ناموفق بود.') }
     finally { setBusy(false) }
+  }
+
+  async function publishSite(event: React.FormEvent) {
+    event.preventDefault()
+    if (!app.domain) { setPublishError('ابتدا دامنه را در مشخصات اپلیکیشن ثبت کن.'); return }
+    if (!staticProject && inspection?.state !== 'ready') { setPublishError('پروژه هنوز آمادهٔ اجرا نیست؛ ابتدا مشکل Runtime یا Build را برطرف کن.'); return }
+    setPublishBusy(true); setPublishError(''); setPublishStage('dns')
+    let serviceEnabled = false
+    let nginxConfigured = false
+    let takeoverBackup: string | undefined
+    try {
+      const domain = app.domain.trim().toLowerCase()
+      const dns = await api<{ domains: Array<{ host: string; resolved: boolean; addresses: string[]; error?: string }> }>(`nginx/domains/check?hosts=${encodeURIComponent(domain)}`)
+      const domainStatus = dns.domains.find((item) => item.host.toLowerCase() === domain)
+      if (!domainStatus?.resolved) throw new Error(domainStatus?.error || `برای ${domain} رکورد DNS پیدا نشد؛ ابتدا رکورد A/AAAA را به VPS وصل کن.`)
+      setPublishDnsAddresses(domainStatus.addresses || [])
+
+      const siteName = `arg-${staticProject ? 'static' : 'node'}-${app.id.slice(0, 12)}`
+      const currentSites = await api<{ sites: Array<{ name: string; enabled: boolean; ssl_enabled?: boolean; application_id?: string | null; server_names?: string[] }> }>('nginx/sites')
+      const existingSite = currentSites.sites.find((item) => item.name === siteName || item.application_id === app.id)
+      const hasExistingCertificate = Boolean(existingSite?.ssl_enabled && existingSite.server_names?.some((host) => host.toLowerCase() === domain))
+      if (!hasExistingCertificate && !publishEmail.trim()) throw new Error('برای صدور گواهی HTTPS، ایمیل اعلان تمدید را وارد کن.')
+
+      if (!staticProject) {
+        setPublishStage('service')
+        const serviceResult = await api<{ domain_takeover_backup?: string }>(`apps/${encodeURIComponent(app.id)}/node/service`, { method: 'PUT', body: JSON.stringify({ enabled: true, takeover_domain_conflict: takeoverDomainConflict }) })
+        takeoverBackup = serviceResult.domain_takeover_backup
+        serviceEnabled = true
+      }
+
+      setPublishStage('nginx')
+      const { sites } = await api<{ sites: Array<{ name: string; enabled: boolean; ssl_enabled?: boolean; application_id?: string | null; server_names?: string[] }> }>('nginx/sites')
+      let site = sites.find((item) => item.name === siteName || item.application_id === app.id)
+      if (!site) throw new Error('سرویس آماده شد اما سایت Nginx متعلق به این اپ پیدا نشد؛ ابتدا یک Deploy موفق انجام بده و دوباره تلاش کن.')
+      if (!site.enabled) {
+        await api(`nginx/sites/${encodeURIComponent(site.name)}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled: true }) })
+        site = { ...site, enabled: true }
+      }
+      nginxConfigured = true
+
+      const certificateMatchesDomain = Boolean(site.ssl_enabled && site.server_names?.some((host) => host.toLowerCase() === domain))
+      if (!certificateMatchesDomain) {
+        setPublishStage('ssl')
+        try {
+          await api(`nginx/sites/${encodeURIComponent(site.name)}/ssl`, { method: 'POST', body: JSON.stringify({ email: publishEmail.trim(), domains: [domain], redirect: true }) })
+        } catch (cause) {
+          const reason = cause instanceof Error ? cause.message : 'صدور گواهی ناموفق بود.'
+          const backupNote = takeoverBackup ? `\nفایل قبلی Nginx نیز در ${takeoverBackup} پشتیبان‌گیری شد.` : ''
+          throw new Error(`سرویس و Nginx روی HTTP فعال شدند، اما SSL صادر نشد: ${reason}${backupNote}`)
+        }
+      }
+
+      notify(`${domain} آمادهٔ نمایش است: سرویس، Nginx و ${certificateMatchesDomain ? 'گواهی SSL موجود' : 'گواهی SSL و انتقال HTTPS'} بررسی شدند.${takeoverBackup ? ` نسخهٔ قبلی Nginx: ${takeoverBackup}` : ''}`)
+      setPublishOpen(false); setPublishStage('idle'); setPublishError('')
+      await load()
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'راه‌اندازی سایت کامل نشد.'
+      setPublishError(message)
+      if ((serviceEnabled || nginxConfigured) && publishStage !== 'ssl') setPublishError(`${message}\nسرویس و تنظیم Nginx ممکن است روی HTTP فعال مانده باشند؛ وضعیت را تازه کن.`)
+    } finally { setPublishBusy(false) }
   }
 
   async function saveEnvironment(event: React.FormEvent) {
@@ -753,7 +821,6 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   }
 
   const stateNames: Record<string, string> = { ready: 'آماده', static_output_missing: 'خروجی استاتیک پیدا نشد', lockfile_missing: 'Lockfile موجود نیست', runtime_missing_or_mismatched: 'Runtime نصب یا هماهنگ نیست', package_manager_missing: 'مدیر بسته نصب نیست', dependencies_missing: 'وابستگی‌ها نصب نیست', start_entrypoint_missing: 'entrypoint اجرای SSR پیدا نشد', manifest_missing_or_invalid: 'package.json نامعتبر است' }
-  const staticProject = inspection?.framework === 'static'
   const title = staticProject ? 'انتشار سایت استاتیک' : app.framework === 'next' ? 'مدیریت Next.js SSR' : app.framework === 'nuxt' ? 'مدیریت Nuxt SSR' : 'مدیریت Node.js / SSR'
   return <section className="mt-3 rounded-xl border border-primary/15 bg-primary/[.025] p-3">
     <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="flex items-center gap-2 text-xs font-medium"><Terminal size={14} className="text-primary"/>{title}</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">تشخیص چارچوب از manifest انجام می‌شود؛ نصب وابستگی و build در sandbox محدود اجرا می‌شوند. سایت استاتیک process اجرایی جدا ندارد.</p></div><div className="flex gap-1.5"><Button size="sm" variant="outline" onClick={() => setExpanded((value) => !value)}>{expanded ? 'بستن' : 'مدیریت'}</Button>{expanded && <Button size="icon" variant="outline" title="تازه‌سازی وضعیت" aria-label="تازه‌سازی وضعیت" onClick={() => void load()} disabled={loading}><RefreshCw size={13} className={loading ? 'animate-spin' : ''}/></Button>}</div></div>
@@ -775,8 +842,9 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
         </div>
         <div className="flex flex-wrap gap-2"><Button size="sm" disabled={runtimeSettingsBusy || busy}>{runtimeSettingsBusy ? 'در حال ذخیره…' : 'ذخیرهٔ تنظیمات Runtime'}</Button>{service?.state === 'active' && <Button type="button" size="sm" variant="outline" disabled={busy || runtimeSettingsBusy} onClick={() => void toggleService(true)}>اعمال تنظیمات سرویس</Button>}</div>
       </form>
-      {staticProject ? <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{inspection.static_output_path || 'auto'}<span dir="rtl" className="mr-2 font-sans">· خروجی از release جاری با Nginx سرو می‌شود؛ فضای Node یا systemd برای اجرای سایت مصرف نمی‌شود.</span></p> : <>{app.listen_port && <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">127.0.0.1:{app.listen_port}<span dir="rtl" className="mr-2 font-sans">· با فعال‌سازی، ARG reverse proxy مستقل Nginx را می‌سازد؛ SSL از صفحهٔ Nginx فعال می‌شود. Health Check از مسیر تنظیم‌شده پاسخ 2xx می‌خواهد.</span></p>}
-      <div className="flex flex-wrap gap-2 border-t border-border/60 pt-3"><Button size="sm" disabled={busy || loading || (service?.state !== 'active' && inspection.state !== 'ready')} onClick={() => void toggleService(service?.state !== 'active')}><Server size={13}/>{busy ? 'در حال اعمال…' : service?.state === 'active' ? 'توقف سرویس' : 'فعال‌سازی سرویس'}</Button><Button size="sm" variant="outline" onClick={() => void readLogs()}><Search size={13}/>نمایش لاگ‌های اجرا</Button></div>
+      {staticProject ? <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">{inspection.static_output_path || 'auto'}<span dir="rtl" className="mr-2 font-sans">· خروجی از release جاری با Nginx سرو می‌شود؛ فضای Node یا systemd برای اجرای سایت مصرف نمی‌شود.</span></p> : <>{app.listen_port && <p dir="ltr" className="text-left font-mono text-[10px] text-muted-foreground">127.0.0.1:{app.listen_port}<span dir="rtl" className="mr-2 font-sans">· راه‌اندازی کامل، سرویس Node، reverse proxy در Nginx و در صورت نیاز SSL را یکجا تنظیم می‌کند. Health Check باید از مسیر تنظیم‌شده پاسخ 2xx بدهد.</span></p>}
+      <div className="flex flex-wrap gap-2 border-t border-border/60 pt-3"><Button size="sm" disabled={busy || loading || !app.domain || (!staticProject && inspection.state !== 'ready')} onClick={() => { setPublishError(''); setPublishDnsAddresses([]); setPublishStage('idle'); setPublishOpen(true) }}><Globe2 size={13}/>{staticProject ? 'تنظیم دامنه و HTTPS' : 'راه‌اندازی کامل سایت'}</Button>{!staticProject && service?.state === 'active' && <Button size="sm" variant="outline" disabled={busy || publishBusy} onClick={() => void toggleService(false)}><Server size={13}/>توقف سرویس</Button>}<Button size="sm" variant="outline" onClick={() => void readLogs()}><Search size={13}/>نمایش لاگ‌های اجرا</Button></div>
+      {!app.domain && <p className="text-[10px] text-amber-100/75">برای ساخت Nginx و HTTPS، دامنه را در مشخصات اپلیکیشن ثبت کن.</p>}
       <form onSubmit={(event) => void saveEnvironment(event)} className="space-y-2 border-t border-border/60 pt-3"><div><p className="text-xs font-medium">متغیرهای Runtime</p><p className="mt-1 text-[10px] leading-5 text-muted-foreground">مقدارهای فعلی هرگز خوانده نمی‌شوند. مقدار خالی یعنی بدون تغییر. این متغیرها فقط هنگام اجرای سرویس در دسترس‌اند، نه برای اسکریپت build.</p></div>
         <div className="grid gap-2 sm:grid-cols-2">{Object.keys(draft).map((key) => <label key={key} className="space-y-1 text-[10px] text-muted-foreground"><span dir="ltr" className="font-mono">{key}</span><Input type={/(SECRET|TOKEN|PASSWORD|KEY)/i.test(key) ? 'password' : 'text'} dir="ltr" autoComplete="new-password" value={draft[key]} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} placeholder="برای نگه‌داشتن مقدار فعلی خالی بگذار"/></label>)}</div>
         <div className="grid gap-2 sm:grid-cols-2"><Input aria-label="نام متغیر جدید" dir="ltr" value={newKey} onChange={(event) => setNewKey(event.target.value.toUpperCase())} placeholder="DB_HOST"/><Input aria-label="مقدار متغیر جدید" type={/(SECRET|TOKEN|PASSWORD|KEY)/i.test(newKey) ? 'password' : 'text'} dir="ltr" autoComplete="new-password" value={newValue} onChange={(event) => setNewValue(event.target.value)} placeholder="مقدار جدید"/></div>
@@ -784,6 +852,7 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
       </form></>}
       {logs && <div className="border-t border-border/60 pt-3"><div className="mb-2 flex items-center justify-between gap-2"><p className="text-xs font-medium">آخرین خروجی سرویس · journald پایدار</p><Button size="sm" variant="outline" disabled={busy || !logCursor} onClick={() => void readLogs(logCursor || undefined)}>دریافت لاگ‌های جدیدتر</Button></div><pre dir="ltr" className="max-h-56 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 text-left font-mono text-[10px] leading-5 text-muted-foreground">{logs}</pre><p className="mt-1 text-[10px] text-muted-foreground">Retention این رخدادها تابع سیاست journald کل سرور است؛ ARG آن را به‌صورت جداگانه تغییر نمی‌دهد.</p></div>}
     </div>)}
+    <Dialog open={publishOpen} onOpenChange={(open) => { if (!publishBusy) setPublishOpen(open) }}><DialogContent className="max-h-[92dvh] max-w-xl overflow-y-auto"><DialogHeader><DialogTitle>راه‌اندازی کامل وب‌سایت</DialogTitle><DialogDescription>ARG اتصال دامنه، اجرای برنامه، Nginx و گواهی HTTPS را به‌ترتیب بررسی و تنظیم می‌کند.</DialogDescription></DialogHeader><form onSubmit={(event) => void publishSite(event)} className="space-y-4"><div className="rounded-lg border border-border/70 bg-background/45 p-3 text-xs leading-6"><p>دامنه: <code dir="ltr" className="font-mono">{app.domain || 'ثبت نشده'}</code></p><p>نشانی سرویس: <code dir="ltr" className="font-mono">{staticProject ? 'خروجی استاتیک' : `127.0.0.1:${app.listen_port || '—'}`}</code></p><p>ARG ابتدا DNS را resolve می‌کند، سرویس و Nginx را آماده می‌کند و اگر سایت هنوز برای این دامنه SSL نداشته باشد، Certbot گواهی می‌گیرد و HTTP را به HTTPS می‌فرستد.</p>{publishDnsAddresses.length > 0 && <p>پاسخ فعلی DNS: <code dir="ltr" className="font-mono">{publishDnsAddresses.join(' · ')}</code></p>}</div><div className="space-y-2"><Label htmlFor="node-publish-email">ایمیل اعلان تمدید گواهی (در صورت نیاز به گواهی جدید)</Label><Input id="node-publish-email" type="email" maxLength={254} dir="ltr" autoComplete="email" value={publishEmail} onChange={(event) => setPublishEmail(event.target.value)} placeholder="admin@example.com"/><p className="text-[10px] leading-5 text-muted-foreground">اگر SSL برای همین دامنه از قبل روی سایت پیکربندی شده باشد، این فیلد لازم نیست.</p></div>{!staticProject && <label className="flex items-start gap-2 rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-[11px] leading-5"><input type="checkbox" checked={takeoverDomainConflict} onChange={(event) => setTakeoverDomainConflict(event.target.checked)} className="mt-1 accent-[#dda46f]"/><span><b>تأیید می‌کنم دامنه از سایت Nginx قبلی به این اپ منتقل شود.</b><span className="mt-1 block text-amber-100/75">ARG فقط همان hostname را از یک فایل عادی در sites-available جدا می‌کند، فایل کامل قبلی را با دسترسی root-only در `/var/backups/arg/nginx-domain-takeovers` پشتیبان می‌گیرد و سایر دامنه‌های همان فایل را حفظ می‌کند. کانفیگ‌های چندگانه، wildcard، تنظیمات متعلق به اپ دیگر یا فایل‌های conf.d خودکار جایگزین نمی‌شوند.</span></span></label>}<div className="rounded-lg border border-sky-300/15 bg-sky-300/[.035] p-3 text-[10px] leading-5 text-muted-foreground">برای صدور خودکار، DNS باید به این VPS برسد و پورت 80 از اینترنت قابل‌دسترسی باشد. بررسی resolve به‌تنهایی دسترسی واقعی ACME را تضمین نمی‌کند؛ خطای Certbot در همین پنجره نمایش داده می‌شود.</div>{publishStage !== 'idle' && <p className="rounded-lg border border-primary/20 bg-primary/[.04] p-3 text-xs" role="status">{({ dns: 'در حال بررسی پاسخ DNS واقعی…', service: 'در حال راه‌اندازی سرویس و بررسی Health Check…', nginx: 'در حال اعمال و اعتبارسنجی Nginx…', ssl: 'در حال دریافت گواهی و فعال‌کردن HTTPS…' } as const)[publishStage]}</p>}{publishError && <pre className="whitespace-pre-wrap rounded-lg border border-rose-300/20 bg-rose-300/[.04] p-3 text-xs leading-5 text-rose-100" role="alert">{publishError}</pre>}<div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" disabled={publishBusy} onClick={() => setPublishOpen(false)}>بستن</Button><Button type="submit" disabled={publishBusy || !app.domain}><Globe2 size={14}/>{publishBusy ? 'در حال پیکربندی…' : 'تنظیم سرویس، Nginx و SSL'}</Button></div></form></DialogContent></Dialog>
     {expanded && error && <p role="alert" className="mt-2 text-xs text-rose-200">{error}</p>}
   </section>
 }

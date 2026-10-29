@@ -24,7 +24,7 @@ Metric history differs from Audit: metrics store CPU/RAM/disk/network samples; A
 
 - **Panel ports:** HTTP and HTTPS ports are configured separately. HTTP changes run in the background; ARG checks for a free port and an HTTP/HTTPS collision, then probes the new endpoint. If the restart or health check fails, the prior port is restored. When TLS is active, HTTP is the backend listener; continue using the HTTPS address.
 - **Timezone:** an IANA zone such as `Asia/Tehran` for schedules and display; backend timestamps remain epoch/UTC based.
-- **TLS/Certificate:** certificate/key paths, hostname or IP, HTTPS port, and TLS activation. Keep private key files in allowed locations with restricted permissions.
+- **TLS/Certificate:** certificate/key paths, hostname or IP, HTTPS port, and TLS activation. When both paths point to one Certbot lineage under `/etc/letsencrypt/live/<name>/`, ARG enables a twice-daily renewal timer and a lineage-specific deploy hook that copies renewed files into `/etc/arg/tls` and restarts `arg.service`. The page reports whether automatic renewal is configured. A certificate copied manually to `/etc/arg/tls` cannot be renewed by Certbot; renew it at its issuer and configure the replacement. Keep private key files in allowed locations with restricted permissions.
 - **Monitoring:** history enable/disable, sampling interval, and retention.
 - **Alert thresholds:** resource warning levels.
 
@@ -43,7 +43,7 @@ For example, if HTTPS currently uses `8443` and Nginx owns `443`, first allow TC
 - **Timezone:** use an IANA ID such as `Asia/Tehran`. A city name or fixed UTC offset alone does not model daylight-saving transitions. Backend event time is stored in a standard format and displayed in the chosen zone.
 - **Monitoring:** Enabled controls background collection; Interval controls sample frequency and Retention controls how long samples remain. Example: one-minute sampling kept for seven days is lighter than 15-second sampling. Changing values does not fill past history.
 - **CPU/RAM/Disk alerts:** a 1–100 percentage is a notification threshold, not a cgroup or service resource limit. Setting CPU to 85% triggers an alert when a sampled value crosses it; it does not throttle the process. Lowering the threshold can trigger an alert immediately.
-- **Panel TLS:** configure actual public/fullchain and private-key paths on the server. Take the HTTP warning seriously: public HTTP does not encrypt login passwords or session cookies. Never put a private key in chat, logs, or browser storage. Test HTTPS and certificate renewal after saving.
+- **Panel TLS:** configure actual public/fullchain and private-key paths on the server. For a Certbot lineage, Settings installs the renewal hook and ensures a timer is enabled; renewal copies the latest certificate into ARG's private TLS directory and restarts the panel. Manual files do not renew automatically. Take the HTTP warning seriously: public HTTP does not encrypt login passwords or session cookies. Never put a private key in chat, logs, or browser storage.
 - **About/updates:** compare SemVer and commit. Version identifies the release line; commit identifies exact installed source. An update notification does not install the update.
 - **Interface preferences:** language, numeral style, and theme change display, not server-side units or calculations.
 

@@ -45,6 +45,10 @@ use tokio::{
 
 const PRIVILEGED_SOCKET: &str = "/run/arg-privileged/manager.sock";
 const UPDATE_STATUS_FILE: &str = "/run/arg-update-in-progress";
+const PANEL_TLS_LINEAGE_FILE: &str = "/etc/arg/https-cert-lineage";
+const PANEL_TLS_DEPLOY_HOOK: &str = "/etc/letsencrypt/renewal-hooks/deploy/arg";
+const PANEL_CERTBOT_TIMER: &str = "/etc/systemd/system/arg-certbot-renew.timer";
+const PANEL_CERTBOT_SERVICE: &str = "/etc/systemd/system/arg-certbot-renew.service";
 const PRIVILEGED_REQUEST_MAX_BYTES: usize = 4 * 1024 * 1024;
 const PRIVILEGED_RESPONSE_MAX_BYTES: usize = 32 * 1024 * 1024;
 const PRIVILEGED_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -1290,6 +1294,21 @@ async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMa
     require_user(&db, &headers)?;
     let configured_cert = env::var("ARG_TLS_CERT").unwrap_or_default();
     let configured_key = env::var("ARG_TLS_KEY").unwrap_or_default();
+    let saved_lineage = fs::read_to_string(PANEL_TLS_LINEAGE_FILE)
+        .ok()
+        .map(|value| value.trim().to_owned());
+    let renewal_lineage = saved_lineage
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .filter(|value| valid_tls_source_path(&format!("{value}/fullchain.pem"), false));
+    let (configured_cert, configured_key) = if let Some(lineage) = renewal_lineage {
+        (
+            format!("{lineage}/fullchain.pem"),
+            format!("{lineage}/privkey.pem"),
+        )
+    } else {
+        (configured_cert, configured_key)
+    };
     let mut discovered = None;
     if configured_cert.is_empty() || configured_key.is_empty() {
         let domain = fs::read_to_string("/etc/arg/https-domain")
@@ -1343,6 +1362,28 @@ async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMa
         !certificate_path.is_empty() && PathBuf::from(&certificate_path).is_file();
     let private_key_present =
         !private_key_path.is_empty() && PathBuf::from(&private_key_path).is_file();
+    let renewal_hook_present = PathBuf::from(PANEL_TLS_DEPLOY_HOOK).is_file();
+    let renewal_timer_present = PathBuf::from(PANEL_CERTBOT_TIMER).is_file()
+        || systemd_unit_available("certbot.timer")
+        || systemd_unit_available("snap.certbot.renew.timer");
+    let auto_renewal = if let Some(lineage) = renewal_lineage {
+        renewal_hook_present && renewal_timer_present && PathBuf::from(lineage).is_dir()
+    } else if saved_lineage.is_none() {
+        // Compatibility for older installations that renewed by matching the
+        // panel domain before lineage tracking was added.
+        renewal_hook_present
+            && renewal_timer_present
+            && PathBuf::from("/etc/arg/https-domain").is_file()
+    } else {
+        false
+    };
+    let renewal_source = if renewal_lineage.is_some() {
+        "certbot"
+    } else if auto_renewal {
+        "legacy"
+    } else {
+        "manual"
+    };
     let pending_port = fs::read_to_string("/run/arg-tls-port-change.pending")
         .ok()
         .and_then(|contents| contents.split_whitespace().nth(1)?.parse::<u16>().ok());
@@ -1356,6 +1397,8 @@ async fn get_panel_tls_settings(State(state): State<AppState>, headers: HeaderMa
         "port": port,
         "certificate_present": certificate_present,
         "private_key_present": private_key_present,
+        "auto_renewal": auto_renewal,
+        "renewal_source": renewal_source,
         "default_certificate_path": if certificate_path.is_empty() { "/etc/arg/tls/fullchain.pem" } else { &certificate_path },
         "default_private_key_path": if private_key_path.is_empty() { "/etc/arg/tls/privkey.pem" } else { &private_key_path }
     })))
@@ -1399,7 +1442,13 @@ async fn update_panel_tls_settings(
         &format!("HTTPS certificate paths configured on port {}", input.port),
     );
     Ok(Json(
-        json!({"scheduled":true,"port":input.port,"message":"HTTPS settings were saved. ARG will restart shortly; reopen the panel using HTTPS."}),
+        json!({
+            "scheduled":true,
+            "port":input.port,
+            "auto_renewal":result["data"]["auto_renewal"].as_bool().unwrap_or(false),
+            "renewal_warning":result["data"]["renewal_warning"].as_str(),
+            "message":"HTTPS settings were saved. ARG will restart shortly; reopen the panel using HTTPS."
+        }),
     ))
 }
 
@@ -3499,6 +3548,152 @@ fn valid_tls_source_path(value: &str, private_key: bool) -> bool {
         && file == expected
 }
 
+fn panel_tls_lineage_from_source(value: &str) -> Option<String> {
+    let remainder = value.strip_prefix("/etc/letsencrypt/live/")?;
+    let (name, file) = remainder.split_once('/')?;
+    if file != "fullchain.pem"
+        || name.is_empty()
+        || name.len() > 128
+        || name.starts_with('.')
+        || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return None;
+    }
+    Some(format!("/etc/letsencrypt/live/{name}"))
+}
+
+fn panel_tls_deploy_hook_contents() -> &'static str {
+    r##"#!/bin/sh
+set -eu
+lineage_file=/etc/arg/https-cert-lineage
+domain_file=/etc/arg/https-domain
+if [ -e "$lineage_file" ]; then
+  expected_lineage=$(cat "$lineage_file")
+  [ -n "$expected_lineage" ] || exit 0
+  [ "${RENEWED_LINEAGE:-}" = "$expected_lineage" ] || exit 0
+else
+  [ -s "$domain_file" ] || exit 0
+  domain=$(cat "$domain_file")
+  case " ${RENEWED_DOMAINS:-} " in
+    *" $domain "*) ;;
+    *) exit 0 ;;
+  esac
+fi
+[ -s "${RENEWED_LINEAGE:-}/fullchain.pem" ] || exit 1
+[ -s "${RENEWED_LINEAGE:-}/privkey.pem" ] || exit 1
+install -o root -g arg -m 0640 "$RENEWED_LINEAGE/fullchain.pem" /etc/arg/tls/fullchain.pem
+install -o root -g arg -m 0640 "$RENEWED_LINEAGE/privkey.pem" /etc/arg/tls/privkey.pem
+systemctl restart arg.service
+"##
+}
+
+fn atomic_root_file(path: &std::path::Path, contents: &[u8], mode: u32) -> Result<(), String> {
+    let parent = path.parent().ok_or("The target file has no parent directory")?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let temporary = parent.join(format!(".{}.{}.tmp", path.file_name().and_then(|name| name.to_str()).unwrap_or("arg"), token()));
+    let write = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&temporary)
+        .and_then(|mut file| {
+            file.write_all(contents)?;
+            file.sync_all()
+        });
+    if let Err(error) = write {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    if let Err(error) = fs::set_permissions(&temporary, fs::Permissions::from_mode(mode)) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+fn systemd_unit_available(name: &str) -> bool {
+    ["/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"]
+        .iter()
+        .any(|directory| std::path::Path::new(directory).join(name).exists())
+}
+
+fn enable_panel_certbot_renewal_timer() -> Result<(), String> {
+    let systemctl = |args: &[&str]| -> Result<(), String> {
+        let output = std::process::Command::new("systemctl")
+            .args(args)
+            .output()
+            .map_err(|error| format!("Could not run systemctl: {error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+        }
+    };
+    systemctl(&["daemon-reload"])?;
+
+    for timer in ["arg-certbot-renew.timer", "certbot.timer", "snap.certbot.renew.timer"] {
+        if timer == "arg-certbot-renew.timer" {
+            if std::path::Path::new(PANEL_CERTBOT_TIMER).exists() {
+                return systemctl(&["enable", "--now", timer]);
+            }
+        } else if systemd_unit_available(timer) {
+            return systemctl(&["enable", "--now", timer]);
+        }
+    }
+
+    let certbot = ["/snap/bin/certbot", "/usr/bin/certbot", "/usr/local/bin/certbot"]
+        .into_iter()
+        .find(|path| {
+            fs::metadata(path).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .ok_or("Certbot is not installed; automatic renewal cannot be enabled.")?;
+    let service = format!(
+        "[Unit]\nDescription=Renew ARG panel TLS certificate\n\n[Service]\nType=oneshot\nExecStart={certbot} renew --quiet\n"
+    );
+    let timer = "[Unit]\nDescription=Twice-daily renewal check for ARG certificates\n\n[Timer]\nOnCalendar=*-*-* 00,12:00:00\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
+    atomic_root_file(std::path::Path::new(PANEL_CERTBOT_SERVICE), service.as_bytes(), 0o644)?;
+    atomic_root_file(std::path::Path::new(PANEL_CERTBOT_TIMER), timer.as_bytes(), 0o644)?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", "--now", "arg-certbot-renew.timer"])
+}
+
+fn configure_panel_certbot_renewal(lineage: Option<&str>, preserve_legacy: bool) -> Result<bool, String> {
+    let lineage_file = std::path::Path::new(PANEL_TLS_LINEAGE_FILE);
+    if let Some(lineage) = lineage {
+        atomic_root_file(
+            std::path::Path::new(PANEL_TLS_DEPLOY_HOOK),
+            panel_tls_deploy_hook_contents().as_bytes(),
+            0o755,
+        )
+        .map_err(|error| format!("Could not install the panel certificate renewal hook: {error}"))?;
+        enable_panel_certbot_renewal_timer()
+            .map_err(|error| format!("Could not schedule automatic panel certificate renewal: {error}"))?;
+        atomic_root_file(lineage_file, format!("{lineage}\n").as_bytes(), 0o600)
+            .map_err(|error| format!("Could not record the panel certificate lineage: {error}"))?;
+        return Ok(true);
+    }
+    if preserve_legacy {
+        return Ok(true);
+    }
+    if !preserve_legacy {
+        atomic_root_file(
+            std::path::Path::new(PANEL_TLS_DEPLOY_HOOK),
+            panel_tls_deploy_hook_contents().as_bytes(),
+            0o755,
+        )
+        .map_err(|error| format!("Could not update the panel certificate renewal hook: {error}"))?;
+        atomic_root_file(lineage_file, b"\n", 0o600)
+            .map_err(|error| format!("Could not disable automatic renewal for the manual certificate: {error}"))?;
+    }
+    Ok(false)
+}
+
 fn tls_openssl_output(args: &[&str]) -> Result<Vec<u8>, String> {
     let output = std::process::Command::new("openssl")
         .args(args)
@@ -3551,6 +3746,13 @@ fn configure_panel_tls(request: &Value) -> Value {
         || !valid_tls_source_path(private_key_source, true)
     {
         return failure("Use /etc/arg/tls/fullchain.pem and /etc/arg/tls/privkey.pem, or the matching files under /etc/letsencrypt/live/<certificate-name>/.".into());
+    }
+    let certificate_lineage = panel_tls_lineage_from_source(certificate_source);
+    if certificate_lineage
+        .as_deref()
+        .is_some_and(|lineage| private_key_source != format!("{lineage}/privkey.pem"))
+    {
+        return failure("Choose the fullchain.pem and privkey.pem files from the same Certbot lineage.".into());
     }
     let certificate_source = match PathBuf::from(certificate_source).canonicalize() {
         Ok(path) => path,
@@ -3644,6 +3846,14 @@ fn configure_panel_tls(request: &Value) -> Value {
     if cert_public_key != key_public_key {
         return failure("The certificate does not match the selected private key.".into());
     }
+
+    let lineage_marker_exists = PathBuf::from(PANEL_TLS_LINEAGE_FILE).exists();
+    let legacy_renewal_is_configured = !lineage_marker_exists
+        && PathBuf::from(PANEL_TLS_DEPLOY_HOOK).is_file()
+        && (PathBuf::from(PANEL_CERTBOT_TIMER).is_file()
+            || systemd_unit_available("certbot.timer")
+            || systemd_unit_available("snap.certbot.renew.timer"));
+    let preserve_legacy_renewal = certificate_lineage.is_none() && legacy_renewal_is_configured;
 
     let tls_dir = PathBuf::from("/etc/arg/tls");
     if let Err(error) = fs::create_dir_all(&tls_dir) {
@@ -3789,6 +3999,14 @@ fn configure_panel_tls(request: &Value) -> Value {
         ));
     }
 
+    let (auto_renewal, renewal_warning) = match configure_panel_certbot_renewal(
+        certificate_lineage.as_deref(),
+        preserve_legacy_renewal,
+    ) {
+        Ok(enabled) => (enabled, None),
+        Err(message) => (false, Some(message)),
+    };
+
     if std::process::Command::new("ufw")
         .args(["status"])
         .output()
@@ -3825,7 +4043,7 @@ fn configure_panel_tls(request: &Value) -> Value {
         .output();
     match restart {
         Ok(output) if output.status.success() => {
-            json!({"ok":true,"port":port,"message":"TLS settings saved; ARG restart scheduled."})
+            json!({"ok":true,"port":port,"auto_renewal":auto_renewal,"renewal_warning":renewal_warning,"message":"TLS settings saved; ARG restart scheduled."})
         }
         Ok(output) => failure(format!(
             "TLS settings were saved, but restart scheduling failed: {}",
@@ -3894,6 +4112,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("node-environment-keys") => "node-environment-keys",
         Some("node-environment-permissions") => "node-environment-permissions",
         Some("node-nginx-proxy") => "node-nginx-proxy",
+        Some("node-nginx-deploy-proxy") => "node-nginx-deploy-proxy",
         Some("node-nginx-static") => "node-nginx-static",
         Some("application-purge") => "application-purge",
         Some("apt-list") => "apt-list",
@@ -5262,6 +5481,7 @@ mod update_progress_tests {
         parse_systemd_exec_start, parse_systemd_service_commands,
         process_belongs_to_arg_service, read_bounded_privileged_response,
         read_privileged_line, role_has_admin_access, valid_apt_install_spec,
+        panel_tls_deploy_hook_contents, panel_tls_lineage_from_source,
         valid_tls_source_path, valid_update_build_mode, AppState, Connection, Credentials,
         FirewallRuleInput,
     };
@@ -6039,5 +6259,35 @@ mod update_progress_tests {
         ));
         assert!(!valid_tls_source_path("/home/admin/cert.pem", false));
         assert!(!valid_tls_source_path("/etc/arg/tls/privkey.pem", false));
+    }
+
+    #[test]
+    fn panel_tls_renewal_tracks_only_a_safe_certbot_lineage() {
+        assert_eq!(
+            panel_tls_lineage_from_source("/etc/letsencrypt/live/panel.example.com/fullchain.pem"),
+            Some("/etc/letsencrypt/live/panel.example.com".to_owned())
+        );
+        assert_eq!(
+            panel_tls_lineage_from_source("/etc/letsencrypt/live/arg/privkey.pem"),
+            None
+        );
+        for path in [
+            "/etc/letsencrypt/live/../arg/fullchain.pem",
+            "/etc/letsencrypt/live/.hidden/fullchain.pem",
+            "/etc/arg/tls/fullchain.pem",
+            "/etc/letsencrypt/archive/arg/fullchain.pem",
+        ] {
+            assert_eq!(panel_tls_lineage_from_source(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn panel_tls_deploy_hook_is_lineage_scoped_and_manual_marker_disables_fallback() {
+        let hook = panel_tls_deploy_hook_contents();
+        assert!(hook.contains("[ -e \"$lineage_file\" ]"));
+        assert!(hook.contains("[ \"${RENEWED_LINEAGE:-}\" = \"$expected_lineage\" ]"));
+        assert!(hook.contains("[ -n \"$expected_lineage\" ] || exit 0"));
+        assert!(hook.contains("systemctl restart arg.service"));
+        assert!(!hook.contains("install -o root -g donatello"));
     }
 }

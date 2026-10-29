@@ -2873,9 +2873,23 @@ fn nginx_create_site(name: &str, content: &str) -> Result<Value, String> {
 }
 
 /// Create an application-scoped HTTP reverse proxy for the Node runner.
-/// Existing sites are never adopted or overwritten: the generated site is
-/// separate, and a conflicting server_name must be resolved by an admin.
+/// Existing sites are not implicitly adopted; hostname transfer is explicit,
+/// backed up, and limited to a single simple standalone Nginx file.
 pub(super) fn configure_node_proxy(
+    app_id: &str,
+    domain: &str,
+    port: u16,
+    take_over_conflict: bool,
+) -> Result<Value, String> {
+    let _guard = NGINX_OPERATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    configure_node_proxy_locked(app_id, domain, port, take_over_conflict)
+}
+
+/// During deployment, retain and validate any existing virtual host. Create
+/// the ARG-managed proxy only when the hostname has no existing owner.
+pub(super) fn ensure_node_proxy_for_deployment(
     app_id: &str,
     domain: &str,
     port: u16,
@@ -2883,6 +2897,58 @@ pub(super) fn configure_node_proxy(
     let _guard = NGINX_OPERATION_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let domain = validate_node_proxy_input(app_id, domain, port)?;
+    let name = format!("arg-node-{}", &app_id[..12]);
+    let (available, _) = nginx_site_paths(&name)?;
+    let has_managed_site = match fs::symlink_metadata(&available) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.to_string()),
+    };
+    let another_site_claims_domain =
+        !has_managed_site && nginx_domain_is_claimed(&domain, &name)?;
+    let plan = deployment_node_proxy_plan(has_managed_site, another_site_claims_domain);
+    match plan {
+        DeploymentNodeProxyPlan::PreserveExisting => {
+            nginx_config_test()?;
+            Ok(json!({
+                "site_name": Value::Null,
+                "content": Value::Null,
+                "created": false,
+                "preserved_existing": true,
+                "message": "برای این دامنه تنظیم Nginx موجود بود؛ اعتبارسنجی شد و بدون بازنویسی حفظ شد."
+            }))
+        }
+        DeploymentNodeProxyPlan::VerifyManaged => {
+            configure_node_proxy_locked(app_id, &domain, port, false)
+        }
+        DeploymentNodeProxyPlan::CreateManaged => {
+            configure_node_proxy_locked(app_id, &domain, port, false)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeploymentNodeProxyPlan {
+    VerifyManaged,
+    PreserveExisting,
+    CreateManaged,
+}
+
+fn deployment_node_proxy_plan(
+    managed_site_exists: bool,
+    another_site_claims_domain: bool,
+) -> DeploymentNodeProxyPlan {
+    if managed_site_exists {
+        DeploymentNodeProxyPlan::VerifyManaged
+    } else if another_site_claims_domain {
+        DeploymentNodeProxyPlan::PreserveExisting
+    } else {
+        DeploymentNodeProxyPlan::CreateManaged
+    }
+}
+
+fn validate_node_proxy_input(app_id: &str, domain: &str, port: u16) -> Result<String, String> {
     if app_id.len() != 36
         || app_id.chars().enumerate().any(|(index, value)| {
             if [8, 13, 18, 23].contains(&index) {
@@ -2898,7 +2964,16 @@ pub(super) fn configure_node_proxy(
     {
         return Err("شناسهٔ اپ، دامنه یا پورت Node معتبر نیست.".into());
     }
-    let domain = domain.to_ascii_lowercase();
+    Ok(domain.to_ascii_lowercase())
+}
+
+fn configure_node_proxy_locked(
+    app_id: &str,
+    domain: &str,
+    port: u16,
+    take_over_conflict: bool,
+) -> Result<Value, String> {
+    let domain = validate_node_proxy_input(app_id, domain, port)?;
     let name = format!("arg-node-{}", &app_id[..12]);
     let (available, _) = nginx_site_paths(&name)?;
     let expected_marker = format!("# Managed by ARG Node runner app={app_id} ");
@@ -2919,23 +2994,301 @@ pub(super) fn configure_node_proxy(
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.to_string()),
     };
+    let mut takeover = None;
     if current.is_none() && nginx_domain_is_claimed(&domain, &name)? {
-        return Err(format!("دامنهٔ {domain} از قبل در یک فایل Nginx دیگر استفاده شده است؛ ARG سایت موجود را تغییر نمی‌دهد."));
+        if !take_over_conflict {
+            return Err(format!("دامنهٔ {domain} از قبل در یک فایل Nginx دیگر استفاده شده است؛ برای انتقال امن دامنه، راه‌اندازی کامل سایت را با تأیید پشتیبان اجرا کن."));
+        }
+        takeover = Some(backup_and_detach_domain(&domain, &name)?);
     }
     if current.is_none() {
         let content = node_proxy_config(app_id, &domain, port);
-        nginx_create_site(&name, &content)?;
-    }
-    if !nginx_site_enabled(&name)? {
-        if let Err(error) = nginx_set_site_enabled(&name, true) {
-            if current.is_none() {
-                let _ = nginx_delete_site(&name);
-            }
-            return Err(error);
+        if let Err(error) = nginx_create_site(&name, &content) {
+            return Err(rollback_node_proxy_setup(
+                &name,
+                false,
+                takeover.as_ref(),
+                error,
+            ));
         }
     }
-    let actual = nginx_get_site(&name)?;
-    Ok(json!({"site_name":name,"content":actual["content"].as_str().unwrap_or_default()}))
+    match nginx_site_enabled(&name) {
+        Ok(true) => {}
+        Ok(false) => {
+            if let Err(error) = nginx_set_site_enabled(&name, true) {
+                return Err(rollback_node_proxy_setup(
+                    &name,
+                    current.is_none(),
+                    takeover.as_ref(),
+                    error,
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(rollback_node_proxy_setup(
+                &name,
+                current.is_none(),
+                takeover.as_ref(),
+                error,
+            ));
+        }
+    }
+    let actual = match nginx_get_site(&name) {
+        Ok(actual) => actual,
+        Err(error) => {
+            return Err(rollback_node_proxy_setup(
+                &name,
+                current.is_none(),
+                takeover.as_ref(),
+                error,
+            ));
+        }
+    };
+    Ok(
+        json!({"site_name":name,"content":actual["content"].as_str().unwrap_or_default(),"takeover_backup":takeover.as_ref().map(|previous|previous.backup_path.to_string_lossy().to_string())}),
+    )
+}
+
+struct NginxDomainTakeover {
+    site_path: std::path::PathBuf,
+    backup_path: std::path::PathBuf,
+    original_content: String,
+    original_mode: u32,
+}
+
+fn rollback_node_proxy_setup(
+    site_name: &str,
+    remove_created_site: bool,
+    takeover: Option<&NginxDomainTakeover>,
+    cause: String,
+) -> String {
+    if remove_created_site {
+        if let Err(error) = nginx_delete_site(site_name) {
+            let backup = takeover
+                .map(|previous| {
+                    format!(" پشتیبان کانفیگ قبلی: {}.", previous.backup_path.display())
+                })
+                .unwrap_or_default();
+            return format!("{cause}\nپاک‌سازی سایت Nginx نیمه‌ساخته هم ناموفق بود: {error}. دامنهٔ قبلی بازگردانده نشد تا دو سایت هم‌زمان مالک آن نشوند.{backup}");
+        }
+    }
+    if let Some(previous) = takeover {
+        if let Err(error) = restore_detached_domain(previous) {
+            return format!("{cause}\nبازگردانی خودکار کانفیگ قبلی ناموفق بود: {error}. نسخهٔ کامل قبلی در {} باقی است.", previous.backup_path.display());
+        }
+    }
+    cause
+}
+
+fn backup_and_detach_domain(domain: &str, own_site: &str) -> Result<NginxDomainTakeover, String> {
+    let conflicts = nginx_domain_conflict_files(domain, own_site)?;
+    if conflicts.len() != 1 {
+        return Err(format!("دامنهٔ {domain} در {} کانفیگ پیدا شد؛ انتقال خودکار فقط وقتی امن است که دقیقاً یک فایل سایت درگیر باشد.", conflicts.len()));
+    }
+    let site_path = conflicts
+        .into_iter()
+        .next()
+        .ok_or("فایل متداخل پیدا نشد.")?;
+    if site_path.parent() != Some(std::path::Path::new(NGINX_AVAILABLE_DIR)) {
+        return Err(format!("دامنه در {} تعریف شده است؛ این فایل خارج از sites-available است و ARG نمی‌تواند آن را خودکار جابه‌جا کند.", site_path.display()));
+    }
+    let site_name = site_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("نام فایل سایت متداخل معتبر نیست.")?;
+    if !valid_nginx_site_name(site_name) || site_name == "default" || site_name == own_site {
+        return Err("فایل سایت متداخل جزو تنظیمات محافظت‌شده است و انتقال خودکار انجام نشد.".into());
+    }
+    let metadata = fs::symlink_metadata(&site_path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() || metadata.len() > 512 * 1024 {
+        return Err("فایل سایت متداخل باید فایل عادی و حداکثر 512 KiB باشد.".into());
+    }
+    let original_content = fs::read_to_string(&site_path).map_err(|error| error.to_string())?;
+    if nginx_managed_application_id(&original_content).is_some() {
+        return Err(
+            "دامنه در سایت متعلق به اپلیکیشن دیگری از ARG است؛ انتقال خودکار آن مجاز نیست.".into(),
+        );
+    }
+    let (updated_content, removed) = detach_exact_server_name(&original_content, domain)?;
+    if removed == 0 || nginx_config_claims_domain(&updated_content, domain) {
+        return Err("دامنه در فایل متداخل به‌شکل wildcard، چندخطی یا غیرقابل‌تشخیص آمده است؛ کانفیگ تغییر نکرد.".into());
+    }
+
+    let backup_dir = std::path::Path::new("/var/backups/arg/nginx-domain-takeovers");
+    fs::create_dir_all(backup_dir)
+        .map_err(|error| format!("ساخت پوشهٔ پشتیبان Nginx ناموفق بود: {error}"))?;
+    fs::set_permissions(backup_dir, fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())?;
+    let mut backup_file = None;
+    for attempt in 0..32u8 {
+        let backup_path = backup_dir.join(format!(
+            "{}-{}-{}-{attempt}.conf",
+            site_name,
+            now(),
+            std::process::id()
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup_path)
+        {
+            Ok(file) => {
+                backup_file = Some((backup_path, file));
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("ذخیرهٔ پشتیبان کانفیگ Nginx ناموفق بود: {error}")),
+        }
+    }
+    let (backup_path, mut backup_file) =
+        backup_file.ok_or("ساخت نام یکتای پشتیبان Nginx ناموفق بود.")?;
+    if let Err(error) = backup_file
+        .write_all(original_content.as_bytes())
+        .and_then(|_| backup_file.sync_all())
+    {
+        drop(backup_file);
+        let _ = fs::remove_file(&backup_path);
+        return Err(format!("نوشتن پشتیبان کانفیگ Nginx ناموفق بود: {error}"));
+    }
+    drop(backup_file);
+    if let Err(error) = fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600)) {
+        let _ = fs::remove_file(&backup_path);
+        return Err(format!("محافظت از فایل پشتیبان Nginx ناموفق بود: {error}"));
+    }
+
+    let original_mode = metadata.permissions().mode();
+    if let Err(error) = nginx_atomic_write(&site_path, updated_content.as_bytes(), original_mode) {
+        let _ = fs::remove_file(&backup_path);
+        return Err(format!("انتقال دامنه در کانفیگ قبلی ناموفق بود: {error}"));
+    }
+    if let Err(error) = nginx_config_test().and_then(|_| nginx_reload_if_active()) {
+        let restore = nginx_atomic_write(&site_path, original_content.as_bytes(), original_mode)
+            .and_then(|_| nginx_config_test())
+            .and_then(|_| nginx_reload_if_active());
+        if let Err(restore_error) = restore {
+            return Err(format!("کانفیگ قبلی پس از جداکردن دامنه معتبر نشد: {error}\nبازگردانی خودکار هم ناموفق بود: {restore_error}. نسخهٔ کامل قبلی در {} باقی است.", backup_path.display()));
+        }
+        let _ = fs::remove_file(&backup_path);
+        return Err(format!(
+            "کانفیگ قبلی پس از جداکردن دامنه معتبر نشد؛ نسخهٔ قبلی بازگردانده شد: {error}"
+        ));
+    }
+    Ok(NginxDomainTakeover {
+        site_path,
+        backup_path,
+        original_content,
+        original_mode,
+    })
+}
+
+fn restore_detached_domain(previous: &NginxDomainTakeover) -> Result<(), String> {
+    nginx_atomic_write(
+        &previous.site_path,
+        previous.original_content.as_bytes(),
+        previous.original_mode,
+    )?;
+    nginx_config_test().and_then(|_| nginx_reload_if_active())
+}
+
+fn detach_exact_server_name(content: &str, domain: &str) -> Result<(String, usize), String> {
+    let mut output = String::with_capacity(content.len());
+    let mut removed = 0usize;
+    for raw_line in content.split_inclusive('\n') {
+        let without_newline = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let ending = if raw_line.ends_with('\n') { "\n" } else { "" };
+        let (directive, comment) = without_newline
+            .split_once('#')
+            .map_or((without_newline, ""), |(directive, comment)| {
+                (directive, comment)
+            });
+        let trimmed = directive.trim_start();
+        let is_server_name = trimmed == "server_name"
+            || trimmed
+                .strip_prefix("server_name")
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace));
+        if !is_server_name {
+            output.push_str(raw_line);
+            continue;
+        }
+        let Some((names, suffix)) = trimmed["server_name".len()..].trim_start().split_once(';')
+        else {
+            return Err(
+                "دستور server_name فایل متداخل چندخطی است و انتقال خودکار امن نیست.".into(),
+            );
+        };
+        if !suffix.trim().is_empty() {
+            return Err(
+                "خط server_name فایل متداخل شامل چند دستور است و انتقال خودکار متوقف شد.".into(),
+            );
+        }
+        let mut remaining = Vec::new();
+        for name in names.split_whitespace() {
+            let normalized = name.trim_matches(['\'', '"']).trim_end_matches('.');
+            if normalized.eq_ignore_ascii_case(domain) {
+                removed += 1;
+            } else {
+                remaining.push(name);
+            }
+        }
+        if remaining.is_empty() {
+            remaining.push("_");
+        }
+        let indentation = &directive[..directive.len() - directive.trim_start().len()];
+        output.push_str(indentation);
+        output.push_str("server_name ");
+        output.push_str(&remaining.join(" "));
+        output.push(';');
+        if !comment.is_empty() {
+            output.push_str(" #");
+            output.push_str(comment);
+        }
+        output.push_str(ending);
+    }
+    Ok((output, removed))
+}
+
+fn nginx_domain_conflict_files(
+    domain: &str,
+    own_site: &str,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut conflicts = Vec::new();
+    for (directory_index, directory) in [
+        std::path::Path::new(NGINX_AVAILABLE_DIR),
+        std::path::Path::new("/etc/nginx/conf.d"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let entries = match fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let file_type = entry.file_type().map_err(|error| error.to_string())?;
+            if (directory_index == 0 && entry.file_name().to_str() == Some(own_site))
+                || !(file_type.is_file() || file_type.is_symlink())
+            {
+                continue;
+            }
+            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+            if !metadata.is_file() {
+                continue;
+            }
+            if metadata.len() > 512 * 1024 {
+                return Err(format!(
+                    "نمی‌توان تداخل دامنه را بررسی کرد؛ فایل Nginx {} از 512 KiB بزرگ‌تر است.",
+                    entry.file_name().to_string_lossy()
+                ));
+            }
+            let content = fs::read_to_string(entry.path()).map_err(|error| error.to_string())?;
+            if nginx_config_claims_domain(&content, domain) {
+                conflicts.push(entry.path());
+            }
+        }
+    }
+    Ok(conflicts)
 }
 
 /// Publish a built static release through Nginx without exposing its source tree.
@@ -3158,7 +3511,81 @@ fn nginx_config_claims_domain(content: &str, domain: &str) -> bool {
 
 #[cfg(test)]
 mod node_proxy_tests {
-    use super::{nginx_managed_application_id, node_proxy_config, safe_static_root_path, server_name_overlaps, static_site_config};
+    use super::{
+        deployment_node_proxy_plan, detach_exact_server_name, nginx_config_claims_domain,
+        nginx_managed_application_id, node_proxy_config, safe_static_root_path,
+        server_name_overlaps, static_site_config, DeploymentNodeProxyPlan,
+    };
+
+    #[test]
+    fn deployment_preserves_existing_domain_owner_and_creates_only_when_missing() {
+        assert_eq!(
+            deployment_node_proxy_plan(false, true),
+            DeploymentNodeProxyPlan::PreserveExisting
+        );
+        assert_eq!(
+            deployment_node_proxy_plan(true, false),
+            DeploymentNodeProxyPlan::VerifyManaged
+        );
+        assert_eq!(
+            deployment_node_proxy_plan(false, false),
+            DeploymentNodeProxyPlan::CreateManaged
+        );
+    }
+
+    #[test]
+    fn domain_takeover_removes_only_the_exact_host_and_keeps_aliases() {
+        let original =
+            "server {\n    server_name nodejstst.suren-tm.ir www.suren-tm.ir; # keep alias\n}\n";
+        let (updated, removed) =
+            detach_exact_server_name(original, "nodejstst.suren-tm.ir").unwrap();
+        assert_eq!(removed, 1);
+        assert!(updated.contains("server_name www.suren-tm.ir; # keep alias"));
+        assert!(!nginx_config_claims_domain(
+            &updated,
+            "nodejstst.suren-tm.ir"
+        ));
+        assert!(nginx_config_claims_domain(&updated, "www.suren-tm.ir"));
+    }
+
+    #[test]
+    fn domain_takeover_uses_catch_all_when_it_removes_the_only_name() {
+        let (updated, removed) = detach_exact_server_name(
+            "server_name nodejstst.suren-tm.ir;\n",
+            "nodejstst.suren-tm.ir",
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(updated, "server_name _;\n");
+    }
+
+    #[test]
+    fn domain_takeover_refuses_multiline_or_ambiguous_server_name_directives() {
+        assert!(detach_exact_server_name(
+            "server_name\n    nodejstst.suren-tm.ir;\n",
+            "nodejstst.suren-tm.ir"
+        )
+        .is_err());
+        assert!(detach_exact_server_name(
+            "server_name nodejstst.suren-tm.ir; return 444;\n",
+            "nodejstst.suren-tm.ir"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn domain_takeover_does_not_remove_a_wildcard_that_matches_the_host() {
+        let (updated, removed) = detach_exact_server_name(
+            "server_name nodejstst.suren-tm.ir *.suren-tm.ir;\n",
+            "nodejstst.suren-tm.ir",
+        )
+        .unwrap();
+        assert_eq!(removed, 1);
+        assert!(nginx_config_claims_domain(
+            &updated,
+            "nodejstst.suren-tm.ir"
+        ));
+    }
 
     #[test]
     fn identifies_nginx_sites_owned_by_application_manager() {
@@ -3186,7 +3613,6 @@ mod node_proxy_tests {
         assert!(!safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/id;include evil/current")));
         assert!(!safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/$host/current")));
     }
-
 
     #[test]
     fn node_proxy_has_loopback_upstream_websocket_and_safe_file_rules() {
