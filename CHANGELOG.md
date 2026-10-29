@@ -3,7 +3,8 @@
 ## v0.7.6-dev.1 — 2026-10-29
 
 ### Development
-- Development prerelease based on stable v0.7.5; it includes the faster, cache-stable Rust updater.
+- Refresh the updater from the selected branch before compiling, so servers running an older installed script use the current build/cache logic on their first update.
+- Include the faster, cache-stable Rust updater from stable v0.7.5.
 
 ## v0.7.5 — 2026-10-29
 

@@ -6,6 +6,8 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 sed -n '/^select_update_options() {$/,/^}$/p' "$root/install.sh" > "$tmp/functions.sh"
+sed -n '/^prepare_source() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
+sed -n '/^should_reexec_latest_updater() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^installer_script_url() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_cpu_count() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
 sed -n '/^release_build_memory_capacity_mb() {$/,/^}$/p' "$root/install.sh" >> "$tmp/functions.sh"
@@ -35,6 +37,19 @@ select_update_options development fast
 select_update_options main complete
 [[ "$BRANCH" == main && "$ARG_UPDATE_MODE" == complete ]]
 [[ "$(installer_script_url main)" == https://raw.githubusercontent.com/themrcortex/arg/main/install.sh ]]
+
+SOURCE_DIR="$tmp/fetched-source"
+mkdir -p "$SOURCE_DIR/.git"
+: > "$SOURCE_DIR/install.sh"
+unset ARG_UPDATE_REEXECED ARG_UPDATE_SOURCE_READY
+should_reexec_latest_updater
+ARG_UPDATE_SOURCE_READY=1
+! should_reexec_latest_updater
+prepare_source
+ARG_UPDATE_SOURCE_READY=0
+ARG_UPDATE_REEXECED=1
+! should_reexec_latest_updater
+unset ARG_UPDATE_REEXECED ARG_UPDATE_SOURCE_READY
 
 unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
 configure_release_build_resources 2048

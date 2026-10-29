@@ -219,6 +219,10 @@ ensure_rust() {
 }
 
 prepare_source() {
+  if [[ "${ARG_UPDATE_SOURCE_READY:-0}" == "1" ]]; then
+    [[ -d "$SOURCE_DIR/.git" && -f "$SOURCE_DIR/install.sh" ]] || die "The fetched updater source is no longer available. Retry the update."
+    return 0
+  fi
   mkdir -p "$INSTALL_DIR"
   if [[ -d "$SOURCE_DIR/.git" ]]; then
     say "Fetching the latest source from GitHub"
@@ -230,6 +234,10 @@ prepare_source() {
     say "Downloading ARG source from GitHub"
     git clone --depth 1 --branch "$BRANCH" "$REPOSITORY" "$SOURCE_DIR"
   fi
+}
+
+should_reexec_latest_updater() {
+  [[ "${ARG_UPDATE_REEXECED:-0}" != "1" && "${ARG_UPDATE_SOURCE_READY:-0}" != "1" ]]
 }
 
 release_build_cpu_count() {
@@ -1820,6 +1828,12 @@ update_app() {
   ensure_firewall_dependency
   sync_ufw_rules
   prepare_source
+  if should_reexec_latest_updater; then
+    [[ -f "$SOURCE_DIR/install.sh" ]] || die "The selected source branch does not contain its updater script."
+    info "Using the fetched $BRANCH updater before compiling so this update uses the selected branch's current build and recovery logic."
+    export ARG_UPDATE_REEXECED=1 ARG_UPDATE_SOURCE_READY=1 ARG_UPDATE_RESERVED=1
+    exec bash -- "$SOURCE_DIR/install.sh" update "$BRANCH" "$ARG_UPDATE_MODE"
+  fi
   # Keep the privileged updater helper in sync before the replacement service starts polling it.
   configure_ufw_status
   update_phase building "Building the new ARG release."
