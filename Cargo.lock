@@ -43,7 +43,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "portable-pty",
- "quick-xml",
+ "quick-xml 0.42.0",
  "rand 0.8.8",
  "reqwest",
  "ring",
@@ -121,7 +121,7 @@ dependencies = [
  "attohttpc",
  "home",
  "log",
- "quick-xml",
+ "quick-xml 0.41.0",
  "rust-ini",
  "serde",
  "thiserror 2.0.21",
@@ -1285,6 +1285,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1589,7 +1598,7 @@ dependencies = [
  "maybe-async",
  "md5",
  "percent-encoding",
- "quick-xml",
+ "quick-xml 0.41.0",
  "reqwest",
  "serde",
  "serde_derive",
