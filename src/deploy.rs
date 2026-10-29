@@ -854,7 +854,7 @@ fn job_event_revision(db: &Connection, job_id: &str) -> rusqlite::Result<Option<
 }
 
 fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
-    let row: (String,String,String,String,String,i64,i64,Option<i64>,Option<String>,Option<String>,Option<String>,Option<String>,Option<String>) = db.query_row(
+    let row: (String,String,String,String,String,i64,i64,Option<i64>,Option<i64>,Option<String>,Option<String>,Option<String>,Option<String>) = db.query_row(
         "SELECT id,application_id,owner_server_uuid,actor,state,attempt,created_at,started_at,finished_at,release_path,previous_release,source_commit,error_summary FROM deployment_jobs WHERE id=?1",
         [job_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?)),
     )?;
@@ -3311,6 +3311,39 @@ mod tests {
             revision_after,
             "the latest retained log ID must advance even when retained count stays capped"
         );
+    }
+
+    #[test]
+    fn job_detail_reads_integer_finished_at_and_accepts_null() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);
+             CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 1, "git", "[]",
+        )
+        .unwrap();
+
+        db.execute(
+            "UPDATE deployment_jobs SET finished_at=?1 WHERE id='job'",
+            [1_798_000_000_i64],
+        )
+        .unwrap();
+        let finished = read_job(&db, "job").unwrap();
+        assert_eq!(finished["finished_at"], 1_798_000_000_i64);
+
+        db.execute("UPDATE deployment_jobs SET finished_at=NULL WHERE id='job'", [])
+            .unwrap();
+        let running = read_job(&db, "job").unwrap();
+        assert!(running["finished_at"].is_null());
     }
 
     #[test]
