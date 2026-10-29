@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.7-dev.1 — 2026-10-29
+
+### Development
+- Development prerelease based on stable v0.7.6; it includes first-run updater refresh and stable Fast cache/resource handling.
+
 ## v0.7.6 — 2026-10-29
 
 ### Fixed
