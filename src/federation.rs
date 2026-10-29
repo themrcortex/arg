@@ -85,6 +85,9 @@ pub(super) struct ServerRoleRequest { role: String, #[serde(default)] confirmed:
 pub(super) struct RotateCredentialRequest { new_token: String }
 
 #[derive(Deserialize)]
+pub(super) struct RenewWorkspaceRequest { workspace_token: String }
+
+#[derive(Deserialize)]
 pub(super) struct UpdateBranchQuery {
     #[serde(default = "default_node_update_branch")]
     branch: String,
@@ -1400,7 +1403,15 @@ async fn ensure_workspace_session(state: &AppState, id: i64) -> Result<String, (
     if !decode_scopes(&scopes_json).iter().any(|scope| scope == "workspace.session.renew") {
         return Err(error(StatusCode::UNAUTHORIZED, "نشست فضای کار منقضی شده و این اتصال نسخهٔ تمدید امن را پشتیبانی نمی‌کند؛ Node را دوباره جفت‌سازی کن."));
     }
-    let response = remote_node_request(state, id, "workspace.session.renew", reqwest::Method::POST, "api/federation/workspace/renew", None).await?;
+    let previous_token = read_node_token(&path)?;
+    let response = remote_node_request(
+        state,
+        id,
+        "workspace.session.renew",
+        reqwest::Method::POST,
+        "api/federation/workspace/renew",
+        Some(json!({"workspace_token":previous_token})),
+    ).await?;
     let token = response["workspace_token"].as_str().unwrap_or_default();
     let expires_at = response["expires_at"].as_i64().unwrap_or_default();
     if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) || expires_at <= now() {
@@ -2281,29 +2292,111 @@ pub(super) async fn rotate_controller_credential(
 pub(super) async fn renew_workspace_session(
     State(state): State<AppState>,
     headers: HeaderMap,
+    body: Option<Json<RenewWorkspaceRequest>>,
 ) -> ApiResult {
-    let db = state.lock().unwrap();
+    let mut db = state.lock().unwrap();
     let identity = authorize_controller(&db, &headers, "workspace.session.renew")?;
-    let (user_id, scopes_json): (i64, String) = db.query_row(
-        "SELECT user_id,scopes_json FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1) ORDER BY expires_at DESC LIMIT 1",
-        [identity.id],
-        |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::CONFLICT, "نشست فضای کار موجود نیست؛ اتصال را دوباره جفت‌سازی کن."))?;
+    let old_token = body.map(|Json(input)| input.workspace_token);
+    if old_token.as_ref().is_some_and(|value| value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+        return Err(error(StatusCode::BAD_REQUEST, "شناسهٔ نشست قبلی معتبر نیست."));
+    }
+    let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
+    let old_hash = old_token.as_deref().map(session_hash);
+    if let Some(source_hash) = old_hash.as_deref() {
+        let existing: Option<(String, i64, String, i64)> = transaction.query_row(
+            "SELECT token_hash,expires_at,scopes_json,user_id FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1) AND renewed_from_hash=?2",
+            params![identity.id,source_hash],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).optional().map_err(db_error)?;
+        if let Some((new_hash, _, scopes_json, user_id)) = existing {
+            let enabled: bool = transaction.query_row(
+                "SELECT enabled=1 AND role='admin' FROM users WHERE id=(SELECT user_id FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1) AND renewed_from_hash=?2)",
+                params![identity.id,source_hash],
+                |row| row.get(0),
+            ).optional().map_err(db_error)?.unwrap_or(false);
+            if !enabled { return Err(error(StatusCode::CONFLICT, "کاربر مدیر پیوندخورده به این نشست غیرفعال است؛ دوباره جفت‌سازی کن.")); }
+            let renewed_token = derive_workspace_renewal_token(old_token.as_deref().unwrap_or_default(), &identity.id.to_string());
+            if session_hash(&renewed_token) != new_hash {
+                return Err(error(StatusCode::CONFLICT, "رکورد تمدید نشست با اعتبارسنجی سازگار نیست؛ اتصال را دوباره جفت‌سازی کن."));
+            }
+            let mut scopes = decode_scopes(&scopes_json);
+            scopes.retain(|scope| known_scope(scope));
+            let expires_at = now() + WORKSPACE_SESSION_TTL;
+            transaction.execute(
+                "UPDATE federation_proxy_sessions SET expires_at=?1 WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?2) AND renewed_from_hash=?3",
+                params![expires_at,identity.id,source_hash],
+            ).map_err(db_error)?;
+            let updated_sessions = transaction.execute(
+                "UPDATE sessions SET expires_at=?1 WHERE token_hash=?2",
+                params![expires_at,new_hash],
+            ).map_err(db_error)?;
+            if updated_sessions == 0 {
+                transaction.execute(
+                    "INSERT INTO sessions(token_hash,user_id,expires_at,created_at,last_seen,remote_ip,user_agent) VALUES (?1,?2,?3,?4,?4,'federation','ARG workspace renewal retry')",
+                    params![new_hash,user_id,expires_at,now()],
+                ).map_err(db_error)?;
+            }
+            transaction.commit().map_err(db_error)?;
+            return Ok(Json(json!({"workspace_token":renewed_token,"expires_at":expires_at,"scopes":scopes})));
+        }
+    }
+    let source: Option<(i64, String)> = if let Some(source_hash) = old_hash.as_deref() {
+        transaction.query_row(
+            "SELECT user_id,scopes_json FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1) AND token_hash=?2",
+            params![identity.id,source_hash],
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional().map_err(db_error)?
+    } else {
+        transaction.query_row(
+            "SELECT user_id,scopes_json FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1) ORDER BY expires_at DESC LIMIT 1",
+            [identity.id],
+            |row| Ok((row.get(0)?,row.get(1)?)),
+        ).optional().map_err(db_error)?
+    };
+    let (user_id, scopes_json) = source.ok_or_else(|| error(StatusCode::CONFLICT, "نشست فضای کار قبلی پیدا نشد؛ اتصال را دوباره جفت‌سازی کن."))?;
     let mut scopes = decode_scopes(&scopes_json);
     scopes.retain(|scope| known_scope(scope));
     if !scopes.iter().any(|scope| scope == "workspace.read") {
         return Err(error(StatusCode::FORBIDDEN, "اتصال موجود اجازهٔ فضای کار را ندارد."));
     }
-    let workspace_token = token();
+    let user_enabled: bool = transaction.query_row("SELECT enabled=1 AND role='admin' FROM users WHERE id=?1", [user_id], |row| row.get(0)).optional().map_err(db_error)?.unwrap_or(false);
+    if !user_enabled { return Err(error(StatusCode::CONFLICT, "کاربر مدیر پیوندخورده به این اتصال غیرفعال است؛ دوباره جفت‌سازی کن.")); }
+    let workspace_token = old_token.as_deref().map(|old| derive_workspace_renewal_token(old, &identity.id.to_string())).unwrap_or_else(token);
     let expires_at = now() + WORKSPACE_SESSION_TTL;
     let hash = session_hash(&workspace_token);
     let at = now();
-    let user_enabled: bool = db.query_row("SELECT enabled=1 AND role='admin' FROM users WHERE id=?1", [user_id], |row| row.get(0)).optional().map_err(db_error)?.unwrap_or(false);
-    if !user_enabled { return Err(error(StatusCode::CONFLICT, "کاربر مدیر پیوندخورده به این اتصال غیرفعال است؛ دوباره جفت‌سازی کن.")); }
-    db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,created_at,last_seen,remote_ip,user_agent) VALUES (?1,?2,?3,?4,?4,'federation','ARG workspace renewal')", params![hash,user_id,expires_at,at]).map_err(db_error)?;
-    db.execute("INSERT INTO federation_proxy_sessions(controller_id,token_hash,user_id,scopes_json,expires_at,actor_name) VALUES ((SELECT controller_id FROM federation_controllers WHERE id=?1),?2,?3,?4,?5,?6)", params![identity.id,hash,user_id,serde_json::to_string(&scopes).unwrap_or_else(|_| "[]".to_owned()),expires_at,identity.name]).map_err(db_error)?;
-    audit(&db, &identity.name, "federation.workspace.session.renew", "new scoped workspace session issued");
+    if old_hash.is_none() {
+        // Older controllers do not send the previous workspace token. Keep this
+        // compatibility path bounded to one active grant rather than retaining
+        // a new valid session row on every retry.
+        transaction.execute(
+            "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1))",
+            [identity.id],
+        ).map_err(db_error)?;
+        transaction.execute(
+            "DELETE FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1)",
+            [identity.id],
+        ).map_err(db_error)?;
+    }
+    transaction.execute("INSERT INTO sessions(token_hash,user_id,expires_at,created_at,last_seen,remote_ip,user_agent) VALUES (?1,?2,?3,?4,?4,'federation','ARG workspace renewal')", params![hash,user_id,expires_at,at]).map_err(db_error)?;
+    transaction.execute("INSERT INTO federation_proxy_sessions(controller_id,token_hash,user_id,scopes_json,expires_at,actor_name,renewed_from_hash) VALUES ((SELECT controller_id FROM federation_controllers WHERE id=?1),?2,?3,?4,?5,?6,?7)", params![identity.id,hash,user_id,serde_json::to_string(&scopes).unwrap_or_else(|_| "[]".to_owned()),expires_at,identity.name,old_hash]).map_err(db_error)?;
+    if old_hash.is_some() {
+        transaction.execute(
+            "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1) AND token_hash!=?2)",
+            params![identity.id,hash],
+        ).map_err(db_error)?;
+        transaction.execute(
+            "DELETE FROM federation_proxy_sessions WHERE controller_id=(SELECT controller_id FROM federation_controllers WHERE id=?1) AND token_hash!=?2",
+            params![identity.id,hash],
+        ).map_err(db_error)?;
+    }
+    audit(&transaction, &identity.name, "federation.workspace.session.renew", "scoped workspace session issued");
+    transaction.commit().map_err(db_error)?;
     Ok(Json(json!({"workspace_token":workspace_token,"expires_at":expires_at,"scopes":scopes})))
+}
+
+fn derive_workspace_renewal_token(previous_token: &str, controller_id: &str) -> String {
+    hex::encode(Sha256::digest(format!("ARG workspace renewal v1\0{controller_id}\0{previous_token}").as_bytes()))
 }
 
 pub(super) async fn revoke_controller_admin(
@@ -2413,9 +2506,11 @@ mod tests {
         should_forget_node_after_revoke_failure, supported_capabilities, valid_server_uuid,
         valid_workspace_api_path, validate_endpoint, validate_public_name,
         validate_resolved_addresses, workspace_key, NodeUpdateRoute,
+        now, renew_workspace_session, session_hash, token_hash, RenewWorkspaceRequest,
     };
-    use axum::http::StatusCode;
-    use rusqlite::Connection;
+    use axum::{extract::State, http::{header::AUTHORIZATION, HeaderMap, StatusCode}, Json};
+    use rusqlite::{params, Connection};
+    use std::sync::{Arc, Mutex};
     #[test]
     fn server_identity_and_public_names_are_validated() {
         assert!(valid_server_uuid("123e4567-e89b-42d3-a456-426614174000"));
@@ -2437,6 +2532,63 @@ mod tests {
         assert_eq!(resolve_workspace_node_id(&db, "123e4567-e89b-42d3-a456-426614174000").unwrap(), 8);
         assert!(resolve_workspace_node_id(&db, "legacy:8").is_err());
         assert!(resolve_workspace_node_id(&db, "not-a-server-id").is_err());
+    }
+
+    #[tokio::test]
+    async fn workspace_renewal_retry_returns_the_same_session_without_duplicate_rows() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL,created_at INTEGER,last_seen INTEGER,enabled INTEGER NOT NULL,scopes_json TEXT NOT NULL,token_expires_at INTEGER); CREATE TABLE users(id INTEGER PRIMARY KEY,enabled INTEGER NOT NULL,role TEXT NOT NULL); CREATE TABLE sessions(token_hash TEXT PRIMARY KEY,user_id INTEGER,expires_at INTEGER,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE federation_proxy_sessions(controller_id TEXT NOT NULL,token_hash TEXT NOT NULL,user_id INTEGER NOT NULL,scopes_json TEXT NOT NULL,expires_at INTEGER,actor_name TEXT NOT NULL,renewed_from_hash TEXT); INSERT INTO users VALUES(1,1,'admin');") .unwrap();
+        let controller_id = "a1b2c3d4e5f60718293a4b5c6d7e8f90";
+        let controller_token = "c".repeat(64);
+        let old_token = "d".repeat(64);
+        let old_hash = session_hash(&old_token);
+        db.execute("INSERT INTO federation_controllers(id,controller_id,controller_name,token_hash,created_at,last_seen,enabled,scopes_json,token_expires_at) VALUES(1,?1,'test controller',?2,1,1,1,'[\"workspace.session.renew\"]',?3)", params![controller_id,token_hash(&controller_token),now()+60]).unwrap();
+        db.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?1,1,?2)", params![old_hash,now()+3600]).unwrap();
+        db.execute("INSERT INTO federation_proxy_sessions(controller_id,token_hash,user_id,scopes_json,expires_at,actor_name) VALUES(?1,?2,1,'[\"workspace.read\"]',?3,'test controller')", params![controller_id,old_hash,now()+3600]).unwrap();
+        let state = Arc::new(Mutex::new(db));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-arg-transport", "https".parse().unwrap());
+        headers.insert(AUTHORIZATION, format!("Bearer {controller_token}").parse().unwrap());
+        let body = Some(Json(RenewWorkspaceRequest { workspace_token: old_token }));
+        let first = renew_workspace_session(State(Arc::clone(&state)),headers.clone(),body).await.unwrap().0;
+        let first_token = first["workspace_token"].as_str().unwrap().to_owned();
+        let second = renew_workspace_session(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Some(Json(RenewWorkspaceRequest { workspace_token: "d".repeat(64) })),
+        ).await.unwrap().0;
+        assert_eq!(second["workspace_token"], first_token);
+        assert!(second["expires_at"].as_i64().unwrap() >= first["expires_at"].as_i64().unwrap());
+        let renewed_hash = {
+            let db = state.lock().unwrap();
+            let total: i64 = db.query_row("SELECT COUNT(*) FROM federation_proxy_sessions",[],|row|row.get(0)).unwrap();
+            let renewed: i64 = db.query_row("SELECT COUNT(*) FROM federation_proxy_sessions WHERE renewed_from_hash=?1",[&old_hash],|row|row.get(0)).unwrap();
+            let sessions: i64 = db.query_row("SELECT COUNT(*) FROM sessions",[],|row|row.get(0)).unwrap();
+            assert_eq!((total,renewed,sessions),(1,1,1));
+            db.execute("UPDATE federation_proxy_sessions SET expires_at=?1 WHERE renewed_from_hash=?2",params![now()-1,old_hash]).unwrap();
+            let renewed_hash: String = db.query_row("SELECT token_hash FROM federation_proxy_sessions WHERE renewed_from_hash=?1",[old_hash],|row|row.get(0)).unwrap();
+            db.execute("UPDATE sessions SET expires_at=?1 WHERE token_hash=?2",params![now()-1,renewed_hash]).unwrap();
+            db.execute("DELETE FROM sessions WHERE token_hash=?1",[&renewed_hash]).unwrap();
+            renewed_hash
+        };
+        let recovered = renew_workspace_session(
+            State(Arc::clone(&state)),
+            headers.clone(),
+            Some(Json(RenewWorkspaceRequest { workspace_token: "d".repeat(64) })),
+        ).await.unwrap().0;
+        assert_eq!(recovered["workspace_token"], first_token);
+        assert!(recovered["expires_at"].as_i64().unwrap() > now());
+        {
+            let db = state.lock().unwrap();
+            let restored_sessions: i64 = db.query_row("SELECT COUNT(*) FROM sessions WHERE token_hash=?1 AND expires_at>?2",params![renewed_hash,now()],|row|row.get(0)).unwrap();
+            assert_eq!(restored_sessions,1,"an idempotent retry restores its session if expired-session cleanup already removed it");
+        }
+        let _ = renew_workspace_session(State(Arc::clone(&state)),headers.clone(),None).await.unwrap();
+        let _ = renew_workspace_session(State(Arc::clone(&state)),headers,None).await.unwrap();
+        let db = state.lock().unwrap();
+        let legacy_grants: i64 = db.query_row("SELECT COUNT(*) FROM federation_proxy_sessions WHERE controller_id=?1",[controller_id],|row|row.get(0)).unwrap();
+        let sessions: i64 = db.query_row("SELECT COUNT(*) FROM sessions",[],|row|row.get(0)).unwrap();
+        assert_eq!((legacy_grants,sessions),(1,1),"the no-body compatibility path must not accumulate grants or sessions");
     }
     #[test]
     fn node_endpoint_requires_a_clean_https_origin() {

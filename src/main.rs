@@ -291,6 +291,7 @@ fn ensure_federation_identity_columns(db: &Connection) -> Result<(), rusqlite::E
         ("federation_proxy_sessions", "scopes_json", "TEXT NOT NULL DEFAULT '[\"workspace.read\"]'"),
         ("federation_proxy_sessions", "expires_at", "INTEGER"),
         ("federation_proxy_sessions", "actor_name", "TEXT NOT NULL DEFAULT ''"),
+        ("federation_proxy_sessions", "renewed_from_hash", "TEXT"),
     ] {
         let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
         let existing: Vec<String> = statement
@@ -318,6 +319,7 @@ fn ensure_federation_identity_columns(db: &Connection) -> Result<(), rusqlite::E
         "UPDATE federation_proxy_sessions SET expires_at=(SELECT expires_at FROM sessions WHERE sessions.token_hash=federation_proxy_sessions.token_hash), actor_name=COALESCE((SELECT controller_name FROM federation_controllers WHERE federation_controllers.controller_id=federation_proxy_sessions.controller_id), '') WHERE expires_at IS NULL OR actor_name=''",
         [],
     )?;
+    db.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS federation_workspace_renewal_source ON federation_proxy_sessions(controller_id,renewed_from_hash) WHERE renewed_from_hash IS NOT NULL;")?;
     Ok(())
 }
 
@@ -5079,6 +5081,60 @@ fn backup_database_cli() -> Result<(), Box<dyn std::error::Error>> {
     )
 }
 
+fn migrate_schema(db: &Connection) -> Result<(), rusqlite::Error> {
+    migrate_schema_with_checkpoint(db, |_| Ok(()))
+}
+
+fn migrate_schema_with_checkpoint(
+    db: &Connection,
+    mut checkpoint: impl FnMut(&str) -> Result<(), rusqlite::Error>,
+) -> Result<(), rusqlite::Error> {
+    db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_runtime (site_name TEXT PRIMARY KEY,unit TEXT NOT NULL,cpu_quota_percent REAL,memory_max_bytes INTEGER,last_cpu_usage_ns INTEGER,last_sampled_at INTEGER,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS fast_actions (id INTEGER PRIMARY KEY,title TEXT NOT NULL,operation TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',site_name TEXT,include_access_log INTEGER NOT NULL DEFAULT 0,include_error_log INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_actions (id INTEGER PRIMARY KEY,site_name TEXT NOT NULL,title TEXT NOT NULL,icon TEXT NOT NULL,operation TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(site_name,title));")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_sql_presets (id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,title TEXT NOT NULL,database_name TEXT,statement TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(user_id,title));")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS federation_pairing_codes(code_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,created_by TEXT NOT NULL); CREATE TABLE IF NOT EXISTS federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS federation_proxy_sessions(controller_id TEXT NOT NULL REFERENCES federation_controllers(controller_id) ON DELETE CASCADE,token_hash TEXT NOT NULL UNIQUE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(controller_id,token_hash)); CREATE TRIGGER IF NOT EXISTS federation_proxy_session_cleanup AFTER DELETE ON federation_proxy_sessions BEGIN DELETE FROM sessions WHERE token_hash=OLD.token_hash; END; CREATE TABLE IF NOT EXISTS federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE INDEX IF NOT EXISTS idx_federated_nodes_last_seen ON federated_nodes(last_seen);")?;
+    checkpoint("core")?;
+    ensure_federation_identity_columns(db)?;
+    checkpoint("federation_identity")?;
+    ensure_metric_storage_columns(db)?;
+    checkpoint("metrics")?;
+
+    macro_rules! run_migration {
+        ($name:literal, $migration:path) => {{
+            $migration(db)?;
+            checkpoint($name)?;
+        }};
+    }
+    run_migration!("apps", apps::migrate);
+    run_migration!("app_networks", app_networks::migrate);
+    run_migration!("app_storage", app_storage::migrate);
+    run_migration!("deploy", deploy::migrate);
+    run_migration!("ssh_keys", ssh_keys::migrate);
+    run_migration!("laravel", laravel::migrate);
+    run_migration!("s3", s3::migrate);
+    run_migration!("app_s3", app_s3::migrate);
+    run_migration!("app_workspaces", app_workspaces::migrate);
+    run_migration!("buildpacks", buildpacks::migrate);
+    run_migration!("app_snapshots", app_snapshots::migrate);
+    run_migration!("app_compose", app_compose::migrate);
+    run_migration!("nginx_domains", nginx_domains::migrate);
+    run_migration!("fleet", fleet::migrate);
+    run_migration!("private_networks", private_networks::migrate);
+    run_migration!("dns", dns::migrate);
+    run_migration!("app_monitoring", app_monitoring::migrate);
+    run_migration!("workflow_drafts", workflow_drafts::migrate);
+    run_migration!("dashboard_preferences", dashboard_preferences::migrate);
+    run_migration!("api_keys", api_keys::migrate);
+    run_migration!("extensions", extensions::migrate);
+    run_migration!("maintenance", maintenance::migrate);
+
+    db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
+    db.execute("DELETE FROM root_terminal_tickets WHERE expires_at<=?1", [now()])?;
+    ensure_sessions_metadata(db)?;
+    checkpoint("sessions")?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if env::args().nth(1).as_deref() == Some("terminal-shell") {
@@ -5105,40 +5161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&db_path, fs::Permissions::from_mode(0o600))?;
     }
-    db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),expires_at INTEGER NOT NULL,created_at INTEGER,last_seen INTEGER,remote_ip TEXT,user_agent TEXT); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY,at INTEGER NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS auth_failures (username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metric_samples (at INTEGER PRIMARY KEY,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,rx_rate REAL NOT NULL,tx_rate REAL NOT NULL); CREATE TABLE IF NOT EXISTS network_traffic_hourly (hour_start INTEGER NOT NULL,interface TEXT NOT NULL,rx_bytes INTEGER NOT NULL,tx_bytes INTEGER NOT NULL,eligible_for_total INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(hour_start,interface)); CREATE INDEX IF NOT EXISTS network_traffic_hourly_time ON network_traffic_hourly(hour_start); CREATE TABLE IF NOT EXISTS managed_firewall_rules (id INTEGER PRIMARY KEY,port INTEGER NOT NULL,protocol TEXT NOT NULL,policy TEXT NOT NULL,enabled INTEGER NOT NULL,UNIQUE(port,protocol)); CREATE TABLE IF NOT EXISTS nginx_site_metadata (name TEXT PRIMARY KEY,description TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS nginx_site_config_state (name TEXT PRIMARY KEY,content TEXT NOT NULL,settings_json TEXT,content_hash TEXT NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_runtime (site_name TEXT PRIMARY KEY,unit TEXT NOT NULL,cpu_quota_percent REAL,memory_max_bytes INTEGER,last_cpu_usage_ns INTEGER,last_sampled_at INTEGER,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS fast_actions (id INTEGER PRIMARY KEY,title TEXT NOT NULL,operation TEXT NOT NULL,target TEXT NOT NULL DEFAULT '',site_name TEXT,include_access_log INTEGER NOT NULL DEFAULT 0,include_error_log INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS nginx_site_actions (id INTEGER PRIMARY KEY,site_name TEXT NOT NULL,title TEXT NOT NULL,icon TEXT NOT NULL,operation TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(site_name,title));")?;
-    db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_sql_presets (id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,title TEXT NOT NULL,database_name TEXT,statement TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(user_id,title));")?;
-    db.execute_batch("CREATE TABLE IF NOT EXISTS federation_pairing_codes(code_hash TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,created_by TEXT NOT NULL); CREATE TABLE IF NOT EXISTS federation_controllers(id INTEGER PRIMARY KEY,controller_id TEXT NOT NULL UNIQUE,controller_name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,created_at INTEGER NOT NULL,last_seen INTEGER,enabled INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS federation_proxy_sessions(controller_id TEXT NOT NULL REFERENCES federation_controllers(controller_id) ON DELETE CASCADE,token_hash TEXT NOT NULL UNIQUE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,PRIMARY KEY(controller_id,token_hash)); CREATE TRIGGER IF NOT EXISTS federation_proxy_session_cleanup AFTER DELETE ON federation_proxy_sessions BEGIN DELETE FROM sessions WHERE token_hash=OLD.token_hash; END; CREATE TABLE IF NOT EXISTS federated_nodes(id INTEGER PRIMARY KEY,name TEXT NOT NULL,endpoint TEXT NOT NULL,node_id TEXT NOT NULL,controller_id TEXT NOT NULL,protocol_version INTEGER NOT NULL,created_at INTEGER NOT NULL,last_seen INTEGER); CREATE INDEX IF NOT EXISTS idx_federated_nodes_last_seen ON federated_nodes(last_seen);")?;
-    ensure_federation_identity_columns(&db)?;
-    ensure_metric_storage_columns(&db)?;
-    apps::migrate(&db)?;
-    app_networks::migrate(&db)?;
-    app_storage::migrate(&db)?;
-    deploy::migrate(&db)?;
-    ssh_keys::migrate(&db)?;
-    laravel::migrate(&db)?;
-    s3::migrate(&db)?;
-    app_s3::migrate(&db)?;
-    app_workspaces::migrate(&db)?;
-    buildpacks::migrate(&db)?;
-    app_snapshots::migrate(&db)?;
-    app_compose::migrate(&db)?;
-    nginx_domains::migrate(&db)?;
-    fleet::migrate(&db)?;
-    private_networks::migrate(&db)?;
-    dns::migrate(&db)?;
-    app_monitoring::migrate(&db)?;
-    workflow_drafts::migrate(&db)?;
-    dashboard_preferences::migrate(&db)?;
-    api_keys::migrate(&db)?;
-    extensions::migrate(&db)?;
-    maintenance::migrate(&db)?;
-    db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
-    db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
-    db.execute(
-        "DELETE FROM root_terminal_tickets WHERE expires_at<=?1",
-        [now()],
-    )?;
-    ensure_sessions_metadata(&db)?;
+    migrate_schema(&db)?;
     let has_users = initialized(&db);
     let configured_setup_token = env::var("ARG_SETUP_TOKEN")
         .ok()
@@ -5605,7 +5628,7 @@ mod update_progress_tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        let (legacy_scope, expires_at, actor_name): (String, i64, String) = db.query_row("SELECT scopes_json,expires_at,actor_name FROM federation_proxy_sessions WHERE token_hash='legacy-session'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        let (legacy_scope, expires_at, actor_name, renewal_source): (String, i64, String, Option<String>) = db.query_row("SELECT scopes_json,expires_at,actor_name,renewed_from_hash FROM federation_proxy_sessions WHERE token_hash='legacy-session'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
         assert_eq!(local_label, "Public Controller Name");
         assert_eq!(public_name, "Public Controller Name");
         assert_eq!(node_label, "Europe VPS");
@@ -5613,6 +5636,28 @@ mod update_progress_tests {
         assert_eq!(legacy_scope, "[\"workspace.read\"]");
         assert_eq!(expires_at, 9999999999);
         assert_eq!(actor_name, "Public Controller Name");
+        assert_eq!(renewal_source, None);
+        let index_count: i64 = db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='federation_workspace_renewal_source'", [], |row| row.get(0)).unwrap();
+        assert_eq!(index_count, 1);
+    }
+
+    #[test]
+    fn startup_migration_sequence_recovers_after_module_boundary_interruption() {
+        for interruption in ["core", "federation_identity", "deploy", "s3", "fleet", "maintenance", "sessions"] {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); INSERT INTO users VALUES(41,'preserved-admin','hash','admin',1);").unwrap();
+            let interrupted = super::migrate_schema_with_checkpoint(&db, |checkpoint| {
+                if checkpoint == interruption { Err(rusqlite::Error::InvalidQuery) } else { Ok(()) }
+            });
+            assert!(interrupted.is_err(), "failure injection did not stop after {interruption}");
+
+            super::migrate_schema(&db).unwrap_or_else(|error| panic!("migration restart after {interruption} failed: {error}"));
+            super::migrate_schema(&db).unwrap_or_else(|error| panic!("second idempotent startup after {interruption} failed: {error}"));
+            let (user_count, username): (i64, String) = db.query_row("SELECT COUNT(*),MIN(username) FROM users WHERE id=41", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!((user_count,username.as_str()),(1,"preserved-admin"));
+            let renewal_column: i64 = db.query_row("SELECT COUNT(*) FROM pragma_table_info('federation_proxy_sessions') WHERE name='renewed_from_hash'", [], |row| row.get(0)).unwrap();
+            assert_eq!(renewal_column,1);
+        }
     }
 
     #[test]
