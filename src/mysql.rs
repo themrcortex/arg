@@ -256,15 +256,26 @@ fn manager_account_grants_allow_recovery(output: &str) -> bool {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(|line| {
-            line.split_whitespace()
+            // MySQL prints account names with backticks, while MariaDB and
+            // older clients commonly use single quotes. Normalize both
+            // spellings before checking the reserved account and its scope.
+            line.replace('`', "'")
+                .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
                 .to_ascii_lowercase()
         })
         .collect();
-    grants.len() == 1
-        && grants[0].contains("grant all privileges on *.* to 'arg_manager'@'localhost'")
-        && grants[0].contains("with grant option")
+    let expected_global = "grant all privileges on *.* to 'arg_manager'@'localhost'";
+    let global_grants = grants
+        .iter()
+        .filter(|grant| grant.starts_with(expected_global) && grant.contains("with grant option"))
+        .count();
+    global_grants == 1
+        && grants.iter().all(|grant| {
+            (grant.starts_with(expected_global) && grant.contains("with grant option"))
+                || grant.starts_with("grant usage on *.* to 'arg_manager'@'localhost'")
+        })
 }
 
 fn manager_config_contents_valid(contents: &str) -> bool {
@@ -1561,11 +1572,20 @@ mod tests {
         assert!(manager_account_grants_allow_recovery(
             "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' IDENTIFIED BY PASSWORD 'redacted' WITH GRANT OPTION\n"
         ));
+        assert!(manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON *.* TO `arg_manager`@`localhost` WITH GRANT OPTION\n"
+        ));
+        assert!(manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT USAGE ON *.* TO `arg_manager`@`localhost` IDENTIFIED VIA mysql_native_password USING 'redacted'\nGRANT ALL PRIVILEGES ON *.* TO `arg_manager`@`localhost` WITH GRANT OPTION\n"
+        ));
         assert!(!manager_account_grants_allow_recovery(
             "Grants for arg_manager@localhost\nGRANT SELECT ON *.* TO 'arg_manager'@'localhost'\n"
         ));
         assert!(!manager_account_grants_allow_recovery(
             "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON *.* TO 'arg_manager'@'localhost' WITH GRANT OPTION\nGRANT PROXY ON ''@'' TO 'arg_manager'@'localhost' WITH GRANT OPTION\n"
+        ));
+        assert!(!manager_account_grants_allow_recovery(
+            "Grants for arg_manager@localhost\nGRANT USAGE ON *.* TO `arg_manager`@`localhost`\nGRANT SELECT ON *.* TO `arg_manager`@`localhost`\nGRANT ALL PRIVILEGES ON *.* TO `arg_manager`@`localhost` WITH GRANT OPTION\n"
         ));
         assert!(!manager_account_grants_allow_recovery(
             "Grants for arg_manager@localhost\nGRANT ALL PRIVILEGES ON `app`.* TO 'arg_manager'@'localhost' WITH GRANT OPTION\n"
