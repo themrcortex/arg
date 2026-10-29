@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.6-dev.2 — 2026-10-29
+
+### Development
+- Before building, switch to the updater script fetched from the requested branch so older installed updaters can apply current performance and recovery fixes immediately.
+
 ## v0.7.6-dev.1 — 2026-10-29
 
 ### Development
