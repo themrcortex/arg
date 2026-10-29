@@ -5,6 +5,13 @@
 
 The selected branch determines which GitHub ref is fetched and which version/API is built.
 
+## Update method
+
+- **Prebuilt Release — recommended and default:** downloads the binary for the selected version from GitHub Releases, verifies its SHA-256 and CPU architecture, and matches the asset/tag version to the selected source version. The release workflow also checks the executable's `--version` output before publishing. The VPS does not compile ARG, use build CPU/RAM, or fill the Rust `target` cache. Linux `x86_64` and `aarch64` assets are published.
+- **Compile from source:** builds the selected branch on the VPS. Fast or Complete then controls whether local Cargo build cache is retained or removed.
+
+Development Release mode works when that exact prerelease version has been published to GitHub Releases. Otherwise select Compile from source. The updater validates the downloaded binary before the atomic install; a failed download or verification leaves the active binary untouched. The checksum is published beside the binary in the same GitHub Release. It detects transfer corruption but is not an independent signature outside the project's GitHub trust boundary.
+
 ## Build cache modes
 
 - **Fast:** retains Rust `target` and incrementally compiles ARG's application crate. The first build after a complete update, an empty cache, or changed Rust dependencies can still take a while because changed dependencies must be rebuilt. Later builds are usually shorter while dependencies stay unchanged. This mode keeps build artifacts on disk.
@@ -25,17 +32,21 @@ If compilation fails, ARG does not replace the active binary. The updater record
 Select branch and mode in the SSH menu. Non-interactive examples:
 
 ```bash
-sudo arg update main complete
-sudo arg update development fast
+sudo arg update main complete release
+sudo arg update development fast source
 ```
 
-Arguments are branch followed by mode. Only `main|development` and `fast|complete` are accepted. Running `sudo arg update` in an interactive TTY prompts for missing choices.
+Arguments are branch, cache mode, then update method. The method is `release|source`; cache mode is `fast|complete` and only affects source builds. Running `sudo arg update` in an interactive TTY prompts for the branch and update method; Release is the default.
 
 ## Update from the panel
 
-The update dialog shows branch/version/commit, mode, progress phase, and available logs. A valid update acquires a server-side lock so concurrent actions from other users do not conflict; other sessions can see the active update state.
+The update dialog shows branch/version/commit, Release or Source method, progress phase, and available logs. Release is recommended and avoids local compilation; Fast/Complete are shown only for source builds. A valid update acquires a server-side lock so concurrent actions from other users do not conflict; other sessions can see the active update state.
 
-The web service may restart during the update. The process builds, installs the binary, restarts the service, and performs a health check. An overlay blocks conflicting UI actions. On completion the UI attempts a cache-busting reload.
+The web service may restart during the update. The process downloads and verifies a Release or compiles from source, installs the binary, restarts the service, and performs a health check. An overlay blocks conflicting UI actions. On completion the UI attempts a cache-busting reload.
+
+## Publishing releases
+
+Stable versions on `main` use `vX.Y.Z` tags. Development prereleases use `vX.Y.Z-dev.N`. After the version change and branch commit are pushed, run `scripts/publish-release-tag.sh` to create and push the matching tag. GitHub Actions builds musl binaries for `x86_64` and `aarch64`, checks the reported version and executable architecture, generates SHA-256 files, and publishes a GitHub Release. `main` receives stable tags; development tags are marked prerelease.
 
 ## Cancellation and rollback
 

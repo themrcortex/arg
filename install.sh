@@ -1667,7 +1667,7 @@ wait_for_panel() {
 }
 
 select_update_options() {
-  local requested_branch="${1:-}" requested_mode="${2:-}" answer default_mode
+  local requested_branch="${1:-}" requested_mode="${2:-}" requested_strategy="${3:-${ARG_UPDATE_STRATEGY:-}}" answer default_mode default_strategy
   if [[ -z "$requested_branch" ]]; then
     if [[ -r /dev/tty && -t 1 && "${ARG_UPDATE_RESERVED:-0}" != "1" ]]; then
       info "Choose the source branch. main is stable; development contains prerelease changes."
@@ -1679,9 +1679,31 @@ select_update_options() {
   fi
   [[ "$requested_branch" == main || "$requested_branch" == development ]] || die "Invalid update branch. Choose main or development."
 
+  default_strategy="${ARG_UPDATE_STRATEGY:-release}"
+  [[ "$default_strategy" == release || "$default_strategy" == source ]] || default_strategy="release"
+  if [[ -z "$requested_strategy" ]]; then
+    if [[ -r /dev/tty && -t 1 && "${ARG_UPDATE_RESERVED:-0}" != "1" ]]; then
+      local strategy_choice=1
+      [[ "$default_strategy" == source ]] && strategy_choice=2
+      info "Release installs the prebuilt, checksum-verified binary and is recommended. Source compiles locally and needs CPU, RAM, and temporary disk space."
+      read_answer "Update method [1=release / 2=compile from source] [$strategy_choice]: " answer "$strategy_choice"
+      case "${answer,,}" in
+        1|release) requested_strategy="release" ;;
+        2|source|compile) requested_strategy="source" ;;
+        *) die "Invalid update method. Choose 1/release or 2/source." ;;
+      esac
+    else
+      requested_strategy="$default_strategy"
+    fi
+  fi
+  [[ "$requested_strategy" == release || "$requested_strategy" == source ]] || die "Invalid update method. Choose release or source."
+
   default_mode="${ARG_UPDATE_MODE:-complete}"
   [[ "$default_mode" == fast || "$default_mode" == complete ]] || default_mode="complete"
-  if [[ -z "$requested_mode" ]]; then
+  if [[ -n "$requested_mode" && "$requested_mode" != fast && "$requested_mode" != complete ]]; then
+    die "Invalid build mode. Choose fast or complete."
+  fi
+  if [[ "$requested_strategy" == source && -z "$requested_mode" ]]; then
     if [[ -r /dev/tty && -t 1 && "${ARG_UPDATE_RESERVED:-0}" != "1" ]]; then
       info "Fast retains Rust build artifacts and incrementally compiles ARG; the first build after cache/dependency changes can still be long. Complete clears the cache and takes longer."
       local default_choice=2
@@ -1696,13 +1718,61 @@ select_update_options() {
       requested_mode="$default_mode"
     fi
   fi
-  [[ "$requested_mode" == fast || "$requested_mode" == complete ]] || die "Invalid build mode. Choose fast or complete."
+  if [[ "$requested_strategy" == source ]]; then
+    [[ "$requested_mode" == fast || "$requested_mode" == complete ]] || die "Invalid build mode. Choose fast or complete."
+  else
+    [[ -n "$requested_mode" ]] || requested_mode="$default_mode"
+  fi
 
   BRANCH="$requested_branch"
   ARG_UPDATE_MODE="$requested_mode"
-  export ARG_UPDATE_MODE ARG_UPDATE_BRANCH="$BRANCH" ARG_UPDATE_OPERATION=update ARG_UPDATE_CONTEXT=update
+  ARG_UPDATE_STRATEGY="$requested_strategy"
+  export ARG_UPDATE_MODE ARG_UPDATE_STRATEGY ARG_UPDATE_BRANCH="$BRANCH" ARG_UPDATE_OPERATION=update ARG_UPDATE_CONTEXT=update
   check_update_status
-  info "Update source: $BRANCH ($UPDATE_STATUS) · build mode: $ARG_UPDATE_MODE"
+  info "Update source: $BRANCH ($UPDATE_STATUS) · method: $ARG_UPDATE_STRATEGY$([[ "$ARG_UPDATE_STRATEGY" == source ]] && printf ' · build mode: %s' "$ARG_UPDATE_MODE")"
+}
+
+release_version_from_source() {
+  sed -n '0,/^version = /s/^version = "\([^"]*\)"/\1/p' "$SOURCE_DIR/Cargo.toml"
+}
+
+release_target_for_host() {
+  case "$(uname -m)" in
+    x86_64) printf 'x86_64-unknown-linux-musl\n' ;;
+    aarch64|arm64) printf 'aarch64-unknown-linux-musl\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+download_release_binary() {
+  local version target asset base_url tmpdir expected actual elf_class elf_encoding machine_low machine_high expected_machine
+  version="$(release_version_from_source)"
+  [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev\.(0|[1-9][0-9]*))?$ ]] || die "The selected source has an invalid ARG release version: ${version:-missing}."
+  target="$(release_target_for_host)" || die "No prebuilt ARG release is available for this server architecture ($(uname -m)); choose compile from source."
+  asset="arg-v${version}-${target}"
+  base_url="https://github.com/themrcortex/arg/releases/download/v${version}"
+  install -d -o root -g root -m 0700 "$ROLLBACK_DIR"
+  tmpdir="$(mktemp -d "$ROLLBACK_DIR/.arg-release.XXXXXX")"
+  UPDATE_CLEANUP_RELEASE_DIR="$tmpdir"
+  info "Downloading prebuilt ARG v${version} for ${target}."
+  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 180 -fsSL "$base_url/$asset" -o "$tmpdir/$asset"; then
+    die "Prebuilt ARG v${version} is not available for ${target}. Choose compile from source or publish the matching GitHub Release first."
+  fi
+  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 -fsSL "$base_url/$asset.sha256" -o "$tmpdir/$asset.sha256"; then
+    die "The release checksum for ARG v${version} could not be downloaded; the installed binary was left untouched."
+  fi
+  expected="$(awk -v name="$asset" '$2 == name { print $1; exit }' "$tmpdir/$asset.sha256")"
+  [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || die "The release checksum file is invalid; the installed binary was left untouched."
+  actual="$(sha256sum "$tmpdir/$asset" | awk '{print $1}')"
+  [[ "${actual,,}" == "${expected,,}" ]] || die "The downloaded ARG release failed SHA-256 verification; the installed binary was left untouched."
+  read -r elf_class elf_encoding < <(od -An -t u1 -j 4 -N 2 "$tmpdir/$asset")
+  read -r machine_low machine_high < <(od -An -t u1 -j 18 -N 2 "$tmpdir/$asset")
+  case "$target" in x86_64-unknown-linux-musl) expected_machine=62 ;; aarch64-unknown-linux-musl) expected_machine=183 ;; esac
+  [[ "$elf_class" == 2 && "$elf_encoding" == 1 && "$machine_low" == "$expected_machine" && "$machine_high" == 0 ]] || die "The downloaded ARG release has an unexpected executable architecture; the installed binary was left untouched."
+  chmod 0755 "$tmpdir/$asset"
+  # The release workflow checks --version before publication. Do not execute a
+  # freshly downloaded program as root during its local verification path.
+  UPDATE_BUILT_BINARY="$tmpdir/$asset"
 }
 
 cleanup_update_build_cache() {
@@ -1759,6 +1829,7 @@ cleanup_update_reservation() {
     fi
   fi
   cleanup_update_build_cache "$exit_code"
+  [[ -z "${UPDATE_CLEANUP_RELEASE_DIR:-}" ]] || rm -rf -- "$UPDATE_CLEANUP_RELEASE_DIR"
   [[ -z "${UPDATE_CLEANUP_STAGED:-}" ]] || rm -f "$UPDATE_CLEANUP_STAGED"
   [[ -z "${UPDATE_CLEANUP_DATABASE_STAGED:-}" ]] || rm -f "$UPDATE_CLEANUP_DATABASE_STAGED"
   rm -f "$UPDATE_STATUS_FILE"
@@ -1775,7 +1846,9 @@ update_app() {
   UPDATE_CLEANUP_BINARY_SWAPPED=0
   UPDATE_CLEANUP_STAGED=""
   UPDATE_CLEANUP_DATABASE_STAGED=""
-  select_update_options "${1:-}" "${2:-}"
+  UPDATE_CLEANUP_RELEASE_DIR=""
+  UPDATE_BUILT_BINARY=""
+  select_update_options "${1:-}" "${2:-}" "${3:-}"
   [[ -f "$SERVICE_FILE" || -f "$OLD_SERVICE_FILE" ]] && was_installed=1
   (( was_installed )) || die "ARG is not installed. Run 'arg install' first."
   if [[ "${ARG_UPDATE_RESERVED:-0}" == "1" ]]; then
@@ -1832,26 +1905,32 @@ update_app() {
     [[ -f "$SOURCE_DIR/install.sh" ]] || die "The selected source branch does not contain its updater script."
     info "Using the fetched $BRANCH updater before compiling so this update uses the selected branch's current build and recovery logic."
     export ARG_UPDATE_REEXECED=1 ARG_UPDATE_SOURCE_READY=1 ARG_UPDATE_RESERVED=1
-    exec bash -- "$SOURCE_DIR/install.sh" update "$BRANCH" "$ARG_UPDATE_MODE"
+    exec bash -- "$SOURCE_DIR/install.sh" update "$BRANCH" "$ARG_UPDATE_MODE" "$ARG_UPDATE_STRATEGY"
   fi
   # Keep the privileged updater helper in sync before the replacement service starts polling it.
   configure_ufw_status
-  update_phase building "Building the new ARG release."
-  UPDATE_CLEANUP_BUILD_STARTED=1
-  build_release
+  update_phase building "$([[ "$ARG_UPDATE_STRATEGY" == release ]] && printf 'Downloading and verifying the prebuilt ARG release.' || printf 'Building the new ARG release from source.')"
+  if [[ "$ARG_UPDATE_STRATEGY" == release ]]; then
+    download_release_binary
+  else
+    UPDATE_CLEANUP_BUILD_STARTED=1
+    build_release
+    UPDATE_BUILT_BINARY="$SOURCE_DIR/target/release/arg"
+  fi
+  [[ -x "$UPDATE_BUILT_BINARY" ]] || die "The selected ARG update did not produce a verified executable."
   ensure_service_account
   configure_ufw_status
   take_database_ownership
   install -d -o root -g root -m 0755 "$(dirname "$BINARY")"
   UPDATE_CLEANUP_STAGED="$(mktemp /usr/local/lib/arg/.arg.XXXXXX)"
   install -d -o root -g root -m 0700 "$ROLLBACK_DIR"
-  install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$DB_BACKUP_TOOL"
+  install -o root -g root -m 0755 "$UPDATE_BUILT_BINARY" "$DB_BACKUP_TOOL"
   database_path="$(configured_db_path)"
   rm -f "$PREVIOUS_DATABASE"
   if [[ -s "$database_path" ]]; then
     UPDATE_CLEANUP_DATABASE_STAGED="$(mktemp "$ROLLBACK_DIR/.arg.db.previous.XXXXXX")"
     rm -f "$UPDATE_CLEANUP_DATABASE_STAGED"
-    if ! "$SOURCE_DIR/target/release/arg" database-backup "$database_path" "$UPDATE_CLEANUP_DATABASE_STAGED"; then
+    if ! "$UPDATE_BUILT_BINARY" database-backup "$database_path" "$UPDATE_CLEANUP_DATABASE_STAGED"; then
       rm -f "$UPDATE_CLEANUP_DATABASE_STAGED"
       die "Could not create a consistent database snapshot. The running ARG binary was left untouched."
     fi
@@ -1865,7 +1944,7 @@ update_app() {
     chmod 0755 "$previous"
     mv -f "$previous" "$PREVIOUS_BINARY"
   fi
-  install -o root -g root -m 0755 "$SOURCE_DIR/target/release/arg" "$UPDATE_CLEANUP_STAGED"
+  install -o root -g root -m 0755 "$UPDATE_BUILT_BINARY" "$UPDATE_CLEANUP_STAGED"
   update_phase installing "Installing the verified build."
   # Arm the EXIT recovery before the atomic rename. If a signal arrives between
   # rename and the next shell instruction, cleanup still knows a swap may have happened.
@@ -2141,7 +2220,7 @@ manage_app() {
       tls-port-confirm) confirm_tls_port_change "${3:-}" ;;
       tls-port-rollback) rollback_tls_port_change ;;
       ssl) configure_https ;;
-      update) update_app "${3:-}" "${4:-}" ;;
+      update) update_app "${3:-}" "${4:-}" "${5:-}" ;;
       delete) delete_app "${3:-}" ;;
       *) die "Unknown management action: $2" ;;
     esac
@@ -2538,7 +2617,7 @@ case "${1:-menu}" in
   logs)
     view_logs "${2:-100}"
     ;;
-  update) update_app "${2:-}" "${3:-}" ;;
+  update) update_app "${2:-}" "${3:-}" "${4:-}" ;;
   cancel-update) require_root cancel-update; "$UPDATE_HELPER" cancel ;;
   rollback) require_root rollback; confirm_rollback; "$UPDATE_HELPER" rollback ;;
   ssl) configure_https ;;

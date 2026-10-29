@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.7.7-dev.1 — 2026-10-29
+
+### Development
+- Add a prebuilt GitHub Release update path with SHA-256, architecture, and embedded-version validation; keep local source compilation available.
+- Carry update method and source-build cache mode through local and remote Node update jobs.
+- Add stable-tag/prerelease GitHub Release workflows for x86_64 and aarch64 Linux binaries.
+
 ## v0.7.6 — 2026-10-29
 
 ### Fixed

@@ -1082,8 +1082,14 @@ pub(super) async fn remote_update_run(
     headers: HeaderMap,
     Query(input): Query<PanelUpdateQuery>,
 ) -> ApiResult {
-    if !valid_update_build_mode(&input.mode) || !valid_update_branch(&input.branch) {
-        return Err(error(StatusCode::BAD_REQUEST, "شاخه یا روش ساخت به‌روزرسانی معتبر نیست."));
+    if !valid_update_build_mode(&input.mode)
+        || !valid_update_branch(&input.branch)
+        || !valid_update_strategy(&input.strategy)
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "شاخه، روش دریافت یا روش ساخت به‌روزرسانی معتبر نیست.",
+        ));
     }
     let _exclusive = UPDATE_OPERATION_GATE.write().await;
     if update_started_at().is_some() {
@@ -1093,15 +1099,29 @@ pub(super) async fn remote_update_run(
         let db = state.lock().unwrap();
         authorize_controller(&db, &headers, "node.services.manage")?.name
     };
-    let output = privileged_request_async(json!({"action":"update-run","mode":input.mode,"branch":input.branch})).await?;
+    let output = privileged_request_async(json!({
+        "action": "update-run",
+        "mode": input.mode,
+        "branch": input.branch,
+        "strategy": input.strategy
+    }))
+    .await?;
     if output["ok"] != true {
         let detail = output["error"].as_str().unwrap_or("به‌روزرسانی Node زمان‌بندی نشد.");
         let status = if detail.contains("ARG_UPDATE_IN_PROGRESS") { StatusCode::CONFLICT } else { StatusCode::BAD_GATEWAY };
         return Err(error(status, detail));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor, "federation.node.update.run", &format!("branch={} mode={}", input.branch, input.mode));
-    Ok(Json(json!({"scheduled":true,"branch":input.branch,"mode":input.mode,"message":"به‌روزرسانی روی Node زمان‌بندی شد؛ کلید و شناسهٔ اتصال حفظ می‌شوند."})))
+    audit(
+        &db,
+        &actor,
+        "federation.node.update.run",
+        &format!(
+            "branch={} strategy={} mode={}",
+            input.branch, input.strategy, input.mode
+        ),
+    );
+    Ok(Json(json!({"scheduled":true,"branch":input.branch,"strategy":input.strategy,"mode":input.mode,"message":"به‌روزرسانی روی Node زمان‌بندی شد؛ کلید و شناسهٔ اتصال حفظ می‌شوند."})))
 }
 
 pub(super) async fn remote_update_cancel(
@@ -1671,19 +1691,58 @@ pub(super) async fn node_update_run(
     Query(input): Query<PanelUpdateQuery>,
 ) -> ApiResult {
     check_origin(&headers)?;
-    if !valid_update_build_mode(&input.mode) || !valid_update_branch(&input.branch) {
-        return Err(error(StatusCode::BAD_REQUEST, "شاخه یا روش ساخت به‌روزرسانی معتبر نیست."));
+    if !valid_update_build_mode(&input.mode)
+        || !valid_update_branch(&input.branch)
+        || !valid_update_strategy(&input.strategy)
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "شاخه، روش دریافت یا روش ساخت به‌روزرسانی معتبر نیست.",
+        ));
     }
     let actor = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
     };
     let result = match ensure_node_update_management(&state, id)? {
-        NodeUpdateRoute::Federation => remote_node_request(&state, id, "node.services.manage", reqwest::Method::POST, &format!("api/federation/update?mode={}&branch={}", input.mode, input.branch), None).await?,
-        NodeUpdateRoute::WorkspaceProxy => remote_workspace_json_request(&state, id, reqwest::Method::POST, &format!("update?mode={}&branch={}", input.mode, input.branch), 15).await?,
+        NodeUpdateRoute::Federation => {
+            remote_node_request(
+                &state,
+                id,
+                "node.services.manage",
+                reqwest::Method::POST,
+                &format!(
+                    "api/federation/update?mode={}&branch={}&strategy={}",
+                    input.mode, input.branch, input.strategy
+                ),
+                None,
+            )
+            .await?
+        }
+        NodeUpdateRoute::WorkspaceProxy => {
+            remote_workspace_json_request(
+                &state,
+                id,
+                reqwest::Method::POST,
+                &format!(
+                    "update?mode={}&branch={}&strategy={}",
+                    input.mode, input.branch, input.strategy
+                ),
+                15,
+            )
+            .await?
+        }
     };
     let db = state.lock().unwrap();
-    audit(&db, &actor, "federation.node.update.run", &format!("node_id={id}; branch={} mode={}", input.branch, input.mode));
+    audit(
+        &db,
+        &actor,
+        "federation.node.update.run",
+        &format!(
+            "node_id={id}; branch={} strategy={} mode={}",
+            input.branch, input.strategy, input.mode
+        ),
+    );
     Ok(Json(result))
 }
 

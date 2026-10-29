@@ -1,0 +1,148 @@
+name: ARG binary release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      version: ${{ steps.release.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release tag and source branch
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          version="$(sed -n '0,/^version = /s/^version = "\([^"]*\)"/\1/p' Cargo.toml)"
+          [[ "$RELEASE_TAG" == "v$version" ]] || { echo "Tag $RELEASE_TAG does not match Cargo version $version" >&2; exit 1; }
+          if [[ "$version" =~ -dev\.[0-9]+$ ]]; then
+            branch=development
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            branch=main
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unsupported version scheme: $version" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin "$branch"
+          git merge-base --is-ancestor HEAD "origin/$branch" || { echo "Release commit is not on origin/$branch" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Install native musl linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build embedded frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run check
+          npm run test:offline
+          npm run build
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Compile ARG for the target architecture
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -Eeuo pipefail
+          target_key="${TARGET//-/_}"
+          target_key_upper="${target_key^^}"
+          export "CC_${target_key}=musl-gcc"
+          export "CARGO_TARGET_${target_key_upper}_LINKER=musl-gcc"
+          cargo build --locked --release --target "$TARGET" --bin arg
+
+      - name: Verify and package release executable
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p dist
+          asset="arg-v${VERSION}-${TARGET}"
+          install -m 0755 "target/${TARGET}/release/arg" "dist/${asset}"
+          actual="$("dist/${asset}" --version)"
+          [[ "$actual" == "arg $VERSION" ]] || { echo "Unexpected executable version: $actual" >&2; exit 1; }
+          readelf -h "dist/${asset}" | grep -F "$( [[ "$TARGET" == x86_64-* ]] && printf 'X86-64' || printf 'AArch64' )" >/dev/null
+          (cd dist && sha256sum "$asset" > "$asset.sha256")
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: arg-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download target binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: arg-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create versioned GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          assets=(dist/arg-*)
+          ((${#assets[@]} == 4)) || { printf 'Expected two binaries and two checksums; found %s assets.\n' "${#assets[@]}" >&2; exit 1; }
+          args=(--verify-tag --title "ARG ${RELEASE_TAG}" --generate-notes)
+          [[ "$PRERELEASE" != true ]] || args+=(--prerelease)
+          gh release create "$RELEASE_TAG" "${assets[@]}" "${args[@]}"

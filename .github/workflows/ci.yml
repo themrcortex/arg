@@ -71,9 +71,10 @@ jobs:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           persist-credentials: false
-      - run: bash -n install.sh scripts/update-helper.sh scripts/ufw-helper.sh scripts/bump-version.sh
+      - run: bash -n install.sh scripts/update-helper.sh scripts/ufw-helper.sh scripts/bump-version.sh scripts/publish-release-tag.sh scripts/tests/test-release-artifact.sh
       - run: bash scripts/tests/test-update-helper.sh
       - run: bash scripts/tests/test-update-selection.sh
+      - run: bash scripts/tests/test-release-artifact.sh
       - run: bash scripts/tests/test-ufw-helper.sh
       - run: bash scripts/tests/test-public-ip-detection.sh
       - run: bash scripts/tests/test-workflow-security.sh
