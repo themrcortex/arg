@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.7.7 — 2026-10-29
+
+### Added
+- Make prebuilt GitHub Release binaries the recommended updater path; verify each artifact's checksum and ELF architecture before installation, while retaining source compilation as an explicit alternative.
+- Carry the selected update method through local updates, remote Node updates, and persistent progress reporting.
+- Publish stable `main` tags as GitHub Releases with x86_64 and aarch64 Linux binaries, checksums, and release-time executable version validation.
+
 ## v0.7.7-dev.1 — 2026-10-29
 
 ### Development
