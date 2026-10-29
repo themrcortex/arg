@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.5-dev.2 — 2026-10-29
+
+### Development
+- Keep Fast dependency compilation cached across updates, scale parallel jobs to the VPS's available CPU/RAM, and preserve compiled dependencies after failed attempts.
+
 ## v0.7.5-dev.1 — 2026-10-29
 
 ### Development
