@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.7.5 — 2026-10-29
+
+### Fixed
+- Keep Fast updater dependency artifacts reusable with a stable per-server Rust profile; changes in free RAM now affect job scheduling without forcing the full dependency graph to rebuild.
+- Scale Fast Cargo jobs up to the CPU and memory safely available to the ARG process, including cgroup limits, and keep successful dependency work after failed builds so retries can continue from cache.
+
 ## v0.7.5-dev.2 — 2026-10-29
 
 ### Development
