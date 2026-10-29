@@ -18,6 +18,7 @@ const MAX_ARCHIVE_ENTRIES: usize = 20_000;
 const MAX_PRE_DEPLOY_COMMANDS: usize = 8;
 const MAX_PRE_DEPLOY_COMMAND_LENGTH: usize = 512;
 const MAX_PRE_DEPLOY_COMMANDS_BYTES: usize = 4096;
+const MAX_QUEUED_DEPLOYMENT_JOBS: i64 = 64;
 const JOB_ACTIVE: &[&str] = &["queued", "validating", "running", "verifying"];
 static ARCHIVE_UPLOAD_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
@@ -664,12 +665,26 @@ fn insert_job(
         &mut db,&job_id,app_id,&owner,&actor,&source_json,&key,healthcheck.as_deref(),at,source_kind(&source),&serde_json::to_string(&pre_deploy_commands).unwrap_or_else(|_| "[]".into()),
     ) {
         Ok(value) => value,
-        Err(error_value) => {
+        Err(PersistJobError::QueueFull) => {
+            if let Some(path) = archive_path.as_deref() { let _ = fs::remove_file(path); }
+            return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "صف استقرار سرور پر است؛ پس از شروع یا پایان یکی از کارهای در صف دوباره تلاش کن."));
+        }
+        Err(PersistJobError::Database(error_value)) => {
         if let Some(path) = archive_path.as_deref() { let _ = fs::remove_file(path); }
         return Err(db_error(error_value));
         }
     };
     Ok(response)
+}
+
+#[derive(Debug)]
+enum PersistJobError {
+    QueueFull,
+    Database(rusqlite::Error),
+}
+
+impl From<rusqlite::Error> for PersistJobError {
+    fn from(error: rusqlite::Error) -> Self { Self::Database(error) }
 }
 
 fn persist_new_job(
@@ -684,8 +699,16 @@ fn persist_new_job(
     at: i64,
     source: &str,
     pre_deploy_commands_json: &str,
-) -> rusqlite::Result<Value> {
-    let transaction = db.transaction()?;
+) -> Result<Value, PersistJobError> {
+    let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let queued: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM deployment_jobs WHERE state='queued'",
+        [],
+        |row| row.get(0),
+    )?;
+    if queued >= MAX_QUEUED_DEPLOYMENT_JOBS {
+        return Err(PersistJobError::QueueFull);
+    }
     transaction.execute(
         "INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,healthcheck_file,pre_deploy_commands_json,created_at,updated_at) VALUES (?1,?2,?3,?4,'queued',?5,?6,?7,?8,?9,?9)",
         params![job_id,app_id,owner,actor,source_json,key,healthcheck,pre_deploy_commands_json,at],
@@ -3329,6 +3352,31 @@ mod tests {
         assert_eq!(created["state"],"queued");
         assert_eq!(created["steps"].as_array().unwrap().len(),1);
     }
+
+    #[test]
+    fn deployment_queue_rejects_jobs_after_global_limit_without_partial_records() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
+        migrate(&db).unwrap();
+        for index in 0..MAX_QUEUED_DEPLOYMENT_JOBS {
+            let app = format!("app-{index}");
+            let job = format!("job-{index}");
+            db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES(?1,'server')", [&app]).unwrap();
+            persist_new_job(&mut db,&job,&app,"server","admin","{}",&job,None,index,"git","[]").unwrap();
+        }
+        let app = "overflow-app";
+        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES(?1,'server')", [app]).unwrap();
+        let rejected = persist_new_job(&mut db,"overflow-job",app,"server","admin","{}","overflow-key",None,99,"git","[]");
+        assert!(matches!(rejected, Err(PersistJobError::QueueFull)));
+        let (queued, partial): (i64, i64) = db.query_row(
+            "SELECT COUNT(*),SUM(id='overflow-job') FROM deployment_jobs WHERE state='queued'",
+            [],
+            |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+        ).unwrap();
+        assert_eq!(queued, MAX_QUEUED_DEPLOYMENT_JOBS);
+        assert_eq!(partial, 0, "a rejected job must not leave a queue row");
+    }
+
     #[test]
     fn legacy_deployment_jobs_gain_runtime_columns_without_data_loss() {
         let db = Connection::open_in_memory().unwrap();
