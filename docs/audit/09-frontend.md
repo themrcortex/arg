@@ -110,3 +110,7 @@ The application uses hash navigation with these page IDs: `dashboard`, `system`,
 - `npm run build` — passed; Vite emitted the existing large-chunk advisory.
 - `git diff --check` — passed.
 - A rendered desktop/mobile browser pass, screen-reader/keyboard pass, React component tests, route-by-route API integration, WebSocket disconnect simulation, and real multi-Node workspace testing were not available. Those checks remain required before describing the UI as fully verified.
+
+## Recheck on 2026-10-29
+
+The shared JSON request wrapper now applies an `AbortController` deadline and propagates caller cancellation. Route classes separate ordinary calls (30 seconds), progress polling (12 seconds), backup operations (5 minutes), and transfers, restore, SSL issuance, package installation, maintenance, MySQL/firewall install, and Nginx operations (up to 15 minutes). Timers and caller abort listeners are removed in `finally`; abort during JSON parsing is reported as a request failure rather than silently converted to a successful `null`. The offline test suite covers the deadline table. Direct multipart/file `fetch` call sites and browser E2E/accessibility remain outside that shared-wrapper coverage, so this is not a claim that every browser request is deadline-controlled.

@@ -1,5 +1,23 @@
 # ARG security, bug, and code-quality audit — final report
 
+> **Current follow-up:** The 2026-10-29 risk recheck below supersedes earlier unresolved S3 DNS-pinning and file-mutation TOCTOU statements in this historical report. See [16-risk-recheck.md](16-risk-recheck.md) for current source SHA, test evidence, and limitations.
+
+## 2026-10-29 recheck addendum
+
+The latest source review started from `c9e87ceb33595299d4978cd31f67058627fdd127` on `audit/development-risk-remediation`. The following remaining findings were reproduced and addressed or reduced:
+
+- **Fixed:** S3 custom endpoints now connect to their exact validated DNS answers through an authenticated loopback CONNECT proxy, preserve TLS hostname verification, and bound DNS answer count and connection time. Explicit private-endpoint opt-in rejects loopback, link-local, metadata, CGNAT, and reserved addresses. Local proxy and address-policy regression tests cover the change.
+- **Fixed:** privileged file mutations, copy/move, edit, rename, delete, ZIP creation and extraction now use anchored directory descriptors and no-follow descriptor-relative operations to close the identified path-swap race.
+- **Mitigated:** file copy and archive operations preserve a 64 MiB destination free-space reserve.
+- **Fixed:** workspace-session renewal retries are idempotent, recover missing/expired session rows, and remove superseded grants.
+- **Fixed:** deployment admission is capped at 64 queued jobs and rejects overflow without leaving partial records.
+- **Fixed in shared JSON API wrapper:** frontend requests have bounded route-class deadlines and caller abort propagation.
+- **Partially mitigated:** migration recovery has module-boundary failure injection and repeated restart coverage; no central schema-version ledger was introduced.
+
+No confirmed P1 finding remains open in the source paths rechecked. The remaining items are not safely closeable from this workspace alone: signed updater provenance needs a maintainer-selected trust root; database contention needs representative VPS measurements; Nginx/Certbot behavior needs a disposable VM; strict Clippy/format gates have repository-wide pre-existing debt. No live server, live S3 provider, ACME endpoint, or remote Node was accessed.
+
+Current verification: 257 Rust tests pass; `cargo check --locked --all-targets`, TypeScript check, 10 offline frontend tests, and frontend production build pass. Strict Clippy and whole-repository rustfmt checks remain red as detailed in [16-risk-recheck.md](16-risk-recheck.md). The rebuilt `frontend/dist` must be committed with its source changes because ARG embeds it in the Rust binary.
+
 ## Executive summary
 
 The `development` branch was audited from baseline commit `eec273cde037fa57edc1b5ab042fda7acc26a32c` (`0.7.3-dev.1`) on the isolated `audit/development-hardening` branch. Phases 0–15 have evidence-based reports in this directory.

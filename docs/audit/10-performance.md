@@ -102,3 +102,9 @@
 ## Phase result
 
 One confirmed P2 deployment progress defect was fixed and regression-tested. Two resource-policy questions remain explicitly unverified. No database architecture change or concurrency expansion was made without benchmark evidence.
+
+## Recheck on 2026-10-29
+
+PERF-003 is now closed with an explicit admission policy: a maximum of 64 queued deployment jobs across applications. The check and insert run in one `BEGIN IMMEDIATE` transaction; running jobs are not counted, overflow is returned as HTTP 429, and a rejected upload archive is removed. The regression test fills the queue and asserts that rejection leaves no partial record. The cap limits backlog growth; no representative multi-site deployment load benchmark was available.
+
+PERF-002 remains open as an unmeasured contention risk. This recheck did not switch the single SQLite connection to an async mutex or connection pool without production-like latency and lock-wait measurements. Current local evidence and the remaining performance limits are listed in [16-risk-recheck.md](16-risk-recheck.md).

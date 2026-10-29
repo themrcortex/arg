@@ -101,3 +101,7 @@ This summary is not the project-wide API permission matrix; see [02-auth-securit
 - No real DNS rebinding, Node outage, certificate rotation, or cross-cloud private-network scenario was exercised; deterministic address validation is covered without network traffic.
 - FED-002 needs a retry-safe session renewal design and bounded-cleanup test.
 - Full multi-Node update/rollback and file-transfer chaos testing remains part of deployment and integration phases.
+
+## Recheck on 2026-10-29
+
+The earlier FED-002 disposition above is historical and is superseded by [16-risk-recheck.md](16-risk-recheck.md). Workspace renewal now accepts the previous token as an idempotency key, returns the same token on retries, extends the same grant if the first response expired, and deletes superseded proxy/session rows in the same immediate transaction. The legacy no-body path also removes the old session rows before inserting its replacement. `workspace_renewal_retry_returns_the_same_session_without_duplicate_rows` covers retries, expired retry recovery, and bounded row counts. No live two-panel restart or packet-loss test was available.

@@ -1,5 +1,7 @@
 # 00 — Baseline and architecture map
 
+> **Follow-up snapshot:** The remaining-risk recheck ran on 2026-10-29 from `audit/development-risk-remediation` at source SHA `c9e87ceb33595299d4978cd31f67058627fdd127`. Its current remediation and verification status is in [16-risk-recheck.md](16-risk-recheck.md); the original `development` baseline and its route inventory below remain historical and are not silently rewritten.
+
 ## Audit baseline
 
 - Repository: `themrcortex/arg`

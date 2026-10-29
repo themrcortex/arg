@@ -49,6 +49,10 @@ Recommended release sequence:
 4. Decide whether to make formatter and strict Clippy clean required gates; do not mass-reformat the current review diff.
 5. Select a source/artifact signing policy before describing updates as independently authenticated.
 
+## Recheck update on 2026-10-29
+
+The open-risk list and release recommendation above record the earlier phase-15 snapshot. The follow-up recheck on branch `audit/development-risk-remediation` fixed S3-004/S3-005, FILE-002, FED-002, PERF-003, and UI-003, mitigated FILE-003, and added module-boundary migration interruption coverage for DB-003. The recheck does **not** clear production readiness: signed artifact provenance, representative SQLite load measurements, installed Debian/Ubuntu Certbot/Nginx behavior, browser E2E/accessibility, live S3 providers, and multi-Node failure testing remain unverified. See [16-risk-recheck.md](16-risk-recheck.md) for the current, evidence-based disposition.
+
 ## Phase result
 
 All requested audit phases have an evidence-based record. The project has targeted fixes for confirmed bugs, stronger CI and a synchronized embedded frontend. Remaining uncertainty is explicit; the result is a hardening branch and audit package, not a claim that every runtime environment or every attack path is proven safe.

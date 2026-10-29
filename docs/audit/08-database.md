@@ -100,3 +100,7 @@
 - `cargo check --locked --all-targets`: passed.
 - `git diff --check`: passed.
 - Full startup migration interruption, production backup/restore, and workload contention tests were not run. No database was taken from an installed ARG server.
+
+## Recheck on 2026-10-29
+
+DB-003 is now **partially mitigated**, not fully closed. Startup schema work is exposed through the same production migration sequence with a test-only callback at module boundaries. `startup_migration_sequence_recovers_after_module_boundary_interruption` injects an interruption after each module boundary, reruns the schema setup twice, and verifies that the administrator row and the new Federation column survive. This covers idempotent recovery between modules but not a crash between individual SQL statements inside every module migration, nor an upgrade against a copied historical production database. No central migration ledger or live database was introduced.
