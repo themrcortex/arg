@@ -3216,6 +3216,8 @@ struct PanelUpdateQuery {
     mode: String,
     #[serde(default = "default_update_branch")]
     branch: String,
+    #[serde(default = "default_update_strategy")]
+    strategy: String,
 }
 
 fn default_update_build_mode() -> String {
@@ -3226,12 +3228,20 @@ fn default_update_branch() -> String {
     "main".into()
 }
 
+fn default_update_strategy() -> String {
+    "release".into()
+}
+
 fn valid_update_build_mode(mode: &str) -> bool {
     matches!(mode, "fast" | "complete")
 }
 
 fn valid_update_branch(branch: &str) -> bool {
     matches!(branch, "main" | "development")
+}
+
+fn valid_update_strategy(strategy: &str) -> bool {
+    matches!(strategy, "release" | "source")
 }
 
 async fn schedule_panel_update(
@@ -3249,6 +3259,9 @@ async fn schedule_panel_update(
     if !valid_update_branch(&input.branch) {
         return Err(error(StatusCode::BAD_REQUEST, "Update branch is invalid."));
     }
+    if !valid_update_strategy(&input.strategy) {
+        return Err(error(StatusCode::BAD_REQUEST, "Update method is invalid."));
+    }
     let _exclusive = UPDATE_OPERATION_GATE.write().await;
     if update_started_at().is_some() {
         return Err(error(
@@ -3258,8 +3271,12 @@ async fn schedule_panel_update(
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?;
-    let output =
-        privileged_request(json!({"action":"update-run","mode":input.mode,"branch":input.branch}))?;
+    let output = privileged_request(json!({
+        "action": "update-run",
+        "mode": input.mode,
+        "branch": input.branch,
+        "strategy": input.strategy
+    }))?;
     if output["ok"] != true {
         let detail = output["error"]
             .as_str()
@@ -4385,15 +4402,20 @@ fn execute_privileged_request(request: &Value) -> Value {
         if !valid_update_branch(branch) {
             return json!({"ok":false,"error":"Update branch is invalid."});
         }
-        Some((mode, branch))
+        let strategy = request["strategy"].as_str().unwrap_or("release");
+        if !valid_update_strategy(strategy) {
+            return json!({"ok":false,"error":"Update method is invalid."});
+        }
+        Some((mode, branch, strategy))
     } else {
         None
     };
     let mut helper_command = std::process::Command::new(helper);
     helper_command.args(helper_args);
-    if let Some((mode, branch)) = update_params {
+    if let Some((mode, branch, strategy)) = update_params {
         helper_command.arg(mode);
         helper_command.arg(branch);
+        helper_command.arg(strategy);
     }
     let output = match helper_command.output() {
         Ok(output) => output,
@@ -5356,6 +5378,10 @@ fn migrate_schema_with_checkpoint(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("arg {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if env::args().nth(1).as_deref() == Some("terminal-shell") {
         return run_terminal_shell();
     }
@@ -5475,14 +5501,16 @@ async fn clear_trusted_transport_marker(
 #[cfg(test)]
 mod update_progress_tests {
     use super::{
-        backup_database, default_update_build_mode, ensure_federation_identity_columns,
-        ensure_metric_storage_columns, firewall_rule_validation_error, update_progress_payload,
+        backup_database, default_update_build_mode, default_update_strategy,
+        ensure_federation_identity_columns, ensure_metric_storage_columns,
+        firewall_rule_validation_error, update_progress_payload,
         encode_bounded_privileged_response, login, login_client_ip, login_throttle_keys,
         parse_systemd_exec_start, parse_systemd_service_commands,
         process_belongs_to_arg_service, read_bounded_privileged_response,
         read_privileged_line, role_has_admin_access, valid_apt_install_spec,
         panel_tls_deploy_hook_contents, panel_tls_lineage_from_source,
-        valid_tls_source_path, valid_update_build_mode, AppState, Connection, Credentials,
+        valid_tls_source_path, valid_update_build_mode, valid_update_strategy, AppState, Connection,
+        Credentials,
         FirewallRuleInput,
     };
 
@@ -5771,17 +5799,22 @@ mod update_progress_tests {
         assert!(!valid_update_build_mode("clean"));
         assert!(!valid_update_build_mode("../../tmp"));
         assert_eq!(default_update_build_mode(), "complete");
+        assert_eq!(default_update_strategy(), "release");
+        assert!(valid_update_strategy("release"));
+        assert!(valid_update_strategy("source"));
+        assert!(!valid_update_strategy("compile;touch /tmp/pwned"));
     }
 
     #[test]
     fn update_progress_proxy_preserves_remote_stage_and_rollback_metadata() {
-        let raw = r#"{"job_id":"arg-test","state":"failed","phase":"failed","previous_phase":"building","operation":"update","branch":"main","build_mode":"complete","started_at":10,"updated_at":25,"message":"compile failed"}"#;
+        let raw = r#"{"job_id":"arg-test","state":"failed","phase":"failed","previous_phase":"building","operation":"update","branch":"main","build_mode":"complete","strategy":"source","started_at":10,"updated_at":25,"message":"compile failed"}"#;
         let payload = update_progress_payload(Some(raw), Some(10), "local-instance");
         assert_eq!(payload["previous_phase"], "building");
         assert_eq!(payload["operation"], "update");
         assert_eq!(payload["updated_at"], 25);
         assert_eq!(payload["branch"], "main");
         assert_eq!(payload["build_mode"], "complete");
+        assert_eq!(payload["strategy"], "source");
         assert_eq!(payload["instance"], "local-instance");
     }
 

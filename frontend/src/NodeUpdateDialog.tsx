@@ -7,6 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 type NodeTarget = { id: number; name: string; public_name?: string; endpoint: string }
 type Branch = 'main' | 'development'
 type BuildMode = 'fast' | 'complete'
+type UpdateStrategy = 'release' | 'source'
 type NodeStatus = {
   server_uuid?: string
   hostname?: string
@@ -38,6 +39,7 @@ type UpdateProgress = {
   message?: string
   branch?: Branch
   build_mode?: BuildMode
+  strategy?: UpdateStrategy
 }
 type CheckResult = {
   supported: boolean
@@ -69,6 +71,17 @@ function branchLabel(branch: Branch) {
   return branch === 'main' ? 'main · پایدار' : 'development · آزمایشی'
 }
 
+function supportsPrebuiltRelease(version?: string) {
+  const match = version?.match(/^(\d+)\.(\d+)\.(\d+)/)
+  if (!match) return false
+  const current = match.slice(1).map(Number)
+  const minimum = [0, 7, 7]
+  for (let index = 0; index < minimum.length; index += 1) {
+    if (current[index] !== minimum[index]) return current[index] > minimum[index]
+  }
+  return true
+}
+
 export function NodeUpdateDialog({
   open,
   onOpenChange,
@@ -84,6 +97,7 @@ export function NodeUpdateDialog({
 }) {
   const [branch, setBranch] = useState<Branch>('main')
   const [buildMode, setBuildMode] = useState<BuildMode>('complete')
+  const [strategy, setStrategy] = useState<UpdateStrategy>('release')
   const [check, setCheck] = useState<CheckResult | null>(null)
   const [progress, setProgress] = useState<UpdateProgress | null>(null)
   const [checking, setChecking] = useState(false)
@@ -111,6 +125,7 @@ export function NodeUpdateDialog({
     try {
       const result = await api<CheckResult>(`nodes/${targetId}/update?branch=${selectedBranch}`)
       setCheck(result)
+      if (!supportsPrebuiltRelease(result.node_status?.arg_version)) setStrategy('source')
       if (result.progress) {
         setProgress(result.progress)
         if (result.progress.updating || result.progress.state === 'running') {
@@ -135,6 +150,7 @@ export function NodeUpdateDialog({
     if (!open || nodeId == null) return
     setBranch('main')
     setBuildMode('complete')
+    setStrategy('release')
     setCheck(null)
     setProgress(null)
     setError('')
@@ -289,7 +305,7 @@ export function NodeUpdateDialog({
     setBusy('run')
     setError('')
     try {
-      await api(`nodes/${nodeId}/update?mode=${buildMode}&branch=${branch}`, { method: 'POST' })
+      await api(`nodes/${nodeId}/update?mode=${buildMode}&branch=${branch}&strategy=${strategy}`, { method: 'POST' })
       setProgress({
         state: 'running',
         updating: true,
@@ -297,6 +313,7 @@ export function NodeUpdateDialog({
         operation: 'update',
         branch,
         build_mode: buildMode,
+        strategy,
         started_at: Math.floor(Date.now() / 1000),
       })
       runStarted.current = Date.now()
@@ -460,7 +477,25 @@ export function NodeUpdateDialog({
                 </div>
               </div>
               <div>
-                <p className="mb-2 text-xs font-semibold">روش کامپایل روی Node</p>
+                <p className="mb-2 text-xs font-semibold">روش به‌روزرسانی Node</p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {(['release', 'source'] as const).map((item) => (
+                    <button
+                      key={item}
+                      type="button"
+                      aria-pressed={strategy === item}
+                      disabled={item === 'release' && !supportsPrebuiltRelease(check?.node_status?.arg_version)}
+                      onClick={() => setStrategy(item)}
+                      className={`rounded-lg border p-3 text-right transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${strategy === item ? 'border-primary/45 bg-primary/[.07]' : 'border-border hover:bg-secondary/50'}`}
+                    >
+                      <span className="block text-xs font-semibold">{item === 'release' ? 'دریافت نسخهٔ آماده · پیشنهادی' : 'کامپایل از سورس'}</span>
+                      <span className="mt-1 block text-[10px] leading-5 text-muted-foreground">{item === 'release' ? supportsPrebuiltRelease(check?.node_status?.arg_version) ? 'باینری نسخهٔ انتخاب‌شده را می‌گیرد، checksum را بررسی می‌کند؛ روی Node کامپایل انجام نمی‌شود.' : 'نسخهٔ ARG این Node از روش Release پشتیبانی نمی‌کند؛ برای به‌روزرسانی از سورس استفاده کن.' : 'سورس همان شاخه را روی Node کامپایل می‌کند و CPU، RAM و دیسک مصرف می‌شود.'}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {strategy === 'source' && <div>
+                <p className="mb-2 text-xs font-semibold">حافظهٔ ساخت از سورس</p>
                 <div className="grid grid-cols-2 gap-2">
                   {(['fast', 'complete'] as const).map((item) => (
                     <button
@@ -481,7 +516,7 @@ export function NodeUpdateDialog({
                     </button>
                   ))}
                 </div>
-              </div>
+              </div>}
             </section>
           )}
 
@@ -545,15 +580,15 @@ export function NodeUpdateDialog({
                           ? 'مرحله و نتیجه از گزارش واقعی Update Helper خوانده می‌شود؛ درصد تخمینی نشان داده نمی‌شود.'
                           : '')}
                   </p>
-                  {(progress.branch || progress.build_mode) && (
+                  {(progress.branch || progress.strategy || progress.build_mode) && (
                     <p className="mt-2 text-[10px] text-muted-foreground">
                       شاخه:{' '}
                       <b dir="ltr" className="font-mono">
                         {progress.branch || branch}
                       </b>{' '}
-                      · روش ساخت:{' '}
+                      · روش:{' '}
                       <b dir="ltr" className="font-mono">
-                        {progress.build_mode || buildMode}
+                        {progress.strategy === 'release' ? 'release' : progress.strategy === 'source' ? `source/${progress.build_mode || buildMode}` : strategy}
                       </b>
                     </p>
                   )}
@@ -625,7 +660,7 @@ export function NodeUpdateDialog({
                   </p>
                   <p className="mt-1 text-xs leading-5 text-muted-foreground">
                     {confirmAction === 'update'
-                      ? `روی «${node?.public_name || node?.name}» نسخهٔ ${update?.remote_version || update?.remote || 'جدید'} از شاخهٔ ${branch} با روش ${buildMode} نصب می‌شود. در زمان Restart ارتباط ممکن است موقتاً قطع شود؛ کلید و شناسهٔ Node حفظ می‌شوند.`
+                      ? `روی «${node?.public_name || node?.name}» نسخهٔ ${update?.remote_version || update?.remote || 'جدید'} از شاخهٔ ${branch} با روش ${strategy === 'release' ? 'دریافت Release آماده' : `کامپایل از سورس (${buildMode})`} نصب می‌شود. در زمان Restart ارتباط ممکن است موقتاً قطع شود؛ کلید و شناسهٔ Node حفظ می‌شوند.`
                       : confirmAction === 'cancel'
                         ? 'لغو از Update Helper مقصد درخواست می‌شود. اگر جایگزینی فایل شروع شده باشد، نسخهٔ قبلی و snapshot دیتابیس بازیابی و سلامت سرویس بررسی می‌شوند.'
                         : 'نسخهٔ قبلی و snapshot دیتابیس آن روی مقصد بازیابی می‌شوند؛ داده‌های پایگاه‌داده پس از snapshot ممکن است از بین بروند.'}

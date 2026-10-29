@@ -32,10 +32,10 @@
 - **Commit:** `adf5f7870663512a9e845b70d065dba3bde69cee`
 - **Remaining risk:** Continue using ARG's custom extraction path; do not replace it with the crate's convenience extraction API without a separate security review.
 
-### SUPPLY-002 — Installer and updater do not authenticate release provenance cryptographically
+### SUPPLY-002 — Release checksums do not independently authenticate provenance
 
 - **ID:** SUPPLY-002
-- **Title:** Source downloads rely on HTTPS and GitHub branch state without signature or artifact attestation verification.
+- **Title:** Source downloads and prebuilt assets rely on HTTPS and GitHub without independent signature or artifact attestation verification.
 - **Severity:** P2 / Medium
 - **Status:** AUDIT_REQUIRED
 - **Confidence:** High for the observed acquisition path; impact and acceptable release policy require maintainer decision.
@@ -43,16 +43,16 @@
 - **File:** `install.sh`, `scripts/update-helper.sh`, `scripts/release.sh`
 - **Function:** `prepare_source`, update selection and source fetch paths
 - **Commit SHA:** Baseline `eec273cde037fa57edc1b5ab042fda7acc26a32c`.
-- **Affected behavior:** A successful compromise of the GitHub account/repository or the trusted HTTPS path could supply code that the installer later builds and installs with service privileges.
-- **Technical evidence:** `install.sh` clones/fetches the selected `main` or `development` branch over HTTPS and resets to `FETCH_HEAD`. The updater checks the remote branch revision using GitHub/Git transport for update availability, but the installation flow does not verify signed commits/tags or a separately trusted checksum/attestation. The rustup bootstrap is downloaded over HTTPS without a pinned checksum.
+- **Affected behavior:** A successful compromise of the GitHub account/repository or the trusted HTTPS path could supply code that the installer later builds or installs with service privileges.
+- **Technical evidence:** `install.sh` clones/fetches the selected `main` or `development` branch over HTTPS and resets to `FETCH_HEAD`. Release mode verifies a SHA-256 sidecar, ELF architecture, and selected asset/tag version before atomic installation. The release workflow separately checks the executable's `--version` before publishing. The checksum sidecar is published in the same GitHub Release and is not an independent signing trust root. The rustup bootstrap is downloaded over HTTPS without a pinned checksum.
 - **Safe reproduction:** Read-only source review of `install.sh:prepare_source`, `scripts/update-helper.sh:check`, and the release tooling. No production or remote host was contacted by this audit.
 - **Root cause:** The release trust model currently treats GitHub TLS and repository access control as the provenance boundary.
 - **Security/functional impact:** This is a supply-chain trust limitation, not evidence that the current source or release is compromised. A server operator cannot independently verify that fetched source or its built binary corresponds to a signed release identity.
 - **Proposed fix:** Decide on a release trust model first. Options include signed annotated tags verified against an embedded maintainer key, signed checksums/provenance attestations, or both. Ensure key rotation and recovery are documented, then add offline-verifiable installer/update checks and tamper tests.
-- **Implemented change:** No provenance mechanism was added in this audit phase; choosing and distributing a trust root is an architectural/release-policy decision.
-- **Tests added:** Existing update-selection and installer tests cover allowed branches and script behavior, not cryptographic provenance.
+- **Implemented change:** The updater now defaults to prebuilt stable GitHub Release assets, verifies the asset checksum, architecture, and reported version, and retains local compilation as an alternative. The release workflow builds x86_64 and aarch64 musl assets and attaches SHA-256 sidecars. Independent signature/attestation verification remains open because the sidecar shares the GitHub Release trust boundary.
+- **Tests added:** Shell regression tests reject checksum, architecture, and version mismatches; workflow pinning and shell parsing checks cover the release workflow. These do not provide independent cryptographic provenance.
 - **Regression risks:** Enforcing a signature without a tested key-rotation and offline recovery path could block installs and upgrades during key rotation or network restrictions.
-- **Commit:** —
+- **Commit:** Pending release commit.
 - **Remaining risk:** Open until the release trust model is selected and a verification path is implemented and tested.
 
 ## Dependency and workflow controls

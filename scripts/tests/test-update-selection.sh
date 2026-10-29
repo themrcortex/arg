@@ -32,11 +32,17 @@ info() { :; }
 warn() { :; }
 die() { printf '%s\n' "$1" >&2; exit 2; }
 select_update_options development fast
-[[ "$BRANCH" == development && "$ARG_UPDATE_MODE" == fast && "$ARG_UPDATE_CONTEXT" == update ]]
+[[ "$BRANCH" == development && "$ARG_UPDATE_MODE" == fast && "$ARG_UPDATE_STRATEGY" == release && "$ARG_UPDATE_CONTEXT" == update ]]
 [[ "$(installer_script_url development)" == https://raw.githubusercontent.com/themrcortex/arg/development/install.sh ]]
 select_update_options main complete
-[[ "$BRANCH" == main && "$ARG_UPDATE_MODE" == complete ]]
+[[ "$BRANCH" == main && "$ARG_UPDATE_MODE" == complete && "$ARG_UPDATE_STRATEGY" == release ]]
 [[ "$(installer_script_url main)" == https://raw.githubusercontent.com/themrcortex/arg/main/install.sh ]]
+select_update_options development fast source
+[[ "$BRANCH" == development && "$ARG_UPDATE_MODE" == fast && "$ARG_UPDATE_STRATEGY" == source ]]
+if (select_update_options main complete 'source;touch /tmp/arg-update-test') >/dev/null 2>&1; then
+  echo 'unsupported update strategy was accepted' >&2
+  exit 1
+fi
 
 SOURCE_DIR="$tmp/fetched-source"
 mkdir -p "$SOURCE_DIR/.git"
@@ -51,7 +57,7 @@ ARG_UPDATE_REEXECED=1
 ! should_reexec_latest_updater
 unset ARG_UPDATE_REEXECED ARG_UPDATE_SOURCE_READY
 
-unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
+unset ARG_UPDATE_CONTEXT ARG_UPDATE_MODE CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL
 configure_release_build_resources 2048
 [[ "$CARGO_BUILD_JOBS" == 1 && "$CARGO_PROFILE_RELEASE_CODEGEN_UNITS" == 4 && "$CARGO_PROFILE_RELEASE_OPT_LEVEL" == 2 ]]
 unset CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS CARGO_PROFILE_RELEASE_OPT_LEVEL ARG_CARGO_BUILD_JOBS ARG_CARGO_PROFILE_RELEASE_CODEGEN_UNITS ARG_CARGO_PROFILE_RELEASE_OPT_LEVEL

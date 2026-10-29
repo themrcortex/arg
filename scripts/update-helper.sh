@@ -50,7 +50,7 @@ clear_stale_update_lock_locked() {
 }
 
 reserve_update() {
-  local operation="$1" phase="$2" branch="$3" build_mode="$4" owner owner_start job_id mutex_fd
+  local operation="$1" phase="$2" branch="$3" build_mode="$4" strategy="${5:-release}" owner owner_start job_id mutex_fd
   exec {mutex_fd}>"$update_mutex_file"
   chmod 0600 "$update_mutex_file"
   flock -x "$mutex_fd" || { exec {mutex_fd}>&-; echo "Could not lock ARG update state." >&2; return 1; }
@@ -64,7 +64,7 @@ reserve_update() {
   owner="${BASHPID:-$$}"
   owner_start="$(awk '{print $22}' "/proc/$owner/stat" 2>/dev/null || true)"
   job_id="arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)-$owner"
-  export ARG_UPDATE_JOB_ID="$job_id" ARG_UPDATE_OPERATION="$operation" ARG_UPDATE_BRANCH="$branch" ARG_UPDATE_MODE="$build_mode"
+  export ARG_UPDATE_JOB_ID="$job_id" ARG_UPDATE_OPERATION="$operation" ARG_UPDATE_BRANCH="$branch" ARG_UPDATE_MODE="$build_mode" ARG_UPDATE_STRATEGY="$strategy"
   printf '%s %s %s\n' "$(date +%s)" "$owner" "$owner_start" > "$update_status_file"
   chmod 0644 "$update_status_file"
   write_update_state running "$phase" "$([[ "$operation" == rollback ]] && printf 'Preparing rollback.' || printf 'Update queued; waiting for the service helper.')"
@@ -319,7 +319,7 @@ rollback_update_locked() {
 }
 
 write_update_state() {
-  local state="$1" phase="$2" message="${3:-}" started job_id updated tmp previous_job operation branch build_mode previous_phase=""
+  local state="$1" phase="$2" message="${3:-}" started job_id updated tmp previous_job operation branch build_mode strategy previous_phase=""
   job_id="${ARG_UPDATE_JOB_ID:-arg-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s)}"
   started="$(sed -n 's/.*"started_at":\([0-9][0-9]*\).*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
   previous_job="$(sed -n 's/.*"job_id":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
@@ -328,22 +328,25 @@ write_update_state() {
     operation="$(sed -n 's/.*"operation":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
     branch="$(sed -n 's/.*"branch":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
     build_mode="$(sed -n 's/.*"build_mode":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
+    strategy="$(sed -n 's/.*"strategy":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
     previous_phase="$(sed -n 's/.*"phase":"\([^"]*\)".*/\1/p' "$update_state_file" 2>/dev/null | head -n 1 || true)"
   fi
   operation="${ARG_UPDATE_OPERATION:-${operation:-update}}"
   branch="${ARG_UPDATE_BRANCH:-${branch:-}}"
   build_mode="${ARG_UPDATE_MODE:-${build_mode:-}}"
+  strategy="${ARG_UPDATE_STRATEGY:-${strategy:-release}}"
   [[ "$operation" == rollback ]] || operation=update
   valid_branch "$branch" || branch=""
   case "$build_mode" in fast|complete) ;; *) build_mode="" ;; esac
+  case "$strategy" in release|source) ;; *) strategy="release" ;; esac
   case "$previous_phase" in scheduled|preparing|building|installing|restarting|verifying|cancelling|rollback|complete|rolled_back|failed|cancelled|idle) ;; *) previous_phase="" ;; esac
   updated="$(date +%s)"
   # Messages are fixed internal strings; strip control characters and JSON quotes defensively.
   message="${message//$'\n'/ }"
   message="${message//\"/}"
   tmp="${update_state_file}.tmp.$$"
-  printf '{"job_id":"%s","state":"%s","phase":"%s","previous_phase":"%s","operation":"%s","branch":"%s","build_mode":"%s","started_at":%s,"updated_at":%s,"message":"%s"}\n' \
-    "$job_id" "$state" "$phase" "${previous_phase:-$phase}" "$operation" "$branch" "$build_mode" "$started" "$updated" "$message" > "$tmp"
+  printf '{"job_id":"%s","state":"%s","phase":"%s","previous_phase":"%s","operation":"%s","branch":"%s","build_mode":"%s","strategy":"%s","started_at":%s,"updated_at":%s,"message":"%s"}\n' \
+    "$job_id" "$state" "$phase" "${previous_phase:-$phase}" "$operation" "$branch" "$build_mode" "$strategy" "$started" "$updated" "$message" > "$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$update_state_file"
 }
@@ -409,11 +412,13 @@ case "${1:-}" in
   run)
     mode="${2:-complete}"
     branch="${3:-main}"
+    strategy="${4:-release}"
     case "$mode" in fast|complete) ;; *) echo "Invalid update build mode." >&2; exit 2 ;; esac
+    case "$strategy" in release|source) ;; *) echo "Invalid update method. Allowed: release, source." >&2; exit 2 ;; esac
     valid_branch "$branch" || { echo "Invalid update branch. Allowed: main, development." >&2; exit 2; }
-    reserve_update update scheduled "$branch" "$mode" || exit $?
+    reserve_update update scheduled "$branch" "$mode" "$strategy" || exit $?
     unit="arg-web-update-$$"
-    if ! systemd-run --quiet --collect --unit="$unit" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 --setenv="ARG_UPDATE_MODE=$mode" --setenv="ARG_UPDATE_BRANCH=$branch" --setenv="ARG_UPDATE_JOB_ID=$ARG_UPDATE_JOB_ID" /usr/local/bin/arg update; then
+    if ! systemd-run --quiet --collect --unit="$unit" --on-active=2s --setenv=ARG_UPDATE_RESERVED=1 --setenv="ARG_UPDATE_MODE=$mode" --setenv="ARG_UPDATE_STRATEGY=$strategy" --setenv="ARG_UPDATE_BRANCH=$branch" --setenv="ARG_UPDATE_JOB_ID=$ARG_UPDATE_JOB_ID" /usr/local/bin/arg update; then
       write_update_state failed scheduling "The system could not start the update job."
       rm -f "$update_status_file"
       rmdir "$update_lock_dir" 2>/dev/null || true

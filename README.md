@@ -88,7 +88,9 @@ Once installed, use `arg` to manage the service:
 | `sudo arg start` / `stop` / `restart` | Control the ARG service |
 | `sudo arg logs [lines]` | View recent service logs |
 | `sudo arg ssl` | Configure HTTPS for the panel |
-| `sudo arg update` | Select update branch and build-cache mode interactively |
+| `sudo arg update` | Select branch and update method interactively; prebuilt Release is recommended |
+| `sudo arg update main complete release` | Install the verified prebuilt stable binary |
+| `sudo arg update development fast source` | Compile the development branch locally, retaining Fast cache |
 | `sudo arg cancel-update` | Cancel a running update or clear a stale update lock |
 | `sudo arg rollback` | Restore the previous saved ARG binary |
 | `sudo arg password` | Reset an account password as root |
@@ -102,6 +104,8 @@ sudo bash arg.sh
 ```
 
 ## Updates
+
+ARG updates default to a prebuilt GitHub Release binary. The updater matches the selected source version to the release tag, verifies the asset's SHA-256 and CPU architecture, then swaps it in atomically. The release workflow checks the executable's reported version before publication. This avoids local compilation and build-cache disk use. To compile locally instead, select **Compile from source** in the panel or run `sudo arg update main fast source`. Fast/Complete cache choices apply only to source compilation. Stable `main` versions use `vX.Y.Z` tags and GitHub Releases; run `scripts/publish-release-tag.sh` from a pushed stable `main` commit to publish the tag and start the release workflow. Development version tags use `vX.Y.Z-dev.N` and publish as prereleases.
 
 ARG supports two source branches:
 

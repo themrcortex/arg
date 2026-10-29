@@ -55,8 +55,15 @@ cat > "$tmp/bin/chown" <<'MOCK'
 exit 0
 MOCK
 chmod +x "$tmp/bin/chown"
+cat > "$tmp/bin/systemd-run" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARG_TEST_SYSTEMD_RUN_LOG"
+exit 0
+MOCK
+chmod +x "$tmp/bin/systemd-run"
 export PATH="$tmp/bin:$PATH"
 export ARG_TEST_SYSTEMCTL_LOG="$tmp/systemctl.log"
+export ARG_TEST_SYSTEMD_RUN_LOG="$tmp/systemd-run.log"
 export ARG_TEST_UPDATE_HELPER="$helper"
 export ARG_TEST_NESTED_UPDATE_LOG="$tmp/nested-update.log"
 export ARG_UPDATE_LOCK_DIR="$tmp/run/arg-update.lock"
@@ -81,12 +88,25 @@ chmod +x "$ARG_DATABASE_BACKUP_TOOL"
 
 # The live update state retains branch and build mode so the UI can describe the
 # exact source and compile policy while the job is running.
-export ARG_UPDATE_JOB_ID=metadata-test ARG_UPDATE_OPERATION=update ARG_UPDATE_BRANCH=development ARG_UPDATE_MODE=fast
+export ARG_UPDATE_JOB_ID=metadata-test ARG_UPDATE_OPERATION=update ARG_UPDATE_BRANCH=development ARG_UPDATE_MODE=fast ARG_UPDATE_STRATEGY=source
 "$helper" state running building "Compiling development branch."
 grep -q '"operation":"update"' "$ARG_UPDATE_STATE_FILE"
 grep -q '"branch":"development"' "$ARG_UPDATE_STATE_FILE"
 grep -q '"build_mode":"fast"' "$ARG_UPDATE_STATE_FILE"
-unset ARG_UPDATE_JOB_ID ARG_UPDATE_OPERATION ARG_UPDATE_BRANCH ARG_UPDATE_MODE
+grep -q '"strategy":"source"' "$ARG_UPDATE_STATE_FILE"
+unset ARG_UPDATE_JOB_ID ARG_UPDATE_OPERATION ARG_UPDATE_BRANCH ARG_UPDATE_MODE ARG_UPDATE_STRATEGY
+
+# Scheduling persists and forwards the selected strategy to the isolated updater process.
+"$helper" run fast development source
+grep -q -- '--setenv=ARG_UPDATE_STRATEGY=source' "$ARG_TEST_SYSTEMD_RUN_LOG"
+grep -q '"branch":"development"' "$ARG_UPDATE_STATE_FILE"
+grep -q '"strategy":"source"' "$ARG_UPDATE_STATE_FILE"
+rm -f "$ARG_UPDATE_STATUS_FILE" "$ARG_UPDATE_LAST_UNIT_FILE"
+rmdir "$ARG_UPDATE_LOCK_DIR"
+if "$helper" run fast main 'source;touch /tmp/arg-update-test' >/dev/null 2>&1; then
+  echo 'invalid update strategy was accepted' >&2
+  exit 1
+fi
 
 # A dead owner and inactive transient unit must clear immediately, without the six-hour wait.
 mkdir "$ARG_UPDATE_LOCK_DIR"
