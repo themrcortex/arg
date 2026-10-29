@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.8-dev.1 — 2026-10-29
+
+### Development
+- Advance the development channel beyond stable v0.7.7; the verified Release-based updater is available by default, with source compilation retained as an alternative.
+
 ## v0.7.7 — 2026-10-29
 
 ### Added
