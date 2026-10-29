@@ -24,6 +24,7 @@ mime_guess = "2"
 portable-pty = "0.9"
 futures-util = "0.3"
 s3 = { package = "rust-s3", version = "0.38", default-features = false, features = ["tokio-rustls-tls-ring", "fail-on-err"] }
+quick-xml = "0.41"
 url = "2"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 tokio-util = { version = "0.7", features = ["io"] }

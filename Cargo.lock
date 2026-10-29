@@ -43,6 +43,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "portable-pty",
+ "quick-xml",
  "rand 0.8.8",
  "reqwest",
  "ring",

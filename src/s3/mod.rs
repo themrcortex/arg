@@ -1,12 +1,16 @@
 use super::*;
-use ::s3::{bucket::Bucket, bucket_ops::BucketConfiguration, creds::Credentials, Region};
+use ::s3::{bucket::Bucket, bucket_ops::BucketConfiguration, command::Command, creds::Credentials, request::{tokio_backend::ReqwestRequest, Request as S3Request}, Region};
 use axum::{body::Body, http::header, response::Response};
+use base64::Engine as _;
 use std::{
-    net::{IpAddr, ToSocketAddrs},
+    collections::HashMap,
+    io::{Read, Write},
+    net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     os::fd::AsRawFd,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path as FsPath, PathBuf},
-    time::Duration,
+    sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 use url::Url;
 
@@ -20,6 +24,12 @@ const S3_UPLOAD_MAX_DURATION: Duration = Duration::from_secs(15 * 60);
 const S3_SCAN_MAX_DURATION: Duration = Duration::from_secs(15 * 60);
 const S3_SCAN_MAX_OBJECTS: u64 = 2_000_000;
 const S3_SCAN_QUEUE_CAPACITY: usize = 16;
+const S3_PROXY_MAX_TARGETS: usize = 256;
+const S3_PROXY_MAX_CONNECTIONS: usize = 64;
+const S3_PROXY_MAX_TARGET_ADDRESSES: usize = 16;
+const S3_PROXY_MAX_HEADERS: usize = 8 * 1024;
+const S3_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const S3_PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 static S3_SCAN_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 static S3_SCAN_QUEUE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(S3_SCAN_QUEUE_CAPACITY);
@@ -27,6 +37,189 @@ static S3_UPLOAD_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::con
 static S3_DOWNLOAD_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 static S3_HELPER_TRANSFER_SEMAPHORE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(1);
+
+#[derive(Clone)]
+struct PinnedS3Target {
+    host: String,
+    port: u16,
+    addresses: Vec<IpAddr>,
+    allow_private: bool,
+    last_used: Instant,
+}
+
+struct PinnedS3Proxy {
+    address: SocketAddr,
+    key: [u8; 32],
+    targets: Mutex<HashMap<String, PinnedS3Target>>,
+    active: Arc<AtomicUsize>,
+}
+
+static PINNED_S3_PROXY: OnceLock<Result<Arc<PinnedS3Proxy>, String>> = OnceLock::new();
+
+impl PinnedS3Proxy {
+    fn start() -> Result<Arc<Self>, String> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .map_err(|_| "ساخت مسیر امن اتصال S3 ناموفق بود.".to_owned())?;
+        let address = listener.local_addr().map_err(|_| "آدرس مسیر امن اتصال S3 خوانده نشد.".to_owned())?;
+        let proxy = Arc::new(Self { address, key: rand::random(), targets: Mutex::new(HashMap::new()), active: Arc::new(AtomicUsize::new(0)) });
+        let state = Arc::clone(&proxy);
+        std::thread::Builder::new().name("arg-s3-dns-pin-proxy".into()).spawn(move || {
+            loop {
+                let connection = match listener.accept() {
+                    Ok((connection, _)) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        // Avoid spinning a core if the listening socket enters a
+                        // transient error state (for example, descriptor pressure).
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                };
+                let active = Arc::clone(&state.active);
+                if active.fetch_add(1, Ordering::AcqRel) >= S3_PROXY_MAX_CONNECTIONS {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    let mut connection = connection;
+                    let _ = connection.write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                let worker_state = Arc::clone(&state);
+                let worker_active = Arc::clone(&active);
+                if std::thread::Builder::new().name("arg-s3-pinned-tunnel".into()).spawn(move || {
+                    let _guard = ActiveConnection(worker_active);
+                    serve_pinned_s3_proxy_connection(connection, &worker_state);
+                }).is_err() {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+        }).map_err(|_| "راه‌اندازی مسیر امن اتصال S3 ناموفق بود.".to_owned())?;
+        Ok(proxy)
+    }
+
+    fn register_endpoint(&self, endpoint: &str, allow_private: bool) -> Result<(String, String), String> {
+        let (host, port, addresses) = resolve_validated_endpoint(endpoint, allow_private)?;
+        let auth_token = self.register_validated_target(PinnedS3Target { host, port, addresses, allow_private, last_used: Instant::now() })?;
+        Ok((format!("http://{}", self.address), auth_token))
+    }
+
+    fn register_validated_target(&self, target: PinnedS3Target) -> Result<String, String> {
+        let mut targets = self.targets.lock().map_err(|_| "قفل مسیر امن S3 در دسترس نیست.".to_owned())?;
+        if targets.len() >= S3_PROXY_MAX_TARGETS {
+            targets.retain(|_, target| target.last_used.elapsed() < Duration::from_secs(30 * 60));
+        }
+        let auth_token = self.target_token(&target);
+        if !targets.contains_key(&auth_token) && targets.len() >= S3_PROXY_MAX_TARGETS {
+            return Err("تعداد Endpointهای S3 ثبت‌شده از حد ایمن این پردازه بیشتر شده است؛ سرویس را راه‌اندازی مجدد کن.".into());
+        }
+        targets.insert(auth_token.clone(), target);
+        Ok(auth_token)
+    }
+
+    fn target_token(&self, target: &PinnedS3Target) -> String {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let mut input = format!("{}\0{}\0{}", target.host.to_ascii_lowercase().trim_end_matches('.'), target.port, target.allow_private);
+        for address in &target.addresses {
+            input.push('\0');
+            input.push_str(&address.to_string());
+        }
+        hex::encode(ring::hmac::sign(&key, input.as_bytes()).as_ref())
+    }
+}
+
+struct ActiveConnection(Arc<AtomicUsize>);
+impl Drop for ActiveConnection { fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); } }
+
+fn pinned_s3_proxy() -> Result<Arc<PinnedS3Proxy>, String> {
+    PINNED_S3_PROXY.get_or_init(PinnedS3Proxy::start).as_ref().map(Arc::clone).map_err(Clone::clone)
+}
+
+fn serve_pinned_s3_proxy_connection(mut client: TcpStream, proxy: &PinnedS3Proxy) {
+    let _ = client.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = client.set_write_timeout(Some(Duration::from_secs(5)));
+    let mut request = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 512];
+    while request.len() < S3_PROXY_MAX_HEADERS {
+        let Ok(count) = client.read(&mut chunk) else { return };
+        if count == 0 { return; }
+        request.extend_from_slice(&chunk[..count]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") { break; }
+    }
+    if request.len() >= S3_PROXY_MAX_HEADERS {
+        let _ = client.write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(&request) else { return };
+    let mut lines = text.split("\r\n");
+    let Some(first_line) = lines.next() else { return };
+    let mut first = first_line.split_ascii_whitespace();
+    if first.next() != Some("CONNECT") {
+        let _ = client.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    let Some(authority) = first.next() else { return };
+    let Some(version) = first.next() else { return };
+    if !matches!(version, "HTTP/1.1" | "HTTP/1.0") || first.next().is_some() {
+        let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        return;
+    }
+    let mut supplied_token = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        if name.eq_ignore_ascii_case("proxy-authorization") {
+            let Some(encoded) = value.trim().strip_prefix("Basic ") else { continue };
+            let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else { continue };
+            let Ok(decoded) = std::str::from_utf8(&decoded) else { continue };
+            supplied_token = decoded.strip_prefix("arg-s3:").map(str::to_owned);
+        }
+    }
+    let Some(supplied_token) = supplied_token else {
+        let _ = client.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n");
+        return;
+    };
+    let target = {
+        let Ok(mut targets) = proxy.targets.lock() else { return };
+        targets.get_mut(&supplied_token).filter(|target| {
+            let Ok(authority) = authority.parse::<axum::http::uri::Authority>() else { return false };
+            let supplied_host = authority.host().trim_start_matches('[').trim_end_matches(']').trim_end_matches('.');
+            supplied_host.eq_ignore_ascii_case(&target.host)
+                && authority.port_u16() == Some(target.port)
+                && proxy.target_token(target) == supplied_token
+        }).map(|target| { target.last_used = Instant::now(); target.clone() })
+    };
+    let Some(target) = target else {
+        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        return;
+    };
+    let mut upstream = None;
+    let connect_deadline = Instant::now() + S3_PROXY_CONNECT_TIMEOUT;
+    for address in &target.addresses {
+        let remaining = connect_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        if let Ok(stream) = TcpStream::connect_timeout(&SocketAddr::new(*address, target.port), remaining) {
+            upstream = Some(stream);
+            break;
+        }
+    }
+    let Some(mut upstream) = upstream else {
+        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+        return;
+    };
+    let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+    let _ = client.set_read_timeout(Some(S3_PROXY_IDLE_TIMEOUT));
+    let _ = client.set_write_timeout(Some(S3_PROXY_IDLE_TIMEOUT));
+    let _ = upstream.set_read_timeout(Some(S3_PROXY_IDLE_TIMEOUT));
+    let _ = upstream.set_write_timeout(Some(S3_PROXY_IDLE_TIMEOUT));
+    let Ok(mut client_writer) = client.try_clone() else { return };
+    let Ok(mut upstream_reader) = upstream.try_clone() else { return };
+    let forward = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client, &mut upstream);
+        let _ = upstream.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut upstream_reader, &mut client_writer);
+    let _ = client_writer.shutdown(std::net::Shutdown::Write);
+    let _ = forward.join();
+}
 
 struct TransferPathCleanup(PathBuf);
 
@@ -231,9 +424,9 @@ fn validate_endpoint_syntax(endpoint: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn validate_endpoint(endpoint: &str, allow_private: bool) -> Result<(), String> {
+fn resolve_validated_endpoint(endpoint: &str, allow_private: bool) -> Result<(String, u16, Vec<IpAddr>), String> {
     let url = validate_endpoint_syntax(endpoint)?;
-    let host = url.host_str().unwrap();
+    let host = url.host_str().ok_or_else(|| "Endpoint میزبان معتبر ندارد.".to_owned())?;
     let normalized_host = host
         .trim_end_matches('.')
         .trim_start_matches('[')
@@ -250,29 +443,87 @@ fn validate_endpoint(endpoint: &str, allow_private: bool) -> Result<(), String> 
         return Err("Endpointهای metadata سرور قابل استفاده نیستند.".into());
     }
     let port = url.port_or_known_default().unwrap_or(443);
+    if port == 0 {
+        return Err("پورت Endpoint نمی‌تواند صفر باشد.".into());
+    }
     let addresses: Vec<IpAddr> = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
     } else {
-        (host, port)
+        (normalized_host.as_str(), port)
             .to_socket_addrs()
             .map_err(|_| "DNS مربوط به Endpoint پاسخ نداد.".to_string())?
             .map(|address| address.ip())
             .collect()
     };
+    validate_endpoint_addresses(addresses, allow_private)
+        .map(|addresses| (normalized_host, port, addresses))
+}
+
+fn validate_endpoint_addresses(
+    mut addresses: Vec<IpAddr>,
+    allow_private: bool,
+) -> Result<Vec<IpAddr>, String> {
     if addresses.is_empty() {
         return Err("Endpoint به هیچ نشانی IP نگاشت نشد.".into());
     }
-    for address in addresses {
-        if is_cloud_metadata_ip(address)
-            || (!allow_private && !metrics::is_public_ip(&address.to_string()))
+    for address in &addresses {
+        let public = metrics::is_public_ip(&address.to_string());
+        let approved_private = allow_private && is_explicitly_private_endpoint_ip(*address);
+        if is_cloud_metadata_ip(*address)
+            || is_forbidden_endpoint_ip(*address)
+            || (!public && !approved_private)
         {
             return Err(
-                "Endpoint خصوصی است. فقط پس از بررسی مقصد و تأیید دسترسی خصوصی آن را فعال کن."
+                "Endpoint به loopback، link-local، metadata یا محدودهٔ غیرعمومی تأییدنشده اشاره می‌کند. برای شبکهٔ خصوصی فقط IPهای RFC1918/ULA با تأیید صریح مجازند."
                     .into(),
             );
         }
     }
-    Ok(())
+    addresses.sort_unstable();
+    addresses.dedup();
+    if addresses.len() > S3_PROXY_MAX_TARGET_ADDRESSES {
+        return Err("Endpoint بیش از 16 نشانی IP برگرداند و برای اتصال امن پذیرفته نمی‌شود.".into());
+    }
+    Ok(addresses)
+}
+
+fn is_forbidden_endpoint_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unicast_link_local()
+                || ip.to_ipv4_mapped().is_some_and(|mapped| {
+                    mapped.is_loopback()
+                        || mapped.is_link_local()
+                        || mapped.is_unspecified()
+                        || mapped.is_broadcast()
+                        || mapped.is_multicast()
+                })
+        }
+    }
+}
+
+fn is_explicitly_private_endpoint_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => ip.is_private(),
+        IpAddr::V6(ip) => {
+            (ip.segments()[0] & 0xfe00) == 0xfc00
+                || ip.to_ipv4_mapped().is_some_and(|mapped| mapped.is_private())
+        }
+    }
+}
+
+fn validate_endpoint(endpoint: &str, allow_private: bool) -> Result<(), String> {
+    resolve_validated_endpoint(endpoint, allow_private).map(|_| ())
 }
 
 fn is_cloud_metadata_ip(address: IpAddr) -> bool {
@@ -486,11 +737,19 @@ fn s3_credentials(secret: &SecretConfig) -> Result<Credentials, String> {
     )
     .map_err(|_| "اطلاعات کلید S3 معتبر نیست.".into())
 }
-fn make_bucket<'a>(name: &'a str, secret: &SecretConfig) -> Result<Box<Bucket>, String> {
+fn make_bucket(name: &str, secret: &SecretConfig) -> Result<Box<Bucket>, String> {
     let region = s3_region(secret)?;
     let credentials = s3_credentials(secret)?;
-    let bucket = Bucket::new(name, region, credentials)
+    let mut bucket = Bucket::new(name, region, credentials)
         .map_err(|_| "ساخت S3 client ناموفق بود.".to_string())?;
+    if !secret.endpoint.is_empty() {
+        let proxy = pinned_s3_proxy()?;
+        let (proxy_url, auth_token) = proxy.register_endpoint(&secret.endpoint, secret.allow_private_endpoint)?;
+        let proxy = reqwest::Proxy::all(proxy_url)
+            .map_err(|_| "ساخت پراکسی محدودشدهٔ S3 ناموفق بود.".to_owned())?
+            .basic_auth("arg-s3", &auth_token);
+        bucket = Box::new(bucket.set_proxy(proxy).map_err(|_| "ساخت پراکسی محدودشدهٔ S3 ناموفق بود.".to_owned())?);
+    }
     Ok(
         if secret.address_style == "path"
             || secret.address_style == "auto" && secret.provider_type != "aws"
@@ -500,6 +759,12 @@ fn make_bucket<'a>(name: &'a str, secret: &SecretConfig) -> Result<Box<Bucket>, 
             bucket
         },
     )
+}
+
+fn parse_custom_endpoint_bucket_list(xml: &str) -> Result<Vec<String>, String> {
+    quick_xml::de::from_str::<::s3::bucket_ops::ListBucketsResponse>(xml)
+        .map(|response| response.bucket_names().collect())
+        .map_err(|_| "پاسخ فهرست Bucketها قالب معتبر S3 ندارد.".to_owned())
 }
 
 fn helper_error(err: &::s3::error::S3Error) -> String {
@@ -583,9 +848,9 @@ fn verify_marker_bucket(bucket: &Bucket) -> Result<Bucket, String> {
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
     let id = request["id"].as_i64().unwrap_or(0);
     match action {
-        "s3-mount-start" => return start_s3_mount(request),
-        "s3-mount-stop" => return stop_s3_mount(request),
-        "s3-mount-status" => return s3_mount_status(request),
+        "s3-mount-start" => start_s3_mount(request),
+        "s3-mount-stop" => stop_s3_mount(request),
+        "s3-mount-status" => s3_mount_status(request),
         "s3-secret-write" => {
             let Some(secret) =
                 serde_json::from_value::<SecretConfig>(request["secret"].clone()).ok()
@@ -1095,14 +1360,33 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
     };
     match action {
         "s3-list-buckets" => {
-            let (Ok(region), Ok(credentials)) = (s3_region(secret), s3_credentials(secret)) else {
-                return json!({"ok":false,"error":"تنظیمات S3 معتبر نیست."});
-            };
-            match Bucket::list_buckets(region, credentials).await {
-                Ok(response) => {
-                    json!({"ok":true,"buckets":response.bucket_names().collect::<Vec<_>>()})
+            let result: Result<Vec<String>, String> = if secret.endpoint.is_empty() {
+                match (s3_region(secret), s3_credentials(secret)) {
+                    (Ok(region), Ok(credentials)) => Bucket::list_buckets(region, credentials)
+                        .await
+                        .map(|response| response.bucket_names().collect())
+                        .map_err(|error| helper_error(&error)),
+                    _ => Err("تنظیمات S3 معتبر نیست.".into()),
                 }
-                Err(error) => json!({"ok":false,"error":helper_error(&error)}),
+            } else {
+                let bucket = match make_bucket("", secret) {
+                    Ok(bucket) => bucket.with_path_style(),
+                    Err(error) => return json!({"ok":false,"error":error}),
+                };
+                let command = match ReqwestRequest::new(bucket.as_ref(), "", Command::ListBuckets).await {
+                    Ok(command) => command,
+                    Err(error) => return json!({"ok":false,"error":helper_error(&error)}),
+                };
+                match command.response_data(false).await {
+                    Ok(data) => data.as_str()
+                        .map_err(|_| "پاسخ فهرست Bucketها UTF-8 معتبر ندارد.".to_owned())
+                        .and_then(parse_custom_endpoint_bucket_list),
+                    Err(error) => Err(helper_error(&error)),
+                }
+            };
+            match result {
+                Ok(buckets) => json!({"ok":true,"buckets":buckets}),
+                Err(error) => json!({"ok":false,"error":error}),
             }
         }
         "s3-test" => {
@@ -1128,19 +1412,35 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
             if !provider_can_create_bucket(&secret.provider_type) {
                 return json!({"ok":false,"error":"ساخت Bucket برای این Preset تا زمان تأیید پشتیبانی ارائه‌دهنده غیرفعال است."});
             }
-            let (Ok(region), Ok(credentials)) = (s3_region(secret), s3_credentials(secret)) else {
-                return json!({"ok":false,"error":"تنظیمات S3 معتبر نیست."});
+            let result: Result<(), String> = if secret.endpoint.is_empty() {
+                match (s3_region(secret), s3_credentials(secret)) {
+                    (Ok(region), Ok(credentials)) => Bucket::create_with_path_style(name, region, credentials, BucketConfiguration::default())
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| helper_error(&error)),
+                    _ => Err("تنظیمات S3 معتبر نیست.".into()),
+                }
+            } else {
+                let region = match s3_region(secret) {
+                    Ok(region) => region,
+                    Err(error) => return json!({"ok":false,"error":error}),
+                };
+                let bucket = match make_bucket(name, secret) {
+                    Ok(bucket) => bucket.with_path_style(),
+                    Err(error) => return json!({"ok":false,"error":error}),
+                };
+                let mut config = BucketConfiguration::default();
+                let skip_constraint = matches!(std::env::var("RUST_S3_SKIP_LOCATION_CONSTRAINT").as_deref(), Ok("true" | "1"));
+                if !skip_constraint { config.set_region(region); }
+                let command = match ReqwestRequest::new(bucket.as_ref(), "", Command::CreateBucket { config }).await {
+                    Ok(command) => command,
+                    Err(error) => return json!({"ok":false,"error":helper_error(&error)}),
+                };
+                command.response_data(false).await.map(|_| ()).map_err(|error| helper_error(&error))
             };
-            match Bucket::create_with_path_style(
-                name,
-                region,
-                credentials,
-                BucketConfiguration::default(),
-            )
-            .await
-            {
-                Ok(_) => json!({"ok":true}),
-                Err(error) => json!({"ok":false,"error":helper_error(&error)}),
+            match result {
+                Ok(()) => json!({"ok":true}),
+                Err(error) => json!({"ok":false,"error":error}),
             }
         }
         "s3-list-objects" => {
@@ -1787,6 +2087,155 @@ mod tests {
         assert!(validate_endpoint_syntax("http://objects.example.net").is_err());
         assert!(validate_endpoint_syntax("https://user:pass@objects.example.net").is_err());
         assert!(validate_endpoint_syntax("https://objects.example.net/path").is_err());
+        assert!(resolve_validated_endpoint("https://objects.example.net:0", true).is_err());
+    }
+
+    #[test]
+    fn custom_endpoint_resolution_returns_exact_validated_addresses() {
+        let (host, port, addresses) = resolve_validated_endpoint("https://10.20.30.40:9443", true).unwrap();
+        assert_eq!(host, "10.20.30.40");
+        assert_eq!(port, 9443);
+        assert_eq!(addresses, vec![IpAddr::V4(std::net::Ipv4Addr::new(10, 20, 30, 40))]);
+        assert!(resolve_validated_endpoint("https://127.0.0.1:9443", false).is_err());
+        assert!(resolve_validated_endpoint("https://127.0.0.1:9443", true).is_err());
+        assert!(resolve_validated_endpoint("https://[::1]:9443", true).is_err());
+        assert!(resolve_validated_endpoint("https://[::ffff:127.0.0.1]:9443", true).is_err());
+        assert!(resolve_validated_endpoint("https://169.254.1.1:9443", true).is_err());
+        assert!(resolve_validated_endpoint("https://100.100.100.200:9443", true).is_err());
+        assert!(resolve_validated_endpoint("https://100.64.0.1:9443", true).is_err());
+        assert!(resolve_validated_endpoint("https://192.0.2.1:9443", true).is_err());
+        assert!(resolve_validated_endpoint("https://[fd00::1]:9443", true).is_ok());
+        assert!(resolve_validated_endpoint("https://169.254.169.254", true).is_err());
+
+        let addresses = (1..=S3_PROXY_MAX_TARGET_ADDRESSES)
+            .map(|last| IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, last as u8)))
+            .collect::<Vec<_>>();
+        assert!(validate_endpoint_addresses(addresses.clone(), true).is_ok());
+        let mut oversized = addresses;
+        oversized.push(IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 1, 1)));
+        assert!(validate_endpoint_addresses(oversized, true).is_err());
+    }
+
+    #[test]
+    fn custom_endpoint_list_bucket_xml_parses_names_and_rejects_malformed_responses() {
+        let response = r#"<?xml version="1.0" encoding="UTF-8"?>
+            <ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                <Owner><ID>owner</ID><DisplayName>test</DisplayName></Owner>
+                <Buckets>
+                    <Bucket><Name>archive-one</Name><CreationDate>2026-10-29T12:00:00.000Z</CreationDate></Bucket>
+                    <Bucket><Name>archive-two</Name><CreationDate>2026-10-29T12:01:00.000Z</CreationDate></Bucket>
+                </Buckets>
+            </ListAllMyBucketsResult>"#;
+        assert_eq!(parse_custom_endpoint_bucket_list(response).unwrap(), ["archive-one", "archive-two"]);
+        assert!(parse_custom_endpoint_bucket_list("<broken>").is_err());
+    }
+
+    #[test]
+    fn pinned_proxy_tokens_are_unique_for_the_same_host_with_different_resolutions() {
+        let proxy = PinnedS3Proxy {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            key: [3; 32],
+            targets: Mutex::new(HashMap::new()),
+            active: Arc::new(AtomicUsize::new(0)),
+        };
+        let target = |address| PinnedS3Target {
+            host: "provider.example.test".into(),
+            port: 443,
+            addresses: vec![address],
+            allow_private: true,
+            last_used: Instant::now(),
+        };
+        let first = proxy.register_validated_target(target(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))).unwrap();
+        let second = proxy.register_validated_target(target(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)))).unwrap();
+        let repeated = proxy.register_validated_target(target(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))).unwrap();
+        let mut other_policy = target(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        other_policy.allow_private = false;
+        let policy_variant = proxy.register_validated_target(other_policy).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, policy_variant);
+        assert_eq!(first, repeated, "a stable resolution should reuse its bounded proxy capability");
+        let targets = proxy.targets.lock().unwrap();
+        assert_eq!(targets[&first].addresses, vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]);
+        assert_eq!(targets[&second].addresses, vec![IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2))]);
+    }
+
+    #[test]
+    fn pinned_s3_proxy_uses_validated_ip_and_rejects_authority_changes() {
+        fn fixture(remote_port: u16) -> (TcpListener, Arc<PinnedS3Proxy>, String) {
+            let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let proxy = Arc::new(PinnedS3Proxy {
+                address,
+                key: rand::random(),
+                targets: Mutex::new(HashMap::new()),
+                active: Arc::new(AtomicUsize::new(0)),
+            });
+            let host = "provider.example.test";
+            let auth = proxy.register_validated_target(PinnedS3Target {
+                host: host.into(),
+                port: remote_port,
+                addresses: vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+                allow_private: true,
+                last_used: Instant::now(),
+            }).unwrap();
+            (listener, proxy, auth)
+        }
+
+        let upstream_listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = std::thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            let mut payload = [0; 4];
+            stream.read_exact(&mut payload).unwrap();
+            assert_eq!(&payload, b"ping");
+            stream.write_all(b"pong").unwrap();
+        });
+        let (proxy_listener, proxy, auth) = fixture(upstream_port);
+        let serving_proxy = Arc::clone(&proxy);
+        let proxy_thread = std::thread::spawn(move || {
+            let (connection, _) = proxy_listener.accept().unwrap();
+            serve_pinned_s3_proxy_connection(connection, &serving_proxy);
+        });
+        let mut client = TcpStream::connect(proxy.address).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("arg-s3:{auth}"));
+        write!(client, "CONNECT provider.example.test:{upstream_port} HTTP/1.1\r\nHost: provider.example.test:{upstream_port}\r\nProxy-Authorization: Basic {encoded}\r\n\r\n").unwrap();
+        let mut response = Vec::new();
+        let mut byte = [0; 1];
+        while !response.ends_with(b"\r\n\r\n") {
+            client.read_exact(&mut byte).unwrap();
+            response.push(byte[0]);
+        }
+        assert!(response.starts_with(b"HTTP/1.1 200 Connection Established"));
+        client.write_all(b"ping").unwrap();
+        let mut pong = [0; 4];
+        client.read_exact(&mut pong).unwrap();
+        assert_eq!(&pong, b"pong");
+        drop(client);
+        proxy_thread.join().unwrap();
+        upstream.join().unwrap();
+
+        let upstream_listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        upstream_listener.set_nonblocking(true).unwrap();
+        let (proxy_listener, proxy, auth) = fixture(upstream_port);
+        let serving_proxy = Arc::clone(&proxy);
+        let proxy_thread = std::thread::spawn(move || {
+            let (connection, _) = proxy_listener.accept().unwrap();
+            serve_pinned_s3_proxy_connection(connection, &serving_proxy);
+        });
+        let mut client = TcpStream::connect(proxy.address).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("arg-s3:{auth}"));
+        write!(client, "CONNECT attacker.example.test:{upstream_port} HTTP/1.1\r\nHost: attacker.example.test:{upstream_port}\r\nProxy-Authorization: Basic {encoded}\r\n\r\n").unwrap();
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            client.read_exact(&mut byte).unwrap();
+            response.push(byte[0]);
+        }
+        assert!(response.starts_with(b"HTTP/1.1 403 Forbidden"));
+        assert!(matches!(upstream_listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        proxy_thread.join().unwrap();
     }
 
     #[test]
