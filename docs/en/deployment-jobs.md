@@ -4,7 +4,7 @@ This page describes ARG's base deployment workflow. ARG acquires source into an 
 
 ## Current scope
 
-Open an application card in **Applications** and choose **Deploy source**. Three source types are available:
+Open an application card in **Applications** and choose **Deploy source**. Four source types are available:
 
 1. **Public HTTPS Git:** fetch a GitHub, GitLab, Bitbucket, or Codeberg repository at a branch, tag, or commit. URLs containing usernames, passwords, or tokens are rejected.
 2. **Private SSH Git:** fetch a private GitHub repository with a Deploy Key scoped to that repository. See [SSH keys and Deploy Keys](./ssh-deploy-keys.md) for key generation, GitHub setup, and limitations.
@@ -21,12 +21,20 @@ Jobs move through `queued`, `validating`, `running`, `verifying`, and then `succ
 
 Only one job per application may be active, and one worker runs jobs per VPS. The worker writes a lease and heartbeat. On ARG restart, interrupted work is queued again. Repeated requests with the same idempotency key return the same job; retry uses a new key.
 
+## Custom pre-activation commands
+
+The **Deploy source** form accepts optional validation or preparation commands before it creates a job. Each non-empty line is one command. Commands run sequentially after source acquisition and automatic install/build, but before ARG switches the `current` pointer. If any command fails, the new release is not activated and the existing release remains current.
+
+Input limits are eight commands, 512 characters per line, 4 KiB total, and 32 tokens per command including the executable. Single or double quotes can keep whitespace inside one argument. This is **not a shell**: variables, `&&`, pipes, redirects, substitutions, and `;` are not interpreted. ARG starts only the executable with its argument list. For example, if the project defines a `verify` package script: `npm run verify -- --strict`. ARG does not interpret shell operators; however, the selected executable can run its own logic. For example, `npm run` runs the package script declared in `package.json`, still inside the restricted sandbox.
+
+Commands run in a restricted sandbox with write access to staging and the build cache. They do not inherit ARG's shell environment, and execution remains resource- and time-bounded. Confirm that commands will run on the VPS before starting the job. External side effects—such as database changes, API calls, or sent messages—are not undone by release rollback. The command text is not returned by the Job details API; inspect each step's output and avoid printing secrets.
+
 ## File safety
 
 - Large ZIPs, suspicious compression ratios, traversal paths such as `../../etc/passwd`, symlinks, and special device files are rejected.
 - Directory copying rejects symlinks and special files. `.env*`, `.git`, and `node_modules` are excluded.
 - Releases are capped at 2 GiB and free space is checked before copying or extraction.
-- Git is invoked with fixed arguments. Project hooks and scripts are never executed; fetch has a 180-second timeout.
+- Git is invoked with fixed arguments, and fetching a repository does not run its hooks. Pre-activation commands run only when you enter and confirm them in the form; build scripts are limited to the selected script in a supported runner. Fetch has a 180-second timeout.
 - Public HTTPS URLs cannot contain credentials. Private SSH keys are Ed25519 files under `/var/lib/arg/ssh-keys` with restricted permissions; Git uses batch mode and strict host-key checking.
 - Register a Deploy Key in GitHub for the specific repository and preferably keep it read-only. ARG does not have GitHub API access to add the key automatically.
 
@@ -39,13 +47,26 @@ Only one job per application may be active, and one worker runs jobs per VPS. Th
 
 ## Runtime integrations added after the base job engine
 
-The base deployment job still does not run arbitrary project commands. Framework-specific integrations run only when the application has an implemented runner:
+The optional pre-activation commands above are bounded and do not create a general-purpose shell. A persistent framework runtime is created only when the application has an implemented runner:
 
 - **Laravel:** see [Laravel management](./laravel-runner.md) for Composer lockfile installs, private environment, approved Artisan operations, Nginx/PHP-FPM, and optional services.
 - **Node.js:** see [Node.js application runner](./node-runner.md) for supported lockfiles, bounded dependency/build steps, runtime environment, a per-app systemd service, loopback verification, guarded Nginx proxy creation, and release recovery.
-- **Other frameworks:** Python, WordPress, custom command execution, static React/Vite publishing, and Next.js/Nuxt SSR remain outside these two runners. They must not be treated as a running service just because a release was activated.
+- **Other frameworks:** Python and WordPress do not have a managed runtime runner in this release. Static React/Vue/Vite publishing and Next.js/Nuxt SSR are covered in [Static and SSR publishing](./static-and-ssr.md). The pre-activation commands above do not create a permanent runtime or add framework support.
 
 The optional `healthcheck_file` is a regular-file check inside the release. Laravel and Node runners add their own framework-specific activation checks; a file-existence check is not a substitute for those runtime checks. Database migrations or other external side effects produced by application code are not reversed by code rollback.
+
+## Troubleshoot job details
+
+If Job details returns a database error, keep the Job ID and exact error text, then inspect the ARG service log. Do not edit the SQLite table manually. Check the authoritative Job list and worker state before retrying so a still-running job is not duplicated. `Invalid column type Integer ... finished_at` was a decoder type mismatch for SQLite's integer timestamp; the `development` branch now reads the value as an integer. Do not convert the stored timestamp to text.
+
+For a failed build or pre-activation command, open that Job's details, locate the failed step, and load its output page. Logs persist across refresh. Do not print secrets from a command or its output. If the panel is unavailable, use SSH:
+
+```bash
+sudo arg status
+sudo journalctl -u arg -n 200 --no-pager
+```
+
+A failed ZIP can only be retried while its temporary upload still exists; upload it again if it has been removed. Rollback switches code releases only; it cannot undo database changes or external service effects.
 
 ## API
 
@@ -54,6 +75,7 @@ The optional `healthcheck_file` is a regular-file check inside the release. Lara
 - `GET /api/apps/{id}/deploy/jobs` — the latest 50 application jobs.
 - `GET /api/deploy/jobs/{id}` — job and step history.
 - `GET /api/deploy/jobs/{id}/events` — Server-Sent Events; administrator session is rechecked during the stream.
+- `GET /api/deploy/jobs/{id}/logs?tail=true&limit=500` — latest output page; `after=<id>` fetches newer events and `before=<id>` fetches older pages. Each response contains up to 500 rows (100 by default; it may be empty), and the latest 2,000 events per job are retained.
 - `POST /api/deploy/jobs/{id}/cancel` and `POST /api/deploy/jobs/{id}/retry`.
 - `POST /api/apps/{id}/deploy/rollback` — body: `{"release_id":"…"}`.
 - Node Runner: `GET /api/apps/{id}/node`, `GET|PUT /api/apps/{id}/node/service`, `PUT /api/apps/{id}/node/environment`, and `GET /api/apps/{id}/node/service/logs`.

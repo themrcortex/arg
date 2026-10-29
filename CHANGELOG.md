@@ -16,6 +16,9 @@
 - Check Nginx during Node SSR deployment, validate and preserve existing virtual hosts, and create/enable an ARG-managed reverse proxy when the hostname has no existing owner.
 - Configure panel certificate renewal from Settings when a Certbot lineage is selected, with a lineage-specific deploy hook, a persistent twice-daily renewal timer, and visible renewal status.
 
+### Fixed
+- Decode the deployment Job `finished_at` SQLite integer with the correct Rust type so completed Job details do not fail during row decoding; cover both populated and `NULL` timestamps with a regression test.
+
 ## v0.7.2 — 2026-10-28
 
 ### Added
