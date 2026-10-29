@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.7.4 — 2026-10-29
+
+### Fixed
+- Recover ARG's reserved `arg_manager@localhost` credential when its protected file is missing or stale, but only after the local MySQL server confirms the account has the exact global grants provisioned by ARG.
+- Stage and test replacement credentials before activating them, retain a recoverable pending file across interruptions, and report a successful repair in the MySQL UI and audit log.
+
 ## v0.7.4-dev.2 — 2026-10-29
 
 ### Development
