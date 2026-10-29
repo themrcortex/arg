@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.7.8-dev.3 — 2026-10-29
+
+### Development
+- Load the MySQL database catalog, runtime metrics, and settings automatically after access is authorized.
+- Move PostgreSQL inventory into its own database-provider tab and place SQL presets above the console.
+
 ## v0.7.8-dev.2 — 2026-10-29
 
 ### Development
