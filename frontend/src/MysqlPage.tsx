@@ -93,6 +93,11 @@ export function MysqlPage({ Heading, notify }: Common) {
     if (!authorized) return
     void api<{ presets: SqlPreset[] }>('mysql/presets').then((result) => setPresets(result.presets)).catch(() => {})
   }, [authorized])
+  useEffect(() => {
+    if (!authorized || !status?.installed || !status.active) return
+    void loadCatalog('databases', true)
+    void loadAdvanced(true)
+  }, [authorized, status?.installed, status?.active])
 
   async function unlock() {
     if (!adminPassword) { notify('رمز پنل را وارد کن.'); return }
@@ -127,15 +132,15 @@ export function MysqlPage({ Heading, notify }: Common) {
     finally { setBusy('') }
   }
 
-  async function loadCatalog(kind: CatalogKind) {
+  async function loadCatalog(kind: CatalogKind, quiet = false) {
     setBusy(`catalog:${kind}`); setError('')
     try {
       const result = await api<{ output: string }>('mysql/catalog', { method: 'POST', body: JSON.stringify({ kind }) })
-      setCatalog(kind); setCatalogOutput(result.output); notify(kind === 'users' ? 'فهرست کاربران MySQL دریافت شد؛ رمزها در سرور قابل خواندن نیستند.' : 'فهرست دیتابیس‌ها دریافت شد.')
-    } catch (cause) { const message = cause instanceof Error ? cause.message : 'دریافت اطلاعات ناموفق بود.'; setError(message); notify(`خطا: ${message}`) }
+      setCatalog(kind); setCatalogOutput(result.output); if (!quiet) notify(kind === 'users' ? 'فهرست کاربران MySQL دریافت شد؛ رمزها در سرور قابل خواندن نیستند.' : 'فهرست دیتابیس‌ها دریافت شد.')
+    } catch (cause) { const message = cause instanceof Error ? cause.message : 'دریافت اطلاعات ناموفق بود.'; setError(message); if (!quiet) notify(`خطا: ${message}`) }
     finally { setBusy('') }
   }
-  async function loadAdvanced() {
+  async function loadAdvanced(quiet = false) {
     setAdvancedBusy(true); setError('')
     try {
       const [metrics, settings] = await Promise.all([
@@ -146,8 +151,8 @@ export function MysqlPage({ Heading, notify }: Common) {
       setRuntimeMetrics(readTable(metrics.output));
       const values = readTable(settings.output)
       setRuntimeSettings(mysqlSettingNames.map((name) => ({ name, value: values[name] || '—', nextValue: values[name] || '' })))
-      notify('آمار و تنظیمات جاری سرور MySQL خوانده شد.')
-    } catch (cause) { const message = cause instanceof Error ? cause.message : 'خواندن تنظیمات سرور MySQL ناموفق بود.'; setError(message); notify(`خطا: ${message}`) }
+      if (!quiet) notify('آمار و تنظیمات جاری سرور MySQL خوانده شد.')
+    } catch (cause) { const message = cause instanceof Error ? cause.message : 'خواندن تنظیمات سرور MySQL ناموفق بود.'; setError(message); if (!quiet) notify(`خطا: ${message}`) }
     finally { setAdvancedBusy(false) }
   }
   async function createDatabase() {
@@ -253,11 +258,29 @@ export function MysqlPage({ Heading, notify }: Common) {
 
   const rows = catalogOutput.trim().split('\n').filter(Boolean).map((row) => row.split('\t'))
   const stateLabel = !status?.installed ? 'نصب نشده' : status.active ? 'فعال' : 'متوقف'
-  if (checkingAccess) return <><Heading title="مدیریت MySQL" description="بررسی دسترسی امن به مدیریت دیتابیس."/><PostgresInventoryPanel/><div className="mt-5 grid gap-3 sm:grid-cols-3"><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/></div></>
-  if (!authorized) return <><Heading title="مدیریت MySQL" description={mysqlApiUnavailable ? "API مدیریت دیتابیس روی VPS انتخاب‌شده در دسترس نیست." : "برای فعال‌سازی این بخش، رمز پنل را یک‌بار برای نشست فعلی تأیید کن."}/><PostgresInventoryPanel/>{mysqlApiUnavailable ? <Card className="mx-auto mt-8 max-w-xl border-amber-300/25 bg-amber-300/[.04]"><CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle size={18} className="text-amber-200"/>نسخهٔ Node با این بخش سازگار نیست</CardTitle><CardDescription>API مدیریت MySQL در VPS انتخاب‌شده پیدا نشد (HTTP 404). Node را به آخرین نسخه به‌روزرسانی کن تا این بخش را فعال کنی.</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => setAccessRetry((value) => value + 1)} disabled={checkingAccess}><RefreshCw size={14} className={checkingAccess ? 'animate-spin' : ''}/>بررسی دوباره</Button></CardContent></Card> : <Card className="mx-auto mt-8 max-w-xl"><CardHeader><CardTitle className="flex items-center gap-2"><KeyRound size={18} className="text-primary"/>تأیید یک‌بارهٔ دسترسی</CardTitle><CardDescription>پس از تأیید، دیگر برای عملیات MySQL رمز پنل پرسیده نمی‌شود. این دسترسی با خروج از حساب باطل خواهد شد.</CardDescription></CardHeader><CardContent className="space-y-3"><Label htmlFor="mysql-unlock-password">رمز پنل</Label><div className="flex gap-2"><Input id="mysql-unlock-password" autoComplete="current-password" type={showPasswords ? 'text' : 'password'} value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void unlock() }}/><Button type="button" variant="outline" size="icon" onClick={() => setShowPasswords(v => !v)} aria-label={showPasswords ? 'پنهان‌کردن رمز' : 'نمایش رمز'}>{showPasswords ? <EyeOff size={15}/> : <Eye size={15}/>}</Button><Button onClick={() => void unlock()} disabled={!!busy}>{busy === 'unlock' ? <LoaderCircle size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}تأیید</Button></div>{error && <Alert className="border-rose-400/25"><AlertDescription>{error}</AlertDescription></Alert>}</CardContent></Card>}</>
+  if (checkingAccess) return <>
+    <Heading title="مدیریت دیتابیس" description="مدیریت MySQL و مشاهدهٔ وضعیت PostgreSQL."/>
+    <Tabs defaultValue="mysql" className="mt-5" dir="rtl">
+      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
+      <TabsContent value="mysql"><div className="mt-3 grid gap-3 sm:grid-cols-3"><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/></div></TabsContent>
+      <TabsContent value="postgres"><PostgresInventoryPanel/></TabsContent>
+    </Tabs>
+  </>
+  if (!authorized) return <>
+    <Heading title="مدیریت دیتابیس" description={mysqlApiUnavailable ? "API مدیریت دیتابیس روی VPS انتخاب‌شده در دسترس نیست." : "برای فعال‌سازی مدیریت MySQL، رمز پنل را یک‌بار برای نشست فعلی تأیید کن."}/>
+    <Tabs defaultValue="mysql" className="mt-5" dir="rtl">
+      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
+      <TabsContent value="mysql">
+        {mysqlApiUnavailable ? <Card className="mx-auto mt-4 max-w-xl border-amber-300/25 bg-amber-300/[.04]"><CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle size={18} className="text-amber-200"/>نسخهٔ Node با این بخش سازگار نیست</CardTitle><CardDescription>API مدیریت MySQL در VPS انتخاب‌شده پیدا نشد (HTTP 404). Node را به آخرین نسخه به‌روزرسانی کن تا این بخش را فعال کنی.</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => setAccessRetry((value) => value + 1)} disabled={checkingAccess}><RefreshCw size={14} className={checkingAccess ? 'animate-spin' : ''}/>بررسی دوباره</Button></CardContent></Card> : <Card className="mx-auto mt-4 max-w-xl"><CardHeader><CardTitle className="flex items-center gap-2"><KeyRound size={18} className="text-primary"/>تأیید یک‌بارهٔ دسترسی</CardTitle><CardDescription>پس از تأیید، دیگر برای عملیات MySQL رمز پنل پرسیده نمی‌شود. این دسترسی با خروج از حساب باطل خواهد شد.</CardDescription></CardHeader><CardContent className="space-y-3"><Label htmlFor="mysql-unlock-password">رمز پنل</Label><div className="flex gap-2"><Input id="mysql-unlock-password" autoComplete="current-password" type={showPasswords ? 'text' : 'password'} value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void unlock() }}/><Button type="button" variant="outline" size="icon" onClick={() => setShowPasswords(v => !v)} aria-label={showPasswords ? 'پنهان‌کردن رمز' : 'نمایش رمز'}>{showPasswords ? <EyeOff size={15}/> : <Eye size={15}/>}</Button><Button onClick={() => void unlock()} disabled={!!busy}>{busy === 'unlock' ? <LoaderCircle size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}تأیید</Button></div>{error && <Alert className="border-rose-400/25"><AlertDescription>{error}</AlertDescription></Alert>}</CardContent></Card>}
+      </TabsContent>
+      <TabsContent value="postgres"><PostgresInventoryPanel/></TabsContent>
+    </Tabs>
+  </>
   return <>
-    <Heading title="مدیریت MySQL" description="سرویس پایگاه‌داده، کاتالوگ‌ها، حساب‌ها و اجرای مستقیم SQL را مدیریت کن." action={<Button size="sm" variant="outline" onClick={() => void refresh()} disabled={loading || !!busy}><RefreshCw size={14} className={loading ? 'animate-spin' : ''}/>بررسی وضعیت</Button>}/>
-    <PostgresInventoryPanel/>
+    <Heading title="مدیریت دیتابیس" description="مدیریت سرویس‌ها و داده‌های MySQL و PostgreSQL." action={<Button size="sm" variant="outline" onClick={() => void refresh()} disabled={loading || !!busy}><RefreshCw size={14} className={loading ? 'animate-spin' : ''}/>بررسی وضعیت MySQL</Button>}/>
+    <Tabs defaultValue="mysql" className="mt-5" dir="rtl">
+      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
+      <TabsContent value="mysql" className="mt-4 space-y-4">
     {mysqlApiUnavailable && <Alert className="mt-4 border-amber-300/25 bg-amber-300/[.05]"><AlertTriangle size={16} className="text-amber-200"/><AlertDescription>بخشی از API مدیریت MySQL در Node انتخاب‌شده در دسترس نیست (HTTP 404). برای فعال‌شدن همهٔ عملیات، نسخهٔ ARG آن Node را به‌روزرسانی کن.</AlertDescription></Alert>}
     {loading && !status ? <div className="grid gap-3 sm:grid-cols-3"><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/></div> : <div className="grid gap-3 sm:grid-cols-3">
       <Card><CardContent className="flex items-center gap-3 p-4"><Database className="text-primary"/><div><div className="font-semibold">وضعیت سرویس</div><Badge variant={status?.active ? 'success' : 'outline'} className="mt-2">{stateLabel}</Badge></div></CardContent></Card>
@@ -287,13 +310,26 @@ export function MysqlPage({ Heading, notify }: Common) {
           <div className="mt-5 space-y-3 border-t border-border/70 pt-4"><div className="text-sm font-semibold">بازنشانی رمز حساب MySQL</div><p className="text-xs leading-5 text-muted-foreground">رمز ذخیره‌شده قابل خواندن نیست؛ رمز تازه برای همان user@host تنظیم می‌شود.</p><div className="grid gap-2 sm:grid-cols-2"><Input value={resetUser} onChange={(event) => setResetUser(event.target.value)} placeholder="نام کاربر" dir="ltr"/><Input value={resetHost} onChange={(event) => setResetHost(event.target.value)} placeholder="Host حساب، مثلاً localhost یا 10.%" dir="ltr"/><Input value={newPassword} onChange={(event) => setNewPassword(event.target.value)} type={showPasswords ? 'text' : 'password'} placeholder="رمز جدید (حداقل 12 نویسه)" className="sm:col-span-2" autoComplete="new-password"/></div><Button variant="outline" onClick={() => void resetUserPassword()} disabled={!!busy}><KeyRound size={14}/>{busy === 'reset' ? 'در حال تغییر…' : 'تغییر رمز حساب'}</Button></div>
         </CardContent></Card>
         </TabsContent>
-        <TabsContent value="sql" className="grid items-start gap-4 xl:grid-cols-2">
-          <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><Play size={17} className="text-primary"/>کنسول SQL</CardTitle><CardDescription>دستورها مستقیماً به MySQL محلی فرستاده می‌شوند؛ بدون shell. خروجی حداکثر 1 MiB و زمان اجرا حداکثر 30 ثانیه است.</CardDescription></CardHeader><CardContent><div className="mb-3 grid gap-2 sm:grid-cols-[1fr_220px]"><div className="space-y-1.5"><Label htmlFor="mysql-database">دیتابیس هدف (اختیاری)</Label><Input id="mysql-database" value={database} onChange={(event) => setDatabase(event.target.value)} placeholder="مثلاً app_db" dir="ltr"/></div><div className="flex flex-wrap items-end gap-2"><Button size="sm" variant="outline" onClick={() => setSql('SHOW DATABASES;')}>SHOW DATABASES</Button><Button size="sm" variant="outline" onClick={() => setSql('SHOW TABLES;')}>SHOW TABLES</Button></div></div><Label htmlFor="mysql-sql">دستور SQL</Label><textarea id="mysql-sql" spellCheck={false} value={sql} onChange={(event) => setSql(event.target.value)} className="mt-2 min-h-[220px] w-full resize-y rounded-xl border border-border bg-[#090d12] p-4 text-left font-mono text-xs leading-6 text-foreground outline-none transition focus:border-primary/50" dir="ltr" placeholder="SELECT VERSION();"/><div className="mt-3 flex flex-wrap items-center justify-between gap-2"><span className="text-[11px] text-muted-foreground">دستورات مخرب تأیید جداگانه می‌خواهند؛ خروجی و رمزها در ARG ثبت نمی‌شوند.</span><Button onClick={() => void runSql()} disabled={!!busy || !sql.trim()}>{busy === 'sql' ? <><LoaderCircle size={15} className="animate-spin"/>در حال اجرا…</> : <><Play size={14}/>اجرای SQL</>}</Button></div>{busy === 'sql' && <div className="arg-apt-progress mt-3 h-1.5 w-full rounded-full bg-primary/70"/>}</CardContent></Card>
-          <Card><CardHeader><CardTitle className="flex items-center gap-2 text-base"><TerminalSquare size={17} className="text-primary"/>پریست‌ها و دستورهای سفارشی</CardTitle><CardDescription>دستورهای پرکاربردت را ذخیره کن تا بعداً در کنسول بازبینی و اجرا شوند. پریست خودش اجرا نمی‌شود.</CardDescription></CardHeader><CardContent>
-          <div className="flex flex-wrap gap-2">{presets.map((preset) => <div key={preset.id} className="flex items-center gap-1 rounded-lg border border-border/70 pl-1"><Button size="sm" variant="ghost" onClick={() => { setSql(preset.sql); setDatabase(preset.database || '') }}>{preset.title}</Button><Button size="icon" variant="ghost" className="h-7 w-7 text-rose-300" onClick={() => void deleteSqlPreset(preset.id)} title="حذف پریست"><Trash2 size={13}/></Button></div>)}{!presets.length && <span className="text-xs text-muted-foreground">هنوز پریست سفارشی نساخته‌ای.</span>}</div>
-          <div className="mt-4 flex flex-wrap gap-2"><Input value={presetTitle} onChange={(event) => setPresetTitle(event.target.value)} placeholder="نام پریست برای SQL فعلی" className="min-w-44 flex-1"/><Button size="sm" variant="outline" onClick={() => void saveSqlPreset()} disabled={!!busy || !presetTitle.trim() || !sql.trim()}><Save size={14}/>ذخیره SQL فعلی</Button></div>
-          <div className="mt-4 border-t border-border/70 pt-3"><p className="mb-2 text-xs font-medium">نمونه‌های آماده</p><div className="flex flex-wrap gap-2">{[['اتصال‌های فعال','SHOW FULL PROCESSLIST;'],['جدول‌های دیتابیس','SHOW TABLE STATUS;'],['وضعیت InnoDB','SHOW ENGINE INNODB STATUS;'],['تنظیمات جاری','SHOW GLOBAL VARIABLES;'],['نسخه و زمان','SELECT VERSION(), NOW();']].map(([title,statement]) => <Button key={title} size="sm" variant="outline" onClick={() => setSql(statement)}>{title}</Button>)}</div></div>
-        </CardContent></Card>
+        <TabsContent value="sql" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 text-base"><TerminalSquare size={17} className="text-primary"/>پریست‌ها و دستورهای سفارشی</CardTitle>
+              <CardDescription>اول دستور را از پریست انتخاب یا ذخیره کن؛ سپس پایین‌تر آن را در کنسول بازبینی و اجرا کن. انتخاب پریست هیچ دستوری را اجرا نمی‌کند.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex flex-wrap gap-2">{presets.map((preset) => <div key={preset.id} className="flex items-center gap-1 rounded-lg border border-border/70 pl-1"><Button size="sm" variant="ghost" onClick={() => { setSql(preset.sql); setDatabase(preset.database || '') }}>{preset.title}</Button><Button size="icon" variant="ghost" className="h-7 w-7 text-rose-300" onClick={() => void deleteSqlPreset(preset.id)} title="حذف پریست"><Trash2 size={13}/></Button></div>)}{!presets.length && <span className="text-xs text-muted-foreground">هنوز پریست سفارشی نساخته‌ای.</span>}</div>
+              <div className="mt-4 flex flex-wrap gap-2"><Input value={presetTitle} onChange={(event) => setPresetTitle(event.target.value)} placeholder="نام پریست برای SQL فعلی" className="min-w-44 flex-1"/><Button size="sm" variant="outline" onClick={() => void saveSqlPreset()} disabled={!!busy || !presetTitle.trim() || !sql.trim()}><Save size={14}/>ذخیره SQL فعلی</Button></div>
+              <div className="mt-4 border-t border-border/70 pt-3"><p className="mb-2 text-xs font-medium">نمونه‌های آماده</p><div className="flex flex-wrap gap-2">{[['اتصال‌های فعال','SHOW FULL PROCESSLIST;'],['جدول‌های دیتابیس','SHOW TABLE STATUS;'],['وضعیت InnoDB','SHOW ENGINE INNODB STATUS;'],['تنظیمات جاری','SHOW GLOBAL VARIABLES;'],['نسخه و زمان','SELECT VERSION(), NOW();']].map(([title,statement]) => <Button key={title} size="sm" variant="outline" onClick={() => setSql(statement)}>{title}</Button>)}</div></div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Play size={17} className="text-primary"/>کنسول SQL</CardTitle><CardDescription>دستورها مستقیماً به MySQL محلی فرستاده می‌شوند؛ بدون shell. خروجی حداکثر 1 MiB و زمان اجرا حداکثر 30 ثانیه است.</CardDescription></CardHeader>
+            <CardContent>
+              <div className="mb-3 grid gap-2 sm:grid-cols-[1fr_220px]"><div className="space-y-1.5"><Label htmlFor="mysql-database">دیتابیس هدف (اختیاری)</Label><Input id="mysql-database" value={database} onChange={(event) => setDatabase(event.target.value)} placeholder="مثلاً app_db" dir="ltr"/></div><div className="flex flex-wrap items-end gap-2"><Button size="sm" variant="outline" onClick={() => setSql('SHOW DATABASES;')}>SHOW DATABASES</Button><Button size="sm" variant="outline" onClick={() => setSql('SHOW TABLES;')}>SHOW TABLES</Button></div></div>
+              <Label htmlFor="mysql-sql">دستور SQL</Label><textarea id="mysql-sql" spellCheck={false} value={sql} onChange={(event) => setSql(event.target.value)} className="mt-2 min-h-[220px] w-full resize-y rounded-xl border border-border bg-[#090d12] p-4 text-left font-mono text-xs leading-6 text-foreground outline-none transition focus:border-primary/50" dir="ltr" placeholder="SELECT VERSION();"/>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2"><span className="text-[11px] text-muted-foreground">دستورات مخرب تأیید جداگانه می‌خواهند؛ خروجی و رمزها در ARG ثبت نمی‌شوند.</span><Button onClick={() => void runSql()} disabled={!!busy || !sql.trim()}>{busy === 'sql' ? <><LoaderCircle size={15} className="animate-spin"/>در حال اجرا…</> : <><Play size={14}/>اجرای SQL</>}</Button></div>{busy === 'sql' && <div className="arg-apt-progress mt-3 h-1.5 w-full rounded-full bg-primary/70"/>}
+            </CardContent>
+          </Card>
         </TabsContent>
         <TabsContent value="settings" className="space-y-4">
           <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><Gauge size={17} className="text-primary"/>آمار و تنظیمات سرور</CardTitle><CardDescription>خواندن متغیرهای runtime و تغییر allowlist امن؛ اعمال تنظیم‌ها ممکن است فقط تا restart برقرار باشد.</CardDescription></div><Button size="sm" variant="outline" onClick={() => void loadAdvanced()} disabled={advancedBusy || !!busy}><RefreshCw size={14} className={advancedBusy ? 'animate-spin' : ''}/>خواندن وضعیت</Button></div></CardHeader><CardContent>
@@ -308,6 +344,9 @@ export function MysqlPage({ Heading, notify }: Common) {
     {error && <Alert className="mt-4 border-rose-400/25 bg-rose-400/[.06]"><AlertTriangle size={16}/><AlertDescription>{error}</AlertDescription></Alert>}
     {output && <Card className="mt-4"><CardHeader className="pb-2"><CardTitle className="text-sm">نتیجهٔ عملیات</CardTitle></CardHeader><CardContent><pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-[#090d12] p-4 text-left font-mono text-xs leading-5 text-muted-foreground" dir="ltr">{output}</pre></CardContent></Card>}
     <p className="mt-5 text-[11px] leading-5 text-muted-foreground">رمز کاربران MySQL قابل بازیابی نیست؛ برای دسترسی مجدد از بخش بازنشانی رمز استفاده کن. رمز حساب داخلی ARG در فایل محافظت‌شدهٔ root ذخیره می‌شود و به رابط یا گزارش‌ها برنمی‌گردد.</p>
+      </TabsContent>
+      <TabsContent value="postgres" className="mt-4"><PostgresInventoryPanel/></TabsContent>
+    </Tabs>
     {confirmation && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) resolveConfirmation(false) }}>
       <section role="alertdialog" aria-modal="true" aria-labelledby="mysql-confirm-title" aria-describedby="mysql-confirm-description" className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-2xl">
         <div className="flex items-start gap-3"><div className="rounded-xl bg-amber-500/10 p-2 text-amber-400"><AlertTriangle size={18}/></div><div><h2 id="mysql-confirm-title" className="font-semibold">تأیید عملیات MySQL</h2><p id="mysql-confirm-description" className="mt-2 text-sm leading-6 text-muted-foreground">{confirmation}</p></div></div>
