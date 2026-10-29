@@ -1,5 +1,5 @@
 id,previous_category,current_category,new_location,content_type,translation_status,verification_status,related_feature,migration_action
-overview,شروع کار,Getting started,gettingStarted/overview,article,fa + en present,content review pending,overview,reorganized; source content retained
+overview,شروع کار,Getting started,gettingStarted/overview,article,fa + en present,fa + en reviewed 2026-10-29 against current README; Cargo versioning; and Federation scope,overview,updated task-first reading paths; Node and rollout capability limits
 install,شروع کار,Getting started,gettingStarted/install,article,fa + en present,content review pending,install,reorganized; source content retained
 cli,شروع کار,Getting started,gettingStarted/cli,article,fa + en present,content review pending,cli,reorganized; source content retained
 architecture,شروع کار,Developers & reference,reference/architecture,article,fa + en present,content review pending,architecture,reorganized; source content retained
@@ -192,6 +192,6 @@ laravel-runner,پلتفرم اپلیکیشن‌ها,Application platform,applica
 node-runner,پلتفرم اپلیکیشن‌ها,Application platform,applications/node-runner,article,fa + en present,content review pending,node,reorganized; source content retained
 static-and-ssr,پلتفرم اپلیکیشن‌ها,Application platform,applications/static-and-ssr,article,fa + en present,content review pending,static,reorganized; source content retained
 app-resources,پلتفرم اپلیکیشن‌ها,Application platform,applications/app-resources,article,fa + en present,content review pending,app,reorganized; source content retained
-deployment-jobs,پلتفرم اپلیکیشن‌ها,Application platform,applications/deployment-jobs,article,fa + en present,content review pending,deployment,reorganized; source content retained
+deployment-jobs,پلتفرم اپلیکیشن‌ها,Application platform,applications/deployment-jobs,article,fa + en present,fa + en reviewed 2026-10-29 against deploy form; worker; helper; and API,deployment,documented bounded pre-activation argv; durable output pagination; decoder regression; corrected stale scope claims
 maintenance,راهنمای نگهداری و بکاپ,Security & maintenance,security/maintenance,reference guide,fa + en present,"checked against MaintenancePage, maintenance API, Doctor, and service worker",maintenance,"consolidated backup/restore, repair, reboot, Doctor, removal, and offline shell guidance"
 cloudflare-dns,مدیریت DNS,Networking & websites,network/dnsProviders,operator guide,fa + en present,"checked against DnsPage, dns API, and encrypted credential vault",Cloudflare DNS,"new guide: scoped connection, zone validation, record operations, risks, and current limits"

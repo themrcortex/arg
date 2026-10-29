@@ -11,6 +11,9 @@
 - Persist Git and live Node install/build output per deployment Job, show it in a follow-tail process details dialog, and surface the underlying database cause when job status cannot be read or claimed.
 - Add ordered, custom pre-deploy commands for Git, directory and ZIP releases. Commands run as argv (without shell interpretation) in the resource-limited staging sandbox, and each command's live output is retained in the deployment Job.
 
+### Fixed
+- Decode the deployment Job `finished_at` SQLite integer with the correct Rust type so completed Job details do not fail during row decoding; cover both populated and `NULL` timestamps with a regression test.
+
 ## v0.7.2 — 2026-10-28
 
 ### Added

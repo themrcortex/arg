@@ -59,7 +59,7 @@ If a lock appears stale, check for a real process or systemd job before clearing
 
 The **main** branch tracks the stable line; **development** receives earlier changes and has higher regression risk. Use main in production. The selected branch is the updater's source for the next revision; inspect the fetched branch/commit and release notes after switching. Choose development only to test a specific fix and keep rollback available.
 
-**Fast update** keeps release artifacts and Rust dependency caches, then incrementally compiles ARG's application crate. Source-only updates are usually shorter, at the cost of disk space. The first Fast build after a **Full update**, an empty cache, or a `Cargo.lock` change can still take a long time while dependencies are compiled. Fast uses a lower optimization level for ARG's application crate; dependencies keep the normal Release profile. **Full update** clears the old cache, makes a fully optimized Release build, then removes the new cache. It takes longer but retains less build data. Retained `target` output can consume several GiB. Choose Full on low-disk hosts and Fast for frequent deployments with sufficient free space.
+**Fast update** keeps release artifacts and Rust dependency caches, then incrementally compiles ARG's application crate. Source-only updates are usually shorter, at the cost of disk space. The first Fast build after a **Complete update**, an empty cache, or a `Cargo.lock` change can still take a long time while dependencies are compiled. Fast uses a lower optimization level for ARG's application crate; dependencies keep the normal Release profile. **Complete update** clears the old cache, makes a fully optimized Release build, then removes the new cache. It takes longer but retains less build data. Retained `target` output can consume several GiB. Choose Full on low-disk hosts and Fast for frequent deployments with sufficient free space.
 
 ## Progress, cancel, and rollback
 
@@ -70,7 +70,7 @@ Distinguish Fetch, Compile, helper/file install, restart, and health check. Buil
 ### Safe release workflow
 
 1. Record current version and commit in Settings/About.
-2. Choose the branch and Fast/Full mode; check free disk and maintenance time.
+2. Choose the branch and Fast/Complete mode; check free disk and maintenance time.
 3. Enable Maintenance and create a backup if users are doing sensitive work.
 4. Start Update and follow Fetch/Build/Install/Health stages.
 5. Treat only success plus health check as completion; after the new UI loads, perform a cache-busting refresh.

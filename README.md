@@ -11,7 +11,7 @@ Manage Linux servers, services, websites, storage, and databases from a single w
 [![Platform](https://img.shields.io/badge/platform-Debian%20%7C%20Ubuntu-DEA574?style=flat-square&logo=linux&logoColor=white)](#requirements)
 [![Docs](https://img.shields.io/badge/docs-bilingual-DEA574?style=flat-square)](https://themrcortex.github.io/arg/)
 
-**Stable release:** `v0.6.8`
+**Stable release:** `v0.7.2`
 
 [Documentation](https://themrcortex.github.io/arg/) · [Report an issue](https://github.com/themrcortex/arg/issues) · [Maintainer](https://t.me/mrc0rtex)
 
@@ -19,7 +19,7 @@ Manage Linux servers, services, websites, storage, and databases from a single w
 
 ---
 
-ARG is a self-hosted control panel for administering a Linux VPS. A lightweight Rust service provides the API and privileged operations; the web interface is built with React and TypeScript. ARG is designed for direct administration of one server at a time.
+ARG is a self-hosted control panel for administering Linux VPSs. A lightweight Rust service provides the API and privileged operations; the web interface is built with React and TypeScript. Manage the local VPS directly, or securely pair compatible ARG Nodes and switch the active workspace to administer a remote server. Cross-server rollout plans remain previews; they do not run fleet-wide deployments.
 
 ## Contents
 
@@ -44,6 +44,8 @@ ARG is a self-hosted control panel for administering a Linux VPS. A lightweight 
 - **S3-compatible storage:** connect supported providers, browse objects, transfer files and folders, mount with Rclone, and scan bucket usage.
 - **MySQL and MariaDB:** inspect databases and users, run bounded SQL operations, and manage credentials.
 - **System administration:** manage APT packages and systemd services; use the web terminal, including a separately confirmed root terminal.
+- **Application management:** register projects and environments, deploy supported sources into retained releases, inspect deployment logs, configure implemented runtimes, and roll back code releases.
+- **Multi-server management:** pair ARG Nodes, inspect their health, switch server workspaces, and update eligible compatible Nodes through the controller. Availability depends on pairing compatibility and granted permissions.
 - **Panel administration:** manage accounts, sessions, audit history, and ARG backup and restore operations.
 - **Installer and service manager:** install, repair, update, cancel an update, roll back, configure TLS, and uninstall ARG.
 
