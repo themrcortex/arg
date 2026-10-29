@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.6-dev.1 — 2026-10-29
+
+### Development
+- Development prerelease based on stable v0.7.5; it includes the faster, cache-stable Rust updater.
+
 ## v0.7.5 — 2026-10-29
 
 ### Fixed
