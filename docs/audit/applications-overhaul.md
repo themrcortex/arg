@@ -80,6 +80,27 @@ No P0/P1 security exploit was established by this phase. The points above must n
 - Impact: do not claim the requested Native PHP deployment matrix case is supported end to end.
 - Plan: add a PHP-FPM adapter with a non-root identity, shared-storage policy and Nginx validation only after its lifecycle/rollback behavior can be integration-tested on a disposable host.
 
+### APP-006 — Private repository support is limited to GitHub SSH Deploy Keys
+
+- Severity: P1 / High product gap
+- Status: CONFIRMED
+- Confidence: high
+- Location: `src/deploy.rs`, `src/ssh_keys.rs`, `frontend/src/ApplicationsPage.tsx`
+- Evidence: public HTTPS URLs are allowlisted for GitHub, GitLab, Bitbucket and Codeberg; private SSH URLs and host-key retrieval are restricted to GitHub. There is no encrypted Git-token credential vault, provider OAuth integration, webhook secret/replay handler, push-to-deploy, or auto-deploy branch policy.
+- Existing protections: SSH key files are restricted to owner-only permissions; Deploy Keys are repository-bound and may be application-bound; host keys are fetched over HTTPS and checked by OpenSSH; the public key must be explicitly installed by an administrator.
+- Tests: the phase 5 security regression checks that a Deploy Key cannot cross its repository or application binding.
+- Plan: add provider credential types only with a secret-vault-backed lifecycle, provider-specific host verification, revocation and audit behavior. Do not put credentials in Git URLs or job logs.
+
+### APP-007 — Custom deployment pipeline covers fewer stages than the requested pipeline model
+
+- Severity: P1 / High product gap
+- Status: CONFIRMED
+- Confidence: high
+- Location: `src/deploy.rs`, `src/node.rs`
+- Evidence: the current source deployment has runtime-specific install/build work and up to eight custom argv-only pre-deploy commands. It does not persist independently configurable pre-build, post-build, post-deploy, migration policy, per-step retry policy or command-specific timeouts. Node build and custom commands use a bounded systemd sandbox (2 GiB memory, 200% CPU, 20 minutes) and deployment logs are bounded/redacted.
+- Impact: the existing pre-deploy editor is not the full ten-stage command pipeline requested in the spec.
+- Plan: evolve the existing job-step schema additively, validate each command at enqueue time, use an allowlisted runtime adapter, and preserve the active release on failure.
+
 ## Reusable components
 
 - Existing `applications`/`application_services` registry and additive migrations.
@@ -139,3 +160,26 @@ Native PHP execution, complete framework-specific adapters, and a create-applica
 | Actual systemd, Nginx, SSL and service health | Blocked | No disposable VPS was available; production hosts were not contacted or modified. |
 
 The project-root field uses the existing bounded relative-directory API. The selected path is stored with the Build Plan and remains analysis-only. No runtime deployment was triggered by these tests.
+
+## Phase 5 and 6 review
+
+### Phase 5 — Source and Git
+
+Existing source methods are Git, ZIP archive and a restricted VPS directory. Public HTTPS Git supports four allowlisted providers; private Git supports GitHub SSH Deploy Keys only. Branch, tag or commit is entered as a bounded reference string and the fetched commit is recorded. Archive imports cap upload size at 256 MiB, expanded release size at 2 GiB and entries at 20,000; ZIP slip, symlinks and special files are rejected. Existing deploy key files and host-key cache use restrictive file modes and key/repository/app scoping.
+
+There is no webhook/push-to-deploy, auto-deploy policy, repository history/diff browser, provider token manager or support for private GitLab/Bitbucket/Codeberg. These are open APP-006 work; no mock buttons were added.
+
+### Phase 6 — Build and custom commands
+
+Node install/build is selected from a supported lockfile and runs in a systemd transient unit with `DynamicUser`, `ProtectSystem=strict`, `ProtectHome`, `NoNewPrivileges`, bounded memory/CPU/tasks/runtime, and no application secrets in the build environment. The pre-deploy command editor tokenizes into argv and does not invoke a shell; it is bounded to eight commands, 512 bytes each, 4 KiB total and 32 argv entries. Build and deploy output has bounded retention and common credential redaction.
+
+The requested complete multi-stage configurable pipeline remains blocked by APP-007. Do not claim custom pre-deploy is equivalent to pre-build/post-build/post-deploy lifecycle hooks.
+
+### Quality Gate 3 (phases 5 and 6)
+
+| Check | Result | Evidence |
+|---|---|---|
+| SSH key scope regression | Pass | `deploy_keys_are_bound_to_their_repository_and_application` rejects both cross-app and cross-repository reuse. |
+| Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, and `cargo test --locked`; 277 tests passed. |
+| Frontend TypeScript/offline tests/build | Pass | TypeScript check, 10 offline tests and production build all passed. |
+| Real provider clone, sandboxed build, timeout/cancel on systemd | Blocked | No disposable VPS and no isolated fake Git provider were available. No external repository was contacted. |

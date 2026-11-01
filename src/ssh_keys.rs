@@ -746,6 +746,31 @@ mod tests {
     }
 
     #[test]
+    fn deploy_keys_are_bound_to_their_repository_and_application() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY);")
+            .unwrap();
+        migrate(&db).unwrap();
+        db.execute("INSERT INTO applications(id) VALUES('app-a')", [])
+            .unwrap();
+        let key_id = "0123456789abcdef0123456789abcdef";
+        let repository = "git@github.com:org/project.git";
+        db.execute(
+            "INSERT INTO ssh_keys(id,name,purpose,repository,application_id,public_key,fingerprint,created_at) VALUES(?1,'Deploy','deploy',?2,'app-a','ssh-ed25519 AAAA test','SHA256:test',1)",
+            params![key_id, repository],
+        )
+        .unwrap();
+
+        let wrong_app = validate_key_for_deployment(&db, "app-b", repository, key_id)
+            .expect_err("a deploy key must not cross application boundaries");
+        assert!(wrong_app.contains("مخزن یا اپلیکیشن دیگری"));
+        let wrong_repository =
+            validate_key_for_deployment(&db, "app-a", "git@github.com:org/other.git", key_id)
+                .expect_err("a deploy key must remain bound to its original repository");
+        assert!(wrong_repository.contains("مخزن یا اپلیکیشن دیگری"));
+    }
+
+    #[test]
     fn migration_is_idempotent_and_unlinks_deleted_applications() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE applications(id TEXT PRIMARY KEY);")
