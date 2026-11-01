@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.7.8-dev.4 — 2026-11-01
+
+### Development
+- Harden application metadata, deployment planning, deploy-key scope, service recovery, environment-file updates, Laravel release workers, and runtime log redaction.
+- Preserve the selected application detail tab across refreshes and direct links.
+- Add regression coverage and an application deployment readiness audit.
+
 ## v0.7.8-dev.3 — 2026-10-29
 
 ### Development
