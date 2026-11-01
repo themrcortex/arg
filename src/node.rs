@@ -619,20 +619,62 @@ fn read_environment(path: &FsPath) -> Vec<(String, String)> {
         return Vec::new();
     }
     fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| parse_environment_contents(&contents).ok())
+        .map(|values| values.into_iter().collect())
         .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let line = line.strip_prefix("export ").unwrap_or(line);
-            let (name, raw) = line.split_once('=')?;
-            let name = name.trim();
-            if !valid_env_name(name) {
-                return None;
-            }
-            let value = unescape_environment_value(raw.trim().trim_matches('"'));
-            Some((name.to_owned(), value))
-        })
-        .collect()
+}
+
+fn read_environment_for_update(path: &FsPath) -> Result<BTreeMap<String, String>, String> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(error) => Err(format!("Could not inspect the environment file: {error}")),
+        Ok(metadata)
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > 1024 * 1024 =>
+        {
+            Err("Environment file must be a regular file no larger than 1 MiB".into())
+        }
+        Ok(_) => {
+            let contents = fs::read_to_string(path)
+                .map_err(|error| format!("Environment file cannot be read safely: {error}"))?;
+            parse_environment_contents(&contents)
+        }
+    }
+}
+
+fn parse_environment_contents(contents: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut values = BTreeMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (name, raw) = line
+            .split_once('=')
+            .ok_or_else(|| "Environment file contains a line without '='".to_owned())?;
+        let name = name.trim();
+        if !valid_env_name(name) {
+            return Err("Environment file contains an invalid variable name".into());
+        }
+        values.insert(name.to_owned(), decode_environment_value(raw));
+    }
+    Ok(values)
+}
+
+fn decode_environment_value(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
+        return raw[1..raw.len() - 1].to_owned();
+    }
+    let raw = if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        &raw[1..raw.len() - 1]
+    } else {
+        raw
+    };
+    unescape_environment_value(raw)
 }
 
 fn unescape_environment_value(raw: &str) -> String {
@@ -665,9 +707,7 @@ fn write_environment(
     {
         return Err("فایل محیط symlink است یا از سقف ۱ MiB بیشتر است.".into());
     }
-    let mut current = read_environment(path)
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
+    let mut current = read_environment_for_update(path)?;
     for (name, value) in variables {
         if !valid_env_name(name)
             || value.len() > 8192
@@ -3625,6 +3665,42 @@ mod tests {
         values.insert("A".into(), "one\ntwo".into());
         assert!(write_environment(&root, &values, "unused-test-group").is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn node_environment_parser_decodes_quotes_and_preserves_equals_in_values() {
+        let values = parse_environment_contents(
+            r#"# persisted app environment
+SINGLE='value with spaces and ='
+DOUBLE="say \"hello\" and \$HOME"
+UNQUOTED=https://example.test/path?a=b
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(values["SINGLE"], "value with spaces and =");
+        assert_eq!(values["DOUBLE"], "say \"hello\" and $HOME");
+        assert_eq!(values["UNQUOTED"], "https://example.test/path?a=b");
+    }
+
+    #[test]
+    fn node_environment_update_refuses_to_replace_unreadable_or_malformed_files() {
+        let root = std::env::temp_dir().join(format!("arg-node-env-invalid-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(".env");
+        let invalid_utf8 = b"DB_PASSWORD=secret\n\xff";
+        fs::write(&path, invalid_utf8).unwrap();
+
+        assert!(read_environment_for_update(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), invalid_utf8);
+
+        fs::write(&path, "DB_PASSWORD=secret\nmalformed-line\n").unwrap();
+        assert!(read_environment_for_update(&path).is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "DB_PASSWORD=secret\nmalformed-line\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

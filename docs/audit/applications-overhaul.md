@@ -44,11 +44,11 @@
 
 ### APP-002 — Application environments are not execution isolation boundaries
 
-- Severity: P1 / High product limitation; no exploit established
-- Status: AUDIT_REQUIRED
+- Severity: P1 / High product gap; no exploit established
+- Status: CONFIRMED
 - Evidence: app records can be assigned to workspace environment IDs, while deployment and runtime ownership/configuration are still primarily keyed by application ID. Existing wording in the UI says environment assignment does not copy or isolate configuration.
 - Impact: do not represent the current environment selector as independent Production/Staging secrets, processes, domains or deployment histories.
-- Plan: retain existing IDs and defaults; introduce only additive environment-scoped records after cross-module ownership and cleanup rules are specified and migration-tested.
+- Plan: retain existing IDs and defaults; introduce only additive environment-scoped records after cross-module ownership and cleanup rules are specified and migration-tested. The Phase 9/10 review confirmed no environment-scoped runtime or secret store is wired into deployment.
 
 ### APP-003 — Queue/process robustness needs deployment-specific integration validation
 
@@ -122,6 +122,17 @@ No P0/P1 security exploit was established by this phase. The points above must n
 - Implemented: each atomic replacement now uses a `create_new` temporary name with a per-write random suffix; cleanup behavior on write or rename failure remains intact.
 - Test: `node_unit_write_ignores_stale_pid_only_temp_files` leaves the previous naming scheme's temp file in place and verifies that a fresh unit write succeeds without modifying it.
 - Remaining risk: systemd acceptance and live process health still require an isolated host.
+
+### APP-010 — Environment updates could misread existing values or silently discard a damaged file
+
+- Severity: P2 / Medium
+- Status: CONFIRMED; fixed
+- Confidence: high
+- Location: `src/node.rs`, `read_environment`/`write_environment`; `src/laravel.rs`, environment update and APP_KEY generation
+- Evidence: Node parsing removed double quotes but left single quotes as part of the value. Both runtime paths treated failed UTF-8 reads or malformed lines as an empty environment during updates, so a later edit could rewrite a partial file and drop existing values.
+- Implemented: Node environment parsing now decodes single- and double-quoted values and preserves `=` in values. Node and Laravel updates use a bounded, strict reader that rejects invalid UTF-8, malformed lines, invalid names and oversized files before any rewrite. Laravel APP_KEY generation uses the same fail-closed reader.
+- Tests: Node quote/equal parsing and malformed-file rejection; Laravel single-quoted/export parsing and corrupted-file rejection. The test verifies original bytes remain unchanged on parse failure.
+- Remaining risk: ENV values remain plain text in VPS-local files (Node 0600 with the service's access group; Laravel 0600), not encrypted at rest. There is an encrypted ARG vault primitive, but application environment management does not use it (`features.environment_secrets=false`). Adding encrypted persistence requires a tested key/decryption lifecycle for systemd/runtime processes and backup/restore.
 
 ## Reusable components
 
@@ -230,3 +241,30 @@ No VPS, ACME server, DNS zone or live certificate was contacted. Certbot issuanc
 | Frontend offline tests | Pass | 10 tests passed. |
 | Frontend production build | Pass | Vite production build completed; the existing >500 kB main-chunk advisory remains. |
 | Live systemd, Nginx, DNS, ACME, renewal and HTTPS | Blocked | No isolated VPS is attached; no production host or live provider was changed or contacted. |
+
+## Phase 9 and 10 review
+
+### Phase 9 — Environment variables and secret handling
+
+Node and Laravel store each app's persistent environment in a per-app `shared/.env` file, enforce size/key/value bounds, use atomic replacement, restrict mode, avoid returning values, and redact common secret assignments in operation logs. Laravel's APP_KEY generation is one-time and now refuses to edit a file it cannot parse safely. Node runtime loads its environment from the app's shared file; browser-build variables are separately restricted to public prefixes.
+
+The phase found and fixed APP-010: parse existing single-quoted values correctly and reject unreadable/corrupt environment files before saving so a routine update cannot silently erase unrelated values.
+
+Application ENV is not encrypted at rest and does not have history/restore or compare support. `secret_vault` is not integrated with app ENV. A transparent migration to encrypted-at-rest secrets is deferred until runtime decryption, systemd credentials, backup/restore and key rotation can be tested together; plaintext values are not copied into the database.
+
+### Phase 10 — Production/Staging isolation
+
+Projects and environments are persistent workspace metadata, seeded additively, with ownership and protected-default constraints. Applications can be assigned to an environment, but deployment job, release, environment file, process, port and domain ownership remain keyed to the application. Therefore Production/Staging do not have isolated runtime state and environment labels must not be presented as an isolation boundary. APP-002 is confirmed as a product gap. No schema change was made because a safe backfill requires an environment-to-runtime mapping and independent persistent storage.
+
+Promotion, per-environment domains/ports/secrets, DB/queue/storage isolation, staging auth and independent rollback are not complete. No UI capability is claimed for these behaviors.
+
+### Quality Gate 5 (phases 9 and 10)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Targeted environment regressions | Pass | Quote/equal parsing, invalid UTF-8, malformed lines, and fail-closed preservation tests for Node and Laravel. |
+| Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, `cargo test --locked`; 284 tests passed. |
+| Frontend TypeScript | Pass | `npm run check`. |
+| Frontend offline tests | Pass | 10 tests passed. |
+| Frontend production build | Pass | Vite build completed; existing >500 kB main-chunk advisory remains. |
+| Database migration and isolated environment runtime checks | Partial/Blocked | No schema migration was introduced. Full production/staging lifecycle, encrypted secret delivery and key recovery need an isolated VPS and were not claimed as verified. |

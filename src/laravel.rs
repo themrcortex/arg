@@ -1726,6 +1726,43 @@ fn read_environment(path: &FsPath) -> BTreeMap<String, String> {
         .collect()
 }
 
+fn read_environment_for_update(path: &FsPath) -> io::Result<BTreeMap<String, String>> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error),
+    };
+    if contents.len() > 64 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Laravel environment exceeds 64 KiB",
+        ));
+    }
+    let mut values = BTreeMap::new();
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (name, value) = line.split_once('=').ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Laravel environment contains a line without '='",
+            )
+        })?;
+        let name = name.trim();
+        if !valid_env_name(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Laravel environment contains an invalid variable name",
+            ));
+        }
+        values.insert(name.to_owned(), decode_env_value(value));
+    }
+    Ok(values)
+}
+
 fn encode_env_value(value: &str) -> String {
     if !value.is_empty()
         && value
@@ -1986,7 +2023,12 @@ pub(super) async fn save_environment(
         let _ = active_release(&app_id)?;
         (actor, environment_path(&app_id)?)
     };
-    let mut values = read_environment(&path);
+    let mut values = read_environment_for_update(&path).map_err(|error_value| {
+        error(
+            StatusCode::CONFLICT,
+            &format!("فایل محیط Laravel قابل‌خواندن امن نیست و برای جلوگیری از حذف تنظیمات ذخیره نشد: {error_value}"),
+        )
+    })?;
     let changed_keys = input.variables.keys().cloned().collect::<Vec<_>>();
     values.extend(input.variables);
     save_environment_file(&path, &values).map_err(|error_value| {
@@ -2033,7 +2075,12 @@ pub(super) async fn generate_key(
         let _ = active_release(&app_id)?;
         (actor, environment_path(&app_id)?)
     };
-    let mut values = read_environment(&path);
+    let mut values = read_environment_for_update(&path).map_err(|error_value| {
+        error(
+            StatusCode::CONFLICT,
+            &format!("فایل محیط Laravel قابل‌خواندن امن نیست و APP_KEY تغییر نکرد: {error_value}"),
+        )
+    })?;
     if values.get("APP_KEY").is_some_and(|value| !value.is_empty()) {
         return Err(error(
             StatusCode::CONFLICT,
@@ -2569,6 +2616,43 @@ mod tests {
         assert!(!valid_env_name("LD_PRELOAD"));
         assert!(!valid_env_name("lowercase"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn environment_updates_reject_corrupt_existing_files_without_discarding_values() {
+        let root = std::env::temp_dir().join(format!("arg-laravel-env-corrupt-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(".env");
+        let original = b"DB_PASSWORD=secret\n\xff";
+        fs::write(&path, original).unwrap();
+
+        assert!(read_environment_for_update(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        fs::write(&path, "DB_PASSWORD=secret\nmalformed-line\n").unwrap();
+        assert!(read_environment_for_update(&path).is_err());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "DB_PASSWORD=secret\nmalformed-line\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn environment_update_parser_keeps_single_quoted_and_equals_values() {
+        let root = std::env::temp_dir().join(format!("arg-laravel-env-parse-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join(".env");
+        fs::write(
+            &path,
+            "# existing settings\nexport DB_USERNAME='service user'\nDB_PASSWORD=a=b=c\n",
+        )
+        .unwrap();
+
+        let values = read_environment_for_update(&path).unwrap();
+        assert_eq!(values["DB_USERNAME"], "service user");
+        assert_eq!(values["DB_PASSWORD"], "a=b=c");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
