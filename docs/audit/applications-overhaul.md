@@ -134,6 +134,27 @@ No P0/P1 security exploit was established by this phase. The points above must n
 - Tests: Node quote/equal parsing and malformed-file rejection; Laravel single-quoted/export parsing and corrupted-file rejection. The test verifies original bytes remain unchanged on parse failure.
 - Remaining risk: ENV values remain plain text in VPS-local files (Node 0600 with the service's access group; Laravel 0600), not encrypted at rest. There is an encrypted ARG vault primitive, but application environment management does not use it (`features.environment_secrets=false`). Adding encrypted persistence requires a tested key/decryption lifecycle for systemd/runtime processes and backup/restore.
 
+### APP-011 — Laravel managed workers remained pinned to an older release after deployment
+
+- Severity: P1 / High
+- Status: CONFIRMED; fixed
+- Confidence: high
+- Location: `src/laravel.rs`, Laravel service unit generation and `laravel_refresh_services_helper`; `src/deploy.rs`, `refresh_laravel_runtime`
+- Evidence: generated units used the canonical `releases/<id>` path as `WorkingDirectory`. Deployment changed the app's `current` symlink and restarted active units, but the unit still started Artisan from the old release.
+- Implemented: Laravel worker units now use the stable app `current` path for working directory and writable cache. During deploy, the helper validates the active release, regenerates ARG-owned service units for the selected PHP runtime, reloads systemd and restarts active workers. Failed unit refresh restores the previous unit and reports any recovery failure.
+- Tests: unit rendering asserts no release ID is embedded; a legacy release-pinned unit is migrated to `current` and active workers restart; a failed restart restores the previous unit.
+- Remaining risk: actual systemd re-resolution of the symlink, process shutdown and Laravel worker behavior require a disposable VPS.
+
+### APP-012 — Worker management is Laravel-specific and has no generic jobs supervisor
+
+- Severity: P1 / High product gap
+- Status: CONFIRMED
+- Confidence: high
+- Location: `src/laravel.rs`, Laravel service endpoints; application UI service controls
+- Evidence: persistent services are limited to fixed Laravel Queue, Scheduler, Horizon, Reverb and Octane commands. There is no arbitrary per-app worker definition, replica control, retry/backoff editor, cron history, scheduler job history, or generic runtime worker supervisor.
+- Impact: do not claim that arbitrary Node/Python/custom worker processes or per-worker advanced settings are managed.
+- Plan: add an additive, app-scoped managed-process schema and helper capabilities after ownership, resource policy, log retention and deletion/recovery behavior are integration-tested. Existing Laravel units remain supported.
+
 ## Reusable components
 
 - Existing `applications`/`application_services` registry and additive migrations.
@@ -268,3 +289,28 @@ Promotion, per-environment domains/ports/secrets, DB/queue/storage isolation, st
 | Frontend offline tests | Pass | 10 tests passed. |
 | Frontend production build | Pass | Vite build completed; existing >500 kB main-chunk advisory remains. |
 | Database migration and isolated environment runtime checks | Partial/Blocked | No schema migration was introduced. Full production/staging lifecycle, encrypted secret delivery and key recovery need an isolated VPS and were not claimed as verified. |
+
+## Phase 11 and 12 review
+
+### Phase 11 — Laravel deployment runner
+
+The current Laravel adapter detects Laravel, validates the PHP/Composer runtime, installs dependencies from `composer.lock` without Composer plugins/scripts, preserves `.env` and storage outside releases, checks the `public` document root, manages PHP-FPM/Nginx through the restricted helper, supports fixed Artisan operations and requires explicit confirmation for migrations. Migration is not silently run as part of deployment; rollback of code does not roll back a database migration.
+
+The phase found and fixed APP-011: Laravel workers now follow the new `current` release after every deploy, including migration of previously generated pinned-path unit files. Unit replacement is atomic and recovers the prior unit when reload/restart fails.
+
+Automatic migration policy/preflight, schema compatibility detection, failed migration recovery UI, Horizon-specific integration tests and live PHP-FPM validation are not complete. These stay explicit limitations rather than implicit deploy behavior.
+
+### Phase 12 — Persistent workers and jobs
+
+Laravel Queue, Scheduler, Horizon, Reverb and Octane can be represented by independent ARG-owned systemd units and run independently of the browser. Queue and Horizon are prevented from being enabled simultaneously. Existing units restart after release changes and are deleted only through ownership-scoped cleanup. APP-012 records the boundary: the system has no generic worker/cron model, replica/backoff controls, persistent per-run scheduler history or arbitrary runtime workers. Service logs and process lifecycle need real host verification.
+
+### Quality Gate 6 (phases 11 and 12)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Targeted worker refresh regressions | Pass | Stable `current` unit rendering; legacy unit migration/restart; restoration of the previous unit after a failed restart. |
+| Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, `cargo test --locked`; 287 tests passed. |
+| Frontend TypeScript | Pass | `npm run check`. |
+| Frontend offline tests | Pass | 10 tests passed. |
+| Frontend production build | Pass | Vite build completed; existing >500 kB main-chunk advisory remains. |
+| Real Laravel, systemd, PHP-FPM, queue and server-restart scenarios | Blocked | No disposable PHP/systemd host is attached. The local tests exercise unit generation/recovery only, not OS behavior. |

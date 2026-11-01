@@ -2236,8 +2236,7 @@ async fn refresh_laravel_runtime(
             nginx_snapshot = Some((name.to_owned(), content.to_owned()));
         }
     }
-    let response =
-        privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id}))
+    let response = privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id,"runtime_version":runtime_version}))
             .await
             .map_err(|_| {
                 "ارتباط با helper برای راه‌اندازی مجدد سرویس‌های Laravel برقرار نشد.".to_owned()

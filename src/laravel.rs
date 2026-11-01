@@ -1267,7 +1267,7 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
         ));
     }
     let command = laravel_service_command(service, port)?;
-    let unit = format!("# ARG managed Laravel service app={app_id} kind={service}\n[Unit]\nDescription=ARG Laravel {service} for app {short}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=arg\nGroup=arg\nWorkingDirectory={}\nExecStart={} artisan {command}\nRestart=on-failure\nRestartSec=5s\nKillSignal=SIGTERM\nTimeoutStopSec=120s\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectHome=read-only\nProtectSystem=strict\nReadWritePaths={} {}\nUMask=0027\n\n[Install]\nWantedBy=multi-user.target\n",current.display(),php.display(),root.join("shared/storage").display(),current.join("bootstrap/cache").display());
+    let unit = render_laravel_service_unit(app_id, service, &root, &php, &command)?;
     let was_enabled = systemd_unit_enabled(&unit_name);
     atomic_write(&unit_path, unit.as_bytes(), 0o644)?;
     if let Err(error) = helper_output("systemctl", &["daemon-reload"])
@@ -1442,6 +1442,23 @@ fn laravel_refresh_services_helper(request: &Value) -> Result<Value, String> {
     if !valid_app_id(app_id) {
         return Err("شناسهٔ اپلیکیشن معتبر نیست.".into());
     }
+    let runtime_version = request["runtime_version"]
+        .as_str()
+        .filter(|value| *value == "system" || valid_runtime_version(value))
+        .ok_or("نسخهٔ PHP برای به‌روزرسانی سرویس‌ها معتبر نیست.")?;
+    let root = deployment_root().join("apps").join(app_id);
+    let releases = root
+        .join("releases")
+        .canonicalize()
+        .map_err(|_| "پوشهٔ releaseهای Laravel پیدا نشد.")?;
+    let current = root
+        .join("current")
+        .canonicalize()
+        .map_err(|_| "release فعال Laravel پیدا نشد.")?;
+    if !current.starts_with(&releases) || !current.join("artisan").is_file() {
+        return Err("release فعال Laravel خارج از محدوده یا ناقص است.".into());
+    }
+    let php = php_binary(runtime_version)?;
     let short = &app_id[..8];
     let mut restarted = Vec::new();
     for service in ["queue", "scheduler", "horizon", "reverb", "octane"] {
@@ -1451,17 +1468,105 @@ fn laravel_refresh_services_helper(request: &Value) -> Result<Value, String> {
         let owned = fs::read_to_string(&path)
             .ok()
             .is_some_and(|content| content.starts_with(&marker));
-        if !owned || systemd_unit_state(&unit) != "active" {
+        if !owned {
             continue;
         }
-        helper_output("systemctl", &["restart", &unit]).map_err(|error| {
-            format!("Restart سرویس {service} پس از استقرار ناموفق بود: {error}")
+        let previous =
+            fs::read(&path).map_err(|error| format!("فایل سرویس {service} خوانده نشد: {error}"))?;
+        let was_active = systemd_unit_state(&unit) == "active";
+        let was_enabled = systemd_unit_enabled(&unit);
+        let command = laravel_service_command(service, laravel_service_port(app_id, service))?;
+        let replacement = render_laravel_service_unit(app_id, service, &root, &php, &command)?;
+        apply_laravel_service_unit(
+            &path,
+            &previous,
+            &unit,
+            &replacement,
+            was_enabled,
+            was_active,
+            |args| helper_output("systemctl", args),
+        )
+        .map_err(|error| {
+            format!("به‌روزرسانی یا restart سرویس {service} پس از استقرار ناموفق بود: {error}")
         })?;
-        restarted.push(service);
+        if was_active {
+            restarted.push(service);
+        }
     }
     Ok(
         json!({"restarted":restarted,"message":"سرویس‌های فعال Laravel پس از جابه‌جایی release دوباره بارگذاری شدند."}),
     )
+}
+
+fn render_laravel_service_unit(
+    app_id: &str,
+    service: &str,
+    root: &FsPath,
+    php: &FsPath,
+    command: &str,
+) -> Result<String, String> {
+    if !valid_app_id(app_id)
+        || !["queue", "scheduler", "horizon", "reverb", "octane"].contains(&service)
+        || !valid_managed_path(root)
+        || !valid_managed_path(php)
+        || command.is_empty()
+        || !command
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b" :_=-".contains(&byte))
+    {
+        return Err("پارامترهای سرویس Laravel برای ساخت unit معتبر نیستند.".into());
+    }
+    let short = &app_id[..8];
+    let current = root.join("current");
+    let storage = root.join("shared/storage");
+    let cache = current.join("bootstrap/cache");
+    if ![current.as_path(), storage.as_path(), cache.as_path()]
+        .iter()
+        .all(|path| valid_managed_path(path))
+    {
+        return Err("مسیرهای سرویس Laravel برای systemd معتبر نیستند.".into());
+    }
+    Ok(format!("# ARG managed Laravel service app={app_id} kind={service}\n[Unit]\nDescription=ARG Laravel {service} for app {short}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=arg\nGroup=arg\nWorkingDirectory={}\nExecStart={} artisan {command}\nRestart=on-failure\nRestartSec=5s\nKillSignal=SIGTERM\nTimeoutStopSec=120s\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectHome=read-only\nProtectSystem=strict\nReadWritePaths={} {}\nUMask=0027\n\n[Install]\nWantedBy=multi-user.target\n",current.display(),php.display(),storage.display(),cache.display()))
+}
+
+fn apply_laravel_service_unit<F>(
+    path: &FsPath,
+    previous: &[u8],
+    unit: &str,
+    replacement: &str,
+    was_enabled: bool,
+    was_active: bool,
+    mut systemctl: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[&str]) -> Result<String, String>,
+{
+    atomic_write(path, replacement.as_bytes(), 0o644)?;
+    let apply = systemctl(&["daemon-reload"]).and_then(|_| {
+        if was_active {
+            systemctl(&["restart", unit]).map(|_| ())
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = apply {
+        let recovery = restore_service_unit_with(
+            path,
+            Some(previous),
+            unit,
+            was_enabled,
+            was_active,
+            &mut systemctl,
+        );
+        return Err(format!(
+            "{error}{}",
+            recovery
+                .err()
+                .map(|problem| format!("; previous unit recovery failed: {problem}"))
+                .unwrap_or_default()
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value {
@@ -2842,6 +2947,97 @@ mod tests {
         assert_eq!(reverb, laravel_service_port(app_id, "reverb").unwrap());
         assert_ne!(reverb, octane);
         assert_eq!(laravel_service_port(app_id, "queue"), None);
+    }
+
+    #[test]
+    fn laravel_service_units_follow_the_stable_current_release_pointer() {
+        let app_id = "12345678-1234-4234-8234-123456789abc";
+        let root = PathBuf::from(format!("/var/lib/arg/deployments/apps/{app_id}"));
+        let unit = render_laravel_service_unit(
+            app_id,
+            "queue",
+            &root,
+            FsPath::new("/usr/bin/php8.3"),
+            &laravel_service_command("queue", None).unwrap(),
+        )
+        .unwrap();
+
+        assert!(unit.contains(&format!("WorkingDirectory={}/current\n", root.display())));
+        assert!(unit.contains(&format!(
+            "ReadWritePaths={}/shared/storage {}/current/bootstrap/cache\n",
+            root.display(),
+            root.display()
+        )));
+        assert!(unit.contains(
+            "ExecStart=/usr/bin/php8.3 artisan queue:work --sleep=3 --tries=3 --timeout=90 --no-interaction"
+        ));
+        assert!(!unit.contains("/releases/"));
+    }
+
+    #[test]
+    fn deployment_refresh_migrates_legacy_service_units_and_restarts_active_workers() {
+        let root = std::env::temp_dir().join(format!("arg-laravel-unit-refresh-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("arg-app-test-queue.service");
+        let app_root =
+            FsPath::new("/var/lib/arg/deployments/apps/12345678-1234-4234-8234-123456789abc");
+        let unit = "arg-app-12345678-queue.service";
+        let previous = format!(
+            "# old\nWorkingDirectory={}/releases/old\n",
+            app_root.display()
+        );
+        let replacement = format!("# new\nWorkingDirectory={}/current\n", app_root.display());
+        fs::write(&path, previous.as_bytes()).unwrap();
+        let mut calls = Vec::new();
+
+        apply_laravel_service_unit(
+            &path,
+            previous.as_bytes(),
+            unit,
+            &replacement,
+            true,
+            true,
+            |args| {
+                calls.push(args.join(" "));
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), replacement);
+        assert_eq!(
+            calls,
+            ["daemon-reload", "restart arg-app-12345678-queue.service"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deployment_refresh_restores_previous_unit_when_worker_restart_fails() {
+        let root = std::env::temp_dir().join(format!("arg-laravel-unit-refresh-fail-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("arg-app-test-queue.service");
+        let unit = "arg-app-12345678-queue.service";
+        let previous = b"# previous unit\nWorkingDirectory=/var/lib/arg/releases/old\n";
+        let replacement = "# new unit\nWorkingDirectory=/var/lib/arg/current\n";
+        fs::write(&path, previous).unwrap();
+        let mut restart_count = 0;
+
+        let error =
+            apply_laravel_service_unit(&path, previous, unit, replacement, true, true, |args| {
+                if args.first() == Some(&"restart") {
+                    restart_count += 1;
+                    if restart_count == 1 {
+                        return Err("worker failed to restart".into());
+                    }
+                }
+                Ok(String::new())
+            })
+            .unwrap_err();
+
+        assert!(error.contains("worker failed to restart"));
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
