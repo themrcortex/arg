@@ -1,5 +1,12 @@
 # ARG Change Log
 
+## v0.7.8 — 2026-11-01
+
+### Changed
+- Harden application metadata and deployment planning, scope deploy keys, improve system-service recovery, preserve environment values, refresh Laravel workers after releases, and redact runtime secrets from logs.
+- Preserve the selected application detail section across refreshes and direct links.
+- Add regression coverage and a documented deployment-engine audit.
+
 ## v0.7.8-dev.4 — 2026-11-01
 
 ### Development
