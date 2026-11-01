@@ -368,3 +368,96 @@ There is no app-scoped terminal. Existing terminals are for the selected server/
 | Frontend offline tests | Pass | 10 tests passed. |
 | Frontend production build | Pass | Vite build completed; existing >500 kB main-chunk advisory remains. |
 | Host metrics, notification delivery, PTY isolation and cross-app access tests | Blocked | No isolated host/PTY service environment is attached; no terminal implementation was added to falsely claim app isolation. |
+
+## Phase 15 — Applications UI/UX
+
+The existing application detail view already separates implemented actions into four real groups: deployments/releases, runtime tools, monitoring/resources, and Nginx/backups/workflow. The deployment job dialog reads persisted steps and logs, supports older-log pagination and refresh, and exposes real job states. The list has framework identity, status, workspace and server context. These existing flows were preserved.
+
+The detail tab is now encoded in the application hash route. Selecting a section updates the shareable URL, so refresh and browser Back/Forward restore the selected application section. Unknown section values safely fall back to deployment history, and old links without a section remain valid. The tab strip remains one row with horizontal scrolling on narrow screens rather than wrapping into an unstable multi-row control. `frontend/tests/application-route.test.mjs` covers route encoding, refresh-compatible parsing, legacy links and invalid sections.
+
+The UI does not yet provide the requested 12-step creation wizard, independent production/staging configuration, environment editor, generic worker manager, app-scoped terminal, request-level metrics or provider-neutral Git credentials. These capabilities do not exist in the backing APIs and were not represented by mock controls. Read-only all-server application records remain clearly non-operational. The four tabs continue to host only real capability panels.
+
+### Phase 15 status
+
+**Partial.** The application detail navigation and mobile tab behavior were improved and tested. A full product redesign is blocked on the backend gaps recorded as APP-002, APP-005, APP-006, APP-007, APP-012, APP-014 and APP-015; showing unsupported controls would misrepresent server behavior.
+
+## Phase 16 — Production readiness and final validation
+
+### Reliability and security review
+
+Verified from code and regression coverage: per-app deployment serialization and bounded queue; persisted jobs/logs; startup recovery and cancellation; idempotency checks; atomic release switch with rollback; build sandbox limits; source/archive path validation; secret-aware application log redaction; application-owned service checks; Nginx validation and ownership checks; Laravel service replacement recovery; deploy-key repository/application binding; strict environment parsing before writes; app/runtime health checks; admin guards on sensitive operations; remote workspace operations are capability-mediated and do not convert all-server overview into writable access.
+
+Not established by these checks: zero downtime for all runtimes; safe automatic rollback across database schema changes; true production/staging execution isolation; encrypted app ENV at rest; generic cron/worker supervision; application-identity PTY; HTTP request metrics; real host recovery after sudden power loss; remote reconciliation while a Node is disconnected; or successful operation against live DNS/ACME. The application snapshot feature is not a database or file restore mechanism. These limitations are presented as gaps, not production guarantees.
+
+### Final compatibility scenario matrix
+
+| Scenario family | Result | Evidence / limitation |
+|---|---|---|
+| Application CRUD, archive, restore, purge and old-record read | Pass in code/tests | Existing version checks, ownership checks and regressions; full browser/server E2E is unavailable. |
+| Framework plan and ambiguous/unknown manifest behavior | Pass in code/tests | Detector and Build Plan tests; no real-world framework matrix was provisioned. |
+| Node Git/archive/directory deployment, build, health and release rollback | Partial | Safe paths and unit/integration coverage exist; actual sandbox/systemd execution requires disposable VPS. |
+| Laravel production deployment, APP_KEY persistence, migration confirmation and code rollback | Partial | Local tests verify parsing, stable current path and service-unit generation/recovery; PHP/Composer/MySQL host is unavailable. |
+| Node private repository and auto-deploy/webhook | Partial/Not implemented | GitHub SSH deploy key is supported; other providers, token vault, webhook and auto-deploy are not. |
+| Next/Nuxt SSR and static; React/Vue; Vanilla JS | Partial | Build-plan/runtime-specific paths exist; no separate live E2E environments were available for each framework/mode. |
+| Native PHP and general custom runtime | Not implemented | No native PHP application deployment adapter was found. |
+| SSL success, renewal and external HTTPS recovery | Blocked | Requires DNS, ACME and a disposable public host; none was contacted. |
+| Workers, queue, scheduler and restart across server reboot | Partial/Blocked | Laravel-owned systemd unit generation and release refresh are tested; the OS service manager and PHP stack are unavailable. Generic worker/cron is not implemented. |
+| Staging isolation, promotion and cross-environment protection | Not implemented | Current environments are metadata, not runtime isolation boundaries. |
+| App-scoped terminal, root authorization and cross-app PTY isolation | Not implemented | No app-scoped terminal is provided; admin server terminal is not claimed as equivalent. |
+| Metrics, persistent logs and alert lifecycle | Partial | App service CPU/memory/storage sampling, logs and acknowledgement exist; HTTP/request, queue, notification and restart metrics are absent. |
+| Multi-server app listing and remote operations | Partial | Remote registry uses workspace/capability proxy; no shared registry or offline operation reconciliation. Live multi-version Node coverage is unavailable. |
+| ARG update preserving application data | Not exercised | No upgrade fixture/VPS was available; this change set adds no destructive app-data migration. |
+
+### Quality Gate 8 (phases 15 and 16)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Application-route persistence regression | Pass | `npm run test:offline`; valid section, encoded IDs, legacy URL and invalid-section fallback covered. |
+| Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, `cargo test --locked`; 288 tests passed. |
+| Frontend TypeScript/offline tests/production build | Pass | `npm run check`; 12 offline tests; Vite production build completed. |
+| Desktop/mobile browser, keyboard and screen-reader verification | Blocked | No browser automation/browser environment is attached. |
+| Isolated VPS deployment, systemd, Nginx, PHP, SSL, DB, reboot and remote-node scenarios | Blocked | No disposable host or live services were contacted. |
+
+The production build retains the existing Vite advisory for the 508.12 kB main chunk (157.12 kB gzip). It completed successfully; the advisory is recorded as a follow-up performance item rather than hidden by changing the warning threshold.
+
+## Final assessment
+
+The audited codebase has received regression-focused corrections to data integrity, Build Plan consistency, deployment-key scope, service rollback, environment preservation, Laravel release-worker activation and runtime log redaction. The application detail section now survives refresh and is navigable on narrow screens. These changes improve the existing system without expanding unsupported features into decorative UI.
+
+This overhaul is **not fully complete or production-validated against the full requested acceptance criteria**. Confirmed remaining product work includes isolated production/staging runtimes and secrets, broader private-Git/provider automation, a general configurable pipeline, native PHP, generic workers/cron, an app-scoped restricted terminal, richer monitoring/notifications, and the corresponding live integration matrix. Until those are implemented and verified on an isolated VPS, ARG Applications must not be described as providing the complete requested deployment platform or universal zero-downtime deployment.
+
+### Phase status and implementation commits
+
+| Phase | Status | Implementation commit(s) |
+|---|---|---|
+| 1 — audit and baseline | Completed | `bb1bb2d` |
+| 2 — stabilization | Partial; confirmed label corruption fixed | `fb33e91` |
+| 3 — deployment engine review | Partial; existing persistent queue reviewed, requested broader state machine remains incomplete | `79d1cab` |
+| 4 — runtime detection | Partial; plan/runtime inconsistencies fixed, Native PHP adapter absent | `79d1cab`, `8d3f487` |
+| 5 — source and Git | Partial; deploy-key scope regression added, provider/webhook gaps remain | `aae1da8` |
+| 6 — build pipeline | Partial; existing bounded pre-deploy and build sandbox reviewed | `aae1da8` |
+| 7 — process manager | Partial; Laravel/Node systemd recovery fixed, host execution unverified | `3e62247` |
+| 8 — Nginx and SSL | Partial; existing managed path audited, live ACME/DNS verification blocked | `3e62247` |
+| 9 — ENV and secrets | Partial; safe parsing and preservation fixed; encrypted secret storage remains absent | `d524ed0` |
+| 10 — production/staging | Blocked on runtime isolation design and safe data migration | `d524ed0` |
+| 11 — Laravel runner | Partial; release-following workers and rollback fixed | `837541c` |
+| 12 — workers and jobs | Partial; Laravel services exist, generic workers/cron absent | `837541c` |
+| 13 — observability | Partial; Node runtime log secret redaction fixed; requested metric families absent | `f473a28` |
+| 14 — app terminal | Not implemented; safe app identity/PTY is not available | `f473a28` |
+| 15 — UI/UX | Partial; existing real panels retained, detail tab URL persistence/mobile strip added | `20a89f2` |
+| 16 — final readiness | Partial; static/regression gate passes, host-level matrix remains blocked | final audit commit |
+
+### Final verification summary
+
+| Gate | Rust tests | Frontend offline tests | Build/type check | Host-dependent cases |
+|---|---:|---:|---|---|
+| 1 (phases 1–2) | 270 passed | 10 passed | Pass | Blocked |
+| 2 (phases 3–4) | 276 passed | 10 passed | Pass | Blocked |
+| 3 (phases 5–6) | 277 passed | 10 passed | Pass | Blocked |
+| 4 (phases 7–8) | 280 passed | 10 passed | Pass | Blocked |
+| 5 (phases 9–10) | 284 passed | 10 passed | Pass | Blocked |
+| 6 (phases 11–12) | 287 passed | 10 passed | Pass | Blocked |
+| 7 (phases 13–14) | 288 passed | 10 passed | Pass | Blocked |
+| 8 (phases 15–16) | 288 passed | 12 passed | Pass | Blocked |
+
+For Gate 8 the exact commands were `cargo fmt --all -- --check`, `cargo check --locked`, `cargo test --locked`, `npm run check`, `npm run test:offline`, and `npm run build`. The checked-out starting branch was `development` at `7975c3fae94836556baa551ff9359f826bb05029`; local unrelated untracked directories were preserved. No production server, real user data, live DNS provider or ACME endpoint was modified or contacted.
