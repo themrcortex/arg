@@ -151,7 +151,12 @@ pub(super) async fn acknowledge_event(
     if changed == 0 {
         return Err(error(StatusCode::NOT_FOUND, "اعلان پایش پیدا نشد."));
     }
-    audit(&db, &actor, "application.monitoring.event.acknowledge", &format!("app={app_id}; event={event_id}"));
+    audit(
+        &db,
+        &actor,
+        "application.monitoring.event.acknowledge",
+        &format!("app={app_id}; event={event_id}"),
+    );
     Ok(Json(json!({"acknowledged":true,"event_id":event_id})))
 }
 
@@ -365,8 +370,14 @@ fn update_alerts(
             |row| Ok((row.get(0)?,row.get(1)?)),
         ).optional().unwrap_or(None);
         let was_open = previous.as_ref().is_some_and(|(state, _)| state == "open");
-        if !open && !was_open { continue; }
-        let lifecycle_started_at = if open && !was_open { at } else { previous.map(|(_, first_seen)| first_seen).unwrap_or(at) };
+        if !open && !was_open {
+            continue;
+        }
+        let lifecycle_started_at = if open && !was_open {
+            at
+        } else {
+            previous.map(|(_, first_seen)| first_seen).unwrap_or(at)
+        };
         let state = if open { "open" } else { "resolved" };
         let resolved_at = if open { None } else { Some(at) };
         let _ = db.execute("INSERT INTO application_monitoring_alerts(application_id,metric,state,current_value,threshold,first_seen,last_seen,resolved_at) VALUES(?1,?2,?3,?4,?5,?6,?6,?7) ON CONFLICT(application_id,metric) DO UPDATE SET state=excluded.state,current_value=excluded.current_value,threshold=excluded.threshold,last_seen=excluded.last_seen,resolved_at=CASE WHEN excluded.state='open' THEN NULL ELSE COALESCE(application_monitoring_alerts.resolved_at,excluded.resolved_at) END,first_seen=CASE WHEN excluded.state='open' AND application_monitoring_alerts.state<>'open' THEN excluded.first_seen ELSE application_monitoring_alerts.first_seen END",params![app_id,metric,state,value,threshold,at,resolved_at]);
@@ -482,7 +493,10 @@ mod tests {
             "SELECT COUNT(*) FROM application_monitoring_events WHERE application_id='app' AND metric='cpu_high'",
             [], |row| row.get(0),
         ).unwrap();
-        assert_eq!(transitions, 4, "two threshold cycles each produce trigger and resolution events");
+        assert_eq!(
+            transitions, 4,
+            "two threshold cycles each produce trigger and resolution events"
+        );
         let duplicate_triggers: i64 = db.query_row(
             "SELECT COUNT(*) FROM application_monitoring_events WHERE application_id='app' AND metric='cpu_high' AND event_type='triggered'",
             [], |row| row.get(0),

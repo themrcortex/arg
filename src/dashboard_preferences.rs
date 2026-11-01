@@ -74,7 +74,10 @@ fn normalize(input: Preferences) -> Option<Preferences> {
         hidden.dedup();
         if legacy_order != expected
             || hidden.len() != input.hidden.len()
-            || input.hidden.iter().any(|widget| !LEGACY_WIDGETS.contains(&widget.as_str()))
+            || input
+                .hidden
+                .iter()
+                .any(|widget| !LEGACY_WIDGETS.contains(&widget.as_str()))
         {
             return None;
         }
@@ -191,13 +194,30 @@ mod tests {
         let legacy = Preferences {
             version: 1,
             preset: "custom".into(),
-            order: LEGACY_WIDGETS.iter().map(|widget| (*widget).to_owned()).collect(),
+            order: LEGACY_WIDGETS
+                .iter()
+                .map(|widget| (*widget).to_owned())
+                .collect(),
             hidden: vec!["operations".into()],
         };
         let upgraded = normalize(legacy).unwrap();
         assert_eq!(upgraded.version, 2);
-        assert_eq!(upgraded.order.iter().map(String::as_str).collect::<Vec<_>>(), vec!["resources", "history", "operations", "mesh"]);
-        assert_eq!(upgraded.hidden.iter().map(String::as_str).collect::<Vec<_>>(), vec!["operations"]);
+        assert_eq!(
+            upgraded
+                .order
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["resources", "history", "operations", "mesh"]
+        );
+        assert_eq!(
+            upgraded
+                .hidden
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["operations"]
+        );
         assert!(valid(&upgraded));
     }
 

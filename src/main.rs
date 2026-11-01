@@ -63,48 +63,48 @@ static ROOT_TERMINAL_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
+mod api_keys;
+mod app_backups;
+mod app_cleanup;
 mod app_code;
 mod app_compose;
-mod app_backups;
-mod nginx_domains;
 mod app_monitoring;
 mod app_networks;
 mod app_s3;
 mod app_snapshots;
 mod app_storage;
 mod app_templates;
-mod workflow_drafts;
-mod dashboard_preferences;
 mod app_workspaces;
 mod apps;
-mod app_cleanup;
 mod buildpacks;
+mod dashboard_preferences;
 mod deploy;
 mod dns;
 mod dns_vault;
-mod extensions;
 mod docker;
+mod doctor;
+mod extensions;
 mod fast_actions;
 mod federation;
 mod files;
+mod fleet;
 mod laravel;
 mod maintenance;
 mod metrics;
 mod mysql;
 mod nginx;
+mod nginx_domains;
 mod node;
 mod postgres;
-mod fleet;
 mod private_networks;
 mod routes;
 mod runtimes;
 mod s3;
-mod ssh_keys;
-mod security_posture;
 mod secret_vault;
+mod security_posture;
+mod ssh_keys;
 mod storage_mounts;
-mod api_keys;
-mod doctor;
+mod workflow_drafts;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist/"]
@@ -1441,15 +1441,13 @@ async fn update_panel_tls_settings(
         "panel.tls.configure",
         &format!("HTTPS certificate paths configured on port {}", input.port),
     );
-    Ok(Json(
-        json!({
-            "scheduled":true,
-            "port":input.port,
-            "auto_renewal":result["data"]["auto_renewal"].as_bool().unwrap_or(false),
-            "renewal_warning":result["data"]["renewal_warning"].as_str(),
-            "message":"HTTPS settings were saved. ARG will restart shortly; reopen the panel using HTTPS."
-        }),
-    ))
+    Ok(Json(json!({
+        "scheduled":true,
+        "port":input.port,
+        "auto_renewal":result["data"]["auto_renewal"].as_bool().unwrap_or(false),
+        "renewal_warning":result["data"]["renewal_warning"].as_str(),
+        "message":"HTTPS settings were saved. ARG will restart shortly; reopen the panel using HTTPS."
+    })))
 }
 
 async fn collect_metrics(state: AppState) {
@@ -1711,12 +1709,16 @@ async fn network_traffic_volume(
     let interface_query = if selected_interface != "all" {
         let name = selected_interface.clone();
         let mut statement = db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND interface=?3 ORDER BY interface").map_err(db_error)?;
-        let rows = statement.query_map(params![from,to,name], |row| row.get::<_,String>(0)).map_err(db_error)?;
-        rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?
+        let rows = statement
+            .query_map(params![from, to, name], |row| row.get::<_, String>(0))
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
     } else {
         let mut statement = db.prepare("SELECT DISTINCT interface FROM network_traffic_hourly WHERE hour_start>=?1 AND hour_start<?2 AND eligible_for_total=1 ORDER BY interface").map_err(db_error)?;
-        let rows = statement.query_map(params![from,to], |row| row.get::<_,String>(0)).map_err(db_error)?;
-        rows.collect::<Result<Vec<_>,_>>().map_err(db_error)?
+        let rows = statement
+            .query_map(params![from, to], |row| row.get::<_, String>(0))
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
     };
     let fresh_at = buckets.last().and_then(|bucket| bucket["at"].as_i64());
     Ok(Json(
@@ -2314,16 +2316,14 @@ fn privileged_request(request: Value) -> Result<Value, (StatusCode, Json<Value>)
             "Could not send privileged operation",
         )
     })?;
-    let response = read_bounded_privileged_response(
-        BufReader::new(stream),
-        PRIVILEGED_RESPONSE_MAX_BYTES,
-    )
-    .map_err(|_| {
-        error(
+    let response =
+        read_bounded_privileged_response(BufReader::new(stream), PRIVILEGED_RESPONSE_MAX_BYTES)
+            .map_err(|_| {
+                error(
             StatusCode::BAD_GATEWAY,
             "Privileged manager response was missing, incomplete, or exceeded the size limit",
         )
-    })?;
+            })?;
     serde_json::from_str(&response).map_err(|_| {
         error(
             StatusCode::BAD_GATEWAY,
@@ -2776,13 +2776,9 @@ async fn update_user(
     if !input.enabled {
         let _ = db.execute("DELETE FROM sessions WHERE user_id=?1", [id]);
     }
-    let revoked_api_keys = api_keys::revoke_if_owner_ineligible(
-        &db,
-        id,
-        &input.role,
-        input.enabled,
-    )
-    .map_err(db_error)?;
+    let revoked_api_keys =
+        api_keys::revoke_if_owner_ineligible(&db, id, &input.role, input.enabled)
+            .map_err(db_error)?;
     audit(
         &db,
         &actor.username,
@@ -3572,7 +3568,9 @@ fn panel_tls_lineage_from_source(value: &str) -> Option<String> {
         || name.is_empty()
         || name.len() > 128
         || name.starts_with('.')
-        || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
     {
         return None;
     }
@@ -3605,9 +3603,17 @@ systemctl restart arg.service
 }
 
 fn atomic_root_file(path: &std::path::Path, contents: &[u8], mode: u32) -> Result<(), String> {
-    let parent = path.parent().ok_or("The target file has no parent directory")?;
+    let parent = path
+        .parent()
+        .ok_or("The target file has no parent directory")?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let temporary = parent.join(format!(".{}.{}.tmp", path.file_name().and_then(|name| name.to_str()).unwrap_or("arg"), token()));
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("arg"),
+        token()
+    ));
     let write = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -3633,9 +3639,14 @@ fn atomic_root_file(path: &std::path::Path, contents: &[u8], mode: u32) -> Resul
 }
 
 fn systemd_unit_available(name: &str) -> bool {
-    ["/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"]
-        .iter()
-        .any(|directory| std::path::Path::new(directory).join(name).exists())
+    [
+        "/etc/systemd/system",
+        "/run/systemd/system",
+        "/usr/lib/systemd/system",
+        "/lib/systemd/system",
+    ]
+    .iter()
+    .any(|directory| std::path::Path::new(directory).join(name).exists())
 }
 
 fn enable_panel_certbot_renewal_timer() -> Result<(), String> {
@@ -3652,7 +3663,11 @@ fn enable_panel_certbot_renewal_timer() -> Result<(), String> {
     };
     systemctl(&["daemon-reload"])?;
 
-    for timer in ["arg-certbot-renew.timer", "certbot.timer", "snap.certbot.renew.timer"] {
+    for timer in [
+        "arg-certbot-renew.timer",
+        "certbot.timer",
+        "snap.certbot.renew.timer",
+    ] {
         if timer == "arg-certbot-renew.timer" {
             if std::path::Path::new(PANEL_CERTBOT_TIMER).exists() {
                 return systemctl(&["enable", "--now", timer]);
@@ -3662,25 +3677,39 @@ fn enable_panel_certbot_renewal_timer() -> Result<(), String> {
         }
     }
 
-    let certbot = ["/snap/bin/certbot", "/usr/bin/certbot", "/usr/local/bin/certbot"]
-        .into_iter()
-        .find(|path| {
-            fs::metadata(path).is_ok_and(|metadata| {
-                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-            })
-        })
-        .ok_or("Certbot is not installed; automatic renewal cannot be enabled.")?;
+    let certbot = [
+        "/snap/bin/certbot",
+        "/usr/bin/certbot",
+        "/usr/local/bin/certbot",
+    ]
+    .into_iter()
+    .find(|path| {
+        fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    })
+    .ok_or("Certbot is not installed; automatic renewal cannot be enabled.")?;
     let service = format!(
         "[Unit]\nDescription=Renew ARG panel TLS certificate\n\n[Service]\nType=oneshot\nExecStart={certbot} renew --quiet\n"
     );
     let timer = "[Unit]\nDescription=Twice-daily renewal check for ARG certificates\n\n[Timer]\nOnCalendar=*-*-* 00,12:00:00\nRandomizedDelaySec=1h\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
-    atomic_root_file(std::path::Path::new(PANEL_CERTBOT_SERVICE), service.as_bytes(), 0o644)?;
-    atomic_root_file(std::path::Path::new(PANEL_CERTBOT_TIMER), timer.as_bytes(), 0o644)?;
+    atomic_root_file(
+        std::path::Path::new(PANEL_CERTBOT_SERVICE),
+        service.as_bytes(),
+        0o644,
+    )?;
+    atomic_root_file(
+        std::path::Path::new(PANEL_CERTBOT_TIMER),
+        timer.as_bytes(),
+        0o644,
+    )?;
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", "arg-certbot-renew.timer"])
 }
 
-fn configure_panel_certbot_renewal(lineage: Option<&str>, preserve_legacy: bool) -> Result<bool, String> {
+fn configure_panel_certbot_renewal(
+    lineage: Option<&str>,
+    preserve_legacy: bool,
+) -> Result<bool, String> {
     let lineage_file = std::path::Path::new(PANEL_TLS_LINEAGE_FILE);
     if let Some(lineage) = lineage {
         atomic_root_file(
@@ -3688,9 +3717,12 @@ fn configure_panel_certbot_renewal(lineage: Option<&str>, preserve_legacy: bool)
             panel_tls_deploy_hook_contents().as_bytes(),
             0o755,
         )
-        .map_err(|error| format!("Could not install the panel certificate renewal hook: {error}"))?;
-        enable_panel_certbot_renewal_timer()
-            .map_err(|error| format!("Could not schedule automatic panel certificate renewal: {error}"))?;
+        .map_err(|error| {
+            format!("Could not install the panel certificate renewal hook: {error}")
+        })?;
+        enable_panel_certbot_renewal_timer().map_err(|error| {
+            format!("Could not schedule automatic panel certificate renewal: {error}")
+        })?;
         atomic_root_file(lineage_file, format!("{lineage}\n").as_bytes(), 0o600)
             .map_err(|error| format!("Could not record the panel certificate lineage: {error}"))?;
         return Ok(true);
@@ -3705,8 +3737,9 @@ fn configure_panel_certbot_renewal(lineage: Option<&str>, preserve_legacy: bool)
             0o755,
         )
         .map_err(|error| format!("Could not update the panel certificate renewal hook: {error}"))?;
-        atomic_root_file(lineage_file, b"\n", 0o600)
-            .map_err(|error| format!("Could not disable automatic renewal for the manual certificate: {error}"))?;
+        atomic_root_file(lineage_file, b"\n", 0o600).map_err(|error| {
+            format!("Could not disable automatic renewal for the manual certificate: {error}")
+        })?;
     }
     Ok(false)
 }
@@ -3769,7 +3802,9 @@ fn configure_panel_tls(request: &Value) -> Value {
         .as_deref()
         .is_some_and(|lineage| private_key_source != format!("{lineage}/privkey.pem"))
     {
-        return failure("Choose the fullchain.pem and privkey.pem files from the same Certbot lineage.".into());
+        return failure(
+            "Choose the fullchain.pem and privkey.pem files from the same Certbot lineage.".into(),
+        );
     }
     let certificate_source = match PathBuf::from(certificate_source).canonicalize() {
         Ok(path) => path,
@@ -4218,7 +4253,9 @@ fn execute_privileged_request(request: &Value) -> Value {
                     _ => "The HTTPS port change could not be scheduled. Check the ARG service logs."
                 }
             }),
-            Err(_) => json!({"ok":false,"error":"The restricted panel port helper is unavailable. Update or repair ARG."}),
+            Err(_) => {
+                json!({"ok":false,"error":"The restricted panel port helper is unavailable. Update or repair ARG."})
+            }
         };
     }
     if action == "tls-port-confirm" {
@@ -4233,7 +4270,9 @@ fn execute_privileged_request(request: &Value) -> Value {
             .output();
         return match output {
             Ok(output) if output.status.success() => json!({"ok":true}),
-            Ok(_) => json!({"ok":false,"error":"No matching HTTPS port change is pending, or its rollback timer could not be cancelled."}),
+            Ok(_) => {
+                json!({"ok":false,"error":"No matching HTTPS port change is pending, or its rollback timer could not be cancelled."})
+            }
             Err(_) => json!({"ok":false,"error":"The ARG management command is unavailable."}),
         };
     }
@@ -4826,7 +4865,7 @@ fn execute_service_request(action: &str, request: &Value) -> Value {
         for batch in service_units.chunks(128) {
             let mut show = std::process::Command::new("systemctl");
             show.args(["show", "--no-pager", "--property=Id,ExecStart"])
-            .args(batch);
+                .args(batch);
             if let Ok((true, output)) = command_result(&mut show) {
                 service_commands.extend(parse_systemd_service_commands(&output));
             }
@@ -5169,10 +5208,7 @@ where
     Ok(line)
 }
 
-fn read_bounded_privileged_response<R>(
-    reader: R,
-    max_bytes: usize,
-) -> std::io::Result<String>
+fn read_bounded_privileged_response<R>(reader: R, max_bytes: usize) -> std::io::Result<String>
 where
     R: std::io::BufRead,
 {
@@ -5370,7 +5406,10 @@ fn migrate_schema_with_checkpoint(
 
     db.execute_batch("CREATE TABLE IF NOT EXISTS mysql_authorizations (session_hash TEXT PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,authorized_at INTEGER NOT NULL);")?;
     db.execute_batch("CREATE TABLE IF NOT EXISTS root_terminal_tickets (token_hash TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,session_hash TEXT NOT NULL,expires_at INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS root_terminal_ticket_expiry ON root_terminal_tickets(expires_at);")?;
-    db.execute("DELETE FROM root_terminal_tickets WHERE expires_at<=?1", [now()])?;
+    db.execute(
+        "DELETE FROM root_terminal_tickets WHERE expires_at<=?1",
+        [now()],
+    )?;
     ensure_sessions_metadata(db)?;
     checkpoint("sessions")?;
     Ok(())
@@ -5502,15 +5541,13 @@ async fn clear_trusted_transport_marker(
 mod update_progress_tests {
     use super::{
         backup_database, default_update_build_mode, default_update_strategy,
-        ensure_federation_identity_columns, ensure_metric_storage_columns,
-        firewall_rule_validation_error, update_progress_payload,
-        encode_bounded_privileged_response, login, login_client_ip, login_throttle_keys,
-        parse_systemd_exec_start, parse_systemd_service_commands,
-        process_belongs_to_arg_service, read_bounded_privileged_response,
-        read_privileged_line, role_has_admin_access, valid_apt_install_spec,
-        panel_tls_deploy_hook_contents, panel_tls_lineage_from_source,
-        valid_tls_source_path, valid_update_build_mode, valid_update_strategy, AppState, Connection,
-        Credentials,
+        encode_bounded_privileged_response, ensure_federation_identity_columns,
+        ensure_metric_storage_columns, firewall_rule_validation_error, login, login_client_ip,
+        login_throttle_keys, panel_tls_deploy_hook_contents, panel_tls_lineage_from_source,
+        parse_systemd_exec_start, parse_systemd_service_commands, process_belongs_to_arg_service,
+        read_bounded_privileged_response, read_privileged_line, role_has_admin_access,
+        update_progress_payload, valid_apt_install_spec, valid_tls_source_path,
+        valid_update_build_mode, valid_update_strategy, AppState, Connection, Credentials,
         FirewallRuleInput,
     };
 
@@ -5656,28 +5693,27 @@ mod update_progress_tests {
         assert!(oversized.len() <= 256);
         assert!(String::from_utf8_lossy(&oversized).contains("response exceeded the size limit"));
 
-        let response = read_bounded_privileged_response(
-            std::io::Cursor::new(b"{\"ok\":true}\n"),
-            32,
-        )
-        .expect("bounded complete response");
+        let response =
+            read_bounded_privileged_response(std::io::Cursor::new(b"{\"ok\":true}\n"), 32)
+                .expect("bounded complete response");
         assert_eq!(response, "{\"ok\":true}\n");
-        assert!(read_bounded_privileged_response(
-            std::io::Cursor::new(b"123456789\n"),
-            8
-        )
-        .is_err());
-        assert!(read_bounded_privileged_response(
-            std::io::Cursor::new(b"{\"ok\":true}"),
-            32
-        )
-        .is_err());
+        assert!(read_bounded_privileged_response(std::io::Cursor::new(b"123456789\n"), 8).is_err());
+        assert!(
+            read_bounded_privileged_response(std::io::Cursor::new(b"{\"ok\":true}"), 32).is_err()
+        );
     }
 
     #[tokio::test]
     async fn legacy_account_wide_login_lockout_does_not_block_another_client() {
-        use argon2::{password_hash::{rand_core::OsRng, PasswordHasher, SaltString}, Argon2};
-        use axum::{extract::{ConnectInfo, State}, http::{header, HeaderValue}, Json};
+        use argon2::{
+            password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+            Argon2,
+        };
+        use axum::{
+            extract::{ConnectInfo, State},
+            http::{header, HeaderValue},
+            Json,
+        };
         use std::sync::{Arc, Mutex};
 
         let db = Connection::open_in_memory().unwrap();
@@ -5690,10 +5726,7 @@ mod update_progress_tests {
         )
         .unwrap();
         let password_hash = Argon2::default()
-            .hash_password(
-                b"correct-test-password",
-                &SaltString::generate(&mut OsRng),
-            )
+            .hash_password(b"correct-test-password", &SaltString::generate(&mut OsRng))
             .unwrap()
             .to_string();
         db.execute(
@@ -5767,8 +5800,14 @@ mod update_progress_tests {
             "ExecStart={ path=/usr/bin/worker ; argv[]=/usr/bin/worker --queue high ; ignore_errors=no }\n",
         );
         let commands = parse_systemd_service_commands(output);
-        assert_eq!(commands.get("cron.service").map(String::as_str), Some("/usr/sbin/cron -f"));
-        assert_eq!(commands.get("worker.service").map(String::as_str), Some("/usr/bin/worker --queue high"));
+        assert_eq!(
+            commands.get("cron.service").map(String::as_str),
+            Some("/usr/sbin/cron -f")
+        );
+        assert_eq!(
+            commands.get("worker.service").map(String::as_str),
+            Some("/usr/bin/worker --queue high")
+        );
         assert_eq!(
             parse_systemd_exec_start("{ path=/usr/bin/worker ; ignore_errors=no }"),
             Some("/usr/bin/worker".to_owned())
@@ -5823,7 +5862,9 @@ mod update_progress_tests {
         assert!(super::update_guard_exempt("/api/update/cancel"));
         assert!(super::update_guard_exempt("/api/update/progress"));
         assert!(super::update_guard_exempt("/api/federation/update/cancel"));
-        assert!(super::update_guard_exempt("/api/federation/update/progress"));
+        assert!(super::update_guard_exempt(
+            "/api/federation/update/progress"
+        ));
         assert!(super::update_guard_exempt("/api/federation/update/logs"));
         assert!(!super::update_guard_exempt("/api/update/rollback"));
         assert!(!super::update_guard_exempt("/api/nginx/restart"));
@@ -5896,20 +5937,45 @@ mod update_progress_tests {
 
     #[test]
     fn startup_migration_sequence_recovers_after_module_boundary_interruption() {
-        for interruption in ["core", "federation_identity", "deploy", "s3", "fleet", "maintenance", "sessions"] {
+        for interruption in [
+            "core",
+            "federation_identity",
+            "deploy",
+            "s3",
+            "fleet",
+            "maintenance",
+            "sessions",
+        ] {
             let db = Connection::open_in_memory().unwrap();
             db.execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,role TEXT NOT NULL,enabled INTEGER NOT NULL); INSERT INTO users VALUES(41,'preserved-admin','hash','admin',1);").unwrap();
             let interrupted = super::migrate_schema_with_checkpoint(&db, |checkpoint| {
-                if checkpoint == interruption { Err(rusqlite::Error::InvalidQuery) } else { Ok(()) }
+                if checkpoint == interruption {
+                    Err(rusqlite::Error::InvalidQuery)
+                } else {
+                    Ok(())
+                }
             });
-            assert!(interrupted.is_err(), "failure injection did not stop after {interruption}");
+            assert!(
+                interrupted.is_err(),
+                "failure injection did not stop after {interruption}"
+            );
 
-            super::migrate_schema(&db).unwrap_or_else(|error| panic!("migration restart after {interruption} failed: {error}"));
-            super::migrate_schema(&db).unwrap_or_else(|error| panic!("second idempotent startup after {interruption} failed: {error}"));
-            let (user_count, username): (i64, String) = db.query_row("SELECT COUNT(*),MIN(username) FROM users WHERE id=41", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
-            assert_eq!((user_count,username.as_str()),(1,"preserved-admin"));
+            super::migrate_schema(&db).unwrap_or_else(|error| {
+                panic!("migration restart after {interruption} failed: {error}")
+            });
+            super::migrate_schema(&db).unwrap_or_else(|error| {
+                panic!("second idempotent startup after {interruption} failed: {error}")
+            });
+            let (user_count, username): (i64, String) = db
+                .query_row(
+                    "SELECT COUNT(*),MIN(username) FROM users WHERE id=41",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((user_count, username.as_str()), (1, "preserved-admin"));
             let renewal_column: i64 = db.query_row("SELECT COUNT(*) FROM pragma_table_info('federation_proxy_sessions') WHERE name='renewed_from_hash'", [], |row| row.get(0)).unwrap();
-            assert_eq!(renewal_column,1);
+            assert_eq!(renewal_column, 1);
         }
     }
 

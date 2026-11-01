@@ -511,13 +511,7 @@ pub(super) async fn list_records(
             "Cloudflare records URL نامعتبر است.",
         )
     })?;
-    let response = cf_request(
-        Method::GET,
-        url.to_string(),
-        &token,
-        None,
-    )
-    .await?;
+    let response = cf_request(Method::GET, url.to_string(), &token, None).await?;
     let rows = response["result"].as_array().cloned().unwrap_or_default();
     let total_pages = response["result_info"]["total_pages"]
         .as_u64()
@@ -670,8 +664,13 @@ mod tests {
     #[test]
     fn cloudflare_record_url_uses_the_requested_bounded_page() {
         let url = records_page_url("0123456789abcdef", 17).unwrap();
-        let query = url.query_pairs().collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(query.get("per_page").map(|value| value.as_ref()), Some("100"));
+        let query = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            query.get("per_page").map(|value| value.as_ref()),
+            Some("100")
+        );
         assert_eq!(query.get("page").map(|value| value.as_ref()), Some("17"));
     }
 

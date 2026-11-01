@@ -226,9 +226,15 @@ async fn configure_web_handler(
     let response = privileged_laravel_request(json!({
         "action":"laravel-web", "app_id":app_id, "domain":domain,
         "runtime_version":runtime_version, "enabled":true, "web_handler":handler
-    })).await?;
+    }))
+    .await?;
     if response["ok"] != true {
-        return Err(error(StatusCode::BAD_GATEWAY, response["error"].as_str().unwrap_or("تغییر اتصال وب Laravel ناموفق بود.")));
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            response["error"]
+                .as_str()
+                .unwrap_or("تغییر اتصال وب Laravel ناموفق بود."),
+        ));
     }
     Ok(response["data"].clone())
 }
@@ -242,7 +248,10 @@ pub(super) async fn configure_service(
     check_origin(&headers)?;
     let _guard = APP_EXECUTION_LOCK.lock().await;
     if !["queue", "scheduler", "horizon", "reverb", "octane"].contains(&input.service.as_str()) {
-        return Err(error(StatusCode::BAD_REQUEST, "نوع سرویس Laravel پشتیبانی نمی‌شود."));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "نوع سرویس Laravel پشتیبانی نمی‌شود.",
+        ));
     }
     let (actor, runtime_version, domain, web_enabled) = {
         let db = state.lock().unwrap();
@@ -264,21 +273,32 @@ pub(super) async fn configure_service(
             params![app_id, owner],
             |row| row.get(0),
         ).optional().map_err(db_error)?.flatten();
-        let web_enabled = db.query_row(
-            "SELECT enabled FROM laravel_app_sites WHERE application_id=?1",
-            [&app_id],
-            |row| row.get::<_, bool>(0),
-        ).optional().map_err(db_error)?.unwrap_or(false);
+        let web_enabled = db
+            .query_row(
+                "SELECT enabled FROM laravel_app_sites WHERE application_id=?1",
+                [&app_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .unwrap_or(false);
         (actor, runtime, domain, web_enabled)
     };
     let mut web_update = None;
     if input.service == "octane" && input.enabled {
         let started = privileged_laravel_request(json!({"action":"laravel-service","app_id":app_id,"runtime_version":runtime_version,"service":"octane","enabled":true})).await?;
         if started["ok"] != true {
-            return Err(error(StatusCode::BAD_GATEWAY, started["error"].as_str().unwrap_or("راه‌اندازی Octane ناموفق بود.")));
+            return Err(error(
+                StatusCode::BAD_GATEWAY,
+                started["error"]
+                    .as_str()
+                    .unwrap_or("راه‌اندازی Octane ناموفق بود."),
+            ));
         }
         if web_enabled {
-            let domain = domain.as_deref().ok_or_else(|| error(StatusCode::CONFLICT, "دامنهٔ سایت Laravel ثبت نشده است."))?;
+            let domain = domain
+                .as_deref()
+                .ok_or_else(|| error(StatusCode::CONFLICT, "دامنهٔ سایت Laravel ثبت نشده است."))?;
             match configure_web_handler(&app_id, &runtime_version, domain, "octane").await {
                 Ok(result) => web_update = Some(result),
                 Err(problem) => {
@@ -289,8 +309,11 @@ pub(super) async fn configure_service(
         }
     } else {
         if input.service == "octane" && !input.enabled && web_enabled {
-            let domain = domain.as_deref().ok_or_else(|| error(StatusCode::CONFLICT, "دامنهٔ سایت Laravel ثبت نشده است."))?;
-            web_update = Some(configure_web_handler(&app_id, &runtime_version, domain, "fpm").await?);
+            let domain = domain
+                .as_deref()
+                .ok_or_else(|| error(StatusCode::CONFLICT, "دامنهٔ سایت Laravel ثبت نشده است."))?;
+            web_update =
+                Some(configure_web_handler(&app_id, &runtime_version, domain, "fpm").await?);
         }
     }
     let response = if input.service == "octane" && input.enabled {
@@ -341,7 +364,10 @@ pub(super) async fn provision_database(
 ) -> ApiResult {
     check_origin(&headers)?;
     if !input.confirmed {
-        return Err(error(StatusCode::BAD_REQUEST, "برای ساخت دیتابیس و کاربر محدود، تأیید صریح لازم است."));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "برای ساخت دیتابیس و کاربر محدود، تأیید صریح لازم است.",
+        ));
     }
     let _guard = APP_EXECUTION_LOCK.lock().await;
     let (actor, environment) = {
@@ -349,20 +375,34 @@ pub(super) async fn provision_database(
         let actor = require_admin(&db, &headers)?.username;
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
         let (framework, _) = app_framework(&db, &app_id, &owner)?;
-        if framework != "laravel" { return Err(error(StatusCode::CONFLICT, "قالب اپلیکیشن Laravel نیست.")); }
+        if framework != "laravel" {
+            return Err(error(StatusCode::CONFLICT, "قالب اپلیکیشن Laravel نیست."));
+        }
         if operation_in_progress(&db, &app_id) || deployment_in_progress(&db, &app_id) {
-            return Err(error(StatusCode::CONFLICT, "هنگام عملیات Laravel یا استقرار، دیتابیس قابل تغییر نیست."));
+            return Err(error(
+                StatusCode::CONFLICT,
+                "هنگام عملیات Laravel یا استقرار، دیتابیس قابل تغییر نیست.",
+            ));
         }
         let release = active_release(&app_id)?;
-        if !release.join("artisan").is_file() { return Err(error(StatusCode::CONFLICT, "release فعال ساختار Laravel ندارد.")); }
+        if !release.join("artisan").is_file() {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "release فعال ساختار Laravel ندارد.",
+            ));
+        }
         let environment = environment_path(&app_id)?;
         let values = read_environment(&environment);
-        if ["DB_DATABASE", "DB_USERNAME", "DB_PASSWORD"].iter().any(|key| values.get(*key).is_some_and(|value| !value.is_empty())) {
+        if ["DB_DATABASE", "DB_USERNAME", "DB_PASSWORD"]
+            .iter()
+            .any(|key| values.get(*key).is_some_and(|value| !value.is_empty()))
+        {
             return Err(error(StatusCode::CONFLICT, "تنظیم دیتابیس از قبل وجود دارد؛ برای جلوگیری از جایگزینی اتصال فعلی، دیتابیس جدید خودکار ساخته نمی‌شود."));
         }
         (actor, environment)
     };
-    let (database, username, password) = mysql::provision_laravel_database(&state, &headers, &app_id).await?;
+    let (database, username, password) =
+        mysql::provision_laravel_database(&state, &headers, &app_id).await?;
     let mut values = read_environment(&environment);
     values.insert("DB_CONNECTION".into(), "mysql".into());
     values.insert("DB_HOST".into(), "127.0.0.1".into());
@@ -380,8 +420,15 @@ pub(super) async fn provision_database(
         return Err(error(StatusCode::INTERNAL_SERVER_ERROR, &message));
     }
     let db = state.lock().unwrap();
-    audit(&db, &actor, "laravel.database.provision", &format!("app={app_id}; database={database}; user={username}; password stored server-side"));
-    Ok(Json(json!({"created":true,"database":database,"username":username,"password_returned":false,"message":"دیتابیس و کاربر با دسترسی محدود به همین دیتابیس ساخته شدند؛ رمز تصادفی فقط در فایل خصوصی .env ذخیره شد و به مرورگر ارسال نشد."})))
+    audit(
+        &db,
+        &actor,
+        "laravel.database.provision",
+        &format!("app={app_id}; database={database}; user={username}; password stored server-side"),
+    );
+    Ok(Json(
+        json!({"created":true,"database":database,"username":username,"password_returned":false,"message":"دیتابیس و کاربر با دسترسی محدود به همین دیتابیس ساخته شدند؛ رمز تصادفی فقط در فایل خصوصی .env ذخیره شد و به مرورگر ارسال نشد."}),
+    ))
 }
 
 fn laravel_service_status(app_id: &str) -> Value {
@@ -389,12 +436,20 @@ fn laravel_service_status(app_id: &str) -> Value {
         return json!({"queue":"unknown","scheduler":"unknown","horizon":"unknown","reverb":"unknown","octane":"unknown"});
     }
     let unit_prefix = format!("arg-app-{}", &app_id[..8]);
-    let release = deployment_root().join("apps").join(app_id).join("current").canonicalize().ok();
+    let release = deployment_root()
+        .join("apps")
+        .join(app_id)
+        .join("current")
+        .canonicalize()
+        .ok();
     let state = |service: &str| {
         let current_state = systemd_unit_state(&format!("{unit_prefix}-{service}.service"));
         if current_state == "active" {
             current_state
-        } else if release.as_deref().is_none_or(|path| !laravel_service_available(service, path)) {
+        } else if release
+            .as_deref()
+            .is_none_or(|path| !laravel_service_available(service, path))
+        {
             "unsupported".to_owned()
         } else {
             current_state
@@ -480,13 +535,26 @@ fn app_site_name(app_id: &str) -> String {
 fn nginx_domain_conflict(site_name: &str, domain: &str) -> Result<(), String> {
     let response = nginx::execute_privileged_request("nginx-list", &json!({}));
     if response["ok"] != true {
-        return Err(response["error"].as_str().unwrap_or("فهرست Nginx برای بررسی تداخل دامنه در دسترس نیست.").to_owned());
+        return Err(response["error"]
+            .as_str()
+            .unwrap_or("فهرست Nginx برای بررسی تداخل دامنه در دسترس نیست.")
+            .to_owned());
     }
     for site in response["data"].as_array().into_iter().flatten() {
-        if site["name"].as_str() == Some(site_name) { continue; }
-        for pattern in site["server_names"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        if site["name"].as_str() == Some(site_name) {
+            continue;
+        }
+        for pattern in site["server_names"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
             if host_pattern_matches(pattern, domain) {
-                return Err(format!("دامنهٔ {domain} از قبل در سایت Nginx دیگری ({}) ثبت شده است.", site["name"].as_str().unwrap_or("unknown")));
+                return Err(format!(
+                    "دامنهٔ {domain} از قبل در سایت Nginx دیگری ({}) ثبت شده است.",
+                    site["name"].as_str().unwrap_or("unknown")
+                ));
             }
         }
     }
@@ -567,8 +635,11 @@ pub(super) fn purge_application_services_and_pool(app_id: &str) -> Result<(), St
         let marker = format!("# ARG managed Laravel service app={app_id} kind={service}\n");
         let contents = fs::read_to_string(&path)
             .map_err(|error| format!("فایل سرویس {service} خوانده نشد: {error}"))?;
-        if !contents.starts_with(&marker) || !contents.contains(&root.to_string_lossy().to_string()) {
-            return Err(format!("سرویس هم‌نام {service} متعلق به این اپ نیست و دست‌نخورده ماند."));
+        if !contents.starts_with(&marker) || !contents.contains(&root.to_string_lossy().to_string())
+        {
+            return Err(format!(
+                "سرویس هم‌نام {service} متعلق به این اپ نیست و دست‌نخورده ماند."
+            ));
         }
         units.push((unit, path));
     }
@@ -577,23 +648,35 @@ pub(super) fn purge_application_services_and_pool(app_id: &str) -> Result<(), St
     let php_root = PathBuf::from("/etc/php");
     if let Ok(versions) = fs::read_dir(&php_root) {
         for entry in versions.flatten() {
-            let Some(version) = entry.file_name().to_str().map(str::to_owned) else { continue };
-            if !valid_runtime_version(&version) { continue; }
-            let Ok((pool, _, fpm_unit)) = php_fpm_paths(&version, app_id) else { continue };
+            let Some(version) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !valid_runtime_version(&version) {
+                continue;
+            }
+            let Ok((pool, _, fpm_unit)) = php_fpm_paths(&version, app_id) else {
+                continue;
+            };
             let metadata = match fs::symlink_metadata(&pool) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(format!("Pool مربوط به PHP {version} بررسی نشد: {error}")),
+                Err(error) => {
+                    return Err(format!("Pool مربوط به PHP {version} بررسی نشد: {error}"))
+                }
             };
             if !metadata.file_type().is_file() {
-                return Err(format!("فایل Pool مربوط به PHP {version} معمولی نیست؛ حذف متوقف شد."));
+                return Err(format!(
+                    "فایل Pool مربوط به PHP {version} معمولی نیست؛ حذف متوقف شد."
+                ));
             }
             let contents = fs::read_to_string(&pool)
                 .map_err(|error| format!("Pool مربوط به PHP {version} خوانده نشد: {error}"))?;
             let expected_pool = format!("[arg-app-{short}]\n");
             let expected_root = format!("php_admin_value[open_basedir] = {}:", root.display());
             if !contents.starts_with(&expected_pool) || !contents.contains(&expected_root) {
-                return Err(format!("Pool هم‌نام PHP {version} متعلق به این اپ نیست و دست‌نخورده ماند."));
+                return Err(format!(
+                    "Pool هم‌نام PHP {version} متعلق به این اپ نیست و دست‌نخورده ماند."
+                ));
             }
             pools.push((version, fpm_unit, pool, contents));
         }
@@ -612,16 +695,26 @@ pub(super) fn purge_application_services_and_pool(app_id: &str) -> Result<(), St
             .map_err(|error| format!("حذف Pool اپ از PHP {version} ناموفق بود: {error}"))?;
         if let Err(problem) = php_fpm_test(&version) {
             let restore = atomic_write(&pool, contents.as_bytes(), 0o644);
-            let detail = restore.err().map(|error| format!("؛ بازیابی Pool هم شکست خورد: {error}")).unwrap_or_default();
-            return Err(format!("اعتبارسنجی PHP-FPM {version} پس از حذف Pool ناموفق بود: {problem}{detail}"));
+            let detail = restore
+                .err()
+                .map(|error| format!("؛ بازیابی Pool هم شکست خورد: {error}"))
+                .unwrap_or_default();
+            return Err(format!(
+                "اعتبارسنجی PHP-FPM {version} پس از حذف Pool ناموفق بود: {problem}{detail}"
+            ));
         }
         if systemd_unit_state(&fpm_unit) == "active" {
             if let Err(problem) = php_fpm_reload(&fpm_unit) {
                 let restore = atomic_write(&pool, contents.as_bytes(), 0o644);
                 let _ = php_fpm_test(&version);
                 let _ = php_fpm_reload(&fpm_unit);
-                let detail = restore.err().map(|error| format!("؛ بازیابی Pool هم شکست خورد: {error}")).unwrap_or_default();
-                return Err(format!("بارگذاری مجدد {fpm_unit} ناموفق بود: {problem}{detail}"));
+                let detail = restore
+                    .err()
+                    .map(|error| format!("؛ بازیابی Pool هم شکست خورد: {error}"))
+                    .unwrap_or_default();
+                return Err(format!(
+                    "بارگذاری مجدد {fpm_unit} ناموفق بود: {problem}{detail}"
+                ));
             }
         }
     }
@@ -638,8 +731,12 @@ fn php_version_key(version: &str) -> Vec<u32> {
 fn resolve_php_fpm_version(version: &str) -> Result<String, String> {
     let installed = installed_php_fpm_versions();
     if version != "system" {
-        if !valid_runtime_version(version) || !installed.iter().any(|candidate| candidate == version) {
-            return Err(format!("PHP-FPM {version} نصب نیست؛ نسخهٔ Runtime سازگار را نصب یا انتخاب کن."));
+        if !valid_runtime_version(version)
+            || !installed.iter().any(|candidate| candidate == version)
+        {
+            return Err(format!(
+                "PHP-FPM {version} نصب نیست؛ نسخهٔ Runtime سازگار را نصب یا انتخاب کن."
+            ));
         }
         return Ok(version.to_owned());
     }
@@ -654,20 +751,18 @@ fn resolve_php_fpm_version(version: &str) -> Result<String, String> {
             return Ok(cli_version);
         }
     }
-    installed
-        .last()
-        .cloned()
-        .ok_or_else(|| "هیچ نسخهٔ PHP-FPM نصب‌شده‌ای پیدا نشد؛ PHP-FPM را از مدیریت Runtime نصب کن.".into())
+    installed.last().cloned().ok_or_else(|| {
+        "هیچ نسخهٔ PHP-FPM نصب‌شده‌ای پیدا نشد؛ PHP-FPM را از مدیریت Runtime نصب کن.".into()
+    })
 }
 
 fn php_fpm_pool_exists(app_id: &str, preferred_version: &str) -> bool {
     if preferred_version != "system" {
-        return php_fpm_paths(preferred_version, app_id)
-            .is_ok_and(|(pool, _, _)| pool.is_file());
+        return php_fpm_paths(preferred_version, app_id).is_ok_and(|(pool, _, _)| pool.is_file());
     }
-    installed_php_fpm_versions().iter().any(|version| {
-        php_fpm_paths(version, app_id).is_ok_and(|(pool, _, _)| pool.is_file())
-    })
+    installed_php_fpm_versions()
+        .iter()
+        .any(|version| php_fpm_paths(version, app_id).is_ok_and(|(pool, _, _)| pool.is_file()))
 }
 
 fn app_nginx_config(app_id: &str, domain: &str, socket: &str, octane_port: Option<u16>) -> String {
@@ -1108,7 +1203,9 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
         .as_deref()
         .is_some_and(|content| !content.starts_with(marker.as_bytes()))
     {
-        return Err("فایل systemd با نام رزروشدهٔ سرویس از قبل وجود دارد و توسط ARG مدیریت نمی‌شود.".into());
+        return Err(
+            "فایل systemd با نام رزروشدهٔ سرویس از قبل وجود دارد و توسط ARG مدیریت نمی‌شود.".into(),
+        );
     }
     if !enabled {
         if previous_unit.is_none() {
@@ -1118,7 +1215,9 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
             .map_err(|error| format!("توقف سرویس Laravel ناموفق بود: {error}"))?;
         fs::remove_file(&unit_path).map_err(|error| format!("فایل سرویس حذف نشد: {error}"))?;
         helper_output("systemctl", &["daemon-reload"])?;
-        return Ok(json!({"service":service,"enabled":false,"unit":unit_name,"state":"inactive","port":laravel_service_port(app_id,service),"message":"سرویس متوقف و غیرفعال شد؛ لاگ‌های قبلی در journal باقی می‌مانند."}));
+        return Ok(
+            json!({"service":service,"enabled":false,"unit":unit_name,"state":"inactive","port":laravel_service_port(app_id,service),"message":"سرویس متوقف و غیرفعال شد؛ لاگ‌های قبلی در journal باقی می‌مانند."}),
+        );
     }
     let version = request["runtime_version"]
         .as_str()
@@ -1141,7 +1240,9 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
         return Err("release فعال برای اجرای Artisan معتبر یا کامل نیست.".into());
     }
     if !laravel_service_available(service, &current) {
-        return Err(format!("وابستگی لازم برای سرویس {service} در release فعال نصب نشده است."));
+        return Err(format!(
+            "وابستگی لازم برای سرویس {service} در release فعال نصب نشده است."
+        ));
     }
     if service == "horizon" {
         let queue_unit = format!("arg-app-{short}-queue.service");
@@ -1158,8 +1259,12 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
     let php = php_binary(version).map_err(|message| message)?;
     let port = laravel_service_port(app_id, service);
     let was_active = systemd_unit_state(&unit_name) == "active";
-    if !was_active && port.is_some_and(|port| std::net::TcpListener::bind(("127.0.0.1", port)).is_err()) {
-        return Err(format!("پورت loopback سرویس {service} در حال استفاده است؛ سرویس شروع نشد."));
+    if !was_active
+        && port.is_some_and(|port| std::net::TcpListener::bind(("127.0.0.1", port)).is_err())
+    {
+        return Err(format!(
+            "پورت loopback سرویس {service} در حال استفاده است؛ سرویس شروع نشد."
+        ));
     }
     let command = laravel_service_command(service, port)?;
     let unit = format!("# ARG managed Laravel service app={app_id} kind={service}\n[Unit]\nDescription=ARG Laravel {service} for app {short}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=arg\nGroup=arg\nWorkingDirectory={}\nExecStart={} artisan {command}\nRestart=on-failure\nRestartSec=5s\nKillSignal=SIGTERM\nTimeoutStopSec=120s\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectHome=read-only\nProtectSystem=strict\nReadWritePaths={} {}\nUMask=0027\n\n[Install]\nWantedBy=multi-user.target\n",current.display(),php.display(),root.join("shared/storage").display(),current.join("bootstrap/cache").display());
@@ -1175,7 +1280,9 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
     if state != "active" {
         restore_service_unit(&unit_path, previous_unit.as_deref(), &unit_name, was_active);
         let _ = helper_output("systemctl", &["daemon-reload"]);
-        return Err(format!("سرویس Laravel فعال نماند (وضعیت {state})؛ تنظیم قبلی بازیابی شد."));
+        return Err(format!(
+            "سرویس Laravel فعال نماند (وضعیت {state})؛ تنظیم قبلی بازیابی شد."
+        ));
     }
     Ok(
         json!({"service":service,"enabled":true,"unit":unit_name,"state":state,"port":port,"message":"سرویس systemd ساخته و فعال شد. اجرا با PHP انتخابی، کاربر محدود ARG و فرمان ثابت انجام می‌شود."}),
@@ -1202,10 +1309,18 @@ fn restore_service_unit(path: &FsPath, previous: Option<&[u8]>, unit: &str, was_
 fn laravel_service_available(service: &str, release: &FsPath) -> bool {
     match service {
         "queue" | "scheduler" => true,
-        "horizon" => release.join("vendor/laravel/horizon/src/HorizonServiceProvider.php").is_file(),
-        "reverb" => release.join("vendor/laravel/reverb/src/ReverbServiceProvider.php").is_file(),
-        "octane" => release.join("vendor/laravel/octane/src/OctaneServiceProvider.php").is_file()
-            && release.join("vendor/bin/rr").is_file(),
+        "horizon" => release
+            .join("vendor/laravel/horizon/src/HorizonServiceProvider.php")
+            .is_file(),
+        "reverb" => release
+            .join("vendor/laravel/reverb/src/ReverbServiceProvider.php")
+            .is_file(),
+        "octane" => {
+            release
+                .join("vendor/laravel/octane/src/OctaneServiceProvider.php")
+                .is_file()
+                && release.join("vendor/bin/rr").is_file()
+        }
         _ => false,
     }
 }
@@ -1215,8 +1330,14 @@ fn laravel_service_command(service: &str, port: Option<u16>) -> Result<String, S
         "queue" => Ok("queue:work --sleep=3 --tries=3 --timeout=90 --no-interaction".into()),
         "scheduler" => Ok("schedule:work".into()),
         "horizon" => Ok("horizon".into()),
-        "reverb" => Ok(format!("reverb:start --host=127.0.0.1 --port={}", port.ok_or("پورت Reverb معتبر نیست.")?)),
-        "octane" => Ok(format!("octane:start --server=roadrunner --host=127.0.0.1 --port={} --max-requests=500", port.ok_or("پورت Octane معتبر نیست.")?)),
+        "reverb" => Ok(format!(
+            "reverb:start --host=127.0.0.1 --port={}",
+            port.ok_or("پورت Reverb معتبر نیست.")?
+        )),
+        "octane" => Ok(format!(
+            "octane:start --server=roadrunner --host=127.0.0.1 --port={} --max-requests=500",
+            port.ok_or("پورت Octane معتبر نیست.")?
+        )),
         _ => Err("نوع سرویس Laravel مجاز نیست.".into()),
     }
 }
@@ -2495,8 +2616,14 @@ mod tests {
     #[test]
     fn laravel_background_commands_are_fixed_and_ports_are_stable_loopback_values() {
         let app_id = "12345678-1234-4234-8234-123456789abc";
-        assert_eq!(laravel_service_command("queue", None).unwrap(), "queue:work --sleep=3 --tries=3 --timeout=90 --no-interaction");
-        assert_eq!(laravel_service_command("scheduler", None).unwrap(), "schedule:work");
+        assert_eq!(
+            laravel_service_command("queue", None).unwrap(),
+            "queue:work --sleep=3 --tries=3 --timeout=90 --no-interaction"
+        );
+        assert_eq!(
+            laravel_service_command("scheduler", None).unwrap(),
+            "schedule:work"
+        );
         assert_eq!(laravel_service_command("horizon", None).unwrap(), "horizon");
         assert!(laravel_service_command("queue;id", None).is_err());
         assert!(laravel_service_command("reverb", None).is_err());
@@ -2524,9 +2651,21 @@ mod tests {
         fs::create_dir_all(release.join("vendor/laravel/reverb/src")).unwrap();
         fs::create_dir_all(release.join("vendor/laravel/octane/src")).unwrap();
         fs::create_dir_all(release.join("vendor/bin")).unwrap();
-        fs::write(release.join("vendor/laravel/horizon/src/HorizonServiceProvider.php"), "").unwrap();
-        fs::write(release.join("vendor/laravel/reverb/src/ReverbServiceProvider.php"), "").unwrap();
-        fs::write(release.join("vendor/laravel/octane/src/OctaneServiceProvider.php"), "").unwrap();
+        fs::write(
+            release.join("vendor/laravel/horizon/src/HorizonServiceProvider.php"),
+            "",
+        )
+        .unwrap();
+        fs::write(
+            release.join("vendor/laravel/reverb/src/ReverbServiceProvider.php"),
+            "",
+        )
+        .unwrap();
+        fs::write(
+            release.join("vendor/laravel/octane/src/OctaneServiceProvider.php"),
+            "",
+        )
+        .unwrap();
         assert!(laravel_service_available("horizon", &release));
         assert!(laravel_service_available("reverb", &release));
         assert!(!laravel_service_available("octane", &release));
@@ -2540,7 +2679,10 @@ mod tests {
     fn nginx_host_overlap_detects_wildcards_without_matching_sibling_domains() {
         assert!(host_pattern_matches("*.example.test", "shop.example.test"));
         assert!(host_pattern_matches(".example.test", "shop.example.test"));
-        assert!(host_pattern_matches("=shop.example.test", "shop.example.test"));
+        assert!(host_pattern_matches(
+            "=shop.example.test",
+            "shop.example.test"
+        ));
         assert!(!host_pattern_matches("*.example.test", "example.test"));
         assert!(!host_pattern_matches("*.example.test", "other.test"));
     }

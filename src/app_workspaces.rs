@@ -349,9 +349,7 @@ pub(super) async fn list_projects(
         return Err(error(StatusCode::NOT_FOUND, "فضای‌کار پیدا نشد."));
     }
     let projects = query_project_rows(&db, &workspace_id).map_err(db_error)?;
-    Ok(Json(
-        json!({"projects":projects}),
-    ))
+    Ok(Json(json!({"projects":projects})))
 }
 
 pub(super) async fn create_project(
@@ -420,9 +418,7 @@ pub(super) async fn list_environments(
         return Err(error(StatusCode::NOT_FOUND, "پروژه پیدا نشد."));
     }
     let environments = query_environment_rows(&db, &project_id).map_err(db_error)?;
-    Ok(Json(
-        json!({"environments":environments}),
-    ))
+    Ok(Json(json!({"environments":environments})))
 }
 
 pub(super) async fn create_environment(

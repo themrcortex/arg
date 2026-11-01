@@ -48,7 +48,8 @@ fn disk_io_rates() -> HashMap<String, (Option<f64>, Option<f64>)> {
                 .map(|(device, (read, written))| {
                     let rate = before.get(device).map(|(old_read, old_written)| {
                         (
-                            read.checked_sub(*old_read).map(|delta| delta as f64 / elapsed),
+                            read.checked_sub(*old_read)
+                                .map(|delta| delta as f64 / elapsed),
                             written
                                 .checked_sub(*old_written)
                                 .map(|delta| delta as f64 / elapsed),
@@ -68,9 +69,12 @@ pub(super) fn root_disk_io_counters() -> Option<(u64, u64)> {
     let device = mountinfo.lines().find_map(|line| {
         let (left, _) = line.split_once(" - ")?;
         let fields: Vec<_> = left.split_whitespace().collect();
-        (fields.get(4).copied() == Some("/")).then(|| fields.get(2).copied().unwrap_or("").to_owned())
+        (fields.get(4).copied() == Some("/"))
+            .then(|| fields.get(2).copied().unwrap_or("").to_owned())
     })?;
-    parse_diskstats(&fs::read_to_string("/proc/diskstats").ok()?).get(&device).copied()
+    parse_diskstats(&fs::read_to_string("/proc/diskstats").ok()?)
+        .get(&device)
+        .copied()
 }
 
 fn unescape_mount_field(value: &str) -> String {
@@ -242,10 +246,8 @@ fn build_inventory() -> Value {
             .filter(|value| *value > 0)
             .zip(used_bytes)
             .map(|(size, usage)| ((usage as f64 / size as f64) * 100.0).clamp(0.0, 100.0));
-        let (read_bytes_per_sec, write_bytes_per_sec) = io_rates
-            .get(device_id)
-            .cloned()
-            .unwrap_or((None, None));
+        let (read_bytes_per_sec, write_bytes_per_sec) =
+            io_rates.get(device_id).cloned().unwrap_or((None, None));
         let is_mount = Path::new(&mount_point).exists();
         volumes.push(json!({
             "id": format!("{}:{}:{}", device_id, filesystem, mount_point),

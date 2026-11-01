@@ -55,11 +55,22 @@ pub(super) async fn docker_operation(
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
     };
-    if let Some(application_id)=input.application_id.as_deref() {
-        if input.action!="container-run" || !apps::valid_uuid(application_id) { return Err(error(StatusCode::BAD_REQUEST,"اتصال کانتینر فقط با شناسهٔ معتبر اپ مجاز است.")); }
-        let db=state.lock().unwrap();let owner=federation::local_server_uuid(&db).map_err(db_error)?;
+    if let Some(application_id) = input.application_id.as_deref() {
+        if input.action != "container-run" || !apps::valid_uuid(application_id) {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "اتصال کانتینر فقط با شناسهٔ معتبر اپ مجاز است.",
+            ));
+        }
+        let db = state.lock().unwrap();
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
         let owned:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND source_type='docker' AND deleted_at IS NULL)",params![application_id,owner],|r|r.get(0)).map_err(db_error)?;
-        if !owned{return Err(error(StatusCode::NOT_FOUND,"اپلیکیشن Docker متعلق به این میزبان پیدا نشد."));}
+        if !owned {
+            return Err(error(
+                StatusCode::NOT_FOUND,
+                "اپلیکیشن Docker متعلق به این میزبان پیدا نشد.",
+            ));
+        }
     }
     let allowed = [
         "install",
@@ -441,9 +452,14 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
                 "--restart".into(),
                 restart.into(),
             ]);
-            if let Some(application_id)=application_id {
-                if !apps::valid_uuid(application_id) { return json!({"ok":false,"error":"Invalid ARG application id"}); }
-                args.extend(["--label".into(),format!("com.arg.application_id={application_id}")]);
+            if let Some(application_id) = application_id {
+                if !apps::valid_uuid(application_id) {
+                    return json!({"ok":false,"error":"Invalid ARG application id"});
+                }
+                args.extend([
+                    "--label".into(),
+                    format!("com.arg.application_id={application_id}"),
+                ]);
             }
             for port in ports {
                 args.extend(["-p".into(), port.into()]);
@@ -703,7 +719,9 @@ pub(super) fn preflight_application_containers(app_id: &str) -> Result<(), Strin
 
 pub(super) fn purge_application_containers(app_id: &str) -> Result<Vec<String>, String> {
     let ids = application_container_ids(app_id)?;
-    if ids.is_empty() { return Ok(ids); }
+    if ids.is_empty() {
+        return Ok(ids);
+    }
     let output = std::process::Command::new("docker")
         .arg("rm")
         .arg("-f")

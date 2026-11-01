@@ -208,12 +208,16 @@ fn authorize(
             )
         })?;
     let hash = session_hash(bearer);
-    let record: Option<(i64, String, i64)> = db.query_row(
-        "SELECT k.id,k.scopes_json,k.expires_at FROM public_api_keys k
+    let record: Option<(i64, String, i64)> = db
+        .query_row(
+            "SELECT k.id,k.scopes_json,k.expires_at FROM public_api_keys k
          JOIN users u ON u.id=k.user_id AND u.role='admin' AND u.enabled=1
          WHERE k.token_hash=?1 AND k.revoked_at IS NULL",
-        [&hash], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-    ).optional().map_err(db_error)?;
+            [&hash],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
     let Some((id, scopes_json, expires_at)) = record else {
         return Err(error(
             StatusCode::UNAUTHORIZED,
@@ -341,10 +345,10 @@ pub(super) async fn openapi() -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ListQuery, authorize, is_api_path, migrate, pagination, revoke_if_owner_ineligible,
+        authorize, is_api_path, migrate, pagination, revoke_if_owner_ineligible, ListQuery,
     };
     use crate::{session_hash, token};
-    use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use rusqlite::Connection;
 
     #[test]
@@ -458,7 +462,10 @@ mod tests {
 
         db.execute("UPDATE users SET role='viewer' WHERE id=1", [])
             .unwrap();
-        assert_eq!(revoke_if_owner_ineligible(&db, 1, "viewer", true).unwrap(), 1);
+        assert_eq!(
+            revoke_if_owner_ineligible(&db, 1, "viewer", true).unwrap(),
+            1
+        );
         assert!(matches!(
             authorize(&db, &headers, "apps:read"),
             Err((StatusCode::UNAUTHORIZED, _))

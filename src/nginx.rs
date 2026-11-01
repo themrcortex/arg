@@ -1,6 +1,6 @@
 use super::*;
-use std::os::unix::fs::FileTypeExt;
 use std::io::{Seek, SeekFrom};
+use std::os::unix::fs::FileTypeExt;
 
 const NGINX_AVAILABLE_DIR: &str = "/etc/nginx/sites-available";
 const NGINX_ENABLED_DIR: &str = "/etc/nginx/sites-enabled";
@@ -112,7 +112,9 @@ pub(super) struct NginxBrowseQuery {
     path: Option<String>,
 }
 
-pub(super) async fn nginx_manager_request_async(request: Value) -> Result<Value, (StatusCode, Json<Value>)> {
+pub(super) async fn nginx_manager_request_async(
+    request: Value,
+) -> Result<Value, (StatusCode, Json<Value>)> {
     let response = privileged_request_async(request).await?;
     if response["ok"] == true {
         Ok(response["data"].clone())
@@ -290,11 +292,14 @@ pub(super) async fn nginx_sites(State(state): State<AppState>, headers: HeaderMa
             if let Some(name) = site["name"].as_str().map(str::to_owned) {
                 if let Some(application_id) = site["application_id"].as_str().map(str::to_owned) {
                     let db = state.lock().unwrap();
-                    let application_name: Option<String> = db.query_row(
-                        "SELECT name FROM applications WHERE id=?1 AND deleted_at IS NULL",
-                        [&application_id],
-                        |row| row.get(0),
-                    ).optional().unwrap_or(None);
+                    let application_name: Option<String> = db
+                        .query_row(
+                            "SELECT name FROM applications WHERE id=?1 AND deleted_at IS NULL",
+                            [&application_id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .unwrap_or(None);
                     site["application_name"] = json!(application_name);
                 }
                 let (description, snapshot, runtime_configured) = {
@@ -1160,8 +1165,7 @@ mod domain_check_tests {
         without_origin.insert(header::HOST, HeaderValue::from_static("panel.example.test"));
         without_origin.insert(
             header::COOKIE,
-            HeaderValue::from_str(&format!("arg_session={token}"))
-                .expect("valid test cookie"),
+            HeaderValue::from_str(&format!("arg_session={token}")).expect("valid test cookie"),
         );
         let result = check_nginx_domains(
             State(state.clone()),
@@ -1184,8 +1188,7 @@ mod domain_check_tests {
         );
         with_origin.insert(
             header::COOKIE,
-            HeaderValue::from_str(&format!("arg_session={token}"))
-                .expect("valid test cookie"),
+            HeaderValue::from_str(&format!("arg_session={token}")).expect("valid test cookie"),
         );
         let result = check_nginx_domains(
             State(state),
@@ -2398,7 +2401,9 @@ fn nginx_managed_application_id(content: &str) -> Option<String> {
         "# ARG managed Laravel site app=",
         "# Managed by ARG Node runner app=",
         "# Managed by ARG Static runner app=",
-    ].iter().find_map(|prefix| first_line.strip_prefix(*prefix))?;
+    ]
+    .iter()
+    .find_map(|prefix| first_line.strip_prefix(*prefix))?;
     let candidate = marker.split_ascii_whitespace().next()?;
     apps::valid_uuid(candidate).then(|| candidate.to_owned())
 }
@@ -2905,8 +2910,7 @@ pub(super) fn ensure_node_proxy_for_deployment(
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(error.to_string()),
     };
-    let another_site_claims_domain =
-        !has_managed_site && nginx_domain_is_claimed(&domain, &name)?;
+    let another_site_claims_domain = !has_managed_site && nginx_domain_is_claimed(&domain, &name)?;
     let plan = deployment_node_proxy_plan(has_managed_site, another_site_claims_domain);
     match plan {
         DeploymentNodeProxyPlan::PreserveExisting => {
@@ -3305,7 +3309,11 @@ pub(super) fn configure_static_site(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if app_id.len() != 36
         || app_id.chars().enumerate().any(|(index, value)| {
-            if [8, 13, 18, 23].contains(&index) { value != '-' } else { !value.is_ascii_hexdigit() }
+            if [8, 13, 18, 23].contains(&index) {
+                value != '-'
+            } else {
+                !value.is_ascii_hexdigit()
+            }
         })
         || !valid_domain_name(domain)
         || domain.contains('*')
@@ -3317,18 +3325,26 @@ pub(super) fn configure_static_site(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/arg/deployments"));
     let app_root = deployment_root.join("apps").join(app_id);
-    let releases = app_root.join("releases").canonicalize()
+    let releases = app_root
+        .join("releases")
+        .canonicalize()
         .map_err(|_| "پوشهٔ releaseهای اپ پیدا نشد.".to_owned())?;
     let current_link = app_root.join("current");
-    if !std::fs::symlink_metadata(&current_link).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    if !std::fs::symlink_metadata(&current_link)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
         return Err("اشاره‌گر current اپ، symlink مدیریت‌شده نیست.".into());
     }
-    let active = current_link.canonicalize().map_err(|_| "release جاری پیدا نشد.".to_owned())?;
+    let active = current_link
+        .canonicalize()
+        .map_err(|_| "release جاری پیدا نشد.".to_owned())?;
     if !active.starts_with(&releases) || !active.is_dir() {
         return Err("release جاری خارج از پوشهٔ مجاز است.".into());
     }
     let selected = active.join(output_path);
-    let output = selected.canonicalize().map_err(|_| format!("پوشهٔ خروجی {output_path} پیدا نشد."))?;
+    let output = selected
+        .canonicalize()
+        .map_err(|_| format!("پوشهٔ خروجی {output_path} پیدا نشد."))?;
     if !output.starts_with(&active) || !output.is_dir() || !output.join("index.html").is_file() {
         return Err("پوشهٔ خروجی باید زیر release جاری باشد و index.html عادی داشته باشد.".into());
     }
@@ -3341,14 +3357,19 @@ pub(super) fn configure_static_site(
     let expected_marker = format!("# Managed by ARG Static runner app={app_id}");
     let root = current_link.join(output_path);
     if !safe_static_root_path(&root) {
-        return Err("مسیر انتشار شامل نویسه‌ای است که در دستور root مربوط به Nginx ایمن نیست.".into());
+        return Err(
+            "مسیر انتشار شامل نویسه‌ای است که در دستور root مربوط به Nginx ایمن نیست.".into(),
+        );
     }
     let content = static_site_config(app_id, &domain, &root, spa_fallback);
     let previous = match std::fs::symlink_metadata(&available) {
         Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= 512 * 1024 => {
-            let existing = std::fs::read_to_string(&available).map_err(|error| error.to_string())?;
+            let existing =
+                std::fs::read_to_string(&available).map_err(|error| error.to_string())?;
             if !existing.starts_with(&expected_marker) {
-                return Err(format!("فایل رزروشدهٔ {name} متعلق به پیکربندی دیگری است؛ تغییرش ندادم."));
+                return Err(format!(
+                    "فایل رزروشدهٔ {name} متعلق به پیکربندی دیگری است؛ تغییرش ندادم."
+                ));
             }
             Some(existing)
         }
@@ -3357,7 +3378,9 @@ pub(super) fn configure_static_site(
         Err(error) => return Err(error.to_string()),
     };
     if previous.is_none() && nginx_domain_is_claimed(&domain, &name)? {
-        return Err(format!("دامنهٔ {domain} از قبل در Nginx استفاده شده است؛ سایت موجود تغییر نکرد."));
+        return Err(format!(
+            "دامنهٔ {domain} از قبل در Nginx استفاده شده است؛ سایت موجود تغییر نکرد."
+        ));
     }
     if let Some(previous_content) = previous.as_ref() {
         if previous_content != &content {
@@ -3365,7 +3388,9 @@ pub(super) fn configure_static_site(
             if let Err(problem) = nginx_config_test().and_then(|_| nginx_reload_if_active()) {
                 let _ = nginx_atomic_write(&available, previous_content.as_bytes(), 0o644);
                 let _ = nginx_config_test().and_then(|_| nginx_reload_if_active());
-                return Err(format!("تغییر سایت Static معتبر نشد؛ کانفیگ قبلی بازیابی شد: {problem}"));
+                return Err(format!(
+                    "تغییر سایت Static معتبر نشد؛ کانفیگ قبلی بازیابی شد: {problem}"
+                ));
             }
         }
     } else {
@@ -3380,20 +3405,35 @@ pub(super) fn configure_static_site(
         nginx_set_site_enabled(&name, true)?;
     }
     let site = nginx_get_site(&name)?;
-    Ok(json!({"site_name":name,"content":site["content"].as_str().unwrap_or_default(),"root":current_link.join(output_path),"enabled":true}))
+    Ok(
+        json!({"site_name":name,"content":site["content"].as_str().unwrap_or_default(),"root":current_link.join(output_path),"enabled":true}),
+    )
 }
 
 fn safe_static_relative_path(value: &str) -> bool {
-    value == "." || (!value.is_empty() && value.len() <= 128 && !value.starts_with('/')
-        && value.split('/').all(|part| !part.is_empty() && part != "." && part != ".."
-            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))))
+    value == "."
+        || (!value.is_empty()
+            && value.len() <= 128
+            && !value.starts_with('/')
+            && value.split('/').all(|part| {
+                !part.is_empty()
+                    && part != "."
+                    && part != ".."
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            }))
 }
 
 fn safe_static_root_path(path: &std::path::Path) -> bool {
-    let Some(value) = path.to_str() else { return false };
+    let Some(value) = path.to_str() else {
+        return false;
+    };
     value.starts_with('/')
         && !value.contains("..")
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
 }
 
 fn validate_static_tree(root: &std::path::Path) -> Result<(), String> {
@@ -3403,15 +3443,25 @@ fn validate_static_tree(root: &std::path::Path) -> Result<(), String> {
     while let Some(directory) = pending.pop() {
         for entry in std::fs::read_dir(&directory).map_err(|error| error.to_string())? {
             let entry = entry.map_err(|error| error.to_string())?;
-            let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
+            let metadata =
+                std::fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
             entries += 1;
-            if entries > 100_000 { return Err("خروجی استاتیک بیش از ۱۰۰ هزار فایل دارد.".into()); }
-            if metadata.file_type().is_symlink() { return Err("خروجی build دارای symlink است و برای انتشار رد شد.".into()); }
-            if metadata.is_dir() { pending.push(entry.path()); }
-            else if metadata.is_file() {
+            if entries > 100_000 {
+                return Err("خروجی استاتیک بیش از ۱۰۰ هزار فایل دارد.".into());
+            }
+            if metadata.file_type().is_symlink() {
+                return Err("خروجی build دارای symlink است و برای انتشار رد شد.".into());
+            }
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if metadata.is_file() {
                 total = total.saturating_add(metadata.len());
-                if total > 2 * 1024 * 1024 * 1024 { return Err("حجم خروجی استاتیک از ۲ GiB بیشتر است.".into()); }
-            } else { return Err("خروجی build شامل فایل خاص است.".into()); }
+                if total > 2 * 1024 * 1024 * 1024 {
+                    return Err("حجم خروجی استاتیک از ۲ GiB بیشتر است.".into());
+                }
+            } else {
+                return Err("خروجی build شامل فایل خاص است.".into());
+            }
         }
     }
     Ok(())
@@ -3423,33 +3473,81 @@ fn grant_static_web_access(
     releases: &std::path::Path,
     output: &std::path::Path,
 ) -> Result<(), String> {
-    let setfacl = std::process::Command::new("setfacl").arg("--version").output();
+    let setfacl = std::process::Command::new("setfacl")
+        .arg("--version")
+        .output();
     if setfacl.is_err() {
-        let install = std::process::Command::new("apt-get").args(["-y", "install", "acl"]).output()
+        let install = std::process::Command::new("apt-get")
+            .args(["-y", "install", "acl"])
+            .output()
             .map_err(|error| format!("ابزار ACL نصب نشد: {error}"))?;
-        if !install.status.success() { return Err(format!("نصب ACL ناموفق بود: {}", String::from_utf8_lossy(&install.stderr).trim())); }
+        if !install.status.success() {
+            return Err(format!(
+                "نصب ACL ناموفق بود: {}",
+                String::from_utf8_lossy(&install.stderr).trim()
+            ));
+        }
     }
     let canonical_app = app_root.canonicalize().map_err(|error| error.to_string())?;
-    let canonical_deployment = deployment_root.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_deployment = deployment_root
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let canonical_releases = releases.canonicalize().map_err(|error| error.to_string())?;
-    if !canonical_app.starts_with(&canonical_deployment) || !output.starts_with(&canonical_releases) {
+    if !canonical_app.starts_with(&canonical_deployment) || !output.starts_with(&canonical_releases)
+    {
         return Err("مسیر سایت خارج از محدودهٔ اپلیکیشن است.".into());
     }
-    let mut parents = vec![canonical_deployment.parent().unwrap_or(&canonical_deployment).to_path_buf(), canonical_deployment.clone(), canonical_deployment.join("apps"), canonical_app, canonical_releases, output.parent().unwrap_or(output).to_path_buf()];
-    parents.sort(); parents.dedup();
+    let mut parents = vec![
+        canonical_deployment
+            .parent()
+            .unwrap_or(&canonical_deployment)
+            .to_path_buf(),
+        canonical_deployment.clone(),
+        canonical_deployment.join("apps"),
+        canonical_app,
+        canonical_releases,
+        output.parent().unwrap_or(output).to_path_buf(),
+    ];
+    parents.sort();
+    parents.dedup();
     for parent in parents {
-        let result = std::process::Command::new("setfacl").args(["-m", "u:www-data:--x", "--"]).arg(&parent).output()
+        let result = std::process::Command::new("setfacl")
+            .args(["-m", "u:www-data:--x", "--"])
+            .arg(&parent)
+            .output()
             .map_err(|error| format!("دسترسی عبور Nginx تنظیم نشد: {error}"))?;
-        if !result.status.success() { return Err(format!("دسترسی عبور Nginx تنظیم نشد: {}", String::from_utf8_lossy(&result.stderr).trim())); }
+        if !result.status.success() {
+            return Err(format!(
+                "دسترسی عبور Nginx تنظیم نشد: {}",
+                String::from_utf8_lossy(&result.stderr).trim()
+            ));
+        }
     }
-    let result = std::process::Command::new("setfacl").args(["-R", "-m", "u:www-data:rX", "--"]).arg(output).output()
+    let result = std::process::Command::new("setfacl")
+        .args(["-R", "-m", "u:www-data:rX", "--"])
+        .arg(output)
+        .output()
         .map_err(|error| format!("دسترسی خواندن خروجی تنظیم نشد: {error}"))?;
-    if !result.status.success() { return Err(format!("دسترسی خواندن خروجی تنظیم نشد: {}", String::from_utf8_lossy(&result.stderr).trim())); }
+    if !result.status.success() {
+        return Err(format!(
+            "دسترسی خواندن خروجی تنظیم نشد: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ));
+    }
     Ok(())
 }
 
-fn static_site_config(app_id: &str, domain: &str, root: &std::path::Path, spa_fallback: bool) -> String {
-    let fallback = if spa_fallback { "try_files $uri $uri/ /index.html;" } else { "try_files $uri $uri/ =404;" };
+fn static_site_config(
+    app_id: &str,
+    domain: &str,
+    root: &std::path::Path,
+    spa_fallback: bool,
+) -> String {
+    let fallback = if spa_fallback {
+        "try_files $uri $uri/ /index.html;"
+    } else {
+        "try_files $uri $uri/ =404;"
+    };
     format!("# Managed by ARG Static runner app={app_id} domain={domain} spa={spa_fallback}\nserver {{\n    listen 80;\n    server_name {domain};\n    root {};\n    index index.html;\n    server_tokens off;\n    add_header X-Content-Type-Options nosniff always;\n    add_header X-Frame-Options SAMEORIGIN always;\n\n    location / {{ {fallback} }}\n    location ~* \\.[a-f0-9]{{8,}}\\.(?:css|js|svg|png|jpg|webp|woff2?)$ {{ expires 1y; add_header Cache-Control \"public, immutable\"; }}\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n    location ~* \\.(?:env|ini|log|sql|sqlite|bak|zip|gz|tar)$ {{ deny all; }}\n}}\n", root.display())
 }
 
@@ -3590,33 +3688,64 @@ mod node_proxy_tests {
     #[test]
     fn identifies_nginx_sites_owned_by_application_manager() {
         let app_id = "12345678-1234-4234-8234-123456789abc";
-        assert_eq!(nginx_managed_application_id(&format!("# ARG managed Laravel site app={app_id}\nserver {{")), Some(app_id.to_owned()));
+        assert_eq!(
+            nginx_managed_application_id(&format!(
+                "# ARG managed Laravel site app={app_id}\nserver {{"
+            )),
+            Some(app_id.to_owned())
+        );
         assert_eq!(nginx_managed_application_id(&format!("# Managed by ARG Node runner app={app_id} domain=site.example port=3000\nserver {{")), Some(app_id.to_owned()));
         assert_eq!(nginx_managed_application_id(&format!("# Managed by ARG Static runner app={app_id} domain=site.example spa=true\nserver {{")), Some(app_id.to_owned()));
-        assert_eq!(nginx_managed_application_id("server {\n    listen 80;\n}"), None);
-        assert_eq!(nginx_managed_application_id("# ARG managed Laravel site app=not-a-uuid\nserver {"), None);
+        assert_eq!(
+            nginx_managed_application_id("server {\n    listen 80;\n}"),
+            None
+        );
+        assert_eq!(
+            nginx_managed_application_id("# ARG managed Laravel site app=not-a-uuid\nserver {"),
+            None
+        );
     }
 
     #[test]
     fn static_site_config_has_spa_fallback_and_safe_asset_headers() {
-        let spa = static_site_config("12345678-1234-4234-8234-123456789abc", "site.example", std::path::Path::new("/var/lib/arg/current/dist"), true);
+        let spa = static_site_config(
+            "12345678-1234-4234-8234-123456789abc",
+            "site.example",
+            std::path::Path::new("/var/lib/arg/current/dist"),
+            true,
+        );
         assert!(spa.contains("try_files $uri $uri/ /index.html;"));
         assert!(spa.contains("public, immutable"));
         assert!(spa.contains("deny all;"));
-        let multipage = static_site_config("12345678-1234-4234-8234-123456789abc", "site.example", std::path::Path::new("/var/lib/arg/current/out"), false);
+        let multipage = static_site_config(
+            "12345678-1234-4234-8234-123456789abc",
+            "site.example",
+            std::path::Path::new("/var/lib/arg/current/out"),
+            false,
+        );
         assert!(multipage.contains("try_files $uri $uri/ =404;"));
     }
 
     #[test]
     fn static_document_root_rejects_nginx_directive_injection() {
-        assert!(safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/id/current/dist")));
-        assert!(!safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/id;include evil/current")));
-        assert!(!safe_static_root_path(std::path::Path::new("/var/lib/arg/apps/$host/current")));
+        assert!(safe_static_root_path(std::path::Path::new(
+            "/var/lib/arg/apps/id/current/dist"
+        )));
+        assert!(!safe_static_root_path(std::path::Path::new(
+            "/var/lib/arg/apps/id;include evil/current"
+        )));
+        assert!(!safe_static_root_path(std::path::Path::new(
+            "/var/lib/arg/apps/$host/current"
+        )));
     }
 
     #[test]
     fn node_proxy_has_loopback_upstream_websocket_and_safe_file_rules() {
-        let config = node_proxy_config("12345678-1234-4234-8234-123456789abc", "api.example.com", 31234);
+        let config = node_proxy_config(
+            "12345678-1234-4234-8234-123456789abc",
+            "api.example.com",
+            31234,
+        );
         assert!(config.contains("server_name api.example.com;"));
         assert!(config.contains("proxy_pass http://127.0.0.1:31234;"));
         assert!(config.contains("proxy_set_header Upgrade $http_upgrade;"));
@@ -3736,8 +3865,9 @@ fn server_name_overlaps(name: &str, domain: &str) -> bool {
     }
     let name = name.to_ascii_lowercase();
     let domain = domain.to_ascii_lowercase();
-    name.strip_prefix("*.")
-        .is_some_and(|suffix| domain.len() > suffix.len() + 1 && domain.ends_with(&format!(".{suffix}")))
+    name.strip_prefix("*.").is_some_and(|suffix| {
+        domain.len() > suffix.len() + 1 && domain.ends_with(&format!(".{suffix}"))
+    })
 }
 
 fn nginx_delete_site(name: &str) -> Result<Value, String> {
@@ -3794,9 +3924,18 @@ pub(super) fn purge_managed_application_sites(app_id: &str) -> Result<Vec<String
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let candidates = [
-        (format!("arg-app-{}", &app_id[..8]), format!("# ARG managed Laravel site app={app_id}")),
-        (format!("arg-node-{}", &app_id[..12]), format!("# Managed by ARG Node runner app={app_id} ")),
-        (format!("arg-static-{}", &app_id[..12]), format!("# Managed by ARG Static runner app={app_id}")),
+        (
+            format!("arg-app-{}", &app_id[..8]),
+            format!("# ARG managed Laravel site app={app_id}"),
+        ),
+        (
+            format!("arg-node-{}", &app_id[..12]),
+            format!("# Managed by ARG Node runner app={app_id} "),
+        ),
+        (
+            format!("arg-static-{}", &app_id[..12]),
+            format!("# Managed by ARG Static runner app={app_id}"),
+        ),
     ];
     let mut removed = Vec::new();
     for (name, expected_marker) in candidates {
@@ -3805,26 +3944,38 @@ pub(super) fn purge_managed_application_sites(app_id: &str) -> Result<Vec<String
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if fs::symlink_metadata(&enabled).is_ok() {
-                    return Err(format!("پیوند فعال سایت {name} هست اما فایل اصلی پیدا نشد؛ بررسی دستی لازم است."));
+                    return Err(format!(
+                        "پیوند فعال سایت {name} هست اما فایل اصلی پیدا نشد؛ بررسی دستی لازم است."
+                    ));
                 }
                 continue;
             }
             Err(error) => return Err(format!("فایل سایت {name} بررسی نشد: {error}")),
         };
         if !metadata.file_type().is_file() {
-            return Err(format!("فایل سایت رزروشدهٔ {name} معمولی نیست؛ دست‌نخورده ماند."));
+            return Err(format!(
+                "فایل سایت رزروشدهٔ {name} معمولی نیست؛ دست‌نخورده ماند."
+            ));
         }
         let content = fs::read_to_string(&available)
             .map_err(|error| format!("کانفیگ سایت {name} خوانده نشد: {error}"))?;
         if !content.starts_with(&expected_marker) {
-            return Err(format!("سایت {name} نشان ARG این اپ را ندارد؛ دست‌نخورده ماند."));
+            return Err(format!(
+                "سایت {name} نشان ARG این اپ را ندارد؛ دست‌نخورده ماند."
+            ));
         }
         if let Ok(link) = fs::symlink_metadata(&enabled) {
             if !link.file_type().is_symlink()
                 || fs::read_link(&enabled).ok().as_deref()
-                    != Some(std::path::Path::new("../sites-available").join(&name).as_path())
+                    != Some(
+                        std::path::Path::new("../sites-available")
+                            .join(&name)
+                            .as_path(),
+                    )
             {
-                return Err(format!("پیوند فعال سایت {name} به فایل مدیریت‌شدهٔ خودش اشاره نمی‌کند."));
+                return Err(format!(
+                    "پیوند فعال سایت {name} به فایل مدیریت‌شدهٔ خودش اشاره نمی‌کند."
+                ));
             }
         }
         nginx_delete_site(&name)
@@ -3969,18 +4120,32 @@ fn nginx_site_repository(name: &str) -> Result<Value, String> {
     )
 }
 
-fn bounded_access_log_tail(mut file: fs::File, max_bytes: u64, max_lines: usize) -> Result<(Vec<String>, usize), String> {
+fn bounded_access_log_tail(
+    mut file: fs::File,
+    max_bytes: u64,
+    max_lines: usize,
+) -> Result<(Vec<String>, usize), String> {
     let file_bytes = file.metadata().map_err(|error| error.to_string())?.len();
     let offset = file_bytes.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(offset)).map_err(|error| error.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
     let mut sample = Vec::with_capacity(file_bytes.min(max_bytes) as usize);
-    file.take(max_bytes).read_to_end(&mut sample).map_err(|error| error.to_string())?;
+    file.take(max_bytes)
+        .read_to_end(&mut sample)
+        .map_err(|error| error.to_string())?;
     let sample_len = sample.len();
     let mut text = String::from_utf8_lossy(&sample).into_owned();
     if offset > 0 {
-        if let Some(newline) = text.find('\n') { text.drain(..=newline); }
+        if let Some(newline) = text.find('\n') {
+            text.drain(..=newline);
+        }
     }
-    let mut lines = text.lines().rev().take(max_lines).map(str::to_owned).collect::<Vec<_>>();
+    let mut lines = text
+        .lines()
+        .rev()
+        .take(max_lines)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     lines.reverse();
     Ok((lines, sample_len))
 }
@@ -4010,7 +4175,11 @@ fn nginx_site_traffic(name: &str) -> Result<Value, String> {
         return Err("فایل access_log معتبر نیست.".into());
     }
     const SAMPLE_BYTES: u64 = 4 * 1024 * 1024;
-    let (lines, sample_bytes_read) = bounded_access_log_tail(fs::File::open(&resolved).map_err(|error| error.to_string())?, SAMPLE_BYTES, 5000)?;
+    let (lines, sample_bytes_read) = bounded_access_log_tail(
+        fs::File::open(&resolved).map_err(|error| error.to_string())?,
+        SAMPLE_BYTES,
+        5000,
+    )?;
     let sample_lines = lines.len();
     let mut requests = 0_u64;
     let mut bytes = 0_u64;
@@ -4363,19 +4532,32 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 #[cfg(test)]
 mod maintenance_tests {
     use super::{
-        bounded_access_log_tail, nginx_maintenance_block, nginx_maintenance_cookie_name, nginx_maintenance_secret_config,
-        nginx_remove_maintenance_block, nginx_server_names, nginx_server_open_offsets,
-        nginx_ssl_certificate_name, nginx_valid_maintenance_token,
+        bounded_access_log_tail, nginx_maintenance_block, nginx_maintenance_cookie_name,
+        nginx_maintenance_secret_config, nginx_remove_maintenance_block, nginx_server_names,
+        nginx_server_open_offsets, nginx_ssl_certificate_name, nginx_valid_maintenance_token,
     };
 
     #[test]
     fn access_log_sampling_is_bounded_by_bytes_and_lines() {
-        use std::{fs, io::Write, time::{SystemTime, UNIX_EPOCH}};
-        let path = std::env::temp_dir().join(format!("arg-nginx-access-{}.log", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        use std::{
+            fs,
+            io::Write,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        let path = std::env::temp_dir().join(format!(
+            "arg-nginx-access-{}.log",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let mut file = fs::File::create(&path).unwrap();
-        for index in 0..6000 { writeln!(file, "{index:05} {}", "x".repeat(1024)).unwrap(); }
+        for index in 0..6000 {
+            writeln!(file, "{index:05} {}", "x".repeat(1024)).unwrap();
+        }
         drop(file);
-        let (lines, bytes) = bounded_access_log_tail(fs::File::open(&path).unwrap(), 4 * 1024 * 1024, 5000).unwrap();
+        let (lines, bytes) =
+            bounded_access_log_tail(fs::File::open(&path).unwrap(), 4 * 1024 * 1024, 5000).unwrap();
         assert!(bytes <= 4 * 1024 * 1024);
         assert!(lines.len() <= 5000);
         assert!(lines.last().unwrap().starts_with("05999 "));

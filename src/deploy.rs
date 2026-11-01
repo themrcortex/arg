@@ -1,6 +1,6 @@
 use super::*;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use futures_util::stream;
 use futures_util::StreamExt;
 use std::{
@@ -121,8 +121,9 @@ fn application_tree_for_purge(app_id: &str) -> Result<Option<PathBuf>, String> {
     if canonical_app != app_path || !canonical_app.starts_with(&canonical_apps) {
         return Err("مسیر واقعی اپلیکیشن با مسیر مدیریت‌شدهٔ ARG یکی نیست.".into());
     }
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo")
-        .map_err(|error| format!("Mountهای سیستم قابل بررسی نیستند؛ حذف فایل‌ها متوقف شد: {error}"))?;
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").map_err(|error| {
+        format!("Mountهای سیستم قابل بررسی نیستند؛ حذف فایل‌ها متوقف شد: {error}")
+    })?;
     for line in mountinfo.lines() {
         let Some(raw_mount) = line.split_whitespace().nth(4) else {
             continue;
@@ -261,7 +262,10 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
         ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !columns.contains(name) {
-            db.execute(&format!("ALTER TABLE deployment_jobs ADD COLUMN {name} {definition}"), [])?;
+            db.execute(
+                &format!("ALTER TABLE deployment_jobs ADD COLUMN {name} {definition}"),
+                [],
+            )?;
         }
     }
     // Repair duplicate active rows left by older non-transactional enqueue
@@ -276,24 +280,32 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     // Older installs may already have created the step/release tables with a
     // partial schema. Bring those forward additively before any job can be
     // inserted, so a failed step write cannot strand a queued job.
-    ensure_table_columns(db, "deployment_job_steps", &[
-        ("job_id", "TEXT NOT NULL DEFAULT ''"),
-        ("sequence", "INTEGER NOT NULL DEFAULT 0"),
-        ("step", "TEXT NOT NULL DEFAULT 'unknown'"),
-        ("state", "TEXT NOT NULL DEFAULT 'pending'"),
-        ("message", "TEXT NOT NULL DEFAULT ''"),
-        ("started_at", "INTEGER NOT NULL DEFAULT 0"),
-        ("finished_at", "INTEGER"),
-    ])?;
-    ensure_table_columns(db, "deployment_releases", &[
-        ("application_id", "TEXT NOT NULL DEFAULT ''"),
-        ("job_id", "TEXT NOT NULL DEFAULT ''"),
-        ("path", "TEXT NOT NULL DEFAULT ''"),
-        ("state", "TEXT NOT NULL DEFAULT 'retained'"),
-        ("source_commit", "TEXT"),
-        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
-        ("activated_at", "INTEGER"),
-    ])?;
+    ensure_table_columns(
+        db,
+        "deployment_job_steps",
+        &[
+            ("job_id", "TEXT NOT NULL DEFAULT ''"),
+            ("sequence", "INTEGER NOT NULL DEFAULT 0"),
+            ("step", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("state", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("message", "TEXT NOT NULL DEFAULT ''"),
+            ("started_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("finished_at", "INTEGER"),
+        ],
+    )?;
+    ensure_table_columns(
+        db,
+        "deployment_releases",
+        &[
+            ("application_id", "TEXT NOT NULL DEFAULT ''"),
+            ("job_id", "TEXT NOT NULL DEFAULT ''"),
+            ("path", "TEXT NOT NULL DEFAULT ''"),
+            ("state", "TEXT NOT NULL DEFAULT 'retained'"),
+            ("source_commit", "TEXT"),
+            ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("activated_at", "INTEGER"),
+        ],
+    )?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS deployment_releases_app ON deployment_releases(application_id,created_at DESC);")?;
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS deployment_job_logs (
@@ -305,14 +317,20 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             message TEXT NOT NULL
          );",
     )?;
-    ensure_table_columns(db, "deployment_job_logs", &[
-        ("job_id", "TEXT NOT NULL DEFAULT ''"),
-        ("created_at", "INTEGER NOT NULL DEFAULT 0"),
-        ("step", "TEXT NOT NULL DEFAULT 'unknown'"),
-        ("level", "TEXT NOT NULL DEFAULT 'info'"),
-        ("message", "TEXT NOT NULL DEFAULT ''"),
-    ])?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS deployment_job_logs_cursor ON deployment_job_logs(job_id,id);")?;
+    ensure_table_columns(
+        db,
+        "deployment_job_logs",
+        &[
+            ("job_id", "TEXT NOT NULL DEFAULT ''"),
+            ("created_at", "INTEGER NOT NULL DEFAULT 0"),
+            ("step", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("level", "TEXT NOT NULL DEFAULT 'info'"),
+            ("message", "TEXT NOT NULL DEFAULT ''"),
+        ],
+    )?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS deployment_job_logs_cursor ON deployment_job_logs(job_id,id);",
+    )?;
     db.execute(
         "INSERT INTO deployment_job_steps(job_id,sequence,step,state,message,started_at,finished_at) SELECT jobs.id,1,'recovered','complete','Job باقی‌مانده از نسخهٔ قبلی بازیابی شد؛ اجرای آن ادامه پیدا می‌کند.',jobs.created_at,jobs.created_at FROM deployment_jobs jobs WHERE jobs.state='queued' AND NOT EXISTS (SELECT 1 FROM deployment_job_steps steps WHERE steps.job_id=jobs.id)",
         [],
@@ -324,14 +342,22 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn ensure_table_columns(db: &Connection, table: &str, expected: &[(&str, &str)]) -> rusqlite::Result<()> {
+fn ensure_table_columns(
+    db: &Connection,
+    table: &str,
+    expected: &[(&str, &str)],
+) -> rusqlite::Result<()> {
     let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
-    let columns = statement.query_map([], |row| row.get::<_, String>(1))?
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<std::collections::HashSet<_>, _>>()?;
     drop(statement);
     for (name, definition) in expected {
         if !columns.contains(*name) {
-            db.execute(&format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"), [])?;
+            db.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {name} {definition}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -362,7 +388,8 @@ fn valid_key(value: &str) -> bool {
 }
 
 fn parse_pre_deploy_command(line: &str) -> Result<Vec<String>, String> {
-    if line.is_empty() || line.len() > MAX_PRE_DEPLOY_COMMAND_LENGTH
+    if line.is_empty()
+        || line.len() > MAX_PRE_DEPLOY_COMMAND_LENGTH
         || line.chars().any(|ch| ch == '\0' || ch.is_control())
     {
         return Err("هر دستور باید یک خط، غیرخالی و حداکثر ۵۱۲ نویسه باشد.".into());
@@ -382,44 +409,104 @@ fn parse_pre_deploy_command(line: &str) -> Result<Vec<String>, String> {
         match (quote, ch) {
             (Some(q), c) if c == q => quote = None,
             (Some('\''), c) => token.push(c),
-            (Some('"'), '\\') | (None, '\\') => { escaped = true; token_started = true; }
-            (Some('"'), c) => token.push(c),
-            (None, '\'' | '"') => { quote = Some(ch); token_started = true; }
-            (None, c) if c.is_whitespace() => {
-                if token_started { argv.push(std::mem::take(&mut token)); token_started = false; }
+            (Some('"'), '\\') | (None, '\\') => {
+                escaped = true;
+                token_started = true;
             }
-            (None, c) => { token.push(c); token_started = true; }
-            (Some(_), c) => { token.push(c); token_started = true; }
+            (Some('"'), c) => token.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+                token_started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if token_started {
+                    argv.push(std::mem::take(&mut token));
+                    token_started = false;
+                }
+            }
+            (None, c) => {
+                token.push(c);
+                token_started = true;
+            }
+            (Some(_), c) => {
+                token.push(c);
+                token_started = true;
+            }
         }
-        if argv.len() > 31 { return Err("هر دستور حداکثر ۳۲ بخش (نام برنامه و آرگومان‌ها) می‌تواند داشته باشد.".into()); }
+        if argv.len() > 31 {
+            return Err(
+                "هر دستور حداکثر ۳۲ بخش (نام برنامه و آرگومان‌ها) می‌تواند داشته باشد.".into(),
+            );
+        }
     }
-    if escaped || quote.is_some() { return Err("نقل‌قول یا escape در دستور بسته نشده است.".into()); }
-    if token_started { argv.push(token); }
-    if argv.is_empty() || argv[0].is_empty() { return Err("نام برنامه در دستور مشخص نشده است.".into()); }
-    if argv.len() > 32 { return Err("هر دستور حداکثر ۳۲ بخش می‌تواند داشته باشد.".into()); }
+    if escaped || quote.is_some() {
+        return Err("نقل‌قول یا escape در دستور بسته نشده است.".into());
+    }
+    if token_started {
+        argv.push(token);
+    }
+    if argv.is_empty() || argv[0].is_empty() {
+        return Err("نام برنامه در دستور مشخص نشده است.".into());
+    }
+    if argv.len() > 32 {
+        return Err("هر دستور حداکثر ۳۲ بخش می‌تواند داشته باشد.".into());
+    }
     Ok(argv)
 }
 
 fn validate_pre_deploy_commands(commands: Vec<String>) -> Result<Vec<String>, String> {
-    let commands = commands.into_iter().map(|line| line.trim().to_owned()).filter(|line| !line.is_empty()).collect::<Vec<_>>();
+    let commands = commands
+        .into_iter()
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
     if commands.len() > MAX_PRE_DEPLOY_COMMANDS {
-        return Err(format!("حداکثر {MAX_PRE_DEPLOY_COMMANDS} دستور پیش از استقرار می‌توانی وارد کنی."));
+        return Err(format!(
+            "حداکثر {MAX_PRE_DEPLOY_COMMANDS} دستور پیش از استقرار می‌توانی وارد کنی."
+        ));
     }
     let total = commands.iter().map(String::len).sum::<usize>();
     if total > MAX_PRE_DEPLOY_COMMANDS_BYTES {
         return Err("مجموع دستورهای پیش از استقرار نباید بیشتر از ۴ کیلوبایت باشد.".into());
     }
-    for line in &commands { parse_pre_deploy_command(line)?; }
+    for line in &commands {
+        parse_pre_deploy_command(line)?;
+    }
     Ok(commands)
 }
 
-fn pre_deploy_commands_from_header(headers: &HeaderMap) -> Result<Vec<String>, (StatusCode, Json<Value>)> {
-    let Some(value) = headers.get("x-arg-pre-deploy-commands") else { return Ok(Vec::new()) };
-    let encoded = value.to_str().map_err(|_| api_error(StatusCode::BAD_REQUEST, "سرآیند دستورهای پیش از استقرار معتبر نیست."))?;
-    if encoded.len() > 8192 { return Err(api_error(StatusCode::BAD_REQUEST, "حجم دستورهای پیش از استقرار بیش از حد مجاز است.")); }
-    let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| api_error(StatusCode::BAD_REQUEST, "قالب دستورهای پیش از استقرار معتبر نیست."))?;
-    let commands: Vec<String> = serde_json::from_slice(&bytes).map_err(|_| api_error(StatusCode::BAD_REQUEST, "دستورهای پیش از استقرار قابل خواندن نیستند."))?;
-    validate_pre_deploy_commands(commands).map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))
+fn pre_deploy_commands_from_header(
+    headers: &HeaderMap,
+) -> Result<Vec<String>, (StatusCode, Json<Value>)> {
+    let Some(value) = headers.get("x-arg-pre-deploy-commands") else {
+        return Ok(Vec::new());
+    };
+    let encoded = value.to_str().map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "سرآیند دستورهای پیش از استقرار معتبر نیست.",
+        )
+    })?;
+    if encoded.len() > 8192 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "حجم دستورهای پیش از استقرار بیش از حد مجاز است.",
+        ));
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "قالب دستورهای پیش از استقرار معتبر نیست.",
+        )
+    })?;
+    let commands: Vec<String> = serde_json::from_slice(&bytes).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "دستورهای پیش از استقرار قابل خواندن نیستند.",
+        )
+    })?;
+    validate_pre_deploy_commands(commands)
+        .map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))
 }
 
 fn valid_reference(value: &str) -> bool {
@@ -540,9 +627,15 @@ fn insert_job(
             ));
         }
     }
-    if let Source::Git { repository, reference, ssh_key_id } = &source {
+    if let Source::Git {
+        repository,
+        reference,
+        ssh_key_id,
+    } = &source
+    {
         let public_https = valid_repo(repository) && ssh_key_id.is_none();
-        let private_ssh = ssh_keys::is_github_ssh_repository(repository) && ssh_key_id.as_deref().is_some_and(ssh_keys::valid_key_id);
+        let private_ssh = ssh_keys::is_github_ssh_repository(repository)
+            && ssh_key_id.as_deref().is_some_and(ssh_keys::valid_key_id);
         if !(public_https || private_ssh) || !valid_reference(reference) {
             return Err(api_error(StatusCode::BAD_REQUEST, "Git عمومی باید HTTPS معتبر باشد؛ مخزن خصوصی GitHub باید SSH و همراه کلید SSH انتخاب‌شده باشد."));
         }
@@ -555,9 +648,15 @@ fn insert_job(
     let (actor, owner) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, headers)?.username;
-        let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
+        let owner = federation::local_server_uuid(&db)
+            .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
         ensure_app(&db, app_id, &owner)?;
-        if let Source::Git { repository, ssh_key_id: Some(key_id), .. } = &source {
+        if let Source::Git {
+            repository,
+            ssh_key_id: Some(key_id),
+            ..
+        } = &source
+        {
             ssh_keys::validate_key_for_deployment(&db, app_id, repository, key_id)
                 .map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))?;
         }
@@ -662,16 +761,33 @@ fn insert_job(
     };
     let mut db = state.lock().unwrap();
     let response = match persist_new_job(
-        &mut db,&job_id,app_id,&owner,&actor,&source_json,&key,healthcheck.as_deref(),at,source_kind(&source),&serde_json::to_string(&pre_deploy_commands).unwrap_or_else(|_| "[]".into()),
+        &mut db,
+        &job_id,
+        app_id,
+        &owner,
+        &actor,
+        &source_json,
+        &key,
+        healthcheck.as_deref(),
+        at,
+        source_kind(&source),
+        &serde_json::to_string(&pre_deploy_commands).unwrap_or_else(|_| "[]".into()),
     ) {
         Ok(value) => value,
         Err(PersistJobError::QueueFull) => {
-            if let Some(path) = archive_path.as_deref() { let _ = fs::remove_file(path); }
-            return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "صف استقرار سرور پر است؛ پس از شروع یا پایان یکی از کارهای در صف دوباره تلاش کن."));
+            if let Some(path) = archive_path.as_deref() {
+                let _ = fs::remove_file(path);
+            }
+            return Err(api_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "صف استقرار سرور پر است؛ پس از شروع یا پایان یکی از کارهای در صف دوباره تلاش کن.",
+            ));
         }
         Err(PersistJobError::Database(error_value)) => {
-        if let Some(path) = archive_path.as_deref() { let _ = fs::remove_file(path); }
-        return Err(db_error(error_value));
+            if let Some(path) = archive_path.as_deref() {
+                let _ = fs::remove_file(path);
+            }
+            return Err(db_error(error_value));
         }
     };
     Ok(response)
@@ -684,7 +800,9 @@ enum PersistJobError {
 }
 
 impl From<rusqlite::Error> for PersistJobError {
-    fn from(error: rusqlite::Error) -> Self { Self::Database(error) }
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Database(error)
+    }
 }
 
 fn persist_new_job(
@@ -713,10 +831,25 @@ fn persist_new_job(
         "INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,healthcheck_file,pre_deploy_commands_json,created_at,updated_at) VALUES (?1,?2,?3,?4,'queued',?5,?6,?7,?8,?9,?9)",
         params![job_id,app_id,owner,actor,source_json,key,healthcheck,pre_deploy_commands_json,at],
     )?;
-    add_step(&transaction,job_id,"queued","complete","در صف اجرای محدود سرور قرار گرفت.")?;
-    let command_count = serde_json::from_str::<Vec<String>>(pre_deploy_commands_json).map(|commands| commands.len()).unwrap_or(0);
-    audit(&transaction,actor,"deployment.enqueue",&format!("job={job_id}; app={app_id}; source={source}; pre_deploy_commands={command_count}"));
-    let response = read_job(&transaction,job_id)?;
+    add_step(
+        &transaction,
+        job_id,
+        "queued",
+        "complete",
+        "در صف اجرای محدود سرور قرار گرفت.",
+    )?;
+    let command_count = serde_json::from_str::<Vec<String>>(pre_deploy_commands_json)
+        .map(|commands| commands.len())
+        .unwrap_or(0);
+    audit(
+        &transaction,
+        actor,
+        "deployment.enqueue",
+        &format!(
+            "job={job_id}; app={app_id}; source={source}; pre_deploy_commands={command_count}"
+        ),
+    );
+    let response = read_job(&transaction, job_id)?;
     transaction.commit()?;
     Ok(response)
 }
@@ -759,12 +892,27 @@ fn add_step(
         |row| row.get(0),
     )?;
     db.execute("INSERT INTO deployment_job_steps(job_id,sequence,step,state,message,started_at,finished_at) VALUES (?1,?2,?3,?4,?5,?6,?6)",params![job_id,sequence,step,state,message,now()])?;
-    append_job_log(db, job_id, step, if state == "failed" { "error" } else { "info" }, message)?;
+    append_job_log(
+        db,
+        job_id,
+        step,
+        if state == "failed" { "error" } else { "info" },
+        message,
+    )?;
     Ok(())
 }
 
-fn append_job_log(db: &Connection, job_id: &str, step: &str, level: &str, message: &str) -> rusqlite::Result<()> {
-    let bounded = sanitize_deployment_output(message).chars().take(8_000).collect::<String>();
+fn append_job_log(
+    db: &Connection,
+    job_id: &str,
+    step: &str,
+    level: &str,
+    message: &str,
+) -> rusqlite::Result<()> {
+    let bounded = sanitize_deployment_output(message)
+        .chars()
+        .take(8_000)
+        .collect::<String>();
     db.execute(
         "INSERT INTO deployment_job_logs(job_id,created_at,step,level,message) VALUES (?1,?2,?3,?4,?5)",
         params![job_id, now(), step.chars().take(64).collect::<String>(), level, bounded],
@@ -777,19 +925,36 @@ fn sanitize_deployment_output(input: &str) -> String {
     let lower = value.to_ascii_lowercase();
     if let Some(relative) = lower.find("bearer ") {
         let start = relative + "bearer ".len();
-        let end = value[start..].find(char::is_whitespace).map_or(value.len(), |offset| start + offset);
-        if end > start { value.replace_range(start..end, "[REDACTED]"); }
+        let end = value[start..]
+            .find(char::is_whitespace)
+            .map_or(value.len(), |offset| start + offset);
+        if end > start {
+            value.replace_range(start..end, "[REDACTED]");
+        }
     }
     // Build tools can echo environment values or auth headers. Keep useful
     // diagnostics while masking common credential-shaped assignments.
-    for marker in ["password", "secret", "token", "api_key", "access_key", "authorization", "credential", "private_key"] {
+    for marker in [
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "access_key",
+        "authorization",
+        "credential",
+        "private_key",
+    ] {
         let mut search_from = 0;
         loop {
             let lower = value.to_ascii_lowercase();
-            let Some(relative) = lower[search_from..].find(marker) else { break };
+            let Some(relative) = lower[search_from..].find(marker) else {
+                break;
+            };
             let key_start = search_from + relative;
             let key_end = key_start + marker.len();
-            let Some(separator_offset) = value[key_end..].find(|character| character == '=' || character == ':') else {
+            let Some(separator_offset) =
+                value[key_end..].find(|character| character == '=' || character == ':')
+            else {
                 search_from = key_end;
                 continue;
             };
@@ -825,7 +990,9 @@ fn sanitize_deployment_output(input: &str) -> String {
     let mut search_from = 0;
     while let Some(relative) = lower[search_from..].find("bearer ") {
         let start = search_from + relative + "bearer ".len();
-        let end = value[start..].find(char::is_whitespace).map_or(value.len(), |offset| start + offset);
+        let end = value[start..]
+            .find(char::is_whitespace)
+            .map_or(value.len(), |offset| start + offset);
         if end > start {
             value.replace_range(start..end, "[REDACTED]");
             break;
@@ -886,7 +1053,11 @@ fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
     let mut log_statement = db.prepare("SELECT id,created_at,step,level,message FROM deployment_job_logs WHERE job_id=?1 ORDER BY id DESC LIMIT 20")?;
     let mut logs = log_statement.query_map([job_id], |r| Ok(json!({"id":r.get::<_,i64>(0)?,"created_at":r.get::<_,i64>(1)?,"step":r.get::<_,String>(2)?,"level":r.get::<_,String>(3)?,"message":r.get::<_,String>(4)?})))?.collect::<Result<Vec<_>,_>>()?;
     logs.reverse();
-    let log_count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_job_logs WHERE job_id=?1", [job_id], |r| r.get(0))?;
+    let log_count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM deployment_job_logs WHERE job_id=?1",
+        [job_id],
+        |r| r.get(0),
+    )?;
     Ok(
         json!({"id":row.0,"application_id":row.1,"owner_server_uuid":row.2,"actor":row.3,"state":row.4,"attempt":row.5,"created_at":row.6,"started_at":row.7,"finished_at":row.8,"release_path":row.9,"previous_release":row.10,"source_commit":row.11,"error":row.12,"steps":steps,"logs":logs,"log_count":log_count}),
     )
@@ -900,13 +1071,21 @@ pub(super) async fn logs(
 ) -> ApiResult {
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
-    let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
-    let job_owner: Option<String> = db.query_row("SELECT owner_server_uuid FROM deployment_jobs WHERE id=?1", [&job_id], |row| row.get(0)).optional().map_err(|cause| deployment_db_error("بررسی مالکیت لاگ‌ها", &cause))?;
+    let owner = federation::local_server_uuid(&db)
+        .map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
+    let job_owner: Option<String> = db
+        .query_row(
+            "SELECT owner_server_uuid FROM deployment_jobs WHERE id=?1",
+            [&job_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|cause| deployment_db_error("بررسی مالکیت لاگ‌ها", &cause))?;
     if job_owner.as_deref() != Some(owner.as_str()) {
-        return Err(api_error(StatusCode::NOT_FOUND,"Job پیدا نشد."));
+        return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
     }
     let after = query.after.unwrap_or(0).max(0);
-    let limit = query.limit.unwrap_or(100).clamp(1,500);
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
     let (sql, cursor, reverse) = if let Some(before) = query.before {
         ("SELECT id,created_at,step,level,message FROM deployment_job_logs WHERE job_id=?1 AND id<?2 ORDER BY id DESC LIMIT ?3", before.max(0), true)
     } else if query.tail.unwrap_or(false) {
@@ -914,37 +1093,66 @@ pub(super) async fn logs(
     } else {
         ("SELECT id,created_at,step,level,message FROM deployment_job_logs WHERE job_id=?1 AND id>?2 ORDER BY id LIMIT ?3", after, false)
     };
-    let mut statement = db.prepare(sql).map_err(|cause| deployment_db_error("آماده‌سازی خواندن لاگ‌های استقرار", &cause))?;
+    let mut statement = db
+        .prepare(sql)
+        .map_err(|cause| deployment_db_error("آماده‌سازی خواندن لاگ‌های استقرار", &cause))?;
     let mut values = statement.query_map(params![job_id,cursor,limit], |row| Ok(json!({"id":row.get::<_,i64>(0)?,"created_at":row.get::<_,i64>(1)?,"step":row.get::<_,String>(2)?,"level":row.get::<_,String>(3)?,"message":row.get::<_,String>(4)?}))).map_err(|cause| deployment_db_error("خواندن لاگ‌های استقرار", &cause))?.collect::<Result<Vec<_>,_>>().map_err(|cause| deployment_db_error("خواندن ردیف‌های لاگ", &cause))?;
-    if reverse || query.tail.unwrap_or(false) { values.reverse(); }
-    let next_after = values.last().and_then(|value| value["id"].as_i64()).unwrap_or(after);
+    if reverse || query.tail.unwrap_or(false) {
+        values.reverse();
+    }
+    let next_after = values
+        .last()
+        .and_then(|value| value["id"].as_i64())
+        .unwrap_or(after);
     let first_id = values.first().and_then(|value| value["id"].as_i64());
     let next_before = if let Some(first_id) = first_id {
-        let older_exists: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM deployment_job_logs WHERE job_id=?1 AND id<?2)",
-            params![job_id, first_id],
-            |row| row.get(0),
-        ).map_err(|cause| deployment_db_error("بررسی ادامهٔ لاگ‌های قدیمی‌تر", &cause))?;
+        let older_exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM deployment_job_logs WHERE job_id=?1 AND id<?2)",
+                params![job_id, first_id],
+                |row| row.get(0),
+            )
+            .map_err(|cause| deployment_db_error("بررسی ادامهٔ لاگ‌های قدیمی‌تر", &cause))?;
         older_exists.then_some(first_id)
-    } else { None };
-    Ok(Json(json!({"logs":values,"next_after":next_after,"next_before":next_before,"retention_per_job":2000})))
+    } else {
+        None
+    };
+    Ok(Json(
+        json!({"logs":values,"next_after":next_after,"next_before":next_before,"retention_per_job":2000}),
+    ))
 }
 
 pub(super) fn record_output(state: &AppState, job_id: &str, step: &str, output: &str) {
     let mut db = state.lock().unwrap();
-    let Ok(transaction) = db.transaction() else { return };
-    let line_count = output.lines().filter(|line| !line.trim().is_empty()).count();
-    let skipped_lines = if line_count > 2_000 { line_count - 1_999 } else { 0 };
+    let Ok(transaction) = db.transaction() else {
+        return;
+    };
+    let line_count = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let skipped_lines = if line_count > 2_000 {
+        line_count - 1_999
+    } else {
+        0
+    };
     if line_count > 2_000 {
         if transaction.execute(
             "INSERT INTO deployment_job_logs(job_id,created_at,step,level,message) VALUES (?1,?2,?3,'warning',?4)",
             params![job_id, now(), step.chars().take(64).collect::<String>(), format!("بخش ابتدایی خروجی این مرحله به‌علت سقف امن ثبت لاگ کنار گذاشته شد ({skipped_lines} خط).")],
         ).is_err() { return; }
     }
-    for line in output.lines().filter(|line| !line.trim().is_empty()).skip(skipped_lines) {
+    for line in output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .skip(skipped_lines)
+    {
         let line = line.trim_end();
         if !line.is_empty() {
-            let bounded = sanitize_deployment_output(line).chars().take(8_000).collect::<String>();
+            let bounded = sanitize_deployment_output(line)
+                .chars()
+                .take(8_000)
+                .collect::<String>();
             if transaction.execute(
                 "INSERT INTO deployment_job_logs(job_id,created_at,step,level,message) VALUES (?1,?2,?3,'output',?4)",
                 params![job_id,now(),step.chars().take(64).collect::<String>(),bounded],
@@ -965,12 +1173,14 @@ fn list_jobs(db: &Connection, app_id: &str, limit: i64) -> rusqlite::Result<Vec<
     let ids = statement
         .query_map(params![app_id, limit], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    ids.iter().map(|job| {
-        read_job(db, job).map_err(|error| {
-            eprintln!("ARG deployment job {job} could not be read from the database: {error}");
-            error
+    ids.iter()
+        .map(|job| {
+            read_job(db, job).map_err(|error| {
+                eprintln!("ARG deployment job {job} could not be read from the database: {error}");
+                error
+            })
         })
-    }).collect()
+        .collect()
 }
 
 pub(super) async fn create(
@@ -1025,7 +1235,8 @@ pub(super) async fn upload_archive(
     {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?;
-        let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
+        let owner = federation::local_server_uuid(&db)
+            .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
         ensure_app(&db, &app_id, &owner)?;
     }
     let dir = deployment_root().join("uploads");
@@ -1175,7 +1386,8 @@ pub(super) async fn list(
 ) -> ApiResult {
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
-    let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
+    let owner = federation::local_server_uuid(&db)
+        .map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
     ensure_app(&db, &app_id, &owner)?;
     let jobs = list_jobs(&db, &app_id, 50)
         .map_err(|cause| deployment_db_error("خواندن فهرست استقرارها", &cause))?;
@@ -1189,8 +1401,10 @@ pub(super) async fn get(
 ) -> ApiResult {
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
-    let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
-    let job = read_job(&db, &job_id).map_err(|cause| deployment_db_error("خواندن جزئیات Job", &cause))?;
+    let owner = federation::local_server_uuid(&db)
+        .map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
+    let job =
+        read_job(&db, &job_id).map_err(|cause| deployment_db_error("خواندن جزئیات Job", &cause))?;
     if job["owner_server_uuid"] != owner {
         return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
     }
@@ -1206,7 +1420,8 @@ pub(super) async fn cancel(
     let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?.username;
-    let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
+    let owner = federation::local_server_uuid(&db)
+        .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
     let old: Option<String> = db
         .query_row(
             "SELECT state FROM deployment_jobs WHERE id=?1 AND owner_server_uuid=?2",
@@ -1277,7 +1492,8 @@ pub(super) async fn rollback(
     let (actor, runtime, static_config, row) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
-        let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
+        let owner = federation::local_server_uuid(&db)
+            .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
         ensure_app(&db, &app_id, &owner)?;
         let active: bool = db
             .query_row(
@@ -1349,7 +1565,9 @@ pub(super) async fn rollback(
         ));
     }
     let current = root.join("current");
-    if current.exists() && !fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    if current.exists()
+        && !fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
         return Err(api_error(
             StatusCode::CONFLICT,
             "current symlink نیست؛ Rollback برای جلوگیری از جایگزینی فایل واقعی متوقف شد.",
@@ -1373,15 +1591,25 @@ pub(super) async fn rollback(
             )
         })?;
 
-    let framework = runtime.as_ref().map(|runtime| runtime.0.as_str()).unwrap_or_default();
+    let framework = runtime
+        .as_ref()
+        .map(|runtime| runtime.0.as_str())
+        .unwrap_or_default();
     let mut nginx_snapshot: Option<(String, String)> = None;
-    let static_refresh = if apps::is_static_framework(framework) || apps::is_auto_framework(framework) {
-        match static_config.as_ref() {
-            Some((Some(domain), output, spa)) => refresh_static_runtime(&app_id, framework, domain, output, *spa).await,
-            Some((None, _, _)) if apps::is_static_framework(framework) => Err("دامنهٔ سایت Static برای انتشار ثبت نشده است.".to_owned()),
-            _ => Ok(None),
-        }
-    } else { Ok(None) };
+    let static_refresh =
+        if apps::is_static_framework(framework) || apps::is_auto_framework(framework) {
+            match static_config.as_ref() {
+                Some((Some(domain), output, spa)) => {
+                    refresh_static_runtime(&app_id, framework, domain, output, *spa).await
+                }
+                Some((None, _, _)) if apps::is_static_framework(framework) => {
+                    Err("دامنهٔ سایت Static برای انتشار ثبت نشده است.".to_owned())
+                }
+                _ => Ok(None),
+            }
+        } else {
+            Ok(None)
+        };
     let refresh_result = match static_refresh {
         Ok(Some(snapshot)) => {
             nginx_snapshot = Some(snapshot);
@@ -1390,13 +1618,22 @@ pub(super) async fn rollback(
         Err(message) => Err(message),
         Ok(None) if framework == "laravel" => {
             let (_, runtime_version, domain, web_enabled) = runtime.as_ref().unwrap();
-            match refresh_laravel_runtime(&app_id, runtime_version, domain.as_deref(), *web_enabled).await {
-                Ok(snapshot) => { nginx_snapshot = snapshot; Ok(()) }
+            match refresh_laravel_runtime(&app_id, runtime_version, domain.as_deref(), *web_enabled)
+                .await
+            {
+                Ok(snapshot) => {
+                    nginx_snapshot = snapshot;
+                    Ok(())
+                }
                 Err(message) => Err(message),
             }
         }
-        Ok(None) if apps::is_node_runtime_framework(framework) || apps::is_auto_framework(framework) => {
-            node::refresh_after_deploy(&app_id, old_pointer.as_deref()).await.map(|_| ())
+        Ok(None)
+            if apps::is_node_runtime_framework(framework) || apps::is_auto_framework(framework) =>
+        {
+            node::refresh_after_deploy(&app_id, old_pointer.as_deref())
+                .await
+                .map(|_| ())
         }
         Ok(None) => Ok(()),
     };
@@ -1429,9 +1666,12 @@ pub(super) async fn rollback(
                     }
                 }
             } else if apps::is_static_framework(framework) || apps::is_auto_framework(framework) {
-                let static_recovery = if let Some((Some(domain), output, spa)) = static_config.as_ref() {
-                    refresh_static_runtime(&app_id, framework, domain, output, *spa).await
-                } else { Ok(None) };
+                let static_recovery =
+                    if let Some((Some(domain), output, spa)) = static_config.as_ref() {
+                        refresh_static_runtime(&app_id, framework, domain, output, *spa).await
+                    } else {
+                        Ok(None)
+                    };
                 match static_recovery {
                     Ok(Some((name, content))) => {
                         let db = state.lock().unwrap();
@@ -1489,10 +1729,27 @@ pub(super) async fn rollback(
         &format!("app={app_id}; release={}", input.release_id),
     );
     let message = snapshot_warning.map_or_else(
-        || format!("release قبلی فعال شد؛ {} بررسی شد. دیتابیس rollback نشد.", if apps::is_node_runtime_framework(framework) { "سرویس Node" } else if apps::is_static_framework(framework) { "سایت Static" } else if apps::is_auto_framework(framework) { "سایت یا Runner تشخیص‌داده‌شده" } else if framework == "laravel" { "سرویس Laravel" } else { "اپلیکیشن" }),
+        || {
+            format!(
+                "release قبلی فعال شد؛ {} بررسی شد. دیتابیس rollback نشد.",
+                if apps::is_node_runtime_framework(framework) {
+                    "سرویس Node"
+                } else if apps::is_static_framework(framework) {
+                    "سایت Static"
+                } else if apps::is_auto_framework(framework) {
+                    "سایت یا Runner تشخیص‌داده‌شده"
+                } else if framework == "laravel" {
+                    "سرویس Laravel"
+                } else {
+                    "اپلیکیشن"
+                }
+            )
+        },
         |warning| format!("release قبلی فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
     );
-    Ok(Json(json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old_id,"message":message})))
+    Ok(Json(
+        json!({"rolled_back":true,"release_id":input.release_id,"previous_release":old_id,"message":message}),
+    ))
 }
 
 #[cfg(test)]
@@ -1526,7 +1783,8 @@ pub(super) async fn retry(
     let (actor, old, source) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, &headers)?.username;
-        let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
+        let owner = federation::local_server_uuid(&db)
+            .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
         let old: (String, String, String, Option<String>, String, Option<String>, String) = db
             .query_row(
                 "SELECT application_id,owner_server_uuid,source_json,healthcheck_file,state,source_commit,pre_deploy_commands_json FROM deployment_jobs WHERE id=?1",
@@ -1551,7 +1809,15 @@ pub(super) async fn retry(
                 "تنظیمات منبع Job قابل بازیابی نیست.",
             )
         })?;
-        if let (Source::Git { repository, ssh_key_id, .. }, Some(commit)) = (&source, old.5.as_ref()) {
+        if let (
+            Source::Git {
+                repository,
+                ssh_key_id,
+                ..
+            },
+            Some(commit),
+        ) = (&source, old.5.as_ref())
+        {
             source = Source::Git {
                 repository: repository.clone(),
                 reference: commit.clone(),
@@ -1612,7 +1878,8 @@ pub(super) async fn retry(
             "deployment.retry",
             &format!("from={job_id}; to={new_id}"),
         );
-        value = read_job(&db, &new_id).map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
+        value = read_job(&db, &new_id)
+            .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
     }
     Ok(Json(value))
 }
@@ -1627,8 +1894,10 @@ pub(super) async fn events(
 > {
     let db = state.lock().unwrap();
     require_admin(&db, &headers)?;
-    let owner = federation::local_server_uuid(&db).map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
-    let job = read_job(&db, &job_id).map_err(|cause| deployment_db_error("آماده‌سازی جریان زندهٔ Job", &cause))?;
+    let owner = federation::local_server_uuid(&db)
+        .map_err(|cause| deployment_db_error("خواندن شناسهٔ VPS", &cause))?;
+    let job = read_job(&db, &job_id)
+        .map_err(|cause| deployment_db_error("آماده‌سازی جریان زندهٔ Job", &cause))?;
     if job["owner_server_uuid"] != owner {
         return Err(api_error(StatusCode::NOT_FOUND, "Job پیدا نشد."));
     }
@@ -1866,9 +2135,13 @@ fn record_claim_error(state: &AppState, cause: &rusqlite::Error) {
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().unwrap_or(None);
-    let Some((job_id, previous)) = queued else { return };
+    let Some((job_id, previous)) = queued else {
+        return;
+    };
     let message = format!("اجرای صف به‌دلیل خطای پایگاه‌داده شروع نشد و دوباره تلاش می‌شود: {cause}");
-    if previous.as_deref() == Some(message.as_str()) { return; }
+    if previous.as_deref() == Some(message.as_str()) {
+        return;
+    }
     let at = now();
     let _ = db.execute(
         "UPDATE deployment_jobs SET error_summary=?1,updated_at=?2 WHERE id=?3 AND state='queued'",
@@ -1901,7 +2174,12 @@ pub(super) fn cancelled(state: &AppState, job_id: &str) -> bool {
 
 fn finish_failure_or_cancel(state: &AppState, job_id: &str, message: &str) {
     if cancelled(state, job_id) {
-        finish(state, job_id, "cancelled", &format!("Job لغو شد؛ عملیات جاری متوقف شد: {message}"));
+        finish(
+            state,
+            job_id,
+            "cancelled",
+            &format!("Job لغو شد؛ عملیات جاری متوقف شد: {message}"),
+        );
     } else {
         finish(state, job_id, "failed", message);
     }
@@ -1946,23 +2224,37 @@ async fn refresh_laravel_runtime(
         .await
         .map_err(|_| "ارتباط با helper برای بازآماده‌سازی Nginx/PHP-FPM برقرار نشد.".to_owned())?;
         if response["ok"] != true {
-            return Err(response["error"].as_str().unwrap_or("Nginx و PHP-FPM پس از تغییر release آماده نشدند.").to_owned());
+            return Err(response["error"]
+                .as_str()
+                .unwrap_or("Nginx و PHP-FPM پس از تغییر release آماده نشدند.")
+                .to_owned());
         }
         let data = &response["data"];
-        if let (Some(name), Some(content)) = (data["site_name"].as_str(), data["nginx_content"].as_str()) {
+        if let (Some(name), Some(content)) =
+            (data["site_name"].as_str(), data["nginx_content"].as_str())
+        {
             nginx_snapshot = Some((name.to_owned(), content.to_owned()));
         }
     }
-    let response = privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id}))
-        .await
-        .map_err(|_| "ارتباط با helper برای راه‌اندازی مجدد سرویس‌های Laravel برقرار نشد.".to_owned())?;
+    let response =
+        privileged_request_async(json!({"action":"laravel-refresh-services","app_id":app_id}))
+            .await
+            .map_err(|_| {
+                "ارتباط با helper برای راه‌اندازی مجدد سرویس‌های Laravel برقرار نشد.".to_owned()
+            })?;
     if response["ok"] != true {
-        return Err(response["error"].as_str().unwrap_or("سرویس‌های Laravel پس از تغییر release راه‌اندازی نشدند.").to_owned());
+        return Err(response["error"]
+            .as_str()
+            .unwrap_or("سرویس‌های Laravel پس از تغییر release راه‌اندازی نشدند.")
+            .to_owned());
     }
     Ok(nginx_snapshot)
 }
 
-fn persist_laravel_nginx_snapshot(state: &AppState, snapshot: &(String, String)) -> Result<(), String> {
+fn persist_laravel_nginx_snapshot(
+    state: &AppState,
+    snapshot: &(String, String),
+) -> Result<(), String> {
     let db = state.lock().unwrap();
     nginx::store_nginx_snapshot(&db, &snapshot.0, &snapshot.1, None)
         .map_err(|error| error.to_string())
@@ -1984,13 +2276,30 @@ async fn process_job(state: AppState, job_id: String) {
             return;
         }
     };
-    let (app_id, _owner, source_json, healthcheck, was_cancelled, pre_deploy_commands_json) = record;
+    let (app_id, _owner, source_json, healthcheck, was_cancelled, pre_deploy_commands_json) =
+        record;
     let pre_deploy_commands = match serde_json::from_str::<Vec<String>>(&pre_deploy_commands_json) {
         Ok(commands) => match validate_pre_deploy_commands(commands) {
             Ok(commands) => commands,
-            Err(message) => { finish(&state, &job_id, "failed", &format!("دستورهای پیش از استقرار معتبر نیستند: {message}")); return; }
+            Err(message) => {
+                finish(
+                    &state,
+                    &job_id,
+                    "failed",
+                    &format!("دستورهای پیش از استقرار معتبر نیستند: {message}"),
+                );
+                return;
+            }
         },
-        Err(cause) => { finish(&state, &job_id, "failed", &format!("فهرست دستورهای پیش از استقرار از پایگاه‌داده خوانده نشد: {cause}")); return; }
+        Err(cause) => {
+            finish(
+                &state,
+                &job_id,
+                "failed",
+                &format!("فهرست دستورهای پیش از استقرار از پایگاه‌داده خوانده نشد: {cause}"),
+            );
+            return;
+        }
     };
     if was_cancelled || cancelled(&state, &job_id) {
         finish(&state, &job_id, "cancelled", "پیش از شروع لغو شد.");
@@ -2088,7 +2397,11 @@ async fn process_job(state: AppState, job_id: String) {
         "منبع در فضای staging مجزا دریافت یا کپی می‌شود؛ هیچ اسکریپت پروژه اجرا نمی‌شود.",
     );
     let source_result = match &source {
-        Source::Git { repository, reference, ssh_key_id } => {
+        Source::Git {
+            repository,
+            reference,
+            ssh_key_id,
+        } => {
             let key_path = match ssh_key_id.as_deref() {
                 Some(key_id) => {
                     let db = state.lock().unwrap();
@@ -2105,20 +2418,29 @@ async fn process_job(state: AppState, job_id: String) {
                 }
                 None => None,
             };
-            match acquire_git(&state, &job_id, repository, reference, key_path.as_deref(), &work).await {
-            Ok(revision) => {
-                let pinned = Source::Git {
-                    repository: repository.clone(),
-                    reference: revision.clone(),
-                    ssh_key_id: ssh_key_id.clone(),
-                };
-                if let Ok(source_json) = serde_json::to_string(&pinned) {
-                    let db = state.lock().unwrap();
-                    let _=db.execute("UPDATE deployment_jobs SET source_json=?1,source_commit=?2,updated_at=?3 WHERE id=?4",params![source_json,revision,now(),job_id]);
+            match acquire_git(
+                &state,
+                &job_id,
+                repository,
+                reference,
+                key_path.as_deref(),
+                &work,
+            )
+            .await
+            {
+                Ok(revision) => {
+                    let pinned = Source::Git {
+                        repository: repository.clone(),
+                        reference: revision.clone(),
+                        ssh_key_id: ssh_key_id.clone(),
+                    };
+                    if let Ok(source_json) = serde_json::to_string(&pinned) {
+                        let db = state.lock().unwrap();
+                        let _=db.execute("UPDATE deployment_jobs SET source_json=?1,source_commit=?2,updated_at=?3 WHERE id=?4",params![source_json,revision,now(),job_id]);
+                    }
+                    copy_tree(&work, &stage).map(|_| Some(revision))
                 }
-                copy_tree(&work, &stage).map(|_| Some(revision))
-            }
-            Err(message) => Err(message),
+                Err(message) => Err(message),
             }
         }
         Source::Directory { path } => acquire_directory(path, &stage).map(|_| None),
@@ -2164,12 +2486,27 @@ async fn process_job(state: AppState, job_id: String) {
         )
         .optional()
     };
-    let (framework, build_runtime_version, domain, static_output_path, static_spa_fallback, build_environment_json, node_build_script, node_start_script, listen_port) = match app_settings {
+    let (
+        framework,
+        build_runtime_version,
+        domain,
+        static_output_path,
+        static_spa_fallback,
+        build_environment_json,
+        node_build_script,
+        node_start_script,
+        listen_port,
+    ) = match app_settings {
         Ok(Some(settings)) => settings,
         Ok(None) => {
             let _ = fs::remove_dir_all(&stage);
             let _ = fs::remove_dir_all(&work);
-            fail_database_job(&state, &job_id, "خواندن تنظیمات اپلیکیشن", &rusqlite::Error::QueryReturnedNoRows);
+            fail_database_job(
+                &state,
+                &job_id,
+                "خواندن تنظیمات اپلیکیشن",
+                &rusqlite::Error::QueryReturnedNoRows,
+            );
             return;
         }
         Err(cause) => {
@@ -2197,7 +2534,12 @@ async fn process_job(state: AppState, job_id: String) {
     };
     if static_site && domain.as_deref().map_or(true, str::is_empty) {
         let _ = fs::remove_dir_all(&stage);
-        finish(&state, &job_id, "failed", "برای انتشار سایت استاتیک، دامنه را در مشخصات اپ ثبت کن تا Nginx همان سایت را بسازد.");
+        finish(
+            &state,
+            &job_id,
+            "failed",
+            "برای انتشار سایت استاتیک، دامنه را در مشخصات اپ ثبت کن تا Nginx همان سایت را بسازد.",
+        );
         return;
     }
     let node_project = apps::is_node_runtime_framework(&framework)
@@ -2224,7 +2566,11 @@ async fn process_job(state: AppState, job_id: String) {
             &job_id,
             "running",
             "node-build",
-            if static_site { "lockfile و خروجی React/Vue/Vite بررسی می‌شوند؛ build در محیط موقت systemd اجرا می‌شود." } else { "lockfile و scripts.start بررسی می‌شوند؛ وابستگی‌ها و build در محیط موقت systemd اجرا می‌شوند." },
+            if static_site {
+                "lockfile و خروجی React/Vue/Vite بررسی می‌شوند؛ build در محیط موقت systemd اجرا می‌شود."
+            } else {
+                "lockfile و scripts.start بررسی می‌شوند؛ وابستگی‌ها و build در محیط موقت systemd اجرا می‌شوند."
+            },
         );
         if has_manifest {
             let should_build = if static_site {
@@ -2246,9 +2592,28 @@ async fn process_job(state: AppState, job_id: String) {
                     return;
                 }
                 let build = if static_site {
-                    node::prepare_static_build(&state, &app_id, &job_id, &stage, &build_runtime_version, &build_environment, &node_build_script).await
+                    node::prepare_static_build(
+                        &state,
+                        &app_id,
+                        &job_id,
+                        &stage,
+                        &build_runtime_version,
+                        &build_environment,
+                        &node_build_script,
+                    )
+                    .await
                 } else {
-                    node::prepare_build(&state, &app_id, &job_id, &stage, &build_runtime_version, &build_environment, &node_build_script, &node_start_script).await
+                    node::prepare_build(
+                        &state,
+                        &app_id,
+                        &job_id,
+                        &stage,
+                        &build_runtime_version,
+                        &build_environment,
+                        &node_build_script,
+                        &node_start_script,
+                    )
+                    .await
                 };
                 if let Err(message) = build {
                     let _ = fs::remove_dir_all(&stage);
@@ -2258,7 +2623,12 @@ async fn process_job(state: AppState, job_id: String) {
             }
         } else if !static_site {
             let _ = fs::remove_dir_all(&stage);
-            finish(&state, &job_id, "failed", "برای اجرای Node.js/SSR باید package.json و lockfile پشتیبانی‌شده وجود داشته باشد.");
+            finish(
+                &state,
+                &job_id,
+                "failed",
+                "برای اجرای Node.js/SSR باید package.json و lockfile پشتیبانی‌شده وجود داشته باشد.",
+            );
             return;
         }
     }
@@ -2267,24 +2637,49 @@ async fn process_job(state: AppState, job_id: String) {
         let argv = match parse_pre_deploy_command(command) {
             Ok(argv) => argv,
             Err(message) => {
-                finish(&state, &job_id, "failed", &format!("دستور پیش از استقرار شماره {} معتبر نیست: {message}", index + 1));
+                finish(
+                    &state,
+                    &job_id,
+                    "failed",
+                    &format!(
+                        "دستور پیش از استقرار شماره {} معتبر نیست: {message}",
+                        index + 1
+                    ),
+                );
                 return;
             }
         };
         progress(&state, &job_id, "running", &step, &format!("اجرای دستور سفارشی شماره {} پس از آماده‌سازی و پیش از فعال‌سازی release در sandbox محدود.", index + 1));
         match node::run_pre_deploy_command(&state, &app_id, &job_id, &step, argv).await {
-            Ok(()) => record_output(&state, &job_id, &step, &format!("دستور شماره {} با کد خروج صفر تمام شد.", index + 1)),
+            Ok(()) => record_output(
+                &state,
+                &job_id,
+                &step,
+                &format!("دستور شماره {} با کد خروج صفر تمام شد.", index + 1),
+            ),
             Err(message) => {
                 let _ = fs::remove_dir_all(&stage);
                 let _ = fs::remove_dir_all(&work);
-                finish_failure_or_cancel(&state, &job_id, &format!("دستور پیش از فعال‌سازی شماره {} شکست خورد: {message}", index + 1));
+                finish_failure_or_cancel(
+                    &state,
+                    &job_id,
+                    &format!(
+                        "دستور پیش از فعال‌سازی شماره {} شکست خورد: {message}",
+                        index + 1
+                    ),
+                );
                 return;
             }
         }
         if cancelled(&state, &job_id) {
             let _ = fs::remove_dir_all(&stage);
             let _ = fs::remove_dir_all(&work);
-            finish(&state, &job_id, "cancelled", "استقرار پس از اجرای دستور سفارشی و پیش از فعال‌سازی release لغو شد.");
+            finish(
+                &state,
+                &job_id,
+                "cancelled",
+                "استقرار پس از اجرای دستور سفارشی و پیش از فعال‌سازی release لغو شد.",
+            );
             return;
         }
     }
@@ -2297,7 +2692,9 @@ async fn process_job(state: AppState, job_id: String) {
                 return;
             }
         }
-    } else { None };
+    } else {
+        None
+    };
     progress(
         &state,
         &job_id,
@@ -2305,7 +2702,14 @@ async fn process_job(state: AppState, job_id: String) {
         "verifying",
         "ساختار release، فایل Health check و symlinkها بررسی می‌شوند.",
     );
-    if let Err(message) = verify_release(&stage, if static_site { None } else { healthcheck.as_deref() }) {
+    if let Err(message) = verify_release(
+        &stage,
+        if static_site {
+            None
+        } else {
+            healthcheck.as_deref()
+        },
+    ) {
         let _ = fs::remove_dir_all(&stage);
         finish(&state, &job_id, "failed", &message);
         return;
@@ -2332,7 +2736,12 @@ async fn process_job(state: AppState, job_id: String) {
     if node_project && !static_site && node::has_package_manifest(&final_release) {
         if let Err(message) = node::activate_release(&final_release) {
             let _ = fs::remove_dir_all(&final_release);
-            finish(&state, &job_id, "failed", &format!("فایل محیط پایدار به release متصل نشد: {message}"));
+            finish(
+                &state,
+                &job_id,
+                "failed",
+                &format!("فایل محیط پایدار به release متصل نشد: {message}"),
+            );
             return;
         }
     }
@@ -2380,17 +2789,28 @@ async fn process_job(state: AppState, job_id: String) {
             Ok(value) if value["ok"] == true => {
                 let name = value["data"]["site_name"].as_str();
                 let content = value["data"]["content"].as_str();
-                name.zip(content).map(|(name, content)| (name.to_owned(), content.to_owned()))
+                name.zip(content)
+                    .map(|(name, content)| (name.to_owned(), content.to_owned()))
                     .ok_or_else(|| "اطلاعات سایت ساخته‌شده از Nginx کامل نیست.".to_owned())
             }
-            Ok(value) => Err(value["error"].as_str().unwrap_or("پیکربندی Static در Nginx انجام نشد.").to_owned()),
-            Err((_, body)) => Err(body["error"].as_str().unwrap_or("ارتباط helper برای پیکربندی Static برقرار نشد.").to_owned()),
+            Ok(value) => Err(value["error"]
+                .as_str()
+                .unwrap_or("پیکربندی Static در Nginx انجام نشد.")
+                .to_owned()),
+            Err((_, body)) => Err(body["error"]
+                .as_str()
+                .unwrap_or("ارتباط helper برای پیکربندی Static برقرار نشد.")
+                .to_owned()),
         };
         match config_result {
             Ok(snapshot) => nginx_snapshot = Some(snapshot),
             Err(message) => {
                 let recovery = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
-                let detail = recovery.map(|_| format!("{message}؛ release قبلی حفظ شد.")).unwrap_or_else(|error| format!("{message}؛ بازگرداندن release قبلی هم ناموفق بود: {error}"));
+                let detail = recovery
+                    .map(|_| format!("{message}؛ release قبلی حفظ شد."))
+                    .unwrap_or_else(|error| {
+                        format!("{message}؛ بازگرداندن release قبلی هم ناموفق بود: {error}")
+                    });
                 finish(&state, &job_id, "failed", &detail);
                 return;
             }
@@ -2406,7 +2826,9 @@ async fn process_job(state: AppState, job_id: String) {
             ).optional().ok().flatten()
         };
         if let Some((runtime_version, domain, web_enabled)) = laravel_runtime {
-            match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled).await {
+            match refresh_laravel_runtime(&app_id, &runtime_version, domain.as_deref(), web_enabled)
+                .await
+            {
                 Ok(snapshot) => nginx_snapshot = snapshot,
                 Err(message) => {
                     let recovery = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
@@ -2428,12 +2850,17 @@ async fn process_job(state: AppState, job_id: String) {
             }
         }
     }
-    if apps::is_node_runtime_framework(&framework) || (apps::is_auto_framework(&framework) && !static_site) {
+    if apps::is_node_runtime_framework(&framework)
+        || (apps::is_auto_framework(&framework) && !static_site)
+    {
         if let Err(message) = node::refresh_after_deploy(&app_id, previous.as_deref()).await {
             finish(&state, &job_id, "failed", &message);
             return;
         }
-        let configured_domain = domain.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        let configured_domain = domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         if let Some(domain) = configured_domain {
             progress(
                 &state,
@@ -2448,7 +2875,9 @@ async fn process_job(state: AppState, job_id: String) {
                     "application_id":app_id,
                     "domain":domain,
                     "port":port
-                })).await {
+                }))
+                .await
+                {
                     Ok(value) if value["ok"] == true => {
                         if value["data"]["preserved_existing"] == true {
                             record_output(
@@ -2482,9 +2911,12 @@ async fn process_job(state: AppState, job_id: String) {
                             .as_str()
                             .unwrap_or("بررسی یا ساخت کانفیگ Nginx ناموفق بود.")
                             .to_owned();
-                        let restored = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                        let restored =
+                            restore_current_pointer(&app_root, previous.as_deref(), &job_id);
                         let service_recovered = if restored.is_ok() {
-                            node::refresh_after_deploy(&app_id, previous.as_deref()).await.is_ok()
+                            node::refresh_after_deploy(&app_id, previous.as_deref())
+                                .await
+                                .is_ok()
                         } else {
                             false
                         };
@@ -2506,9 +2938,12 @@ async fn process_job(state: AppState, job_id: String) {
                             .as_str()
                             .unwrap_or("ارتباط با helper برای بررسی Nginx برقرار نشد.")
                             .to_owned();
-                        let restored = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                        let restored =
+                            restore_current_pointer(&app_root, previous.as_deref(), &job_id);
                         let service_recovered = if restored.is_ok() {
-                            node::refresh_after_deploy(&app_id, previous.as_deref()).await.is_ok()
+                            node::refresh_after_deploy(&app_id, previous.as_deref())
+                                .await
+                                .is_ok()
                         } else {
                             false
                         };
@@ -2586,8 +3021,14 @@ async fn refresh_static_runtime(
     spa_fallback: bool,
 ) -> Result<Option<(String, String)>, String> {
     let app_root = deployment_root().join("apps").join(app_id);
-    let releases = app_root.join("releases").canonicalize().map_err(|error| format!("پوشهٔ releaseها پیدا نشد: {error}"))?;
-    let release = app_root.join("current").canonicalize().map_err(|error| format!("release جاری پیدا نشد: {error}"))?;
+    let releases = app_root
+        .join("releases")
+        .canonicalize()
+        .map_err(|error| format!("پوشهٔ releaseها پیدا نشد: {error}"))?;
+    let release = app_root
+        .join("current")
+        .canonicalize()
+        .map_err(|error| format!("release جاری پیدا نشد: {error}"))?;
     if !release.starts_with(&releases) || !release.is_dir() {
         return Err("release جاری خارج از مسیر مدیریت‌شده است.".to_owned());
     }
@@ -2599,10 +3040,17 @@ async fn refresh_static_runtime(
         .await
         .map_err(|(_, body)| body["error"].as_str().unwrap_or("ارتباط helper برای تنظیم Nginx برقرار نشد.").to_owned())?;
     if response["ok"] != true {
-        return Err(response["error"].as_str().unwrap_or("تنظیم Nginx سایت Static ناموفق بود.").to_owned());
+        return Err(response["error"]
+            .as_str()
+            .unwrap_or("تنظیم Nginx سایت Static ناموفق بود.")
+            .to_owned());
     }
-    let name = response["data"]["site_name"].as_str().ok_or("نام سایت Nginx از helper دریافت نشد.")?;
-    let content = response["data"]["content"].as_str().ok_or("متن کانفیگ Nginx از helper دریافت نشد.")?;
+    let name = response["data"]["site_name"]
+        .as_str()
+        .ok_or("نام سایت Nginx از helper دریافت نشد.")?;
+    let content = response["data"]["content"]
+        .as_str()
+        .ok_or("متن کانفیگ Nginx از helper دریافت نشد.")?;
     Ok(Some((name.to_owned(), content.to_owned())))
 }
 
@@ -2740,8 +3188,13 @@ async fn acquire_git(
     }
     let ssh_command = if let Some(private_key) = private_key {
         if !private_key.is_absolute()
-            || private_key.file_name().and_then(OsStr::to_str).map_or(true, |name| !ssh_keys::valid_key_id(name))
-            || !private_key.parent().is_some_and(|parent| parent == FsPath::new("/var/lib/arg/ssh-keys"))
+            || private_key
+                .file_name()
+                .and_then(OsStr::to_str)
+                .map_or(true, |name| !ssh_keys::valid_key_id(name))
+            || !private_key
+                .parent()
+                .is_some_and(|parent| parent == FsPath::new("/var/lib/arg/ssh-keys"))
         {
             return Err("مسیر کلید SSH با ریشهٔ امن ARG تطبیق ندارد.".into());
         }
@@ -2774,7 +3227,15 @@ async fn acquire_git(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output();
-    command_output(state, job_id, "acquiring", run, Duration::from_secs(15), "git init").await?;
+    command_output(
+        state,
+        job_id,
+        "acquiring",
+        run,
+        Duration::from_secs(15),
+        "git init",
+    )
+    .await?;
     let remote = tokio::process::Command::new("git")
         .args(["remote", "add", "origin", repository])
         .current_dir(destination)
@@ -2782,7 +3243,15 @@ async fn acquire_git(
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .kill_on_drop(true)
         .output();
-    command_output(state, job_id, "acquiring", remote, Duration::from_secs(15), "ثبت مخزن").await?;
+    command_output(
+        state,
+        job_id,
+        "acquiring",
+        remote,
+        Duration::from_secs(15),
+        "ثبت مخزن",
+    )
+    .await?;
     let fetch = tokio::process::Command::new("git")
         .args([
             "-c",
@@ -2801,7 +3270,12 @@ async fn acquire_git(
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_SSH_COMMAND", ssh_command.as_deref().unwrap_or("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"))
+        .env(
+            "GIT_SSH_COMMAND",
+            ssh_command
+                .as_deref()
+                .unwrap_or("ssh -o BatchMode=yes -o StrictHostKeyChecking=yes"),
+        )
         .kill_on_drop(true)
         .output();
     command_output_bounded(
@@ -2857,7 +3331,15 @@ async fn acquire_git(
     .await?;
     record_process_output(state, job_id, "acquiring", "خواندن revision", &rev);
     if !rev.status.success() {
-        record_output(state, job_id, "acquiring", &format!("git rev-parse failed with exit code {}", rev.status.code().unwrap_or(-1)));
+        record_output(
+            state,
+            job_id,
+            "acquiring",
+            &format!(
+                "git rev-parse failed with exit code {}",
+                rev.status.code().unwrap_or(-1)
+            ),
+        );
         return Err("commit دریافت‌شده قابل شناسایی نیست.".into());
     }
     let revision = String::from_utf8_lossy(&rev.stdout)
@@ -2865,23 +3347,50 @@ async fn acquire_git(
         .chars()
         .take(64)
         .collect::<String>();
-    record_output(state, job_id, "acquiring", &format!("Resolved Git revision: {revision}"));
+    record_output(
+        state,
+        job_id,
+        "acquiring",
+        &format!("Resolved Git revision: {revision}"),
+    );
     Ok(revision)
 }
 
-fn record_process_output(state: &AppState, job_id: &str, step: &str, label: &str, output: &std::process::Output) {
+fn record_process_output(
+    state: &AppState,
+    job_id: &str,
+    step: &str,
+    label: &str,
+    output: &std::process::Output,
+) {
     let mut lines = Vec::new();
     if !output.stdout.is_empty() {
-        lines.push(format!("[{label}] stdout:\n{}", String::from_utf8_lossy(&output.stdout)));
+        lines.push(format!(
+            "[{label}] stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        ));
     }
     if !output.stderr.is_empty() {
-        lines.push(format!("[{label}] stderr:\n{}", String::from_utf8_lossy(&output.stderr)));
+        lines.push(format!(
+            "[{label}] stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
-    lines.push(format!("[{label}] exited with code {}", output.status.code().unwrap_or(-1)));
+    lines.push(format!(
+        "[{label}] exited with code {}",
+        output.status.code().unwrap_or(-1)
+    ));
     record_output(state, job_id, step, &lines.join("\n"));
 }
 
-async fn command_output<F>(state: &AppState, job_id: &str, step: &str, future: F, timeout: Duration, label: &str) -> Result<(), String>
+async fn command_output<F>(
+    state: &AppState,
+    job_id: &str,
+    step: &str,
+    future: F,
+    timeout: Duration,
+    label: &str,
+) -> Result<(), String>
 where
     F: std::future::Future<Output = io::Result<std::process::Output>>,
 {
@@ -3158,21 +3667,37 @@ fn common_archive_wrapper(zip: &mut zip::ZipArchive<fs::File>) -> Result<Option<
     let mut wrapper: Option<PathBuf> = None;
     let mut files = 0usize;
     for index in 0..zip.len() {
-        let item = zip.by_index(index).map_err(|error| format!("ورودی ZIP خوانده نشد: {error}"))?;
+        let item = zip
+            .by_index(index)
+            .map_err(|error| format!("ورودی ZIP خوانده نشد: {error}"))?;
         let Some(path) = item.enclosed_name() else {
             return Err("مسیر ZIP شامل traversal یا مسیر مطلق است.".into());
         };
-        if !path.components().all(|component| matches!(component, Component::Normal(_))) {
+        if !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        {
             return Err("مسیر ZIP معتبر نیست.".into());
         }
-        if item.is_dir() { continue; }
-        if excluded_source_path(&path) { continue; }
+        if item.is_dir() {
+            continue;
+        }
+        if excluded_source_path(&path) {
+            continue;
+        }
         files += 1;
         let mut components = path.components();
-        let Some(Component::Normal(first)) = components.next() else { return Ok(None) };
-        if components.next().is_none() { return Ok(None); }
+        let Some(Component::Normal(first)) = components.next() else {
+            return Ok(None);
+        };
+        if components.next().is_none() {
+            return Ok(None);
+        }
         let candidate = PathBuf::from(first);
-        if wrapper.as_ref().is_some_and(|existing| existing != &candidate) {
+        if wrapper
+            .as_ref()
+            .is_some_and(|existing| existing != &candidate)
+        {
             return Ok(None);
         }
         wrapper = Some(candidate);
@@ -3235,7 +3760,13 @@ mod tests {
             r#"{"kind":"git","repository":"https://github.com/acme/site.git","reference":"main"}"#,
         )
         .unwrap();
-        assert!(matches!(source, Source::Git { ssh_key_id: None, .. }));
+        assert!(matches!(
+            source,
+            Source::Git {
+                ssh_key_id: None,
+                ..
+            }
+        ));
     }
     #[test]
     fn references_and_health_paths_reject_option_and_traversal() {
@@ -3273,12 +3804,17 @@ mod tests {
 
     #[test]
     fn deployment_logs_redact_common_secret_assignments_and_bearer_tokens() {
-        let sanitized = sanitize_deployment_output("TOKEN=very-secret API_KEY: abc123 Authorization: Bearer test-token");
+        let sanitized = sanitize_deployment_output(
+            "TOKEN=very-secret API_KEY: abc123 Authorization: Bearer test-token",
+        );
         assert!(!sanitized.contains("very-secret"));
         assert!(!sanitized.contains("abc123"));
         assert!(!sanitized.contains("test-token"));
         assert!(sanitized.contains("[REDACTED]"));
-        assert_eq!(sanitize_deployment_output("خطای build فارسی"), "خطای build فارسی");
+        assert_eq!(
+            sanitize_deployment_output("خطای build فارسی"),
+            "خطای build فارسی"
+        );
     }
 
     #[test]
@@ -3288,11 +3824,21 @@ mod tests {
             vec!["npm", "run", "migrate", "--", "--label", "blue green"]
         );
         // Operators are ordinary argv text; ARG never invokes a shell to interpret them.
-        assert_eq!(parse_pre_deploy_command("echo ready && echo later").unwrap(), vec!["echo", "ready", "&&", "echo", "later"]);
+        assert_eq!(
+            parse_pre_deploy_command("echo ready && echo later").unwrap(),
+            vec!["echo", "ready", "&&", "echo", "later"]
+        );
         assert!(parse_pre_deploy_command("npm run \"unfinished").is_err());
         assert!(parse_pre_deploy_command(&"x".repeat(MAX_PRE_DEPLOY_COMMAND_LENGTH + 1)).is_err());
-        assert!(validate_pre_deploy_commands(vec!["npm run build".into(); MAX_PRE_DEPLOY_COMMANDS + 1]).is_err());
-        assert_eq!(validate_pre_deploy_commands(vec!["  ".into()]).unwrap(), Vec::<String>::new());
+        assert!(validate_pre_deploy_commands(vec![
+            "npm run build".into();
+            MAX_PRE_DEPLOY_COMMANDS + 1
+        ])
+        .is_err());
+        assert_eq!(
+            validate_pre_deploy_commands(vec!["  ".into()]).unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -3300,19 +3846,40 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
         migrate(&db).unwrap();
-        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
-        let commands = serde_json::to_string(&vec!["npm run generate".to_owned(), "php artisan config:cache".to_owned()]).unwrap();
-        let job = persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git",&commands).unwrap();
-        let persisted: String = db.query_row("SELECT pre_deploy_commands_json FROM deployment_jobs WHERE id='job'", [], |row| row.get(0)).unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        let commands = serde_json::to_string(&vec![
+            "npm run generate".to_owned(),
+            "php artisan config:cache".to_owned(),
+        ])
+        .unwrap();
+        let job = persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 1, "git", &commands,
+        )
+        .unwrap();
+        let persisted: String = db
+            .query_row(
+                "SELECT pre_deploy_commands_json FROM deployment_jobs WHERE id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let persisted: Vec<String> = serde_json::from_str(&persisted).unwrap();
         assert_eq!(persisted[0], "npm run generate");
         assert_eq!(persisted[1], "php artisan config:cache");
-        assert!(job.get("pre_deploy_commands").is_none(), "custom command text must not be echoed by the Job API");
+        assert!(
+            job.get("pre_deploy_commands").is_none(),
+            "custom command text must not be echoed by the Job API"
+        );
     }
 
     #[test]
     fn deployment_database_errors_return_the_underlying_cause() {
-        let (status, Json(payload)) = deployment_db_error("خواندن لاگ", &rusqlite::Error::InvalidQuery);
+        let (status, Json(payload)) =
+            deployment_db_error("خواندن لاگ", &rusqlite::Error::InvalidQuery);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         let message = payload["error"].as_str().unwrap();
         assert!(message.contains("پایگاه‌داده هنگام خواندن لاگ خطا داد"));
@@ -3336,14 +3903,42 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT); CREATE TABLE deployment_job_steps(id INTEGER PRIMARY KEY,job_id TEXT); CREATE TABLE deployment_releases(id TEXT PRIMARY KEY); CREATE TABLE deployment_job_logs(id INTEGER PRIMARY KEY,job_id TEXT,message TEXT); INSERT INTO deployment_job_logs(id,job_id,message) VALUES(1,'old-job','preserve this legacy event');").unwrap();
         migrate(&db).unwrap();
-        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
-        persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git","[]").unwrap();
-        let message: String = db.query_row("SELECT message FROM deployment_job_steps WHERE job_id='job'", [], |row| row.get(0)).unwrap();
-        assert_eq!(message,"در صف اجرای محدود سرور قرار گرفت.");
-        let log_count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'", [], |row| row.get(0)).unwrap();
-        assert_eq!(log_count,1);
-        let legacy: (String, String) = db.query_row("SELECT message,level FROM deployment_job_logs WHERE id=1", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
-        assert_eq!(legacy, ("preserve this legacy event".to_owned(), "info".to_owned()));
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 1, "git", "[]",
+        )
+        .unwrap();
+        let message: String = db
+            .query_row(
+                "SELECT message FROM deployment_job_steps WHERE job_id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(message, "در صف اجرای محدود سرور قرار گرفت.");
+        let log_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM deployment_job_logs WHERE job_id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(log_count, 1);
+        let legacy: (String, String) = db
+            .query_row(
+                "SELECT message,level FROM deployment_job_logs WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy,
+            ("preserve this legacy event".to_owned(), "info".to_owned())
+        );
     }
 
     #[test]
@@ -3351,14 +3946,30 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
         migrate(&db).unwrap();
-        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
-        persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git","[]").unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 1, "git", "[]",
+        )
+        .unwrap();
         db.execute_batch("CREATE TRIGGER reject_claim_step BEFORE INSERT ON deployment_job_steps WHEN NEW.step='validating' BEGIN SELECT RAISE(ABORT,'progress insert rejected'); END;").unwrap();
         let state = Arc::new(Mutex::new(db));
         assert!(claim_next(&state).is_err());
         let db = state.lock().unwrap();
-        let job_state: String = db.query_row("SELECT state FROM deployment_jobs WHERE id='job'", [], |row| row.get(0)).unwrap();
-        assert_eq!(job_state, "queued", "a failed claim must not strand the Job in validating");
+        let job_state: String = db
+            .query_row(
+                "SELECT state FROM deployment_jobs WHERE id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            job_state, "queued",
+            "a failed claim must not strand the Job in validating"
+        );
     }
 
     #[test]
@@ -3366,14 +3977,27 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
         migrate(&db).unwrap();
-        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
-        persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"git","[]").unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 1, "git", "[]",
+        )
+        .unwrap();
         db.execute_batch("CREATE TRIGGER reject_claim_step BEFORE INSERT ON deployment_job_steps WHEN NEW.step='validating' BEGIN SELECT RAISE(ABORT,'progress insert rejected'); END;").unwrap();
         let state = Arc::new(Mutex::new(db));
         let cause = claim_next(&state).unwrap_err();
         record_claim_error(&state, &cause);
         let db = state.lock().unwrap();
-        let (status, diagnostic): (String, String) = db.query_row("SELECT state,error_summary FROM deployment_jobs WHERE id='job'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (status, diagnostic): (String, String) = db
+            .query_row(
+                "SELECT state,error_summary FROM deployment_jobs WHERE id='job'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(status, "queued");
         assert!(diagnostic.contains("progress insert rejected"));
         let log: String = db.query_row("SELECT message FROM deployment_job_logs WHERE job_id='job' ORDER BY id DESC LIMIT 1", [], |row| row.get(0)).unwrap();
@@ -3439,8 +4063,7 @@ mod tests {
         assert_eq!(job["logs"].as_array().unwrap().len(), 20);
         assert_eq!(job["log_count"], 2_000);
         assert_ne!(
-            revision_before,
-            revision_after,
+            revision_before, revision_after,
             "the latest retained log ID must advance even when retained count stays capped"
         );
     }
@@ -3472,8 +4095,11 @@ mod tests {
         let finished = read_job(&db, "job").unwrap();
         assert_eq!(finished["finished_at"], 1_798_000_000_i64);
 
-        db.execute("UPDATE deployment_jobs SET finished_at=NULL WHERE id='job'", [])
-            .unwrap();
+        db.execute(
+            "UPDATE deployment_jobs SET finished_at=NULL WHERE id='job'",
+            [],
+        )
+        .unwrap();
         let running = read_job(&db, "job").unwrap();
         assert!(running["finished_at"].is_null());
     }
@@ -3483,16 +4109,35 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL); CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);").unwrap();
         migrate(&db).unwrap();
-        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",[]).unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
         db.execute_batch("CREATE TRIGGER reject_initial_step BEFORE INSERT ON deployment_job_steps BEGIN SELECT RAISE(ABORT,'step insert rejected'); END;").unwrap();
-        let failed = persist_new_job(&mut db,"job","app","server","admin","{}","key",None,1,"archive","[]");
+        let failed = persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 1, "archive", "[]",
+        );
         assert!(failed.is_err());
-        let count: i64 = db.query_row("SELECT COUNT(*) FROM deployment_jobs WHERE id='job'",[],|row|row.get(0)).unwrap();
-        assert_eq!(count,0,"a failed first-stage write must not leave a queued deployment");
-        db.execute_batch("DROP TRIGGER reject_initial_step;").unwrap();
-        let created = persist_new_job(&mut db,"job","app","server","admin","{}","key",None,2,"archive","[]").unwrap();
-        assert_eq!(created["state"],"queued");
-        assert_eq!(created["steps"].as_array().unwrap().len(),1);
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM deployment_jobs WHERE id='job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "a failed first-stage write must not leave a queued deployment"
+        );
+        db.execute_batch("DROP TRIGGER reject_initial_step;")
+            .unwrap();
+        let created = persist_new_job(
+            &mut db, "job", "app", "server", "admin", "{}", "key", None, 2, "archive", "[]",
+        )
+        .unwrap();
+        assert_eq!(created["state"], "queued");
+        assert_eq!(created["steps"].as_array().unwrap().len(), 1);
     }
 
     #[test]
@@ -3503,18 +4148,43 @@ mod tests {
         for index in 0..MAX_QUEUED_DEPLOYMENT_JOBS {
             let app = format!("app-{index}");
             let job = format!("job-{index}");
-            db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES(?1,'server')", [&app]).unwrap();
-            persist_new_job(&mut db,&job,&app,"server","admin","{}",&job,None,index,"git","[]").unwrap();
+            db.execute(
+                "INSERT INTO applications(id,owner_server_uuid) VALUES(?1,'server')",
+                [&app],
+            )
+            .unwrap();
+            persist_new_job(
+                &mut db, &job, &app, "server", "admin", "{}", &job, None, index, "git", "[]",
+            )
+            .unwrap();
         }
         let app = "overflow-app";
-        db.execute("INSERT INTO applications(id,owner_server_uuid) VALUES(?1,'server')", [app]).unwrap();
-        let rejected = persist_new_job(&mut db,"overflow-job",app,"server","admin","{}","overflow-key",None,99,"git","[]");
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES(?1,'server')",
+            [app],
+        )
+        .unwrap();
+        let rejected = persist_new_job(
+            &mut db,
+            "overflow-job",
+            app,
+            "server",
+            "admin",
+            "{}",
+            "overflow-key",
+            None,
+            99,
+            "git",
+            "[]",
+        );
         assert!(matches!(rejected, Err(PersistJobError::QueueFull)));
-        let (queued, partial): (i64, i64) = db.query_row(
-            "SELECT COUNT(*),SUM(id='overflow-job') FROM deployment_jobs WHERE state='queued'",
-            [],
-            |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
-        ).unwrap();
+        let (queued, partial): (i64, i64) = db
+            .query_row(
+                "SELECT COUNT(*),SUM(id='overflow-job') FROM deployment_jobs WHERE state='queued'",
+                [],
+                |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+            )
+            .unwrap();
         assert_eq!(queued, MAX_QUEUED_DEPLOYMENT_JOBS);
         assert_eq!(partial, 0, "a rejected job must not leave a queue row");
     }
@@ -3535,16 +4205,38 @@ mod tests {
         migrate(&db).unwrap();
         let columns = {
             let mut statement = db.prepare("PRAGMA table_info(deployment_jobs)").unwrap();
-            statement.query_map([], |row| row.get::<_, String>(1)).unwrap()
-                .collect::<Result<std::collections::HashSet<_>, _>>().unwrap()
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<std::collections::HashSet<_>, _>>()
+                .unwrap()
         };
-        for column in ["healthcheck_file", "pre_deploy_commands_json", "attempt", "cancel_requested", "source_commit", "updated_at"] {
+        for column in [
+            "healthcheck_file",
+            "pre_deploy_commands_json",
+            "attempt",
+            "cancel_requested",
+            "source_commit",
+            "updated_at",
+        ] {
             assert!(columns.contains(column), "missing migrated column {column}");
         }
-        let state: String = db.query_row("SELECT state FROM deployment_jobs WHERE id='old-job'", [], |row| row.get(0)).unwrap();
+        let state: String = db
+            .query_row(
+                "SELECT state FROM deployment_jobs WHERE id='old-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(state, "queued");
-        let step: String = db.query_row("SELECT step FROM deployment_job_steps WHERE job_id='old-job'", [], |row| row.get(0)).unwrap();
-        assert_eq!(step,"recovered");
+        let step: String = db
+            .query_row(
+                "SELECT step FROM deployment_job_steps WHERE job_id='old-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(step, "recovered");
     }
     #[test]
     fn failed_runtime_activation_restores_only_a_release_inside_the_app_root() {
@@ -3554,14 +4246,20 @@ mod tests {
         fs::create_dir_all(releases.join("new")).unwrap();
         std::os::unix::fs::symlink("releases/new", root.join("current")).unwrap();
         restore_current_pointer(&root, Some("releases/old"), "job-safe").unwrap();
-        assert_eq!(fs::read_link(root.join("current")).unwrap(), FsPath::new("releases/old"));
+        assert_eq!(
+            fs::read_link(root.join("current")).unwrap(),
+            FsPath::new("releases/old")
+        );
 
         std::os::unix::fs::symlink("releases/new", root.join("current")).unwrap_or_else(|_| {
             fs::remove_file(root.join("current")).unwrap();
             std::os::unix::fs::symlink("releases/new", root.join("current")).unwrap();
         });
         assert!(restore_current_pointer(&root, Some("../../etc"), "job-unsafe").is_err());
-        assert_eq!(fs::read_link(root.join("current")).unwrap(), FsPath::new("releases/new"));
+        assert_eq!(
+            fs::read_link(root.join("current")).unwrap(),
+            FsPath::new("releases/new")
+        );
         restore_current_pointer(&root, None, "job-first").unwrap();
         assert!(!root.join("current").exists());
         let _ = fs::remove_dir_all(root);
@@ -3620,15 +4318,21 @@ mod tests {
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         zip.add_directory("arg-nodejs-test-site/", options).unwrap();
-        zip.start_file("arg-nodejs-test-site/package.json", options).unwrap();
+        zip.start_file("arg-nodejs-test-site/package.json", options)
+            .unwrap();
         zip.write_all(br#"{"name":"arg-nodejs-test-site","scripts":{"build":"node scripts/build.mjs","start":"node server.mjs"}}"#).unwrap();
-        zip.start_file("arg-nodejs-test-site/package-lock.json", options).unwrap();
-        zip.write_all(br#"{"name":"arg-nodejs-test-site","lockfileVersion":3}"#).unwrap();
-        zip.start_file("arg-nodejs-test-site/.env.example", options).unwrap();
+        zip.start_file("arg-nodejs-test-site/package-lock.json", options)
+            .unwrap();
+        zip.write_all(br#"{"name":"arg-nodejs-test-site","lockfileVersion":3}"#)
+            .unwrap();
+        zip.start_file("arg-nodejs-test-site/.env.example", options)
+            .unwrap();
         zip.write_all(b"SHOULD_NOT_SHIP=1").unwrap();
-        zip.start_file("__MACOSX/arg-nodejs-test-site/._package.json", options).unwrap();
+        zip.start_file("__MACOSX/arg-nodejs-test-site/._package.json", options)
+            .unwrap();
         zip.write_all(b"macOS metadata").unwrap();
-        zip.start_file("arg-nodejs-test-site/server.mjs", options).unwrap();
+        zip.start_file("arg-nodejs-test-site/server.mjs", options)
+            .unwrap();
         zip.write_all(b"export {};").unwrap();
         zip.finish().unwrap();
 
@@ -3641,8 +4345,10 @@ mod tests {
         assert!(!release.join("arg-nodejs-test-site/package.json").exists());
         assert!(!release.join(".env.example").exists());
         assert!(!release.join("__MACOSX").exists());
-        let manifest = serde_json::from_slice::<Value>(&fs::read(release.join("package.json")).unwrap()).unwrap();
-        assert_eq!(manifest["scripts"]["start"],"node server.mjs");
+        let manifest =
+            serde_json::from_slice::<Value>(&fs::read(release.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["scripts"]["start"], "node server.mjs");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3951,7 +4657,11 @@ mod tests {
 
         assert!(result.unwrap_err().contains("لغو"));
         assert!(started.elapsed() < Duration::from_secs(1));
-        let pid: i32 = fs::read_to_string(&pid_path).unwrap().trim().parse().unwrap();
+        let pid: i32 = fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         let mut still_running = true;
         for _ in 0..20 {
             let state = fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -3964,6 +4674,9 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let _ = fs::remove_file(pid_path);
-        assert!(!still_running, "cancelled Git child must not remain running");
+        assert!(
+            !still_running,
+            "cancelled Git child must not remain running"
+        );
     }
 }

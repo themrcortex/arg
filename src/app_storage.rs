@@ -520,12 +520,7 @@ mod tests {
             header::ORIGIN,
             HeaderValue::from_static("https://panel.example.test"),
         );
-        let authenticated = scan(
-            State(state),
-            same_origin,
-            Path("volume-1".to_owned()),
-        )
-        .await;
+        let authenticated = scan(State(state), same_origin, Path("volume-1".to_owned())).await;
         assert_eq!(authenticated.unwrap_err().0, StatusCode::UNAUTHORIZED);
     }
 

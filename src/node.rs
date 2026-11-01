@@ -238,15 +238,17 @@ pub(super) fn is_static_deployment(
     }
     if has_package_manifest(release) {
         let manifest = inspect_manifest(release)?;
-        return Ok(matches!(manifest.detected_framework.as_str(), "react" | "vue" | "vite"));
+        return Ok(matches!(
+            manifest.detected_framework.as_str(),
+            "react" | "vue" | "vite"
+        ));
     }
     Ok(resolve_static_output_path(release, configured_output).is_ok())
 }
 
 pub(super) fn has_package_manifest(release: &FsPath) -> bool {
-    fs::symlink_metadata(release.join("package.json")).is_ok_and(|metadata| {
-        metadata.is_file() && !metadata.file_type().is_symlink()
-    })
+    fs::symlink_metadata(release.join("package.json"))
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
 pub(super) fn static_build_available(release: &FsPath) -> Result<bool, String> {
@@ -258,17 +260,32 @@ pub(super) fn static_build_available(release: &FsPath) -> Result<bool, String> {
 }
 
 fn valid_public_build_name(name: &str) -> bool {
-    let allowed_prefix = ["VITE_", "NEXT_PUBLIC_", "NUXT_PUBLIC_", "REACT_APP_", "PUBLIC_"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix));
+    let allowed_prefix = [
+        "VITE_",
+        "NEXT_PUBLIC_",
+        "NUXT_PUBLIC_",
+        "REACT_APP_",
+        "PUBLIC_",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix));
     allowed_prefix
         && name.len() <= 120
         && name
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
-        && !["SECRET", "PASSWORD", "TOKEN", "PRIVATE", "CREDENTIAL", "API_KEY", "APIKEY", "ACCESS_KEY"]
-            .iter()
-            .any(|marker| name.contains(marker))
+        && ![
+            "SECRET",
+            "PASSWORD",
+            "TOKEN",
+            "PRIVATE",
+            "CREDENTIAL",
+            "API_KEY",
+            "APIKEY",
+            "ACCESS_KEY",
+        ]
+        .iter()
+        .any(|marker| name.contains(marker))
 }
 
 fn validate_public_build_environment(variables: &BTreeMap<String, String>) -> Result<(), String> {
@@ -281,9 +298,13 @@ fn validate_public_build_environment(variables: &BTreeMap<String, String>) -> Re
             return Err(format!("نام متغیر Build «{name}» عمومی یا معتبر نیست."));
         }
         if value.len() > 4096 || value.chars().any(char::is_control) {
-            return Err(format!("مقدار متغیر «{name}» نامعتبر است یا از ۴ KiB بیشتر است."));
+            return Err(format!(
+                "مقدار متغیر «{name}» نامعتبر است یا از ۴ KiB بیشتر است."
+            ));
         }
-        total_bytes = total_bytes.saturating_add(name.len()).saturating_add(value.len());
+        total_bytes = total_bytes
+            .saturating_add(name.len())
+            .saturating_add(value.len());
     }
     if total_bytes > 16 * 1024 {
         return Err("مجموع متغیرهای عمومی Build نباید از ۱۶ KiB بیشتر شود.".into());
@@ -321,7 +342,9 @@ fn valid_script_name(value: &str) -> bool {
 }
 
 fn valid_configured_script(value: &str, allow_none: bool) -> bool {
-    value == "auto" || (value == "none" && allow_none) || (value != "none" && valid_script_name(value))
+    value == "auto"
+        || (value == "none" && allow_none)
+        || (value != "none" && valid_script_name(value))
 }
 
 fn valid_healthcheck_path(value: &str) -> bool {
@@ -329,33 +352,55 @@ fn valid_healthcheck_path(value: &str) -> bool {
         && value.len() <= 256
         && !value.contains("//")
         && !value.contains('#')
-        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/._~?=&-".contains(&byte))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._~?=&-".contains(&byte))
 }
 
 fn has_nuxt_server_entrypoint(release: &FsPath) -> bool {
     let entry = release.join(".output/server/index.mjs");
-    let Ok(metadata) = fs::symlink_metadata(&entry) else { return false };
-    if !metadata.is_file() || metadata.file_type().is_symlink() { return false; }
-    let (Ok(root), Ok(real_entry)) = (release.canonicalize(), entry.canonicalize()) else { return false };
+    let Ok(metadata) = fs::symlink_metadata(&entry) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    let (Ok(root), Ok(real_entry)) = (release.canonicalize(), entry.canonicalize()) else {
+        return false;
+    };
     real_entry.starts_with(root)
 }
 
 fn has_next_cli_entrypoint(release: &FsPath) -> bool {
     let entry = release.join("node_modules/next/dist/bin/next");
-    let (Ok(root), Ok(real_entry)) = (release.canonicalize(), entry.canonicalize()) else { return false };
+    let (Ok(root), Ok(real_entry)) = (release.canonicalize(), entry.canonicalize()) else {
+        return false;
+    };
     real_entry.starts_with(root) && real_entry.is_file()
 }
 
-fn runtime_entrypoint(manifest: &Manifest, release: &FsPath, allow_prebuild: bool, configured_script: &str) -> Option<RuntimeEntrypoint> {
+fn runtime_entrypoint(
+    manifest: &Manifest,
+    release: &FsPath,
+    allow_prebuild: bool,
+    configured_script: &str,
+) -> Option<RuntimeEntrypoint> {
     if configured_script != "auto" {
-        return manifest.scripts.iter().any(|script| script == configured_script)
+        return manifest
+            .scripts
+            .iter()
+            .any(|script| script == configured_script)
             .then(|| RuntimeEntrypoint::PackageScript(configured_script.to_owned()));
     }
     if manifest.scripts.iter().any(|script| script == "start") {
         Some(RuntimeEntrypoint::PackageScript("start".to_owned()))
-    } else if manifest.detected_framework == "next" && (allow_prebuild || has_next_cli_entrypoint(release)) {
+    } else if manifest.detected_framework == "next"
+        && (allow_prebuild || has_next_cli_entrypoint(release))
+    {
         Some(RuntimeEntrypoint::NextCli)
-    } else if manifest.detected_framework == "nuxt" && (allow_prebuild || has_nuxt_server_entrypoint(release)) {
+    } else if manifest.detected_framework == "nuxt"
+        && (allow_prebuild || has_nuxt_server_entrypoint(release))
+    {
         Some(RuntimeEntrypoint::NuxtOutput)
     } else {
         None
@@ -425,8 +470,12 @@ fn inspection_json(
 ) -> Value {
     if static_site {
         return match resolve_static_output_path(root, configured_output) {
-            Ok(output) => json!({"framework":"static","detected_framework":inspect_manifest(root).map(|manifest| manifest.detected_framework).unwrap_or_else(|_|"static".to_owned()),"state":"ready","release_path":root,"static_output_path":output,"environment_keys":[],"scripts":[],"message":"خروجی استاتیک معتبر است؛ Nginx آن را از current منتشر می‌کند و سرویس Runtime جداگانه‌ای اجرا نمی‌شود."}),
-            Err(message) => json!({"framework":"static","detected_framework":inspect_manifest(root).map(|manifest| manifest.detected_framework).unwrap_or_else(|_|"static".to_owned()),"state":"static_output_missing","release_path":root,"static_output_path":configured_output,"environment_keys":[],"scripts":[],"message":message}),
+            Ok(output) => {
+                json!({"framework":"static","detected_framework":inspect_manifest(root).map(|manifest| manifest.detected_framework).unwrap_or_else(|_|"static".to_owned()),"state":"ready","release_path":root,"static_output_path":output,"environment_keys":[],"scripts":[],"message":"خروجی استاتیک معتبر است؛ Nginx آن را از current منتشر می‌کند و سرویس Runtime جداگانه‌ای اجرا نمی‌شود."})
+            }
+            Err(message) => {
+                json!({"framework":"static","detected_framework":inspect_manifest(root).map(|manifest| manifest.detected_framework).unwrap_or_else(|_|"static".to_owned()),"state":"static_output_missing","release_path":root,"static_output_path":configured_output,"environment_keys":[],"scripts":[],"message":message})
+            }
         };
     }
     let Ok(manifest) = inspect_manifest(root) else {
@@ -537,7 +586,11 @@ fn deployment_build_unit_name(app_id: &str, job_id: &str, step: &str) -> Option<
     {
         return None;
     }
-    Some(format!("arg-node-build-{}-{}-{step}", &app_id[..8], &job_id[..8]))
+    Some(format!(
+        "arg-node-build-{}-{}-{step}",
+        &app_id[..8],
+        &job_id[..8]
+    ))
 }
 
 fn service_record_id() -> String {
@@ -560,9 +613,9 @@ fn valid_env_name(name: &str) -> bool {
 }
 
 fn read_environment(path: &FsPath) -> Vec<(String, String)> {
-    if !fs::symlink_metadata(path).is_ok_and(|metadata| {
-        metadata.file_type().is_file() && metadata.len() <= 1024 * 1024
-    }) {
+    if !fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() <= 1024 * 1024)
+    {
         return Vec::new();
     }
     fs::read_to_string(path)
@@ -724,17 +777,21 @@ pub(super) fn activate_release(release: &FsPath) -> Result<(), String> {
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("Node release must be a regular directory".into());
     }
-    let app = release.parent().and_then(FsPath::parent).ok_or("Release path is invalid")?;
+    let app = release
+        .parent()
+        .and_then(FsPath::parent)
+        .ok_or("Release path is invalid")?;
     if !release.starts_with(app.join("releases")) {
         return Err("Node release is outside its managed release directory".into());
     }
     let environment = app.join("shared/.env");
-    let env_meta = fs::symlink_metadata(&environment).map_err(|error_value| error_value.to_string())?;
+    let env_meta =
+        fs::symlink_metadata(&environment).map_err(|error_value| error_value.to_string())?;
     if !env_meta.file_type().is_file() {
         return Err("Persistent Node environment must be a regular file".into());
     }
-    let shared_meta = fs::symlink_metadata(app.join("shared"))
-        .map_err(|error_value| error_value.to_string())?;
+    let shared_meta =
+        fs::symlink_metadata(app.join("shared")).map_err(|error_value| error_value.to_string())?;
     if shared_meta.file_type().is_symlink() || !shared_meta.file_type().is_dir() {
         return Err("Persistent Node shared directory must not be a symlink".into());
     }
@@ -759,7 +816,18 @@ pub(super) async fn prepare_build(
     build_script: &str,
     start_script: &str,
 ) -> Result<(), String> {
-    prepare_project_build(state, app_id, job_id, release, build_runtime, build_environment, build_script, start_script, true).await
+    prepare_project_build(
+        state,
+        app_id,
+        job_id,
+        release,
+        build_runtime,
+        build_environment,
+        build_script,
+        start_script,
+        true,
+    )
+    .await
 }
 
 pub(super) async fn prepare_static_build(
@@ -771,7 +839,18 @@ pub(super) async fn prepare_static_build(
     build_environment: &BTreeMap<String, String>,
     build_script: &str,
 ) -> Result<(), String> {
-    prepare_project_build(state, app_id, job_id, release, build_runtime, build_environment, build_script, "auto", false).await
+    prepare_project_build(
+        state,
+        app_id,
+        job_id,
+        release,
+        build_runtime,
+        build_environment,
+        build_script,
+        "auto",
+        false,
+    )
+    .await
 }
 
 pub(super) async fn run_pre_deploy_command(
@@ -793,18 +872,26 @@ pub(super) async fn run_pre_deploy_command(
         json!({"action":"node-pre-deploy-command","application_id":app_id,"job_id":job_id,"step":step,"argv":argv,"log_path":log_path}),
     ).await?;
     if response["ok"] != true {
-        return Err(response["error"].as_str().unwrap_or("اجرای دستور سفارشی در sandbox شکست خورد.").to_owned());
+        return Err(response["error"]
+            .as_str()
+            .unwrap_or("اجرای دستور سفارشی در sandbox شکست خورد.")
+            .to_owned());
     }
     let exit_code = response["data"]["exit_code"].as_i64().unwrap_or(1);
     if exit_code != 0 {
         let output = response["data"]["output"].as_str().unwrap_or("");
-        return Err(if output.is_empty() { format!("فرمان با کد خروج {exit_code} تمام شد.") } else { format!("کد خروج: {exit_code}\n{output}") });
+        return Err(if output.is_empty() {
+            format!("فرمان با کد خروج {exit_code} تمام شد.")
+        } else {
+            format!("کد خروج: {exit_code}\n{output}")
+        });
     }
     Ok(())
 }
 
 fn valid_deployment_log_step(step: &str) -> bool {
-    matches!(step, "install" | "build") || (1..=8).any(|number| step == format!("pre-deploy-{number}"))
+    matches!(step, "install" | "build")
+        || (1..=8).any(|number| step == format!("pre-deploy-{number}"))
 }
 
 pub(super) fn resolve_static_output_path(
@@ -830,18 +917,34 @@ pub(super) fn resolve_static_output_path(
         vec!["dist", "build", "out", "public", "."]
     };
     for relative in candidates {
-        if !apps::valid_static_output_path(relative) || relative == "auto" { continue; }
-        let candidate = if relative == "." { release.to_path_buf() } else { release.join(relative) };
+        if !apps::valid_static_output_path(relative) || relative == "auto" {
+            continue;
+        }
+        let candidate = if relative == "." {
+            release.to_path_buf()
+        } else {
+            release.join(relative)
+        };
         let metadata = match fs::symlink_metadata(&candidate) {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() { continue; }
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
         let canonical_release = release.canonicalize().map_err(|error| error.to_string())?;
-        let canonical_output = candidate.canonicalize().map_err(|error| error.to_string())?;
-        if !canonical_output.starts_with(&canonical_release) { continue; }
+        let canonical_output = candidate
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if !canonical_output.starts_with(&canonical_release) {
+            continue;
+        }
         let index = canonical_output.join("index.html");
-        if !fs::symlink_metadata(&index).is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink()) { continue; }
+        if !fs::symlink_metadata(&index)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            continue;
+        }
         return Ok(relative.to_owned());
     }
     Err(if configured == "auto" {
@@ -865,17 +968,30 @@ async fn prepare_project_build(
     let manifest = inspect_manifest(release)?;
     let manager = manifest.manager.ok_or("lockfile انتخابی پیدا نشد.")?;
     if require_start && runtime_entrypoint(&manifest, release, true, start_script).is_none() {
-        return Err(if start_script == "auto" { "برای برنامهٔ Node.js، scripts.start در package.json تعریف نشده است." } else { "اسکریپت Runtime انتخاب‌شده در package.json پیدا نشد." }.into());
+        return Err(if start_script == "auto" {
+            "برای برنامهٔ Node.js، scripts.start در package.json تعریف نشده است."
+        } else {
+            "اسکریپت Runtime انتخاب‌شده در package.json پیدا نشد."
+        }
+        .into());
     }
     if !valid_configured_script(build_script, true) {
         return Err("نام scripts.build معتبر نیست.".into());
     }
     let selected_build = if build_script == "auto" {
-        manifest.scripts.iter().any(|script| script == "build").then_some("build")
+        manifest
+            .scripts
+            .iter()
+            .any(|script| script == "build")
+            .then_some("build")
     } else if build_script == "none" {
         None
     } else {
-        manifest.scripts.iter().any(|script| script == build_script).then_some(build_script)
+        manifest
+            .scripts
+            .iter()
+            .any(|script| script == build_script)
+            .then_some(build_script)
     };
     if build_script != "auto" && build_script != "none" && selected_build.is_none() {
         return Err("اسکریپت Build انتخاب‌شده در package.json پیدا نشد.".into());
@@ -896,23 +1012,38 @@ async fn prepare_project_build(
         ));
     }
     for step in ["install", "build"] {
-        let script = if step == "install" { None } else { selected_build };
+        let script = if step == "install" {
+            None
+        } else {
+            selected_build
+        };
         if step == "build" && script.is_none() {
             continue;
         }
         let progress_message = if step == "install" {
             "نصب وابستگی‌ها با lockfile انتخاب‌شده در sandbox ایزوله اجرا می‌شود.".to_owned()
         } else {
-            format!("اسکریپت package.json با نام {} در sandbox ایزوله اجرا می‌شود.", script.unwrap_or("نامشخص"))
+            format!(
+                "اسکریپت package.json با نام {} در sandbox ایزوله اجرا می‌شود.",
+                script.unwrap_or("نامشخص")
+            )
         };
         super::deploy::progress(
             state,
             job_id,
             "running",
-            if step == "install" { "node-install" } else { "node-build-script" },
+            if step == "install" {
+                "node-install"
+            } else {
+                "node-build-script"
+            },
             &progress_message,
         );
-        let environment = if step == "build" { json!(build_environment) } else { json!({}) };
+        let environment = if step == "build" {
+            json!(build_environment)
+        } else {
+            json!({})
+        };
         let log_path = create_live_build_log(job_id, step)?;
         let result = request_build_step_with_live_logs(
             state,
@@ -921,7 +1052,15 @@ async fn prepare_project_build(
             &log_path,
             json!({"action":"node-build-step","application_id":app_id,"job_id":job_id,"step":step,"script":script,"node_version":build_runtime,"package_manager":manager.label(),"build_environment":environment,"log_path":log_path}),
         ).await?;
-        super::deploy::record_output(state, job_id, step, &format!("Runner finished {step}; exit code {}.", result["data"]["exit_code"].as_i64().unwrap_or(-1)));
+        super::deploy::record_output(
+            state,
+            job_id,
+            step,
+            &format!(
+                "Runner finished {step}; exit code {}.",
+                result["data"]["exit_code"].as_i64().unwrap_or(-1)
+            ),
+        );
         if result["ok"] != true {
             return Err(result["error"]
                 .as_str()
@@ -963,51 +1102,94 @@ fn create_live_build_log(job_id: &str, step: &str) -> Result<PathBuf, String> {
     }
     let log_directory = deployment.join("job-logs");
     match fs::symlink_metadata(&log_directory) {
-        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => return Err("پوشهٔ لاگ‌های Build معتبر نیست.".into()),
+        Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
+            return Err("پوشهٔ لاگ‌های Build معتبر نیست.".into())
+        }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&log_directory).map_err(|error| format!("پوشهٔ لاگ Build ساخته نشد: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&log_directory)
+                .map_err(|error| format!("پوشهٔ لاگ Build ساخته نشد: {error}"))?
+        }
         Err(error) => return Err(format!("پوشهٔ لاگ Build بررسی نشد: {error}")),
     }
-    let canonical_deployment = deployment.canonicalize().map_err(|error| error.to_string())?;
-    let canonical_logs = log_directory.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_deployment = deployment
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let canonical_logs = log_directory
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     if canonical_logs.parent() != Some(canonical_deployment.as_path()) {
         return Err("پوشهٔ لاگ Build از ریشهٔ استقرار خارج شده است.".into());
     }
     let path = canonical_logs.join(format!("{job_id}-{step}.log"));
-    OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
         .map_err(|error| format!("فایل لاگ Build امن ساخته نشد: {error}"))?;
     Ok(path)
 }
 
-fn drain_live_build_log(path: &FsPath, offset: &mut u64, pending: &mut Vec<u8>, final_read: bool, state: &AppState, job_id: &str, step: &str) -> bool {
-    let mut file = match fs::File::open(path) { Ok(file) => file, Err(_) => return false };
-    if file.seek(SeekFrom::Start(*offset)).is_err() { return false; }
+fn drain_live_build_log(
+    path: &FsPath,
+    offset: &mut u64,
+    pending: &mut Vec<u8>,
+    final_read: bool,
+    state: &AppState,
+    job_id: &str,
+    step: &str,
+) -> bool {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    if file.seek(SeekFrom::Start(*offset)).is_err() {
+        return false;
+    }
     let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() { return false; }
+    if file.read_to_end(&mut bytes).is_err() {
+        return false;
+    }
     *offset = offset.saturating_add(bytes.len() as u64);
     pending.extend_from_slice(&bytes);
     let mut lines = Vec::new();
     while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
         let line = pending.drain(..=end).collect::<Vec<_>>();
         let message = String::from_utf8_lossy(&line).trim().to_owned();
-        if !message.is_empty() { lines.push(message); }
+        if !message.is_empty() {
+            lines.push(message);
+        }
     }
     if final_read && !pending.is_empty() {
         let line = std::mem::take(pending);
         let message = String::from_utf8_lossy(&line).trim().to_owned();
-        if !message.is_empty() { lines.push(message); }
+        if !message.is_empty() {
+            lines.push(message);
+        }
     }
-    if lines.is_empty() { false } else {
+    if lines.is_empty() {
+        false
+    } else {
         super::deploy::record_output(state, job_id, step, &lines.join("\n"));
         true
     }
 }
 
-async fn request_build_step_with_live_logs(state: &AppState, job_id: &str, step: &str, log_path: &FsPath, request: Value) -> Result<Value, String> {
+async fn request_build_step_with_live_logs(
+    state: &AppState,
+    job_id: &str,
+    step: &str,
+    log_path: &FsPath,
+    request: Value,
+) -> Result<Value, String> {
     let mut offset = 0_u64;
     let mut pending = Vec::new();
     let mut streamed = false;
-    let application_id = request["application_id"].as_str().unwrap_or_default().to_owned();
+    let application_id = request["application_id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
     let helper_step = request["step"].as_str().unwrap_or_default().to_owned();
     let mut last_cancel_request = None;
     let request = privileged_request_async(request);
@@ -1059,8 +1241,14 @@ pub(super) async fn inspect(
             .optional()
             .map_err(db_error)?
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
-        if !apps::is_node_runtime_framework(&framework) && !apps::is_static_framework(&framework) && !apps::is_auto_framework(&framework) {
-            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Runner وب پشتیبانی‌شده ندارد."));
+        if !apps::is_node_runtime_framework(&framework)
+            && !apps::is_static_framework(&framework)
+            && !apps::is_auto_framework(&framework)
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "این اپلیکیشن Runner وب پشتیبانی‌شده ندارد.",
+            ));
         }
         (framework, runtime_version, output_path, spa_fallback)
     };
@@ -1075,11 +1263,21 @@ pub(super) async fn inspect(
         )
         .await?;
         if environment["ok"] != true {
-            return Err(error(StatusCode::BAD_GATEWAY, environment["error"].as_str().unwrap_or("کلیدهای فایل محیط خوانده نشد.")));
+            return Err(error(
+                StatusCode::BAD_GATEWAY,
+                environment["error"]
+                    .as_str()
+                    .unwrap_or("کلیدهای فایل محیط خوانده نشد."),
+            ));
         }
         environment["data"]["keys"]
             .as_array()
-            .map(|keys| keys.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
             .unwrap_or_default()
     };
     Ok(Json(
@@ -1110,8 +1308,14 @@ pub(super) async fn get_runtime_settings(
             |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?)),
         ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?
     };
-    let scripts = active_release(&app_id).ok().and_then(|release| inspect_manifest(&release).ok()).map(|manifest| manifest.scripts).unwrap_or_default();
-    Ok(Json(json!({"build_script":build_script,"start_script":start_script,"healthcheck_path":healthcheck_path,"available_scripts":scripts,"arbitrary_shell":false})))
+    let scripts = active_release(&app_id)
+        .ok()
+        .and_then(|release| inspect_manifest(&release).ok())
+        .map(|manifest| manifest.scripts)
+        .unwrap_or_default();
+    Ok(Json(
+        json!({"build_script":build_script,"start_script":start_script,"healthcheck_path":healthcheck_path,"available_scripts":scripts,"arbitrary_shell":false}),
+    ))
 }
 
 pub(super) async fn save_runtime_settings(
@@ -1125,7 +1329,10 @@ pub(super) async fn save_runtime_settings(
         || !valid_configured_script(&input.start_script, false)
         || !valid_healthcheck_path(&input.healthcheck_path)
     {
-        return Err(error(StatusCode::BAD_REQUEST,"نام scripts یا مسیر Health Check معتبر نیست."));
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "نام scripts یا مسیر Health Check معتبر نیست.",
+        ));
     }
     let db = state.lock().unwrap();
     let actor = require_admin(&db, &headers)?.username;
@@ -1134,20 +1341,39 @@ pub(super) async fn save_runtime_settings(
         "SELECT framework FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
         params![app_id,owner], |row| row.get(0),
     ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
-    if !apps::is_node_runtime_framework(&framework) && !apps::is_static_framework(&framework) && !apps::is_auto_framework(&framework) {
-        return Err(error(StatusCode::CONFLICT,"تنظیمات Runtime فقط برای اپلیکیشن‌های Node قابل استفاده است."));
+    if !apps::is_node_runtime_framework(&framework)
+        && !apps::is_static_framework(&framework)
+        && !apps::is_auto_framework(&framework)
+    {
+        return Err(error(
+            StatusCode::CONFLICT,
+            "تنظیمات Runtime فقط برای اپلیکیشن‌های Node قابل استفاده است.",
+        ));
     }
     if deployment_in_progress(&db, &app_id) {
-        return Err(error(StatusCode::CONFLICT,"تا پایان استقرار نمی‌توان تنظیمات Runtime را تغییر داد."));
+        return Err(error(
+            StatusCode::CONFLICT,
+            "تا پایان استقرار نمی‌توان تنظیمات Runtime را تغییر داد.",
+        ));
     }
     if let Ok(release) = active_release(&app_id) {
         if has_package_manifest(&release) {
-            let manifest = inspect_manifest(&release).map_err(|message| error(StatusCode::CONFLICT,&message))?;
-            if input.build_script != "auto" && input.build_script != "none" && !manifest.scripts.contains(&input.build_script) {
-                return Err(error(StatusCode::BAD_REQUEST,"اسکریپت Build در package.json نسخهٔ فعلی پیدا نشد."));
+            let manifest = inspect_manifest(&release)
+                .map_err(|message| error(StatusCode::CONFLICT, &message))?;
+            if input.build_script != "auto"
+                && input.build_script != "none"
+                && !manifest.scripts.contains(&input.build_script)
+            {
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "اسکریپت Build در package.json نسخهٔ فعلی پیدا نشد.",
+                ));
             }
             if input.start_script != "auto" && !manifest.scripts.contains(&input.start_script) {
-                return Err(error(StatusCode::BAD_REQUEST,"اسکریپت Runtime در package.json نسخهٔ فعلی پیدا نشد."));
+                return Err(error(
+                    StatusCode::BAD_REQUEST,
+                    "اسکریپت Runtime در package.json نسخهٔ فعلی پیدا نشد.",
+                ));
             }
         }
     }
@@ -1155,8 +1381,18 @@ pub(super) async fn save_runtime_settings(
         "UPDATE applications SET node_build_script=?1,node_start_script=?2,node_healthcheck_path=?3,version=version+1,updated_at=?4 WHERE id=?5 AND owner_server_uuid=?6 AND deleted_at IS NULL",
         params![input.build_script,input.start_script,input.healthcheck_path,now(),app_id,owner],
     ).map_err(db_error)?;
-    audit(&db,&actor,"node.runtime_settings.update",&format!("app={app_id}; build={}; start={}; healthcheck={}",input.build_script,input.start_script,input.healthcheck_path));
-    Ok(Json(json!({"saved":true,"settings":{"build_script":input.build_script,"start_script":input.start_script,"healthcheck_path":input.healthcheck_path}})))
+    audit(
+        &db,
+        &actor,
+        "node.runtime_settings.update",
+        &format!(
+            "app={app_id}; build={}; start={}; healthcheck={}",
+            input.build_script, input.start_script, input.healthcheck_path
+        ),
+    );
+    Ok(Json(
+        json!({"saved":true,"settings":{"build_script":input.build_script,"start_script":input.start_script,"healthcheck_path":input.healthcheck_path}}),
+    ))
 }
 
 pub(super) async fn get_build_environment(
@@ -1178,7 +1414,9 @@ pub(super) async fn get_build_environment(
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
     let variables = parse_public_build_environment(&raw)
         .map_err(|message| error(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
-    Ok(Json(json!({"variables":variables,"values_are_public":true})))
+    Ok(Json(
+        json!({"variables":variables,"values_are_public":true}),
+    ))
 }
 
 pub(super) async fn save_build_environment(
@@ -1208,15 +1446,22 @@ pub(super) async fn save_build_environment(
             && !apps::is_static_framework(&framework)
             && !apps::is_auto_framework(&framework)
         {
-            return Err(error(StatusCode::CONFLICT, "این قالب از Buildهای Node پشتیبانی نمی‌کند."));
+            return Err(error(
+                StatusCode::CONFLICT,
+                "این قالب از Buildهای Node پشتیبانی نمی‌کند.",
+            ));
         }
         if deployment_in_progress(&db, &app_id) {
-            return Err(error(StatusCode::CONFLICT, "تا پایان Deploy نمی‌توان متغیرهای Build را تغییر داد."));
+            return Err(error(
+                StatusCode::CONFLICT,
+                "تا پایان Deploy نمی‌توان متغیرهای Build را تغییر داد.",
+            ));
         }
         (actor, owner)
     };
-    let encoded = serde_json::to_string(&input.variables)
-        .map_err(|error_value| error(StatusCode::INTERNAL_SERVER_ERROR, &error_value.to_string()))?;
+    let encoded = serde_json::to_string(&input.variables).map_err(|error_value| {
+        error(StatusCode::INTERNAL_SERVER_ERROR, &error_value.to_string())
+    })?;
     let db = state.lock().unwrap();
     let changed = db
         .execute(
@@ -1234,7 +1479,9 @@ pub(super) async fn save_build_environment(
         "node.build_environment.update",
         &format!("app={app_id}; keys={}", keys.join(",")),
     );
-    Ok(Json(json!({"saved":true,"keys":keys,"values_are_public":true})))
+    Ok(Json(
+        json!({"saved":true,"keys":keys,"values_are_public":true}),
+    ))
 }
 
 pub(super) async fn service(
@@ -1256,7 +1503,9 @@ pub(super) async fn service(
             .map_err(db_error)?
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."))?;
         if apps::is_static_framework(&framework) {
-            return Ok(Json(json!({"service":{"unit":null,"state":"static","enabled":true},"port":null})));
+            return Ok(Json(
+                json!({"service":{"unit":null,"state":"static","enabled":true},"port":null}),
+            ));
         }
         if !apps::is_node_runtime_framework(&framework) && !apps::is_auto_framework(&framework) {
             return Err(error(StatusCode::CONFLICT, "این اپلیکیشن Runner وب ندارد."));
@@ -1265,8 +1514,12 @@ pub(super) async fn service(
     };
     if apps::is_auto_framework(&framework) {
         if let Ok(release) = active_release(&app_id) {
-            if is_static_deployment(&framework, &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
-                return Ok(Json(json!({"service":{"unit":null,"state":"static","enabled":true},"port":null})));
+            if is_static_deployment(&framework, &release, &output_path)
+                .map_err(|message| error(StatusCode::CONFLICT, &message))?
+            {
+                return Ok(Json(
+                    json!({"service":{"unit":null,"state":"static","enabled":true},"port":null}),
+                ));
             }
         }
     }
@@ -1298,7 +1551,10 @@ pub(super) async fn set_service(
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
         let row:(String,String,Option<u16>,Option<String>,String)=db.query_row("SELECT framework,runtime_version,listen_port,domain,static_output_path FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",params![app_id,owner],|row|Ok((row.get(0)?,row.get(1)?,row.get::<_,Option<i64>>(2)?.map(|v|v as u16),row.get::<_,Option<String>>(3)?,row.get(4)?))).optional().map_err(db_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
         if !apps::is_node_runtime_framework(&row.0) && !apps::is_auto_framework(&row.0) {
-            return Err(error(StatusCode::CONFLICT, "فقط اپ SSR دارای سرویس Node قابل روشن/خاموش‌کردن است."));
+            return Err(error(
+                StatusCode::CONFLICT,
+                "فقط اپ SSR دارای سرویس Node قابل روشن/خاموش‌کردن است.",
+            ));
         }
         if deployment_in_progress(&db, &app_id) {
             return Err(error(
@@ -1306,13 +1562,28 @@ pub(super) async fn set_service(
                 "تا پایان deploy نمی‌توان وضعیت سرویس Node را تغییر داد.",
             ));
         }
-        let (start_script, healthcheck_path) = runtime_settings_for_app(&db, &app_id).map_err(db_error)?;
-        (actor, row.0, row.1, row.2, row.3, row.4, start_script, healthcheck_path)
+        let (start_script, healthcheck_path) =
+            runtime_settings_for_app(&db, &app_id).map_err(db_error)?;
+        (
+            actor,
+            row.0,
+            row.1,
+            row.2,
+            row.3,
+            row.4,
+            start_script,
+            healthcheck_path,
+        )
     };
     if apps::is_auto_framework(&framework) {
         let release = active_release(&app_id)?;
-        if is_static_deployment("auto", &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
-            return Err(error(StatusCode::CONFLICT, "این پروژه به‌صورت Static منتشر شده و سرویس Node ندارد."));
+        if is_static_deployment("auto", &release, &output_path)
+            .map_err(|message| error(StatusCode::CONFLICT, &message))?
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "این پروژه به‌صورت Static منتشر شده و سرویس Node ندارد.",
+            ));
         }
     }
     let previously_active = if input.enabled {
@@ -1323,7 +1594,9 @@ pub(super) async fn set_service(
         if previous["ok"] != true {
             return Err(error(
                 StatusCode::BAD_GATEWAY,
-                previous["error"].as_str().unwrap_or("وضعیت قبلی سرویس Node مشخص نشد؛ عملیات انجام نشد."),
+                previous["error"]
+                    .as_str()
+                    .unwrap_or("وضعیت قبلی سرویس Node مشخص نشد؛ عملیات انجام نشد."),
             ));
         }
         previous["data"]["state"] == "active"
@@ -1377,27 +1650,50 @@ pub(super) async fn set_service(
             .await;
             match proxy {
                 Ok(value) if value["ok"] == true => {
-                    if let (Some(name), Some(content)) = (value["data"]["site_name"].as_str(), value["data"]["content"].as_str()) {
+                    if let (Some(name), Some(content)) = (
+                        value["data"]["site_name"].as_str(),
+                        value["data"]["content"].as_str(),
+                    ) {
                         nginx_snapshot = Some((name.to_owned(), content.to_owned()));
                     }
                     takeover_backup = value["data"]["takeover_backup"].as_str().map(str::to_owned);
                 }
                 Ok(value) => {
-                    let message = value["error"].as_str().unwrap_or("تنظیم reverse proxy در Nginx ناموفق بود.");
+                    let message = value["error"]
+                        .as_str()
+                        .unwrap_or("تنظیم reverse proxy در Nginx ناموفق بود.");
                     if !previously_active {
-                        let _ = privileged_request_async(json!({"action":"node-service-disable","application_id":app_id})).await;
+                        let _ = privileged_request_async(
+                            json!({"action":"node-service-disable","application_id":app_id}),
+                        )
+                        .await;
                     }
                     let db = state.lock().unwrap();
-                    audit(&db, &actor, "node.service.proxy_failed", &format!("app={app_id}; domain={domain}; error={message}"));
+                    audit(
+                        &db,
+                        &actor,
+                        "node.service.proxy_failed",
+                        &format!("app={app_id}; domain={domain}; error={message}"),
+                    );
                     return Err(error(StatusCode::BAD_GATEWAY, message));
                 }
                 Err((_, body)) => {
-                    let message = body["error"].as_str().unwrap_or("ارتباط با helper تنظیم Nginx برقرار نشد.");
+                    let message = body["error"]
+                        .as_str()
+                        .unwrap_or("ارتباط با helper تنظیم Nginx برقرار نشد.");
                     if !previously_active {
-                        let _ = privileged_request_async(json!({"action":"node-service-disable","application_id":app_id})).await;
+                        let _ = privileged_request_async(
+                            json!({"action":"node-service-disable","application_id":app_id}),
+                        )
+                        .await;
                     }
                     let db = state.lock().unwrap();
-                    audit(&db, &actor, "node.service.proxy_failed", &format!("app={app_id}; domain={domain}; error={message}"));
+                    audit(
+                        &db,
+                        &actor,
+                        "node.service.proxy_failed",
+                        &format!("app={app_id}; domain={domain}; error={message}"),
+                    );
                     return Err(error(StatusCode::BAD_GATEWAY, message));
                 }
             }
@@ -1418,13 +1714,15 @@ pub(super) async fn set_service(
             &db,
             &actor,
             "node.service.domain_takeover",
-            &format!(
-                "app={app_id}; domain={domain}; backup={backup}"
-            ),
+            &format!("app={app_id}; domain={domain}; backup={backup}"),
         );
     }
     if let Some((site_name, content)) = nginx_snapshot.as_ref() {
-        db.execute("INSERT OR IGNORE INTO nginx_site_metadata(name,description) VALUES (?1,?2)", params![site_name, format!("Node application {app_id}")]).map_err(db_error)?;
+        db.execute(
+            "INSERT OR IGNORE INTO nginx_site_metadata(name,description) VALUES (?1,?2)",
+            params![site_name, format!("Node application {app_id}")],
+        )
+        .map_err(db_error)?;
         nginx::store_nginx_snapshot(&db, site_name, content, None).map_err(db_error)?;
     }
     let mut response = result["data"].clone();
@@ -1457,7 +1755,10 @@ pub(super) async fn save_environment(
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
         let (framework, output_path):(String,String)=db.query_row("SELECT framework,static_output_path FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",params![app_id,owner],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(db_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"اپلیکیشن پیدا نشد."))?;
         if !apps::is_node_runtime_framework(&framework) && !apps::is_auto_framework(&framework) {
-            return Err(error(StatusCode::CONFLICT, "این اپلیکیشن سرویس Runtime Node ندارد."));
+            return Err(error(
+                StatusCode::CONFLICT,
+                "این اپلیکیشن سرویس Runtime Node ندارد.",
+            ));
         }
         if deployment_in_progress(&db, &app_id) {
             return Err(error(
@@ -1469,8 +1770,13 @@ pub(super) async fn save_environment(
     };
     if apps::is_auto_framework(&framework) {
         let release = active_release(&app_id)?;
-        if is_static_deployment("auto", &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
-            return Err(error(StatusCode::CONFLICT, "این پروژه Static است و متغیر Runtime ندارد."));
+        if is_static_deployment("auto", &release, &output_path)
+            .map_err(|message| error(StatusCode::CONFLICT, &message))?
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "این پروژه Static است و متغیر Runtime ندارد.",
+            ));
         }
     }
     let result = privileged_request_async(json!({
@@ -1487,7 +1793,13 @@ pub(super) async fn save_environment(
     }
     let keys = result["data"]["keys"]
         .as_array()
-        .map(|values| values.iter().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let db = state.lock().unwrap();
     audit(
@@ -1496,24 +1808,25 @@ pub(super) async fn save_environment(
         "node.environment.update",
         &format!("app={app_id}; keys={}", keys.join(",")),
     );
-    Ok(Json(json!({"saved":true,"keys":keys,"secrets_returned":false})))
+    Ok(Json(
+        json!({"saved":true,"keys":keys,"secrets_returned":false}),
+    ))
 }
 
 pub(super) async fn refresh_after_deploy(
     app_id: &str,
     previous: Option<&str>,
 ) -> Result<bool, String> {
-    let status = privileged_request_async(
-        json!({"action":"node-service-status","application_id":app_id}),
-    )
-    .await;
+    let status =
+        privileged_request_async(json!({"action":"node-service-status","application_id":app_id}))
+            .await;
     let status = match status {
         Ok(status) => status,
         Err((_, body)) => {
             let message = body["error"]
-            .as_str()
-            .unwrap_or("Node service status failed")
-            .to_owned();
+                .as_str()
+                .unwrap_or("Node service status failed")
+                .to_owned();
             let restored = restore_previous_release(app_id, previous).is_ok();
             return Err(format!("وضعیت سرویس Node بررسی نشد: {message}. اشاره‌گر release {}؛ چون وضعیت سرویس معلوم نیست، آن را خودکار start نکردم.", if restored { "به نسخهٔ قبلی برگشت" } else { "قابل‌بازگشت نبود" }));
         }
@@ -1524,22 +1837,28 @@ pub(super) async fn refresh_after_deploy(
             .unwrap_or("Node service status failed")
             .to_owned();
         let restored = restore_previous_release(app_id, previous).is_ok();
-        return Err(format!("وضعیت سرویس Node خوانده نشد: {message}. اشاره‌گر release {}.", if restored { "به نسخهٔ قبلی برگشت" } else { "بازنگشت" }));
+        return Err(format!(
+            "وضعیت سرویس Node خوانده نشد: {message}. اشاره‌گر release {}.",
+            if restored {
+                "به نسخهٔ قبلی برگشت"
+            } else {
+                "بازنگشت"
+            }
+        ));
     }
     if status["data"]["enabled"] != true && status["data"]["state"] != "active" {
         return Ok(false);
     }
-    let result = privileged_request_async(
-        json!({"action":"node-service-restart","application_id":app_id}),
-    )
-    .await;
+    let result =
+        privileged_request_async(json!({"action":"node-service-restart","application_id":app_id}))
+            .await;
     let result = match result {
         Ok(result) => result,
         Err((_, body)) => {
             let restart_error = body["error"]
-            .as_str()
-            .unwrap_or("Node service restart failed")
-            .to_owned();
+                .as_str()
+                .unwrap_or("Node service restart failed")
+                .to_owned();
             let restore = restore_previous_release(app_id, previous);
             let old_service = if restore.is_ok() {
                 privileged_request_async(
@@ -1547,10 +1866,21 @@ pub(super) async fn refresh_after_deploy(
                 )
                 .await
             } else {
-                Err((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"restore failed"}))))
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error":"restore failed"})),
+                ))
             };
-            let recovered = restore.is_ok() && matches!(old_service, Ok(ref value) if value["ok"] == true);
-            return Err(format!("راه‌اندازی release تازه شکست خورد: {restart_error}. {}", if recovered { "نسخهٔ قبلی دوباره فعال شد." } else { "بازگردانی کامل نشد؛ وضعیت current و سرویس را بررسی کن." }));
+            let recovered =
+                restore.is_ok() && matches!(old_service, Ok(ref value) if value["ok"] == true);
+            return Err(format!(
+                "راه‌اندازی release تازه شکست خورد: {restart_error}. {}",
+                if recovered {
+                    "نسخهٔ قبلی دوباره فعال شد."
+                } else {
+                    "بازگردانی کامل نشد؛ وضعیت current و سرویس را بررسی کن."
+                }
+            ));
         }
     };
     if result["ok"] == true {
@@ -1560,16 +1890,17 @@ pub(super) async fn refresh_after_deploy(
         .as_str()
         .unwrap_or("Node service restart failed");
     let restore = restore_previous_release(app_id, previous);
-    let old_service = privileged_request_async(
-        json!({"action":"node-service-restart","application_id":app_id}),
-    )
-    .await;
+    let old_service =
+        privileged_request_async(json!({"action":"node-service-restart","application_id":app_id}))
+            .await;
     let detail = match (restore, old_service) {
         (Ok(()), Ok(value)) if value["ok"] == true => " نسخهٔ قبلی دوباره فعال شد.",
         (Ok(()), _) => " اشاره‌گر قبلی برگشت، اما سرویس قدیمی خودکار راه نیفتاد.",
         (Err(_), _) => " بازگردانی خودکار اشاره‌گر هم ناموفق بود؛ نسخهٔ جاری را بررسی کن.",
     };
-    Err(format!("راه‌اندازی release تازه شکست خورد: {restart_error}.{detail}"))
+    Err(format!(
+        "راه‌اندازی release تازه شکست خورد: {restart_error}.{detail}"
+    ))
 }
 
 fn restore_previous_release(app_id: &str, previous: Option<&str>) -> Result<(), String> {
@@ -1619,7 +1950,11 @@ pub(super) async fn logs(
     Path(app_id): Path<String>,
     Query(query): Query<NodeLogsQuery>,
 ) -> ApiResult {
-    if query.after.as_deref().is_some_and(|cursor| !valid_journal_cursor(cursor)) {
+    if query
+        .after
+        .as_deref()
+        .is_some_and(|cursor| !valid_journal_cursor(cursor))
+    {
         return Err(error(StatusCode::BAD_REQUEST, "شناسهٔ ادامهٔ لاگ معتبر نیست."));
     }
     let (framework, output_path) = {
@@ -1634,15 +1969,22 @@ pub(super) async fn logs(
             )
             .optional()
             .map_err(db_error)?;
-        if !record.as_ref().is_some_and(|(value, _)| apps::is_node_runtime_framework(value) || apps::is_auto_framework(value)) {
+        if !record.as_ref().is_some_and(|(value, _)| {
+            apps::is_node_runtime_framework(value) || apps::is_auto_framework(value)
+        }) {
             return Err(error(StatusCode::NOT_FOUND, "اپلیکیشن Node.js پیدا نشد."));
         }
         record.unwrap_or_default()
     };
     if apps::is_auto_framework(&framework) {
         let release = active_release(&app_id)?;
-        if is_static_deployment("auto", &release, &output_path).map_err(|message| error(StatusCode::CONFLICT, &message))? {
-            return Err(error(StatusCode::CONFLICT, "این پروژه Static است و سرویس اجرایی ندارد."));
+        if is_static_deployment("auto", &release, &output_path)
+            .map_err(|message| error(StatusCode::CONFLICT, &message))?
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "این پروژه Static است و سرویس اجرایی ندارد.",
+            ));
         }
     }
     let result = privileged_request_async(
@@ -1679,10 +2021,16 @@ pub(super) fn execute_privileged_request(action: &str, request: &Value) -> Value
 }
 
 fn helper_build_cancel(request: &Value) -> Value {
-    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(app_id) = request["application_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Application ID is invalid"});
     };
-    let Some(job_id) = request["job_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(job_id) = request["job_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Deployment ID is invalid"});
     };
     let Some(step) = request["step"].as_str() else {
@@ -1697,9 +2045,14 @@ fn helper_build_cancel(request: &Value) -> Value {
         .output()
     {
         Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
-        Err(error) => return json!({"ok":false,"error":format!("Could not inspect build unit: {error}")}),
+        Err(error) => {
+            return json!({"ok":false,"error":format!("Could not inspect build unit: {error}")})
+        }
     };
-    if !matches!(active.as_str(), "active" | "activating" | "deactivating" | "reloading") {
+    if !matches!(
+        active.as_str(),
+        "active" | "activating" | "deactivating" | "reloading"
+    ) {
         return json!({"ok":true,"data":{"unit":unit,"stop_requested":false}});
     }
     match Command::new("/usr/bin/systemctl")
@@ -1707,20 +2060,30 @@ fn helper_build_cancel(request: &Value) -> Value {
         .stdin(Stdio::null())
         .output()
     {
-        Ok(output) if output.status.success() => json!({"ok":true,"data":{"unit":unit,"stop_requested":true}}),
-        Ok(output) => json!({"ok":false,"error":format!("Could not stop build unit: {}", String::from_utf8_lossy(&output.stderr).trim())}),
+        Ok(output) if output.status.success() => {
+            json!({"ok":true,"data":{"unit":unit,"stop_requested":true}})
+        }
+        Ok(output) => {
+            json!({"ok":false,"error":format!("Could not stop build unit: {}", String::from_utf8_lossy(&output.stderr).trim())})
+        }
         Err(error) => json!({"ok":false,"error":format!("Could not stop build unit: {error}")}),
     }
 }
 
 fn helper_node_nginx_proxy(request: &Value) -> Value {
-    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(app_id) = request["application_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Application ID is invalid"});
     };
     let Some(domain) = request["domain"].as_str() else {
         return json!({"ok":false,"error":"Application domain is missing"});
     };
-    let Some(port) = request["port"].as_u64().filter(|port| (1024..=65535).contains(port)) else {
+    let Some(port) = request["port"]
+        .as_u64()
+        .filter(|port| (1024..=65535).contains(port))
+    else {
         return json!({"ok":false,"error":"Node port is invalid"});
     };
     match nginx::configure_node_proxy(
@@ -1737,13 +2100,19 @@ fn helper_node_nginx_proxy(request: &Value) -> Value {
 }
 
 fn helper_node_nginx_deploy_proxy(request: &Value) -> Value {
-    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(app_id) = request["application_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Application ID is invalid"});
     };
     let Some(domain) = request["domain"].as_str() else {
         return json!({"ok":false,"error":"Application domain is missing"});
     };
-    let Some(port) = request["port"].as_u64().filter(|port| (1024..=65535).contains(port)) else {
+    let Some(port) = request["port"]
+        .as_u64()
+        .filter(|port| (1024..=65535).contains(port))
+    else {
         return json!({"ok":false,"error":"Node port is invalid"});
     };
     match nginx::ensure_node_proxy_for_deployment(app_id, domain, port as u16) {
@@ -1753,7 +2122,10 @@ fn helper_node_nginx_deploy_proxy(request: &Value) -> Value {
 }
 
 fn helper_node_nginx_static(request: &Value) -> Value {
-    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(app_id) = request["application_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Application ID is invalid"});
     };
     let (Some(domain), Some(output_path), Some(spa_fallback)) = (
@@ -1830,7 +2202,12 @@ fn helper_build_step(request: &Value) -> Value {
     let Some((node_binary, _)) = find_node_binary(node_version) else {
         return json!({"ok":false,"error":"Requested Node.js runtime is not installed"});
     };
-    if step == "build" && !manifest.scripts.iter().any(|available| Some(available.as_str()) == script) {
+    if step == "build"
+        && !manifest
+            .scripts
+            .iter()
+            .any(|available| Some(available.as_str()) == script)
+    {
         return json!({"ok":false,"error":"The selected build script does not exist in package.json"});
     }
     let build_environment = if step == "build" {
@@ -1855,10 +2232,17 @@ fn helper_build_step(request: &Value) -> Value {
     };
     let log_file = match open_build_log_file(log_path, job_id, step) {
         Ok(file) => file,
-        Err(message) => { let _ = restore_tree_owner(&real_stage, &group); return json!({"ok":false,"error":message}); }
+        Err(message) => {
+            let _ = restore_tree_owner(&real_stage, &group);
+            return json!({"ok":false,"error":message});
+        }
     };
     let build_args = script.map(|name| vec!["run", name]);
-    let args = if step == "install" { manager.install_args() } else { build_args.as_deref().unwrap_or(&[]) };
+    let args = if step == "install" {
+        manager.install_args()
+    } else {
+        build_args.as_deref().unwrap_or(&[])
+    };
     let output = run_sandboxed(
         &real_stage,
         &build_cache,
@@ -1883,25 +2267,39 @@ fn helper_build_step(request: &Value) -> Value {
 }
 
 fn helper_pre_deploy_command(request: &Value) -> Value {
-    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(app_id) = request["application_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Application ID is invalid"});
     };
-    let Some(job_id) = request["job_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(job_id) = request["job_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Deployment ID is invalid"});
     };
-    let Some(step) = request["step"].as_str().filter(|value| valid_deployment_log_step(value) && value.starts_with("pre-deploy-")) else {
+    let Some(step) = request["step"]
+        .as_str()
+        .filter(|value| valid_deployment_log_step(value) && value.starts_with("pre-deploy-"))
+    else {
         return json!({"ok":false,"error":"Pre-deploy step is invalid"});
     };
     let Some(log_path) = request["log_path"].as_str() else {
         return json!({"ok":false,"error":"Pre-deploy log path is missing"});
     };
-    let Some(argv) = request["argv"].as_array().filter(|args| !args.is_empty() && args.len() <= 32) else {
+    let Some(argv) = request["argv"]
+        .as_array()
+        .filter(|args| !args.is_empty() && args.len() <= 32)
+    else {
         return json!({"ok":false,"error":"Pre-deploy argv is invalid"});
     };
     let mut owned_argv = Vec::with_capacity(argv.len());
     let mut total_bytes = 0usize;
     for item in argv {
-        let Some(value) = item.as_str().filter(|value| !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)) else {
+        let Some(value) = item.as_str().filter(|value| {
+            !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+        }) else {
             return json!({"ok":false,"error":"Pre-deploy argument is invalid"});
         };
         total_bytes = total_bytes.saturating_add(value.len());
@@ -1912,7 +2310,9 @@ fn helper_pre_deploy_command(request: &Value) -> Value {
     }
     let root = deployment_root().join("apps").join(app_id);
     let stage = root.join(format!(".staging-{job_id}"));
-    if fs::symlink_metadata(&root).is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink()) {
+    if fs::symlink_metadata(&root)
+        .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
+    {
         return json!({"ok":false,"error":"Application root must be a regular directory"});
     }
     let (Ok(real_root), Ok(real_stage)) = (root.canonicalize(), stage.canonicalize()) else {
@@ -1923,7 +2323,9 @@ fn helper_pre_deploy_command(request: &Value) -> Value {
     }
     let group = app_group(app_id);
     let build_cache = root.join("build-cache");
-    if fs::symlink_metadata(&build_cache).is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink()) {
+    if fs::symlink_metadata(&build_cache)
+        .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
+    {
         return json!({"ok":false,"error":"Build cache path must be a regular directory"});
     }
     if let Err(message) = fs::create_dir_all(&build_cache)
@@ -1934,22 +2336,42 @@ fn helper_pre_deploy_command(request: &Value) -> Value {
     {
         return json!({"ok":false,"error":message});
     }
-    let env = ["/usr/bin/env", "/bin/env"].iter().map(PathBuf::from).find(|path| path.is_file());
+    let env = ["/usr/bin/env", "/bin/env"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file());
     let Some(env) = env else {
         let _ = restore_tree_owner(&real_stage, &group);
         return json!({"ok":false,"error":"env executable is not installed"});
     };
     let log_file = match open_build_log_file(log_path, job_id, step) {
         Ok(file) => file,
-        Err(message) => { let _ = restore_tree_owner(&real_stage, &group); return json!({"ok":false,"error":message}); }
+        Err(message) => {
+            let _ = restore_tree_owner(&real_stage, &group);
+            return json!({"ok":false,"error":message});
+        }
     };
     let mut args: Vec<&str> = vec!["--"];
     args.extend(owned_argv.iter().map(String::as_str));
     let empty_environment = BTreeMap::new();
-    let output = run_sandboxed(&real_stage, &build_cache, &group, &env, &env, &args, &empty_environment, app_id, job_id, step, log_file);
+    let output = run_sandboxed(
+        &real_stage,
+        &build_cache,
+        &group,
+        &env,
+        &env,
+        &args,
+        &empty_environment,
+        app_id,
+        job_id,
+        step,
+        log_file,
+    );
     let restored = restore_tree_owner(&real_stage, &group);
     match (output, restored) {
-        (Ok((code, output)), Ok(())) => json!({"ok":true,"data":{"exit_code":code,"output":output}}),
+        (Ok((code, output)), Ok(())) => {
+            json!({"ok":true,"data":{"exit_code":code,"output":output}})
+        }
         (Err(message), _) => json!({"ok":false,"error":message}),
         (_, Err(message)) => json!({"ok":false,"error":message}),
     }
@@ -1995,10 +2417,8 @@ fn helper_service_enable(request: &Value) -> Value {
         Ok(value) => value,
         Err(message) => return json!({"ok":false,"error":message}),
     };
-        let entrypoint = runtime_entrypoint(&manifest, &release, false, start_script);
-        if entrypoint.is_none()
-        || !release.join("node_modules").is_dir()
-    {
+    let entrypoint = runtime_entrypoint(&manifest, &release, false, start_script);
+    if entrypoint.is_none() || !release.join("node_modules").is_dir() {
         return json!({"ok":false,"error":"A start script and installed dependencies are required"});
     }
     let group = app_group(app_id);
@@ -2055,7 +2475,13 @@ fn helper_service_enable(request: &Value) -> Value {
         }
     });
     if let Err(message) = start {
-        let restore = restore_node_unit(&unit_path, &unit, existing.as_deref(), was_enabled, was_active);
+        let restore = restore_node_unit(
+            &unit_path,
+            &unit,
+            existing.as_deref(),
+            was_enabled,
+            was_active,
+        );
         return json!({"ok":false,"error":format!("{message}{}", restore.err().map(|problem| format!("؛ بازگرداندن تنظیم قبلی هم شکست خورد: {problem}")).unwrap_or_default())});
     }
     match verify_node_service(port as u16, &unit, healthcheck_path) {
@@ -2063,7 +2489,13 @@ fn helper_service_enable(request: &Value) -> Value {
             json!({"ok":true,"data":{"unit":unit,"enabled":true,"state":"active","port":port,"bind":"127.0.0.1","message":"Node service is running on its private loopback port"}})
         }
         Err(message) => {
-            let restore = restore_node_unit(&unit_path, &unit, existing.as_deref(), was_enabled, was_active);
+            let restore = restore_node_unit(
+                &unit_path,
+                &unit,
+                existing.as_deref(),
+                was_enabled,
+                was_active,
+            );
             json!({"ok":false,"error":format!("{message}{}", restore.err().map(|problem| format!("؛ بازگرداندن تنظیم قبلی هم شکست خورد: {problem}")).unwrap_or_default())})
         }
     }
@@ -2138,12 +2570,17 @@ fn helper_service_restart(request: &Value) -> Value {
         return json!({"ok":false,"error":message});
     }
     match verify_node_service(port, &unit, &manifest_healthcheck_path(&unit_path)) {
-        Ok(()) => json!({"ok":true,"data":{"unit":unit,"state":"active","port":port,"bind":"127.0.0.1"}}),
+        Ok(()) => {
+            json!({"ok":true,"data":{"unit":unit,"state":"active","port":port,"bind":"127.0.0.1"}})
+        }
         Err(message) => {
             let stop = systemctl(&["stop", &unit]);
-            let detail = stop.err().map(|problem| format!(" سرویس متوقف نشد: {problem}")).unwrap_or_default();
+            let detail = stop
+                .err()
+                .map(|problem| format!(" سرویس متوقف نشد: {problem}"))
+                .unwrap_or_default();
             json!({"ok":false,"error":format!("{message}{detail}")})
-        },
+        }
     }
 }
 
@@ -2158,7 +2595,12 @@ fn manifest_port(unit_path: &FsPath) -> Option<u16> {
 fn manifest_healthcheck_path(unit_path: &FsPath) -> String {
     fs::read_to_string(unit_path)
         .ok()
-        .and_then(|contents| contents.lines().find_map(|line| line.strip_prefix("Environment=ARG_HEALTHCHECK_PATH=").map(str::to_owned)))
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                line.strip_prefix("Environment=ARG_HEALTHCHECK_PATH=")
+                    .map(str::to_owned)
+            })
+        })
         .filter(|path| valid_healthcheck_path(path))
         .unwrap_or_else(|| "/".to_owned())
 }
@@ -2187,8 +2629,14 @@ pub(super) fn purge_application_service(app_id: &str) -> Result<bool, String> {
         .map_err(|error| format!("محتوای سرویس Node خوانده نشد: {error}"))?;
     let app_root = deployment_root().join("apps").join(app_id);
     if !contents.starts_with("# Managed by ARG Node runner;")
-        || !contents.contains(&format!("BindReadOnlyPaths={}/current:/workspace", app_root.display()))
-        || !contents.contains(&format!("BindPaths={}/shared/data:/shared/data", app_root.display()))
+        || !contents.contains(&format!(
+            "BindReadOnlyPaths={}/current:/workspace",
+            app_root.display()
+        ))
+        || !contents.contains(&format!(
+            "BindPaths={}/shared/data:/shared/data",
+            app_root.display()
+        ))
     {
         return Err("سرویس هم‌نام Node با این اپلیکیشن تطبیق ندارد و دست‌نخورده ماند.".into());
     }
@@ -2218,7 +2666,10 @@ pub(super) fn purge_application_service(app_id: &str) -> Result<bool, String> {
 }
 
 fn helper_environment_keys(request: &Value) -> Value {
-    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(app_id) = request["application_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Application ID is invalid"});
     };
     let Some(root) = app_root(app_id) else {
@@ -2231,9 +2682,9 @@ fn helper_environment_keys(request: &Value) -> Value {
         return json!({"ok":false,"error":"Application shared path is invalid"});
     }
     let path = root.join("shared/.env");
-    if !fs::symlink_metadata(&path).is_ok_and(|metadata| {
-        metadata.file_type().is_file() && metadata.len() <= 1024 * 1024
-    }) {
+    if !fs::symlink_metadata(&path)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() <= 1024 * 1024)
+    {
         return json!({"ok":false,"error":"Environment file is invalid"});
     }
     let keys = read_environment(&path)
@@ -2244,7 +2695,10 @@ fn helper_environment_keys(request: &Value) -> Value {
 }
 
 fn helper_environment_save(request: &Value) -> Value {
-    let Some(app_id) = request["application_id"].as_str().filter(|value| valid_app_id(value)) else {
+    let Some(app_id) = request["application_id"]
+        .as_str()
+        .filter(|value| valid_app_id(value))
+    else {
         return json!({"ok":false,"error":"Application ID is invalid"});
     };
     let Some(root) = app_root(app_id) else {
@@ -2258,9 +2712,9 @@ fn helper_environment_save(request: &Value) -> Value {
         return json!({"ok":false,"error":"Shared path must be a normal directory"});
     }
     let path = shared.join(".env");
-    if fs::symlink_metadata(&path).is_ok_and(|metadata| {
-        metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024
-    }) {
+    if fs::symlink_metadata(&path)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink() || metadata.len() > 1024 * 1024)
+    {
         return json!({"ok":false,"error":"Environment file is invalid or exceeds 1 MiB"});
     }
     let Some(values) = request["variables"].as_object() else {
@@ -2328,10 +2782,23 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
     let enabled = systemctl_output(&["is-enabled", &unit]).is_ok_and(|value| value == "enabled");
     if logs {
         let limit = request["limit"].as_u64().unwrap_or(100).clamp(1, 500);
-        let cursor = request["after"].as_str().filter(|value| valid_journal_cursor(value));
+        let cursor = request["after"]
+            .as_str()
+            .filter(|value| valid_journal_cursor(value));
         let mut command = Command::new("/usr/bin/journalctl");
-        command.args(["-u", &unit, "-n", &limit.to_string(), "--no-pager", "--show-cursor", "-o", "cat"]);
-        if let Some(cursor) = cursor { command.arg(format!("--after-cursor={cursor}")); }
+        command.args([
+            "-u",
+            &unit,
+            "-n",
+            &limit.to_string(),
+            "--no-pager",
+            "--show-cursor",
+            "-o",
+            "cat",
+        ]);
+        if let Some(cursor) = cursor {
+            command.arg(format!("--after-cursor={cursor}"));
+        }
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2344,12 +2811,20 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
                 let reader = thread::spawn(move || read_capped_sync(stdout));
                 let _ = child.wait();
                 let output = reader.join().unwrap_or_default();
-                let text=String::from_utf8_lossy(&output).into_owned();
-                let next_cursor=text.lines().find_map(|line|line.strip_prefix("-- cursor: ").map(str::to_owned));
-                let logs=text.lines().filter(|line|!line.starts_with("-- cursor: ")).collect::<Vec<_>>().join("\n");
+                let text = String::from_utf8_lossy(&output).into_owned();
+                let next_cursor = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_owned));
+                let logs = text
+                    .lines()
+                    .filter(|line| !line.starts_with("-- cursor: "))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 json!({"ok":true,"data":{"unit":unit,"logs":logs,"next_cursor":next_cursor,"source":"systemd-journal","persistent":true,"retention_scope":"host-journald"}})
             }
-            Err(error_value) => json!({"ok":false,"error":format!("Could not read unit logs: {error_value}")}),
+            Err(error_value) => {
+                json!({"ok":false,"error":format!("Could not read unit logs: {error_value}")})
+            }
         };
     }
     json!({"ok":true,"data":{"unit":unit,"state":active,"enabled":enabled}})
@@ -2523,10 +2998,7 @@ fn run_sandboxed(
     let cache = cache
         .to_str()
         .ok_or("Non-UTF8 build cache path is unsupported")?;
-    if [stage, cache]
-        .iter()
-        .any(|path| !safe_systemd_path(path))
-    {
+    if [stage, cache].iter().any(|path| !safe_systemd_path(path)) {
         return Err("Deployment path cannot be represented safely in systemd properties.".into());
     }
     let Some(unit) = deployment_build_unit_name(app_id, job_id, step) else {
@@ -2576,7 +3048,11 @@ fn run_sandboxed(
         "Environment=HOME=/tmp",
         "Environment=CI=1",
         "Environment=NODE_ENV=production",
-        &format!("Environment=PATH={}:{}", node_dir.display(), "/usr/local/bin:/usr/bin:/bin"),
+        &format!(
+            "Environment=PATH={}:{}",
+            node_dir.display(),
+            "/usr/local/bin:/usr/bin:/bin"
+        ),
     ] {
         command.arg(format!("--property={property}"));
     }
@@ -2595,7 +3071,11 @@ fn run_sandboxed(
         .map_err(|error_value| format!("Could not start isolated Node task: {error_value}"))?;
     let stdout = child.stdout.take().ok_or("stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("stderr unavailable")?;
-    let sink = Arc::new(Mutex::new(BuildLogSink { file: log_file, bytes_written: 0, truncated: false }));
+    let sink = Arc::new(Mutex::new(BuildLogSink {
+        file: log_file,
+        bytes_written: 0,
+        truncated: false,
+    }));
     let out_sink = sink.clone();
     let err_sink = sink.clone();
     let out = thread::spawn(move || read_build_stream(stdout, "stdout", out_sink));
@@ -2633,32 +3113,52 @@ fn open_build_log_file(path: &str, job_id: &str, step: &str) -> Result<fs::File,
         return Err("Live build log identity is invalid".into());
     }
     let directory = deployment_root().join("job-logs");
-    let metadata = fs::symlink_metadata(&directory).map_err(|error| format!("Build log directory is unavailable: {error}"))?;
+    let metadata = fs::symlink_metadata(&directory)
+        .map_err(|error| format!("Build log directory is unavailable: {error}"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err("Build log directory must be a regular directory".into());
     }
-    let canonical_directory = directory.canonicalize().map_err(|error| error.to_string())?;
+    let canonical_directory = directory
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
     let requested = PathBuf::from(path);
     if !requested.is_absolute()
-        || requested.file_name().and_then(|name| name.to_str()) != Some(format!("{job_id}-{step}.log").as_str())
-        || requested.parent().and_then(|parent| parent.canonicalize().ok()).as_deref() != Some(canonical_directory.as_path())
+        || requested.file_name().and_then(|name| name.to_str())
+            != Some(format!("{job_id}-{step}.log").as_str())
+        || requested
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .as_deref()
+            != Some(canonical_directory.as_path())
     {
         return Err("Build log path is outside the job log directory".into());
     }
-    let metadata = fs::symlink_metadata(&requested).map_err(|error| format!("Build log file is unavailable: {error}"))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.permissions().mode() & 0o077 != 0 {
+    let metadata = fs::symlink_metadata(&requested)
+        .map_err(|error| format!("Build log file is unavailable: {error}"))?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
         return Err("Build log must be a private regular file".into());
     }
-    OpenOptions::new().append(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(requested)
+    OpenOptions::new()
+        .append(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(requested)
         .map_err(|error| format!("Build log could not be opened safely: {error}"))
 }
 
 fn write_build_log_line(sink: &Arc<Mutex<BuildLogSink>>, stream: &str, line: &[u8]) {
     let mut sink = sink.lock().unwrap();
-    if sink.truncated { return; }
+    if sink.truncated {
+        return;
+    }
     let prefix = format!("[{stream}] ");
     let remaining = LIVE_BUILD_LOG_LIMIT.saturating_sub(sink.bytes_written);
-    if remaining == 0 { sink.truncated = true; return; }
+    if remaining == 0 {
+        sink.truncated = true;
+        return;
+    }
     let total = prefix.len().saturating_add(line.len()).saturating_add(1);
     let keep = remaining.min(total);
     let prefix_bytes = prefix.as_bytes();
@@ -2666,13 +3166,21 @@ fn write_build_log_line(sink: &Arc<Mutex<BuildLogSink>>, stream: &str, line: &[u
     let _ = sink.file.write_all(&prefix_bytes[..prefix_keep]);
     let line_keep = keep.saturating_sub(prefix_keep).min(line.len());
     let _ = sink.file.write_all(&line[..line_keep]);
-    if keep > prefix_keep + line_keep { let _ = sink.file.write_all(b"\n"); }
+    if keep > prefix_keep + line_keep {
+        let _ = sink.file.write_all(b"\n");
+    }
     let _ = sink.file.flush();
     sink.bytes_written = sink.bytes_written.saturating_add(keep);
-    if keep < total { sink.truncated = true; }
+    if keep < total {
+        sink.truncated = true;
+    }
 }
 
-fn read_build_stream<R: Read>(mut reader: R, stream: &'static str, sink: Arc<Mutex<BuildLogSink>>) -> Vec<u8> {
+fn read_build_stream<R: Read>(
+    mut reader: R,
+    stream: &'static str,
+    sink: Arc<Mutex<BuildLogSink>>,
+) -> Vec<u8> {
     let mut saved = Vec::new();
     let mut pending = Vec::new();
     let mut buffer = [0u8; 8192];
@@ -2683,11 +3191,18 @@ fn read_build_stream<R: Read>(mut reader: R, stream: &'static str, sink: Arc<Mut
                 let remaining = OUTPUT_LIMIT.saturating_sub(saved.len());
                 saved.extend_from_slice(&buffer[..length.min(remaining)]);
                 pending.extend_from_slice(&buffer[..length]);
-                while let Some(end) = pending.iter().position(|byte| *byte == b'\n' || *byte == b'\r') {
+                while let Some(end) = pending
+                    .iter()
+                    .position(|byte| *byte == b'\n' || *byte == b'\r')
+                {
                     let line = pending.drain(..end).collect::<Vec<_>>();
                     let consumed = pending.remove(0);
-                    if !line.is_empty() { write_build_log_line(&sink, stream, &line); }
-                    if consumed == b'\r' && pending.first() == Some(&b'\n') { pending.remove(0); }
+                    if !line.is_empty() {
+                        write_build_log_line(&sink, stream, &line);
+                    }
+                    if consumed == b'\r' && pending.first() == Some(&b'\n') {
+                        pending.remove(0);
+                    }
                 }
                 while pending.len() > 16 * 1024 {
                     let chunk = pending.drain(..16 * 1024).collect::<Vec<_>>();
@@ -2696,7 +3211,9 @@ fn read_build_stream<R: Read>(mut reader: R, stream: &'static str, sink: Arc<Mut
             }
         }
     }
-    if !pending.is_empty() { write_build_log_line(&sink, stream, &pending); }
+    if !pending.is_empty() {
+        write_build_log_line(&sink, stream, &pending);
+    }
     saved
 }
 
@@ -2778,9 +3295,13 @@ fn render_node_unit(
         RuntimeEntrypoint::NextCli => format!("{} /workspace/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port {port}", node.display()),
         RuntimeEntrypoint::NuxtOutput => format!("{} /workspace/.output/server/index.mjs", node.display()),
     };
-    if ![current.as_str(), env_file.as_str(), package_manager.as_str()]
-        .iter()
-        .all(|value| safe_systemd_path(value))
+    if ![
+        current.as_str(),
+        env_file.as_str(),
+        package_manager.as_str(),
+    ]
+    .iter()
+    .all(|value| safe_systemd_path(value))
         || !path.split(':').all(safe_systemd_path)
     {
         return Err("Application paths cannot be safely represented in a systemd unit".into());
@@ -2894,18 +3415,24 @@ fn verify_node_service(port: u16, unit: &str, healthcheck_path: &str) -> Result<
     loop {
         let last_error = match probe_node_http(address, healthcheck_path) {
             Ok(status) if (200..300).contains(&status) => return Ok(()),
-            Ok(status) => format!("بررسی HTTP مسیر {healthcheck_path} کد {status} گرفت؛ پاسخ 2xx لازم است."),
+            Ok(status) => {
+                format!("بررسی HTTP مسیر {healthcheck_path} کد {status} گرفت؛ پاسخ 2xx لازم است.")
+            }
             Err(message) => message,
         };
         if std::time::Instant::now() >= deadline {
-            return Err(format!("برنامه روی loopback پورت {port} گوش می‌دهد، اما بررسی HTTP موفق نشد: {last_error}"));
+            return Err(format!(
+                "برنامه روی loopback پورت {port} گوش می‌دهد، اما بررسی HTTP موفق نشد: {last_error}"
+            ));
         }
         thread::sleep(Duration::from_millis(300));
     }
 }
 
 fn probe_node_http(address: SocketAddr, path: &str) -> Result<u16, String> {
-    if !valid_healthcheck_path(path) { return Err("مسیر Health Check ناامن است.".into()); }
+    if !valid_healthcheck_path(path) {
+        return Err("مسیر Health Check ناامن است.".into());
+    }
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|error| format!("اتصال به health check محلی برقرار نشد: {error}"))?;
     stream
@@ -2960,11 +3487,28 @@ mod tests {
 
     #[test]
     fn build_runner_streams_each_real_output_line_to_its_job_log() {
-        let path = std::env::temp_dir().join(format!("arg-build-live-log-{}.log", rand::random::<u64>()));
-        let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).unwrap();
-        let sink = Arc::new(Mutex::new(BuildLogSink { file, bytes_written: 0, truncated: false }));
-        let output = read_build_stream(std::io::Cursor::new(b"installing package\r\nrun build\n"), "stdout", sink.clone());
-        assert_eq!(String::from_utf8(output).unwrap(), "installing package\r\nrun build\n");
+        let path =
+            std::env::temp_dir().join(format!("arg-build-live-log-{}.log", rand::random::<u64>()));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        let sink = Arc::new(Mutex::new(BuildLogSink {
+            file,
+            bytes_written: 0,
+            truncated: false,
+        }));
+        let output = read_build_stream(
+            std::io::Cursor::new(b"installing package\r\nrun build\n"),
+            "stdout",
+            sink.clone(),
+        );
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "installing package\r\nrun build\n"
+        );
         drop(sink);
         let log = fs::read_to_string(&path).unwrap();
         assert_eq!(log, "[stdout] installing package\n[stdout] run build\n");
@@ -3000,7 +3544,8 @@ mod tests {
 
     #[test]
     fn auto_detect_accepts_custom_prebuilt_static_path_without_manifest() {
-        let root = std::env::temp_dir().join(format!("arg-static-custom-{}", rand::random::<u64>()));
+        let root =
+            std::env::temp_dir().join(format!("arg-static-custom-{}", rand::random::<u64>()));
         fs::create_dir_all(root.join("customer/site")).unwrap();
         fs::write(root.join("customer/site/index.html"), "ok").unwrap();
         assert!(is_static_deployment("auto", &root, "customer/site").unwrap());
@@ -3024,10 +3569,15 @@ mod tests {
     fn next_cli_entrypoint_must_resolve_inside_the_release() {
         let root = std::env::temp_dir().join(format!("arg-next-entry-{}", rand::random::<u64>()));
         fs::create_dir_all(root.join("node_modules/next/dist/bin")).unwrap();
-        fs::write(root.join("node_modules/next/dist/bin/next"), "#!/usr/bin/env node").unwrap();
+        fs::write(
+            root.join("node_modules/next/dist/bin/next"),
+            "#!/usr/bin/env node",
+        )
+        .unwrap();
         assert!(has_next_cli_entrypoint(&root));
         fs::remove_file(root.join("node_modules/next/dist/bin/next")).unwrap();
-        std::os::unix::fs::symlink("/etc/passwd", root.join("node_modules/next/dist/bin/next")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join("node_modules/next/dist/bin/next"))
+            .unwrap();
         assert!(!has_next_cli_entrypoint(&root));
         let _ = fs::remove_dir_all(root);
     }
@@ -3072,11 +3622,20 @@ mod tests {
     #[test]
     fn build_environment_allows_public_prefixes_and_rejects_secret_names() {
         let allowed = BTreeMap::from([
-            ("VITE_API_ORIGIN".to_owned(), "https://example.test".to_owned()),
+            (
+                "VITE_API_ORIGIN".to_owned(),
+                "https://example.test".to_owned(),
+            ),
             ("NEXT_PUBLIC_MAP_ID".to_owned(), "public-map".to_owned()),
             ("NUXT_PUBLIC_TITLE".to_owned(), "ARG".to_owned()),
-            ("REACT_APP_ORIGIN".to_owned(), "https://example.test".to_owned()),
-            ("PUBLIC_ASSET_HOST".to_owned(), "cdn.example.test".to_owned()),
+            (
+                "REACT_APP_ORIGIN".to_owned(),
+                "https://example.test".to_owned(),
+            ),
+            (
+                "PUBLIC_ASSET_HOST".to_owned(),
+                "cdn.example.test".to_owned(),
+            ),
         ]);
         assert!(validate_public_build_environment(&allowed).is_ok());
         assert!(valid_public_build_name("VITE_API_ORIGIN"));
@@ -3118,12 +3677,20 @@ mod tests {
 
     #[test]
     fn install_lifecycle_scripts_are_enabled_only_inside_the_sandboxed_runner() {
-        for manager in [PackageManager::Npm, PackageManager::Pnpm, PackageManager::YarnClassic] {
+        for manager in [
+            PackageManager::Npm,
+            PackageManager::Pnpm,
+            PackageManager::YarnClassic,
+        ] {
             assert!(!manager.install_args().contains(&"--ignore-scripts"));
         }
         assert!(PackageManager::Npm.install_args().contains(&"--no-audit"));
-        assert!(PackageManager::Pnpm.install_args().contains(&"--frozen-lockfile"));
-        assert!(PackageManager::YarnClassic.install_args().contains(&"--frozen-lockfile"));
+        assert!(PackageManager::Pnpm
+            .install_args()
+            .contains(&"--frozen-lockfile"));
+        assert!(PackageManager::YarnClassic
+            .install_args()
+            .contains(&"--frozen-lockfile"));
     }
 
     #[test]
@@ -3140,8 +3707,12 @@ mod tests {
             RuntimeEntrypoint::PackageScript("start".into()),
         )
         .unwrap();
-        assert!(unit.contains("BindReadOnlyPaths=/var/lib/arg/deployments/apps/app/shared/.env:/shared/.env"));
-        assert!(unit.contains("BindPaths=/var/lib/arg/deployments/apps/app/shared/data:/shared/data"));
+        assert!(unit.contains(
+            "BindReadOnlyPaths=/var/lib/arg/deployments/apps/app/shared/.env:/shared/.env"
+        ));
+        assert!(
+            unit.contains("BindPaths=/var/lib/arg/deployments/apps/app/shared/data:/shared/data")
+        );
         assert!(!unit.contains("BindPaths=/var/lib/arg/deployments/apps/app/shared:/shared"));
         assert!(unit.contains("ExecStart=/usr/bin/pnpm run start"));
         assert!(unit.contains("Environment=ARG_HEALTHCHECK_PATH=/health"));
@@ -3156,7 +3727,8 @@ mod tests {
             31234,
             "/ready",
             RuntimeEntrypoint::NuxtOutput,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(nuxt.contains("ExecStart=/usr/bin/node /workspace/.output/server/index.mjs"));
         assert!(nuxt.contains("Environment=NITRO_HOST=127.0.0.1"));
         assert!(nuxt.contains("Environment=NITRO_PORT=31234"));
@@ -3171,7 +3743,8 @@ mod tests {
             31234,
             "/api/health",
             RuntimeEntrypoint::NextCli,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(next.contains("ExecStart=/usr/bin/node /workspace/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 31234"));
     }
     #[test]
@@ -3185,11 +3758,17 @@ mod tests {
     fn node_healthcheck_parses_http_and_rejects_server_errors() {
         let response = b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
         assert_eq!(parse_node_http_status(response), Some(204));
-        assert_eq!(parse_node_http_status(b"HTTP/1.1 503 Service Unavailable\r\n\r\n"), Some(503));
+        assert_eq!(
+            parse_node_http_status(b"HTTP/1.1 503 Service Unavailable\r\n\r\n"),
+            Some(503)
+        );
         assert_eq!(parse_node_http_status(b"not HTTP\r\n\r\n"), None);
         assert!((200..300).contains(&parse_node_http_status(response).unwrap()));
-        assert!(!(200..300).contains(&parse_node_http_status(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap()));
-        assert!(!(200..300).contains(&parse_node_http_status(b"HTTP/1.1 503 Error\r\n\r\n").unwrap()));
+        assert!(!(200..300)
+            .contains(&parse_node_http_status(b"HTTP/1.1 404 Not Found\r\n\r\n").unwrap()));
+        assert!(
+            !(200..300).contains(&parse_node_http_status(b"HTTP/1.1 503 Error\r\n\r\n").unwrap())
+        );
     }
 
     #[test]
@@ -3207,8 +3786,14 @@ mod tests {
             manager: None,
             detected_framework: "node".to_owned(),
         };
-        assert_eq!(runtime_entrypoint(&manifest, FsPath::new("/unused"), false, "start:prod"), Some(RuntimeEntrypoint::PackageScript("start:prod".to_owned())));
-        assert_eq!(runtime_entrypoint(&manifest, FsPath::new("/unused"), false, "missing"), None);
+        assert_eq!(
+            runtime_entrypoint(&manifest, FsPath::new("/unused"), false, "start:prod"),
+            Some(RuntimeEntrypoint::PackageScript("start:prod".to_owned()))
+        );
+        assert_eq!(
+            runtime_entrypoint(&manifest, FsPath::new("/unused"), false, "missing"),
+            None
+        );
         assert!(valid_healthcheck_path("/api/health?ready=true"));
         assert!(!valid_healthcheck_path("/health\\r\\nHost:evil"));
         assert!(!valid_healthcheck_path("//example.test/path"));

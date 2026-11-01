@@ -7,7 +7,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Component, Path as FsPath, PathBuf},
 };
-use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 const MAX_ENTRIES: usize = 20_000;
 const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;

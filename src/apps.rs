@@ -1,8 +1,18 @@
 use super::*;
 
 const APP_FRAMEWORKS: &[&str] = &[
-    "auto", "laravel", "node", "next", "nuxt", "python", "wordpress", "static", "react", "vue",
-    "vite", "custom",
+    "auto",
+    "laravel",
+    "node",
+    "next",
+    "nuxt",
+    "python",
+    "wordpress",
+    "static",
+    "react",
+    "vue",
+    "vite",
+    "custom",
 ];
 const APP_SOURCES: &[&str] = &[
     "manual",
@@ -12,7 +22,8 @@ const APP_SOURCES: &[&str] = &[
     "existing-directory",
     "image",
 ];
-pub(super) static APP_REGISTRY_OPERATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) static APP_REGISTRY_OPERATION_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize)]
 pub(super) struct AppListQuery {
@@ -276,9 +287,14 @@ pub(super) fn random_uuid() -> String {
 }
 
 pub(super) fn valid_uuid(value: &str) -> bool {
-    value.len() == 36 && value.chars().enumerate().all(|(index, character)| {
-        if [8, 13, 18, 23].contains(&index) { character == '-' } else { character.is_ascii_hexdigit() }
-    })
+    value.len() == 36
+        && value.chars().enumerate().all(|(index, character)| {
+            if [8, 13, 18, 23].contains(&index) {
+                character == '-'
+            } else {
+                character.is_ascii_hexdigit()
+            }
+        })
 }
 
 fn read_apps(
@@ -438,7 +454,10 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             .query_map([], |row| row.get::<_, String>(1))?
             .collect::<Result<Vec<_>, _>>()?;
         if !columns.iter().any(|column| column == name) {
-            db.execute(&format!("ALTER TABLE applications ADD COLUMN {name} {declaration}"), [])?;
+            db.execute(
+                &format!("ALTER TABLE applications ADD COLUMN {name} {declaration}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -475,9 +494,13 @@ pub(super) async fn create(
         owner = federation::local_server_uuid(&db).map_err(db_error)?;
         if let Some(environment_id) = input.environment_id.as_deref() {
             if !valid_uuid(environment_id)
-                || !app_workspaces::environment_is_owned_by(&db, environment_id, &owner).map_err(db_error)?
+                || !app_workspaces::environment_is_owned_by(&db, environment_id, &owner)
+                    .map_err(db_error)?
             {
-                return Err(error(StatusCode::NOT_FOUND, "محیط انتخاب‌شده متعلق به این VPS نیست."));
+                return Err(error(
+                    StatusCode::NOT_FOUND,
+                    "محیط انتخاب‌شده متعلق به این VPS نیست.",
+                ));
             }
         }
         validate_port_free(&db, input.listen_port, None)?;
@@ -538,7 +561,8 @@ pub(super) async fn create(
     let db = state.lock().unwrap();
     db.execute("INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at,static_output_path,static_spa_fallback) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown','active','manual','manual',?13,?14,?14,?15,?16)", params![id,owner,name,input.description.trim(),input.framework,input.runtime_version,input.build_runtime_version,input.source_type,domain,input.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),input.desired_state,actor,at,input.static_output_path,input.static_spa_fallback]).map_err(|error_value| if error_value.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.") } else { db_error(error_value) })?;
     if let Some(environment_id) = input.environment_id.as_deref() {
-        app_workspaces::set_application_environment(&db, &id, environment_id, &actor).map_err(db_error)?;
+        app_workspaces::set_application_environment(&db, &id, environment_id, &actor)
+            .map_err(db_error)?;
     } else {
         app_workspaces::assign_default(&db, &id, &owner, &actor).map_err(db_error)?;
     }
@@ -640,9 +664,13 @@ pub(super) async fn update(
         owner = federation::local_server_uuid(&db).map_err(db_error)?;
         if let Some(environment_id) = input.app.environment_id.as_deref() {
             if !valid_uuid(environment_id)
-                || !app_workspaces::environment_is_owned_by(&db, environment_id, &owner).map_err(db_error)?
+                || !app_workspaces::environment_is_owned_by(&db, environment_id, &owner)
+                    .map_err(db_error)?
             {
-                return Err(error(StatusCode::NOT_FOUND, "محیط انتخاب‌شده متعلق به این VPS نیست."));
+                return Err(error(
+                    StatusCode::NOT_FOUND,
+                    "محیط انتخاب‌شده متعلق به این VPS نیست.",
+                ));
             }
         }
         validate_port_free(&db, input.app.listen_port, Some(&id))?;
@@ -725,7 +753,8 @@ pub(super) async fn update(
         ));
     }
     if let Some(environment_id) = input.app.environment_id.as_deref() {
-        app_workspaces::set_application_environment(&db, &id, environment_id, &actor).map_err(db_error)?;
+        app_workspaces::set_application_environment(&db, &id, environment_id, &actor)
+            .map_err(db_error)?;
     }
     audit(
         &db,
@@ -733,11 +762,12 @@ pub(super) async fn update(
         "application.update",
         &format!("id={id}; version={}", input.expected_version + 1),
     );
-    let mut apps = read_apps(&db, &owner, false)
-        .map_err(db_error)?
-        ;
+    let mut apps = read_apps(&db, &owner, false).map_err(db_error)?;
     app_workspaces::add_context(&db, &mut apps).map_err(db_error)?;
-    let app = apps.into_iter().find(|app| app["id"] == id).unwrap_or(Value::Null);
+    let app = apps
+        .into_iter()
+        .find(|app| app["id"] == id)
+        .unwrap_or(Value::Null);
     Ok(Json(json!({"app":app})))
 }
 
@@ -805,9 +835,9 @@ pub(super) async fn restore(
 #[cfg(test)]
 mod tests {
     use super::{
-        domain_patterns_overlap, is_auto_framework, is_static_framework, is_node_runtime_framework,
-        listening_tcp_ports, migrate, normalized_domain, template_framework, valid_domain, valid_runtime_version,
-        valid_static_output_path, AppInput, AppUpdate,
+        domain_patterns_overlap, is_auto_framework, is_node_runtime_framework, is_static_framework,
+        listening_tcp_ports, migrate, normalized_domain, template_framework, valid_domain,
+        valid_runtime_version, valid_static_output_path, AppInput, AppUpdate,
     };
 
     #[test]
@@ -899,11 +929,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(values, ("system".into(), "system".into()));
-        let static_defaults: (String, bool) = db.query_row(
-            "SELECT static_output_path,static_spa_fallback FROM applications WHERE id='old'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).unwrap();
+        let static_defaults: (String, bool) = db
+            .query_row(
+                "SELECT static_output_path,static_spa_fallback FROM applications WHERE id='old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(static_defaults, ("auto".into(), true));
         let build_environment: String = db
             .query_row(

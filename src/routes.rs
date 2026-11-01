@@ -18,7 +18,10 @@ pub(super) fn router(state: AppState) -> Router {
             post(revoke_other_account_sessions),
         )
         .route("/api/account/capabilities", get(account_capabilities))
-        .route("/api/account/dashboard-preferences", get(dashboard_preferences::read).put(dashboard_preferences::save))
+        .route(
+            "/api/account/dashboard-preferences",
+            get(dashboard_preferences::read).put(dashboard_preferences::save),
+        )
         .route("/api/terminal", get(terminal_socket))
         .route(
             "/api/terminal/root/authorize",
@@ -27,24 +30,72 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/dashboard", get(dashboard))
         .route("/api/storage/volumes", get(storage_volumes))
         .route("/api/maintenance/system", get(maintenance::system_info))
-        .route("/api/maintenance/doctor", get(doctor::read).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/ssh-keys", get(ssh_keys::list).post(ssh_keys::create).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/ssh-keys/trusted-hosts/github", get(ssh_keys::host_keys).post(ssh_keys::refresh_host_keys).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/ssh-keys/{id}", put(ssh_keys::rename).delete(ssh_keys::delete).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/admin/api-keys", get(api_keys::list).post(api_keys::create).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/admin/api-keys/{id}", axum::routing::delete(api_keys::revoke).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/v1/openapi.json", get(api_keys::openapi).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/v1/apps", get(api_keys::apps_read).layer(middleware::from_fn(api_keys::no_store)))
-        .route("/api/v1/deployments", get(api_keys::deployments_read).layer(middleware::from_fn(api_keys::no_store)))
+        .route(
+            "/api/maintenance/doctor",
+            get(doctor::read).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/ssh-keys",
+            get(ssh_keys::list)
+                .post(ssh_keys::create)
+                .layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/ssh-keys/trusted-hosts/github",
+            get(ssh_keys::host_keys)
+                .post(ssh_keys::refresh_host_keys)
+                .layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/ssh-keys/{id}",
+            put(ssh_keys::rename)
+                .delete(ssh_keys::delete)
+                .layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/admin/api-keys",
+            get(api_keys::list)
+                .post(api_keys::create)
+                .layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/admin/api-keys/{id}",
+            axum::routing::delete(api_keys::revoke).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/v1/openapi.json",
+            get(api_keys::openapi).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/v1/apps",
+            get(api_keys::apps_read).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/v1/deployments",
+            get(api_keys::deployments_read).layer(middleware::from_fn(api_keys::no_store)),
+        )
         .route("/api/security/posture", get(security_posture::inventory))
-        .route("/api/extensions/trust-keys", get(extensions::list_trust_keys).post(extensions::add_trust_key))
-        .route("/api/extensions/trust-keys/{id}", axum::routing::delete(extensions::revoke_trust_key))
-        .route("/api/extensions/validate", post(extensions::validate_manifest).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)))
+        .route(
+            "/api/extensions/trust-keys",
+            get(extensions::list_trust_keys).post(extensions::add_trust_key),
+        )
+        .route(
+            "/api/extensions/trust-keys/{id}",
+            axum::routing::delete(extensions::revoke_trust_key),
+        )
+        .route(
+            "/api/extensions/validate",
+            post(extensions::validate_manifest)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
         .route(
             "/api/maintenance/backups",
             get(maintenance::list_backups).post(maintenance::create_backup),
         )
-        .route("/api/maintenance/backup-policy", get(maintenance::get_backup_policy).put(maintenance::save_backup_policy))
+        .route(
+            "/api/maintenance/backup-policy",
+            get(maintenance::get_backup_policy).put(maintenance::save_backup_policy),
+        )
         .route(
             "/api/maintenance/backups/upload",
             post(maintenance::upload_backup),
@@ -224,44 +275,133 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/s3/mounts/{id}/stop", post(s3::stop_bucket_mount))
         .route("/api/history", get(history))
         .route("/api/apps", get(apps::list).post(apps::create))
-        .route("/api/app-platform/workspaces", get(app_workspaces::list_workspaces).post(app_workspaces::create_workspace))
+        .route(
+            "/api/app-platform/workspaces",
+            get(app_workspaces::list_workspaces).post(app_workspaces::create_workspace),
+        )
         .route("/api/app-templates", get(app_templates::list))
-        .route("/api/app-templates/{id}/draft", post(app_templates::create_draft))
-        .route("/api/app-platform/workspaces/{id}/projects", get(app_workspaces::list_projects).post(app_workspaces::create_project))
-        .route("/api/app-platform/projects/{id}/environments", get(app_workspaces::list_environments).post(app_workspaces::create_environment))
-        .route("/api/apps/{id}/build-plans", get(buildpacks::list).post(buildpacks::analyze))
+        .route(
+            "/api/app-templates/{id}/draft",
+            post(app_templates::create_draft),
+        )
+        .route(
+            "/api/app-platform/workspaces/{id}/projects",
+            get(app_workspaces::list_projects).post(app_workspaces::create_project),
+        )
+        .route(
+            "/api/app-platform/projects/{id}/environments",
+            get(app_workspaces::list_environments).post(app_workspaces::create_environment),
+        )
+        .route(
+            "/api/apps/{id}/build-plans",
+            get(buildpacks::list).post(buildpacks::analyze),
+        )
         .route("/api/apps/{id}/source/tree", get(app_code::tree))
         .route("/api/apps/{id}/source/file", get(app_code::file))
-        .route("/api/apps/{id}/snapshots", get(app_snapshots::list).post(app_snapshots::create))
-        .route("/api/apps/{id}/workflows", get(workflow_drafts::list).post(workflow_drafts::create))
-        .route("/api/apps/{id}/workflows/{workflow_id}", axum::routing::delete(workflow_drafts::delete))
-        .route("/api/apps/{id}/containers", get(app_compose::list).post(app_compose::link))
-        .route("/api/apps/{id}/containers/{container_id}", axum::routing::delete(app_compose::unlink))
-        .route("/api/apps/{id}/nginx-site", get(nginx_domains::get).put(nginx_domains::link).delete(nginx_domains::unlink))
-        .route("/api/apps/{id}/backups", get(app_backups::list).post(app_backups::create))
-        .route("/api/apps/{id}/backups/{backup_id}", axum::routing::delete(app_backups::delete))
-        .route("/api/apps/{id}/backups/{backup_id}/download", get(app_backups::download))
+        .route(
+            "/api/apps/{id}/snapshots",
+            get(app_snapshots::list).post(app_snapshots::create),
+        )
+        .route(
+            "/api/apps/{id}/workflows",
+            get(workflow_drafts::list).post(workflow_drafts::create),
+        )
+        .route(
+            "/api/apps/{id}/workflows/{workflow_id}",
+            axum::routing::delete(workflow_drafts::delete),
+        )
+        .route(
+            "/api/apps/{id}/containers",
+            get(app_compose::list).post(app_compose::link),
+        )
+        .route(
+            "/api/apps/{id}/containers/{container_id}",
+            axum::routing::delete(app_compose::unlink),
+        )
+        .route(
+            "/api/apps/{id}/nginx-site",
+            get(nginx_domains::get)
+                .put(nginx_domains::link)
+                .delete(nginx_domains::unlink),
+        )
+        .route(
+            "/api/apps/{id}/backups",
+            get(app_backups::list).post(app_backups::create),
+        )
+        .route(
+            "/api/apps/{id}/backups/{backup_id}",
+            axum::routing::delete(app_backups::delete),
+        )
+        .route(
+            "/api/apps/{id}/backups/{backup_id}/download",
+            get(app_backups::download),
+        )
         .route("/api/postgres/status", get(postgres::status))
         .route("/api/nodes/{id}/tags", put(fleet::set_tags))
         .route("/api/fleet/groups", get(fleet::list_groups))
         .route("/api/fleet/rollouts", get(fleet::list_rollouts))
         .route("/api/fleet/rollouts/preview", post(fleet::preview_rollout))
-        .route("/api/private-network/policies", get(private_networks::list).post(private_networks::create))
-        .route("/api/private-network/policies/{id}", axum::routing::delete(private_networks::delete))
-        .route("/api/dns/connections", get(dns::list_connections).post(dns::connect))
-        .route("/api/dns/connections/{id}", axum::routing::delete(dns::disconnect))
-        .route("/api/dns/connections/{id}/records", get(dns::list_records).post(dns::create_record))
-        .route("/api/dns/connections/{id}/records/{record_id}", put(dns::update_record).delete(dns::delete_record))
-        .route("/api/apps/{id}/environment", put(app_workspaces::assign_environment))
-        .route("/api/app-networks", get(app_networks::list).post(app_networks::create))
-        .route("/api/app-networks/{id}/members", get(app_networks::list_members).post(app_networks::attach))
-        .route("/api/app-networks/{id}/members/{app_id}", axum::routing::delete(app_networks::detach))
-        .route("/api/app-networks/{id}", axum::routing::delete(app_networks::remove))
-        .route("/api/apps/{id}/volumes", get(app_storage::list).post(app_storage::create))
-        .route("/api/apps/{id}/s3-bindings", get(app_s3::list).post(app_s3::create))
-        .route("/api/app-s3-bindings/{id}", axum::routing::delete(app_s3::remove))
+        .route(
+            "/api/private-network/policies",
+            get(private_networks::list).post(private_networks::create),
+        )
+        .route(
+            "/api/private-network/policies/{id}",
+            axum::routing::delete(private_networks::delete),
+        )
+        .route(
+            "/api/dns/connections",
+            get(dns::list_connections).post(dns::connect),
+        )
+        .route(
+            "/api/dns/connections/{id}",
+            axum::routing::delete(dns::disconnect),
+        )
+        .route(
+            "/api/dns/connections/{id}/records",
+            get(dns::list_records).post(dns::create_record),
+        )
+        .route(
+            "/api/dns/connections/{id}/records/{record_id}",
+            put(dns::update_record).delete(dns::delete_record),
+        )
+        .route(
+            "/api/apps/{id}/environment",
+            put(app_workspaces::assign_environment),
+        )
+        .route(
+            "/api/app-networks",
+            get(app_networks::list).post(app_networks::create),
+        )
+        .route(
+            "/api/app-networks/{id}/members",
+            get(app_networks::list_members).post(app_networks::attach),
+        )
+        .route(
+            "/api/app-networks/{id}/members/{app_id}",
+            axum::routing::delete(app_networks::detach),
+        )
+        .route(
+            "/api/app-networks/{id}",
+            axum::routing::delete(app_networks::remove),
+        )
+        .route(
+            "/api/apps/{id}/volumes",
+            get(app_storage::list).post(app_storage::create),
+        )
+        .route(
+            "/api/apps/{id}/s3-bindings",
+            get(app_s3::list).post(app_s3::create),
+        )
+        .route(
+            "/api/app-s3-bindings/{id}",
+            axum::routing::delete(app_s3::remove),
+        )
         .route("/api/app-volumes/{id}/scan", post(app_storage::scan))
-        .route("/api/app-volumes/{id}", axum::routing::delete(app_storage::detach))
+        .route(
+            "/api/app-volumes/{id}",
+            axum::routing::delete(app_storage::detach),
+        )
         .route("/api/app-volumes/{id}/purge", post(app_storage::purge))
         .route(
             "/api/apps/{id}",
@@ -291,7 +431,10 @@ pub(super) fn router(state: AppState) -> Router {
             put(laravel::save_environment).post(laravel::generate_key),
         )
         .route("/api/apps/{id}/node", get(node::inspect))
-        .route("/api/apps/{id}/node/runtime-settings", get(node::get_runtime_settings).put(node::save_runtime_settings))
+        .route(
+            "/api/apps/{id}/node/runtime-settings",
+            get(node::get_runtime_settings).put(node::save_runtime_settings),
+        )
         .route(
             "/api/apps/{id}/node/service",
             get(node::service).put(node::set_service),
@@ -306,8 +449,14 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/apps/{id}/node/service/logs", get(node::logs))
         .route("/api/apps/{id}/monitoring", get(app_monitoring::read))
-        .route("/api/apps/{id}/monitoring/rules", put(app_monitoring::save_rules))
-        .route("/api/apps/{id}/monitoring/events/{event_id}/ack", post(app_monitoring::acknowledge_event))
+        .route(
+            "/api/apps/{id}/monitoring/rules",
+            put(app_monitoring::save_rules),
+        )
+        .route(
+            "/api/apps/{id}/monitoring/events/{event_id}/ack",
+            post(app_monitoring::acknowledge_event),
+        )
         .route("/api/apps/{id}/deploy", post(deploy::create))
         .route(
             "/api/apps/{id}/deploy/archive",
