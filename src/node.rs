@@ -3328,7 +3328,15 @@ fn write_managed_unit(path: &FsPath, content: &str) -> Result<(), String> {
         }
     }
     let parent = path.parent().ok_or("systemd unit path is invalid")?;
-    let temp = parent.join(format!(".arg-node-{}.tmp", std::process::id()));
+    // The helper may handle multiple app operations concurrently. A PID-only
+    // temporary name can collide across different units, and a hard-killed
+    // helper can leave that name behind until PID reuse. Keep replacement
+    // atomic while giving each write its own create_new path.
+    let temp = parent.join(format!(
+        ".arg-node-{}-{}.tmp",
+        std::process::id(),
+        hex::encode(rand::random::<[u8; 8]>())
+    ));
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -3746,6 +3754,28 @@ mod tests {
         )
         .unwrap();
         assert!(next.contains("ExecStart=/usr/bin/node /workspace/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 31234"));
+    }
+
+    #[test]
+    fn node_unit_write_ignores_stale_pid_only_temp_files() {
+        let root =
+            std::env::temp_dir().join(format!("arg-node-unit-test-{}", rand::random::<u64>()));
+        fs::create_dir(&root).unwrap();
+        let stale = root.join(format!(".arg-node-{}.tmp", std::process::id()));
+        fs::write(&stale, "interrupted previous unit write").unwrap();
+        let unit = root.join("arg-node-test.service");
+
+        write_managed_unit(&unit, "# Managed by ARG Node runner; test\n[Service]\n").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&unit).unwrap(),
+            "# Managed by ARG Node runner; test\n[Service]\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&stale).unwrap(),
+            "interrupted previous unit write"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn loopback_verifier_rejects_public_addresses() {

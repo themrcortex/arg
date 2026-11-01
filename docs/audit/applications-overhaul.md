@@ -101,6 +101,28 @@ No P0/P1 security exploit was established by this phase. The points above must n
 - Impact: the existing pre-deploy editor is not the full ten-stage command pipeline requested in the spec.
 - Plan: evolve the existing job-step schema additively, validate each command at enqueue time, use an allowlisted runtime adapter, and preserve the active release on failure.
 
+### APP-008 — Laravel service rollback could silently leave systemd in the wrong state
+
+- Severity: P2 / Medium
+- Status: CONFIRMED; fixed
+- Confidence: high
+- Location: `src/laravel.rs`, `laravel_service_helper` and `restore_service_unit`
+- Evidence: after `systemctl enable --now` failed or a unit failed to stay active, rollback ignored file restoration and systemd errors. An existing unit that was enabled but inactive was restored with `disable --now`, changing its autostart policy.
+- Implemented: capture the previous enabled state; atomically restore the old unit; reload systemd; restore active/inactive and enabled/disabled state; return recovery failures to the API error. If the first `daemon-reload` fails, the previous configuration is restored as well.
+- Tests: `laravel_service_rollback_preserves_enabled_inactive_unit_state` and `laravel_service_rollback_reports_systemd_recovery_failures` cover the prior state and visible recovery failure.
+- Remaining risk: a real unit start/stop and recovery against systemd remains blocked without a disposable Linux host.
+
+### APP-009 — Node systemd unit writes could be blocked by stale temporary files
+
+- Severity: P2 / Medium
+- Status: CONFIRMED; fixed
+- Confidence: high
+- Location: `src/node.rs`, `write_managed_unit`
+- Evidence: every helper process used the same PID-only temporary path in `/etc/systemd/system`. A helper killed during a write could leave the path behind, and PID reuse would make a later service install fail with `AlreadyExists`. Concurrent unit writes in the same helper also shared the path.
+- Implemented: each atomic replacement now uses a `create_new` temporary name with a per-write random suffix; cleanup behavior on write or rename failure remains intact.
+- Test: `node_unit_write_ignores_stale_pid_only_temp_files` leaves the previous naming scheme's temp file in place and verifies that a fresh unit write succeeds without modifying it.
+- Remaining risk: systemd acceptance and live process health still require an isolated host.
+
 ## Reusable components
 
 - Existing `applications`/`application_services` registry and additive migrations.
@@ -183,3 +205,28 @@ The requested complete multi-stage configurable pipeline remains blocked by APP-
 | Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, and `cargo test --locked`; 277 tests passed. |
 | Frontend TypeScript/offline tests/build | Pass | TypeScript check, 10 offline tests and production build all passed. |
 | Real provider clone, sandboxed build, timeout/cancel on systemd | Blocked | No disposable VPS and no isolated fake Git provider were available. No external repository was contacted. |
+
+## Phase 7 and 8 review
+
+### Phase 7 — Runtime and managed process behavior
+
+Node SSR services use one ARG-managed systemd unit per app, `DynamicUser`, read-only release and environment mounts, a dedicated writable data mount, loopback bind addresses, restart-on-failure, bounded tasks/CPU/RAM, group-wide termination and a real HTTP health check before the helper reports success. Laravel queue/scheduler/optional Horizon/Reverb/Octane units run as the restricted `arg` account with fixed Artisan commands, loopback ports for network services and a 120-second graceful stop. The actual systemd lifecycle cannot be verified in this workspace.
+
+The phase found and fixed APP-008 and APP-009. Laravel unit recovery now retains the prior enabled state, reports restoration failures, and also recovers if the first `daemon-reload` fails. Node unit replacement temp names are unique per write, so abandoned temp files no longer block later installs.
+
+### Phase 8 — Domain, Nginx and SSL
+
+Application deployment checks the actual domain resolution, prepares the application service, then creates or validates the ARG-managed Nginx virtual host. If no matching certificate exists, the explicit “complete website setup” flow invokes the existing Nginx SSL operation. That operation checks site/domain ownership and conflicts, backs up the Nginx file, invokes bounded Certbot with the Nginx plugin, validates `nginx -t`, reloads Nginx and restores the site config on failure. Certbot owns renewal configuration. Nginx site writes use atomic replacement and validate before reload. Existing site configs are preserved during deployment when another site already owns a hostname.
+
+No VPS, ACME server, DNS zone or live certificate was contacted. Certbot issuance, renewal timer behavior, external HTTPS reachability and rollback under a real Nginx failure remain blocked. The current code verifies Certbot completion plus Nginx syntax/reload; it does not perform a separate post-apply public TLS probe. DNS-01 and wildcard certificates are not supported by this HTTP-01 flow.
+
+### Quality Gate 4 (phases 7 and 8)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Targeted runtime regressions | Pass | `node_unit_write_ignores_stale_pid_only_temp_files`; both Laravel service rollback tests. |
+| Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, `cargo test --locked`; 280 tests passed. |
+| Frontend TypeScript | Pass | `npm run check`. |
+| Frontend offline tests | Pass | 10 tests passed. |
+| Frontend production build | Pass | Vite production build completed; the existing >500 kB main-chunk advisory remains. |
+| Live systemd, Nginx, DNS, ACME, renewal and HTTPS | Blocked | No isolated VPS is attached; no production host or live provider was changed or contacted. |

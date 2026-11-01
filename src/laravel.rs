@@ -1268,20 +1268,42 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
     }
     let command = laravel_service_command(service, port)?;
     let unit = format!("# ARG managed Laravel service app={app_id} kind={service}\n[Unit]\nDescription=ARG Laravel {service} for app {short}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=arg\nGroup=arg\nWorkingDirectory={}\nExecStart={} artisan {command}\nRestart=on-failure\nRestartSec=5s\nKillSignal=SIGTERM\nTimeoutStopSec=120s\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectHome=read-only\nProtectSystem=strict\nReadWritePaths={} {}\nUMask=0027\n\n[Install]\nWantedBy=multi-user.target\n",current.display(),php.display(),root.join("shared/storage").display(),current.join("bootstrap/cache").display());
+    let was_enabled = systemd_unit_enabled(&unit_name);
     atomic_write(&unit_path, unit.as_bytes(), 0o644)?;
-    helper_output("systemctl", &["daemon-reload"])?;
-    if let Err(error) = helper_output("systemctl", &["enable", "--now", &unit_name]) {
-        restore_service_unit(&unit_path, previous_unit.as_deref(), &unit_name, was_active);
-        let _ = helper_output("systemctl", &["daemon-reload"]);
-        return Err(format!("سرویس Laravel راه‌اندازی نشد: {error}"));
+    if let Err(error) = helper_output("systemctl", &["daemon-reload"])
+        .and_then(|_| helper_output("systemctl", &["enable", "--now", &unit_name]))
+    {
+        let recovery = restore_service_unit(
+            &unit_path,
+            previous_unit.as_deref(),
+            &unit_name,
+            was_enabled,
+            was_active,
+        );
+        return Err(format!(
+            "سرویس Laravel راه‌اندازی نشد: {error}{}",
+            recovery
+                .err()
+                .map(|problem| format!("؛ بازیابی وضعیت قبلی هم شکست خورد: {problem}"))
+                .unwrap_or_default()
+        ));
     }
     let state =
         helper_output("systemctl", &["is-active", &unit_name]).unwrap_or_else(|_| "failed".into());
     if state != "active" {
-        restore_service_unit(&unit_path, previous_unit.as_deref(), &unit_name, was_active);
-        let _ = helper_output("systemctl", &["daemon-reload"]);
+        let recovery = restore_service_unit(
+            &unit_path,
+            previous_unit.as_deref(),
+            &unit_name,
+            was_enabled,
+            was_active,
+        );
         return Err(format!(
-            "سرویس Laravel فعال نماند (وضعیت {state})؛ تنظیم قبلی بازیابی شد."
+            "سرویس Laravel فعال نماند (وضعیت {state}){}",
+            recovery
+                .err()
+                .map(|problem| format!("؛ بازیابی وضعیت قبلی شکست خورد: {problem}"))
+                .unwrap_or_else(|| "؛ وضعیت قبلی بازیابی شد.".into())
         ));
     }
     Ok(
@@ -1289,21 +1311,58 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
     )
 }
 
-fn restore_service_unit(path: &FsPath, previous: Option<&[u8]>, unit: &str, was_active: bool) {
+fn restore_service_unit(
+    path: &FsPath,
+    previous: Option<&[u8]>,
+    unit: &str,
+    was_enabled: bool,
+    was_active: bool,
+) -> Result<(), String> {
+    restore_service_unit_with(path, previous, unit, was_enabled, was_active, |args| {
+        helper_output("systemctl", args)
+    })
+}
+
+fn restore_service_unit_with<F>(
+    path: &FsPath,
+    previous: Option<&[u8]>,
+    unit: &str,
+    was_enabled: bool,
+    was_active: bool,
+    mut systemctl: F,
+) -> Result<(), String>
+where
+    F: FnMut(&[&str]) -> Result<String, String>,
+{
     match previous {
         Some(content) => {
-            let _ = atomic_write(path, content, 0o644);
+            atomic_write(path, content, 0o644)
+                .map_err(|error| format!("previous unit file could not be restored: {error}"))?;
+            systemctl(&["daemon-reload"])?;
             if was_active {
-                let _ = helper_output("systemctl", &["restart", unit]);
+                systemctl(&["restart", unit])?;
             } else {
-                let _ = helper_output("systemctl", &["disable", "--now", unit]);
+                systemctl(&["stop", unit])?;
             }
+            systemctl(&[if was_enabled { "enable" } else { "disable" }, unit])?;
         }
         None => {
-            let _ = helper_output("systemctl", &["disable", "--now", unit]);
-            let _ = fs::remove_file(path);
+            systemctl(&["disable", "--now", unit])?;
+            fs::remove_file(path)
+                .map_err(|error| format!("new unit file could not be removed: {error}"))?;
+            systemctl(&["daemon-reload"])?;
         }
     }
+    Ok(())
+}
+
+fn systemd_unit_enabled(unit: &str) -> bool {
+    helper_output("systemctl", &["is-enabled", unit]).is_ok_and(|state| {
+        matches!(
+            state.trim(),
+            "enabled" | "enabled-runtime" | "linked" | "linked-runtime"
+        )
+    })
 }
 
 fn laravel_service_available(service: &str, release: &FsPath) -> bool {
@@ -2611,6 +2670,71 @@ mod tests {
             &json!({"app_id":"../../etc/passwd","enabled":true}),
         );
         assert_eq!(response["ok"], false);
+    }
+
+    #[test]
+    fn laravel_service_rollback_preserves_enabled_inactive_unit_state() {
+        let root = std::env::temp_dir().join(format!("arg-laravel-rollback-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("arg-app-test-queue.service");
+        let previous = b"# previous unit\n[Service]\n";
+        fs::write(&path, b"# failed replacement\n").unwrap();
+        let mut calls = Vec::new();
+
+        restore_service_unit_with(
+            &path,
+            Some(previous),
+            "arg-app-test-queue.service",
+            true,
+            false,
+            |args| {
+                calls.push(args.join(" "));
+                Ok(String::new())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        assert_eq!(
+            calls,
+            [
+                "daemon-reload",
+                "stop arg-app-test-queue.service",
+                "enable arg-app-test-queue.service"
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn laravel_service_rollback_reports_systemd_recovery_failures() {
+        let root = std::env::temp_dir().join(format!("arg-laravel-recovery-error-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("arg-app-test-queue.service");
+        let previous = b"# previous unit\n[Service]\n";
+        fs::write(&path, b"# failed replacement\n").unwrap();
+        let mut call_count = 0;
+
+        let error = restore_service_unit_with(
+            &path,
+            Some(previous),
+            "arg-app-test-queue.service",
+            false,
+            false,
+            |_| {
+                call_count += 1;
+                if call_count == 2 {
+                    Err("systemd is unavailable".into())
+                } else {
+                    Ok(String::new())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("systemd is unavailable"));
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
