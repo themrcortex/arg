@@ -155,6 +155,37 @@ No P0/P1 security exploit was established by this phase. The points above must n
 - Impact: do not claim that arbitrary Node/Python/custom worker processes or per-worker advanced settings are managed.
 - Plan: add an additive, app-scoped managed-process schema and helper capabilities after ownership, resource policy, log retention and deletion/recovery behavior are integration-tested. Existing Laravel units remain supported.
 
+### APP-013 — Node runtime journal output was returned without redacting app secrets
+
+- Severity: P2 / Medium
+- Status: CONFIRMED; fixed
+- Confidence: high
+- Location: `src/node.rs`, `helper_service_status`
+- Evidence: the helper returned raw `journalctl` output. Unlike Laravel operation output, it did not redact known values from the app's `.env`, secret assignments or URL user-info.
+- Implemented: journal output is now passed through bounded sanitization before the helper response. It masks configured secret values, common secret assignment markers and HTTP(S) URL credentials while preserving the journal cursor and retention metadata.
+- Test: `node_runtime_journal_logs_redact_env_values_assignments_and_url_credentials` verifies those redaction cases.
+- Remaining risk: redaction cannot identify arbitrary secrets not stored in `.env` or printed in an unrecognized encoding; apps should not write credentials to logs.
+
+### APP-014 — No application-scoped terminal is implemented
+
+- Severity: P1 / High product gap
+- Status: CONFIRMED
+- Confidence: high
+- Location: `src/routes.rs`, `/api/terminal`; application runtime APIs
+- Evidence: terminal sessions are server/workspace scoped. No application terminal route binds a PTY to an app identity, environment and working directory. The existing app file browser is not an execution terminal.
+- Impact: do not describe the global terminal as isolated to a selected app. An app terminal must not be implemented by reusing root shell access.
+- Plan: add a short-lived app scope token and a restricted per-app identity/working directory only after OS user mapping, environment-secret exposure rules, PTY cleanup and websocket permission checks are tested on a disposable host.
+
+### APP-015 — Application monitoring covers only web service CPU/RAM and storage
+
+- Severity: P1 / High product gap
+- Status: CONFIRMED
+- Confidence: high
+- Location: `src/app_monitoring.rs`, `collect_batch` and read API
+- Evidence: the sampler selects only `node-web` and `laravel-web` units, records systemd CPU/RAM and app-volume usage, and evaluates inactive/CPU/memory thresholds. API output explicitly returns `network_bytes` and `http_latency_ms` as null. It does not measure per-worker metrics, request rates, error rates, restart counts, queue metrics or certificate expiry, and its events are not sent through the notification system.
+- Impact: the charts must remain limited to measured values; do not infer request health or report zeros for unavailable metrics.
+- Plan: add metrics only where their source and attribution are real (dedicated unit/cgroup or app instrumentation), then add bounded history, alert deduplication and notification delivery tests.
+
 ## Reusable components
 
 - Existing `applications`/`application_services` registry and additive migrations.
@@ -314,3 +345,26 @@ Laravel Queue, Scheduler, Horizon, Reverb and Octane can be represented by indep
 | Frontend offline tests | Pass | 10 tests passed. |
 | Frontend production build | Pass | Vite build completed; existing >500 kB main-chunk advisory remains. |
 | Real Laravel, systemd, PHP-FPM, queue and server-restart scenarios | Blocked | No disposable PHP/systemd host is attached. The local tests exercise unit generation/recovery only, not OS behavior. |
+
+## Phase 13 and 14 review
+
+### Phase 13 — Monitoring and observability
+
+The sampler runs every 60 seconds, processes up to 20 app candidates per pass, retains 30 days of samples and 365 days of alert lifecycle events. Current per-app measurements are managed web-unit state, CPU time delta, memory and volume usage. Unknown measurements stay null/unknown and do not resolve an existing threshold alert. Alerts cover inactive expected service, CPU and RAM; acknowledgement is persisted.
+
+The implementation does not yet monitor arbitrary workers, HTTP request/latency/error rate, network bytes, certificate expiry, queue health, process restart counts or notification delivery. This is recorded as APP-015. Runtime Node journald was unredacted before this phase; APP-013 adds redaction before logs leave the helper.
+
+### Phase 14 — Application terminal and isolation
+
+There is no app-scoped terminal. Existing terminals are for the selected server/workspace and administrator. App browser/log features do not provide a restricted PTY. The requested app identity, limited shell, session-token binding, reconnect/cleanup and app-level authorization therefore remain unimplemented (APP-014). No root shell was exposed as a substitute.
+
+### Quality Gate 7 (phases 13 and 14)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Runtime log redaction regression | Pass | `node_runtime_journal_logs_redact_env_values_assignments_and_url_credentials`. |
+| Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, `cargo test --locked`; 288 tests passed. |
+| Frontend TypeScript | Pass | `npm run check`. |
+| Frontend offline tests | Pass | 10 tests passed. |
+| Frontend production build | Pass | Vite build completed; existing >500 kB main-chunk advisory remains. |
+| Host metrics, notification delivery, PTY isolation and cross-app access tests | Blocked | No isolated host/PTY service environment is attached; no terminal implementation was added to falsely claim app isolation. |

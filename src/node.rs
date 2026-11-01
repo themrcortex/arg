@@ -2855,11 +2855,13 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
                 let next_cursor = text
                     .lines()
                     .find_map(|line| line.strip_prefix("-- cursor: ").map(str::to_owned));
-                let logs = text
+                let raw_logs = text
                     .lines()
                     .filter(|line| !line.starts_with("-- cursor: "))
                     .collect::<Vec<_>>()
                     .join("\n");
+                let environment = app_root(app_id).map(|root| root.join("shared/.env"));
+                let logs = sanitize_node_runtime_logs(&raw_logs, environment.as_deref());
                 json!({"ok":true,"data":{"unit":unit,"logs":logs,"next_cursor":next_cursor,"source":"systemd-journal","persistent":true,"retention_scope":"host-journald"}})
             }
             Err(error_value) => {
@@ -3270,6 +3272,108 @@ fn read_capped_sync<R: Read>(mut reader: R) -> Vec<u8> {
         }
     }
     saved
+}
+
+fn sanitize_node_runtime_logs(output: &str, environment_path: Option<&FsPath>) -> String {
+    const MARKERS: &[&str] = &[
+        "password=",
+        "password:",
+        "passwd=",
+        "passwd:",
+        "token=",
+        "token:",
+        "secret=",
+        "secret:",
+        "authorization=",
+        "authorization:",
+        "api_key=",
+        "api-key=",
+        "api_key:",
+        "api-key:",
+    ];
+    let secrets = environment_path
+        .map(read_environment)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(name, value)| {
+            !value.is_empty()
+                && (name == "APP_KEY"
+                    || name.ends_with("_PASSWORD")
+                    || name.ends_with("_SECRET")
+                    || name.ends_with("_TOKEN")
+                    || name.contains("CREDENTIAL"))
+        })
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    output
+        .lines()
+        .take(1200)
+        .map(|line| {
+            let mut line = line.to_owned();
+            for marker in MARKERS {
+                let mut search_from = 0;
+                loop {
+                    let lower = line.to_ascii_lowercase();
+                    let Some(offset) = lower[search_from..].find(marker) else {
+                        break;
+                    };
+                    let marker_at = search_from + offset;
+                    let mut value_start = marker_at + marker.len();
+                    while line[value_start..]
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_whitespace)
+                    {
+                        value_start += line[value_start..].chars().next().unwrap().len_utf8();
+                    }
+                    let value_end = line[value_start..]
+                        .find(|character: char| {
+                            character.is_whitespace() || matches!(character, ',' | ';')
+                        })
+                        .map(|offset| value_start + offset)
+                        .unwrap_or(line.len());
+                    if value_end <= value_start {
+                        break;
+                    }
+                    line.replace_range(value_start..value_end, "[REDACTED]");
+                    search_from = value_start + "[REDACTED]".len();
+                }
+            }
+            for secret in &secrets {
+                line = line.replace(secret, "[REDACTED]");
+            }
+            redact_node_url_credentials(&mut line);
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn redact_node_url_credentials(line: &mut String) {
+    for scheme in ["https://", "http://"] {
+        let mut from = 0;
+        while from < line.len() {
+            let Some(offset) = line[from..].find(scheme) else {
+                break;
+            };
+            let start = from + offset + scheme.len();
+            let authority_end = line[start..]
+                .find('/')
+                .map(|offset| start + offset)
+                .unwrap_or(line.len());
+            let Some(at_offset) = line[start..authority_end].find('@') else {
+                from = start;
+                continue;
+            };
+            let at = start + at_offset;
+            if line[start..at].contains(':') {
+                line.replace_range(start..at, "[REDACTED]");
+                from = start + "[REDACTED]@".len();
+            } else {
+                from = at + 1;
+            }
+        }
+    }
 }
 
 fn sanitize_build_output(output: &str) -> String {
@@ -3700,6 +3804,35 @@ UNQUOTED=https://example.test/path?a=b
             fs::read_to_string(&path).unwrap(),
             "DB_PASSWORD=secret\nmalformed-line\n"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn node_runtime_journal_logs_redact_env_values_assignments_and_url_credentials() {
+        let root = std::env::temp_dir().join(format!("arg-node-log-redaction-{}", now()));
+        fs::create_dir_all(&root).unwrap();
+        let environment = root.join(".env");
+        fs::write(
+            &environment,
+            "DB_PASSWORD='database-private-value'\nAPP_KEY=application-private-key\n",
+        )
+        .unwrap();
+
+        let logs = sanitize_node_runtime_logs(
+            "starting with database-private-value\nDB_PASSWORD=inline-private-value\ntoken: inline-token\nconnect https://user:password@db.example.test/path",
+            Some(&environment),
+        );
+
+        for secret in [
+            "database-private-value",
+            "application-private-key",
+            "inline-private-value",
+            "inline-token",
+            "user:password",
+        ] {
+            assert!(!logs.contains(secret), "journal leaked {secret}");
+        }
+        assert!(logs.contains("[REDACTED]"));
         fs::remove_dir_all(root).unwrap();
     }
 
