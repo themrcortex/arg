@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Activity, Archive, ArrowDownToLine, CircleAlert, CircleHelp, CirclePlus, Copy, ExternalLink, Globe2, KeyRound, Layers3, Pencil, RefreshCw, RotateCcw, Search, Server, Trash2, Upload, X, Terminal, Wrench } from 'lucide-react'
 import { ApiError, api, apiForWorkspace } from './lib/api'
+import { buildApplicationRoute, parseApplicationRoute, type ApplicationSection } from './lib/application-route.mjs'
 import { createRequestEpoch, createSingleFlightGate } from './lib/request-epoch.mjs'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
@@ -857,10 +858,8 @@ function NodeRunnerPanel({ app, notify }: { app: AppRecord; notify: (message: st
   </section>
 }
 
-function applicationRouteFromHash(): { appId: string | null; serverUuid: string | null } {
-  const query = window.location.hash.split('?')[1] || ''
-  const params = new URLSearchParams(query)
-  return { appId: params.get('app'), serverUuid: params.get('server') }
+function applicationRouteFromHash(): { appId: string | null; serverUuid: string | null; section: ApplicationSection } {
+  return parseApplicationRoute(window.location.hash)
 }
 
 function ApplicationDetailPage({
@@ -873,6 +872,8 @@ function ApplicationDetailPage({
   onArchive,
   onRestore,
   onPurge,
+  section,
+  onSectionChange,
 }: {
   row: RegistryRow
   Heading: Heading
@@ -883,6 +884,8 @@ function ApplicationDetailPage({
   onArchive: () => void
   onRestore: () => void
   onPurge: () => void
+  section: ApplicationSection
+  onSectionChange: (section: ApplicationSection) => void
 }) {
   const { app, serverName } = row
   const actions = <div className="flex flex-wrap gap-2"><Button variant="outline" onClick={onBack}><X size={14}/>همهٔ اپلیکیشن‌ها</Button>{!readOnly && (app.deleted_at ? <><Button onClick={onRestore}><RotateCcw size={14}/>بازیابی</Button><Button variant="destructive" onClick={onPurge}><Trash2 size={14}/>حذف کامل</Button></> : <><Button variant="outline" onClick={onEdit}><Pencil size={14}/>ویرایش مشخصات</Button><Button variant="outline" className="text-rose-200" onClick={onArchive}><Archive size={14}/>آرشیو</Button><Button variant="destructive" onClick={onPurge}><Trash2 size={14}/>حذف کامل</Button></>)}</div>
@@ -909,12 +912,12 @@ function ApplicationDetailPage({
     {readOnly && <Card className="mb-5 border-amber-400/20 bg-amber-400/[.04]"><CardContent className="p-4 text-xs leading-6 text-amber-100">نمایش همهٔ VPSها فقط‌خواندنی است. برای انجام عملیات، ابتدا فضای کار VPS میزبان را از انتخاب‌گر بالای پنل باز کن.</CardContent></Card>}
     {app.deleted_at ? <Card className="border-dashed"><CardContent className="p-5 text-sm text-muted-foreground">این اپلیکیشن آرشیو شده است؛ فایل‌ها و سرویس‌های VPS با آرشیو تغییر نمی‌کنند.</CardContent></Card> : !readOnly && <>
       <SectionHeading title="مدیریت اپلیکیشن" description="هر بخش را جداگانه باز کن؛ عملیات این صفحه فقط برای همین اپلیکیشن هدف‌گذاری می‌شوند." icon={Layers3}/>
-      <Tabs key={app.id} defaultValue="deploy" dir="rtl" className="space-y-4">
-        <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label={`بخش‌های اپلیکیشن ${app.name}`}>
-          <TabsTrigger value="deploy">انتشار و نسخه‌ها</TabsTrigger>
-          <TabsTrigger value="runtime">Runtime و ابزارها</TabsTrigger>
-          <TabsTrigger value="resources">مانیتورینگ و منابع</TabsTrigger>
-          <TabsTrigger value="integrations">Nginx، پشتیبان و گردش‌کار</TabsTrigger>
+      <Tabs key={app.id} value={section} onValueChange={(value) => { if (value === 'deploy' || value === 'runtime' || value === 'resources' || value === 'integrations') onSectionChange(value) }} dir="rtl" className="space-y-4">
+        <TabsList className="h-auto w-full max-w-full flex-nowrap justify-start overflow-x-auto sm:w-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label={`بخش‌های اپلیکیشن ${app.name}`}>
+          <TabsTrigger className="whitespace-nowrap" value="deploy">انتشار و نسخه‌ها</TabsTrigger>
+          <TabsTrigger className="whitespace-nowrap" value="runtime">Runtime و ابزارها</TabsTrigger>
+          <TabsTrigger className="whitespace-nowrap" value="resources">مانیتورینگ و منابع</TabsTrigger>
+          <TabsTrigger className="whitespace-nowrap" value="integrations">Nginx، پشتیبان و گردش‌کار</TabsTrigger>
         </TabsList>
         <TabsContent value="deploy" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
           <DeploymentPanel app={app} notify={notify}/>
@@ -1159,13 +1162,17 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
   }
   function beginEdit(row: RegistryRow) { setTarget(row.app); setDraft(asDraft(row.app)); setError(''); setDialog('form') }
   function openDetails(row: RegistryRow) {
-    const params = new URLSearchParams({ app: row.app.id, server: row.serverUuid })
-    setDetailRoute({ appId: row.app.id, serverUuid: row.serverUuid })
-    window.location.hash = `/apps?${params.toString()}`
+    setDetailRoute({ appId: row.app.id, serverUuid: row.serverUuid, section: 'deploy' })
+    window.location.hash = buildApplicationRoute({ appId: row.app.id, serverUuid: row.serverUuid })
+  }
+  function changeDetailSection(section: ApplicationSection) {
+    if (!detailRoute.appId || !detailRoute.serverUuid) return
+    setDetailRoute((current) => ({ ...current, section }))
+    window.location.hash = buildApplicationRoute({ ...detailRoute, section })
   }
   function returnToList() {
-    setDetailRoute({ appId: null, serverUuid: null })
-    window.location.hash = '/apps'
+    setDetailRoute({ appId: null, serverUuid: null, section: 'deploy' })
+    window.location.hash = buildApplicationRoute({ appId: null, serverUuid: null })
   }
 
   async function submit(event: React.FormEvent) {
@@ -1231,7 +1238,7 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
 
   return <>
     {detailRoute.appId ? (
-      selectedRow ? <ApplicationDetailPage row={selectedRow} Heading={PageHeading} notify={notify} readOnly={allServers} onBack={returnToList} onEdit={() => beginEdit(selectedRow)} onArchive={() => { setTarget(selectedRow.app); setError(''); setDialog('delete') }} onRestore={() => { setTarget(selectedRow.app); setError(''); setDialog('restore') }} onPurge={() => { setTarget(selectedRow.app); setPurgeName(''); setError(''); setDialog('purge') }} /> : loading ? <div className="space-y-4"><PageHeading title="بارگذاری اپلیکیشن" description="اطلاعات و وضعیت مدیریت اپ در حال دریافت است." action={<Button variant="outline" onClick={returnToList}>همهٔ اپلیکیشن‌ها</Button>} /><Skeleton className="h-40 rounded-2xl" /><Skeleton className="h-72 rounded-2xl" /></div> : <div className="space-y-4"><PageHeading title="اپلیکیشن پیدا نشد" description="این رکورد در فضای کار فعلی وجود ندارد یا VPS میزبان در دسترس نیست." action={<Button variant="outline" onClick={returnToList}>همهٔ اپلیکیشن‌ها</Button>} /><Card><CardContent className="p-5 text-sm text-muted-foreground">فضای کار VPS میزبان را بررسی کن یا از فهرست اپلیکیشن‌ها دوباره وارد شو.</CardContent></Card></div>
+      selectedRow ? <ApplicationDetailPage row={selectedRow} Heading={PageHeading} notify={notify} readOnly={allServers} onBack={returnToList} section={detailRoute.section} onSectionChange={changeDetailSection} onEdit={() => beginEdit(selectedRow)} onArchive={() => { setTarget(selectedRow.app); setError(''); setDialog('delete') }} onRestore={() => { setTarget(selectedRow.app); setError(''); setDialog('restore') }} onPurge={() => { setTarget(selectedRow.app); setPurgeName(''); setError(''); setDialog('purge') }} /> : loading ? <div className="space-y-4"><PageHeading title="بارگذاری اپلیکیشن" description="اطلاعات و وضعیت مدیریت اپ در حال دریافت است." action={<Button variant="outline" onClick={returnToList}>همهٔ اپلیکیشن‌ها</Button>} /><Skeleton className="h-40 rounded-2xl" /><Skeleton className="h-72 rounded-2xl" /></div> : <div className="space-y-4"><PageHeading title="اپلیکیشن پیدا نشد" description="این رکورد در فضای کار فعلی وجود ندارد یا VPS میزبان در دسترس نیست." action={<Button variant="outline" onClick={returnToList}>همهٔ اپلیکیشن‌ها</Button>} /><Card><CardContent className="p-5 text-sm text-muted-foreground">فضای کار VPS میزبان را بررسی کن یا از فهرست اپلیکیشن‌ها دوباره وارد شو.</CardContent></Card></div>
     ) : (
     <>
     <PageHeading title="اپلیکیشن‌ها" description={allServers ? 'فهرست خواندنی اپلیکیشن‌های ثبت‌شده روی VPSهای متصل؛ عملیات هر رکورد در فضای کار میزبان انجام می‌شود.' : 'فهرست مستقل اپلیکیشن‌ها و وضعیت مالکیت آن‌ها روی همین VPS.'} action={action}/>
