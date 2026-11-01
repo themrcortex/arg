@@ -116,7 +116,7 @@ fn active_release(app_id: &str) -> Result<PathBuf, (StatusCode, Json<Value>)> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PackageManager {
+pub(super) enum PackageManager {
     Npm,
     Pnpm,
     YarnClassic,
@@ -130,7 +130,7 @@ enum RuntimeEntrypoint {
 }
 
 impl PackageManager {
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::Npm => "npm",
             Self::Pnpm => "pnpm",
@@ -407,7 +407,7 @@ fn runtime_entrypoint(
     }
 }
 
-fn choose_package_manager(
+pub(super) fn choose_package_manager(
     root: &FsPath,
     declaration: Option<&str>,
 ) -> Result<Option<PackageManager>, String> {

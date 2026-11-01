@@ -59,6 +59,27 @@
 
 No P0/P1 security exploit was established by this phase. The points above must not be treated as proof that every helper path, provider, or remote-node scenario is safe; those require their phase-specific tests.
 
+### APP-004 — Build plan can disagree with the selected runtime package manager
+
+- Severity: P2 / Medium
+- Status: CONFIRMED
+- Confidence: high
+- Location: `src/buildpacks.rs`, `build_commands` and `detect`; `src/node.rs`, `choose_package_manager`
+- Evidence: the runtime rejected multiple lockfiles and enforced `packageManager`, while the saved Build Plan selected the first lockfile by fixed priority, suggested Yarn Berry-only `--immutable`, and proposed `run build` even when `scripts.build` was absent. Manifest reads also followed symlinks and converted parse failures into an unannotated Custom plan.
+- Implemented: Build Plan now reuses the Node runtime package-manager decision, produces install/build commands only for a matching supported manager and defined build script, warns on malformed/oversized/symlinked manifests, and exposes the selected project root in the UI for monorepos.
+- Tests: matching npm/Yarn Classic; conflicting lockfiles; missing build script; Next.js/Nuxt; manual monorepo subdirectory; malformed, oversized and symlinked manifests; Python, static and unknown projects.
+- Remaining risk: a Build Plan is still analysis-only. Native PHP and provider-independent runtime adapters are not implemented by this change.
+
+### APP-005 — Application deployment does not provide a Native PHP runtime adapter
+
+- Severity: P1 / High product gap
+- Status: CONFIRMED
+- Confidence: high
+- Location: `src/apps.rs`, `src/buildpacks.rs`, `src/deploy.rs`, `src/laravel.rs`
+- Evidence: the application framework registry and deploy dispatcher have Laravel and Node paths, but no Native PHP application runner with PHP-FPM/document-root configuration. WordPress templates remain explicitly draft-only.
+- Impact: do not claim the requested Native PHP deployment matrix case is supported end to end.
+- Plan: add a PHP-FPM adapter with a non-root identity, shared-storage policy and Nginx validation only after its lifecycle/rollback behavior can be integration-tested on a disposable host.
+
 ## Reusable components
 
 - Existing `applications`/`application_services` registry and additive migrations.
@@ -86,7 +107,7 @@ The static architecture and capability audit is recorded here. Phase 2 contains 
 |---|---|---|
 | `cargo fmt --all -- --check` | Pass | Workspace formatter applied in standalone commit `f122af9`; check subsequently passed. |
 | `cargo check --locked` | Pass | Completed successfully after formatting. |
-| `cargo test --locked` | Pass | 269 tests passed before the APP-001 regression was added; rerun after that change is recorded in the phase 2 commit/review. |
+| `cargo test --locked` | Pass | 270 tests passed after the APP-001 regression was added. |
 | Frontend `npm run check` | Pass | TypeScript check completed. |
 | Frontend `npm run test:offline` | Pass | 10 tests passed. |
 | Frontend `npm run build` | Pass | Vite production build completed; reports the existing >500 kB chunk advisory. |
@@ -94,3 +115,27 @@ The static architecture and capability audit is recorded here. Phase 2 contains 
 | systemd/Nginx/SSL/real deployment | Blocked | This workspace is not an isolated VPS; no host mutation was performed. |
 
 The frontend bundle-size warning is not a build failure. Do not treat blocked host-level scenarios as verified.
+
+## Phase 3 and 4 review
+
+### Phase 3 — Persistent deployment coordination
+
+The current implementation has durable `deployment_jobs`, ordered `deployment_job_steps`, persisted logs and releases; idempotency is unique per application/key; a partial unique index prevents concurrent active jobs per application; the queue is capped at 64; cancellation, retries, startup recovery, release activation and rollback have existing tests. The worker intentionally processes one job at a time globally, which is safe but limits throughput. Job status remains compatibility-oriented (`queued`, `validating`, `running`, `verifying`, terminal), with detailed stage state in the steps table; it is not the full expanded enum from the proposal. No schema rewrite was made in this phase.
+
+### Phase 4 — Runtime detection and Build Plan
+
+The detector already supports Laravel, Next, Nuxt, React/Vite, Vue/Vite, Node, Python, static and manual Custom selection. The plan now respects the same package-manager rules as the Node runtime, avoids suggesting a missing build script, refuses to follow symlinked manifests, reports invalid manifests, and accepts an explicit project root for monorepos. Dockerfile/Compose plans remain analysis-only.
+
+Native PHP execution, complete framework-specific adapters, and a create-application wizard spanning source through deploy remain unimplemented. These are recorded as product gaps rather than active-looking controls.
+
+### Quality Gate 2 (phases 3 and 4)
+
+| Check | Result | Evidence |
+|---|---|---|
+| Rust format/check/tests | Pass | `cargo fmt --all -- --check`, `cargo check --locked`, and `cargo test --locked`; 276 tests passed. |
+| Frontend TypeScript | Pass | `npm run check`. |
+| Frontend offline tests | Pass | 10 tests passed. |
+| Frontend production build | Pass | Vite build completed with the existing large-chunk advisory. |
+| Actual systemd, Nginx, SSL and service health | Blocked | No disposable VPS was available; production hosts were not contacted or modified. |
+
+The project-root field uses the existing bounded relative-directory API. The selected path is stored with the Build Plan and remains analysis-only. No runtime deployment was triggered by these tests.

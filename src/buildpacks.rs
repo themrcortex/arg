@@ -90,19 +90,30 @@ fn has(names: &std::collections::HashSet<String>, file: &str) -> bool {
     names.contains(file)
 }
 
-fn build_commands(framework: &str, names: &std::collections::HashSet<String>) -> Vec<&'static str> {
+fn build_commands(
+    framework: &str,
+    package_manager: Option<&str>,
+    has_build_script: bool,
+) -> Vec<&'static str> {
     match framework {
         "laravel" => vec!["composer install --no-dev --prefer-dist --no-interaction"],
         "node" | "next" | "nuxt" | "react" | "vue" | "vite" => {
-            if has(names, "pnpm-lock.yaml") {
-                vec!["pnpm install --frozen-lockfile", "pnpm run build"]
-            } else if has(names, "yarn.lock") {
-                vec!["yarn install --immutable", "yarn build"]
-            } else if has(names, "package-lock.json") {
-                vec!["npm ci", "npm run build"]
-            } else {
-                Vec::new()
+            let install = match package_manager {
+                Some("npm") => "npm ci --no-audit --no-fund",
+                Some("pnpm") => "pnpm install --frozen-lockfile --store-dir=/cache/pnpm-store",
+                Some("yarn-classic") => "yarn install --frozen-lockfile",
+                _ => return Vec::new(),
+            };
+            let mut commands = vec![install];
+            if has_build_script {
+                commands.push(match package_manager {
+                    Some("npm") => "npm run build",
+                    Some("pnpm") => "pnpm run build",
+                    Some("yarn-classic") => "yarn run build",
+                    _ => return Vec::new(),
+                });
             }
+            commands
         }
         "python" => {
             vec!["Review requirements.txt or pyproject.toml before selecting an isolated runner"]
@@ -114,9 +125,11 @@ fn build_commands(framework: &str, names: &std::collections::HashSet<String>) ->
 fn apply_framework_override(
     plan: &mut Value,
     framework: &str,
-    names: &std::collections::HashSet<String>,
+    _names: &std::collections::HashSet<String>,
 ) {
-    let commands = build_commands(framework, names);
+    let package_manager = plan["package_manager"].as_str();
+    let has_build_script = plan["has_build_script"].as_bool().unwrap_or(false);
+    let commands = build_commands(framework, package_manager, has_build_script);
     plan["framework"] = json!(framework);
     plan["override"] = json!(true);
     plan["ambiguous"] = json!(false);
@@ -154,17 +167,49 @@ fn apply_framework_override(
 }
 
 fn json_file(path: &FsPath) -> serde_json::Value {
-    fs::metadata(path)
+    fs::symlink_metadata(path)
         .ok()
-        .filter(|metadata| metadata.is_file() && metadata.len() <= MAX_MANIFEST_BYTES)
+        .filter(|metadata| metadata.file_type().is_file() && metadata.len() <= MAX_MANIFEST_BYTES)
         .and_then(|_| fs::read(path).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn manifest_problem(root: &FsPath, name: &str) -> Option<&'static str> {
+    let path = root.join(name);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some("یکی از manifestها خوانده نشد؛ تشخیص خودکار قابل اتکا نیست."),
+    };
+    if !metadata.file_type().is_file() {
+        return Some("manifest باید فایل واقعی باشد؛ symlink برای تحلیل دنبال نمی‌شود.");
+    }
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Some("اندازهٔ manifest از سقف تحلیل بیشتر است؛ تشخیص خودکار انجام نشد.");
+    }
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Some("یکی از manifestها خوانده نشد؛ تشخیص خودکار قابل اتکا نیست."),
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) if value.is_object() => None,
+        _ => Some("ساختار manifest معتبر نیست؛ framework را دستی بررسی کن."),
+    }
+}
+
 fn detect(root: &FsPath, names: &std::collections::HashSet<String>) -> serde_json::Value {
     let package = json_file(&root.join("package.json"));
     let composer = json_file(&root.join("composer.json"));
+    let has_build_script = package["scripts"]["build"].is_string();
+    let package_manager_result =
+        node::choose_package_manager(root, package["packageManager"].as_str());
+    let (package_manager, package_manager_error) = match package_manager_result {
+        Ok(manager) => (manager.map(node::PackageManager::label), None),
+        Err(error) => (None, Some(error)),
+    };
+    let package_problem = manifest_problem(root, "package.json");
+    let composer_problem = manifest_problem(root, "composer.json");
     let dependencies = package
         .get("dependencies")
         .and_then(Value::as_object)
@@ -239,8 +284,28 @@ fn detect(root: &FsPath, names: &std::collections::HashSet<String>) -> serde_jso
     } else {
         "host_runner_review"
     };
-    let commands = build_commands(framework, names);
-    let mut warnings = Vec::new();
+    let commands = build_commands(framework, package_manager, has_build_script);
+    let mut warnings: Vec<&str> = Vec::new();
+    if let Some(problem) = package_problem {
+        warnings.push(problem);
+    }
+    if let Some(problem) = composer_problem {
+        warnings.push(problem);
+    }
+    if let Some(error) = package_manager_error.as_deref() {
+        warnings.push(error);
+    }
+    if package["packageManager"].is_string()
+        && package_manager.is_none()
+        && package_manager_error.is_none()
+    {
+        warnings.push("packageManager تعریف شده اما lockfile سازگار و پشتیبانی‌شده پیدا نشد.");
+    }
+    if matches!(framework, "react" | "vue" | "vite" | "next" | "nuxt") && !has_build_script {
+        warnings.push(
+            "اسکریپت build در package.json تعریف نشده؛ خروجی Production قابل ساخت خودکار نیست.",
+        );
+    }
     if ambiguous {
         warnings.push("چند چارچوب نزدیک به هم شناسایی شد؛ انتخاب را دستی تأیید کن.");
     }
@@ -257,6 +322,7 @@ fn detect(root: &FsPath, names: &std::collections::HashSet<String>) -> serde_jso
         "detector": "arg-buildplan-v1", "framework": framework, "confidence": confidence,
         "ambiguous": ambiguous, "candidates": candidates.iter().map(|(name,score,reason)| json!({"framework":name,"confidence":score,"reason":reason})).collect::<Vec<_>>(),
         "build_mode": mode, "working_directory": ".", "commands": commands,
+        "package_manager": package_manager, "has_build_script": has_build_script,
         "artifact": if framework == "laravel" { "release source" } else if matches!(framework,"react"|"vue"|"vite") { "dist" } else { "runtime" },
         "port": if matches!(framework,"node"|"next"|"nuxt") { json!(3000) } else { Value::Null },
         "healthcheck": if matches!(framework,"node"|"next"|"nuxt") { "/" } else { "" },
@@ -419,13 +485,16 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("package.json"),
-            r#"{"devDependencies":{"vite":"*","react":"*"}}"#,
+            r#"{"devDependencies":{"vite":"*","react":"*"},"scripts":{"build":"vite build"}}"#,
         )
         .unwrap();
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
         let files = names(&["package.json", "package-lock.json"]);
         let plan = detect(&root, &files);
         assert_eq!(plan["framework"], "react");
-        assert_eq!(plan["commands"][0], "npm ci");
+        assert_eq!(plan["package_manager"], "npm");
+        assert_eq!(plan["commands"][0], "npm ci --no-audit --no-fund");
+        assert_eq!(plan["commands"][1], "npm run build");
         let mut docker_files = files;
         docker_files.insert("Dockerfile".into());
         let docker = detect(&root, &docker_files);
@@ -440,9 +509,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("package.json"),
-            r#"{"dependencies":{"express":"*"},"scripts":{"start":"node server.js"}}"#,
+            r#"{"dependencies":{"express":"*"},"scripts":{"start":"node server.js","build":"vite build"}}"#,
         )
         .unwrap();
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
         let names = names(&["package.json", "package-lock.json", "Dockerfile"]);
         let mut plan = detect(&root, &names);
         assert_eq!(plan["framework"], "node");
@@ -453,7 +523,7 @@ mod tests {
         assert_eq!(plan["framework"], "react");
         assert_eq!(plan["override"], true);
         assert_eq!(plan["ambiguous"], false);
-        assert_eq!(plan["commands"][0], "npm ci");
+        assert_eq!(plan["commands"][0], "npm ci --no-audit --no-fund");
         assert_eq!(plan["commands"][1], "npm run build");
         assert_eq!(plan["artifact"], "dist");
         assert!(!plan["warnings"].as_array().unwrap().iter().any(|warning| {
@@ -461,6 +531,143 @@ mod tests {
         }));
         assert_eq!(plan["build_mode"], "dockerfile_review");
         assert_eq!(plan["executes_commands"], false);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_plan_uses_the_declared_supported_package_manager() {
+        let root =
+            std::env::temp_dir().join(format!("arg-buildplan-yarn-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"packageManager":"yarn@1.22.22","dependencies":{"vite":"*","react":"*"},"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("yarn.lock"), "# yarn lockfile v1").unwrap();
+        let files = names(&["package.json", "yarn.lock"]);
+
+        let plan = detect(&root, &files);
+
+        assert_eq!(plan["package_manager"], "yarn-classic");
+        assert_eq!(plan["commands"][0], "yarn install --frozen-lockfile");
+        assert_eq!(plan["commands"][1], "yarn run build");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conflicting_lockfiles_are_not_given_a_guessed_build_plan() {
+        let root =
+            std::env::temp_dir().join(format!("arg-buildplan-locks-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"packageManager":"npm@10.0.0","dependencies":{"vite":"*","react":"*"},"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
+        fs::write(root.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'").unwrap();
+        let files = names(&["package.json", "package-lock.json", "pnpm-lock.yaml"]);
+
+        let plan = detect(&root, &files);
+
+        assert!(plan["package_manager"].is_null());
+        assert!(plan["commands"].as_array().unwrap().is_empty());
+        assert!(plan["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|message| message.contains("چند lockfile متفاوت"))
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_build_script_is_not_advertised_as_an_executable_command() {
+        let root =
+            std::env::temp_dir().join(format!("arg-buildplan-no-build-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"vite":"*","react":"*"}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("package-lock.json"), "{}").unwrap();
+        let files = names(&["package.json", "package-lock.json"]);
+
+        let plan = detect(&root, &files);
+
+        assert_eq!(plan["commands"], json!(["npm ci --no-audit --no-fund"]));
+        assert_eq!(plan["has_build_script"], false);
+        assert!(plan["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|message| message.contains("اسکریپت build"))
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn next_nuxt_and_manually_selected_monorepo_roots_are_detected() {
+        let root = std::env::temp_dir().join(format!(
+            "arg-buildplan-frameworks-{}",
+            rand::random::<u64>()
+        ));
+        let monorepo_root = root.join("repo");
+        let app_root = monorepo_root.join("apps/web");
+        fs::create_dir_all(&app_root).unwrap();
+        fs::write(
+            app_root.join("package.json"),
+            r#"{"dependencies":{"next":"*"},"scripts":{"build":"next build"}}"#,
+        )
+        .unwrap();
+        fs::write(app_root.join("package-lock.json"), "{}").unwrap();
+        let root_plan = detect(&monorepo_root, &names_for(&monorepo_root).unwrap());
+        assert_eq!(root_plan["framework"], "custom");
+
+        let next_plan = detect(&app_root, &names_for(&app_root).unwrap());
+        assert_eq!(next_plan["framework"], "next");
+
+        fs::write(
+            app_root.join("package.json"),
+            r#"{"dependencies":{"nuxt":"*"},"scripts":{"build":"nuxt build"}}"#,
+        )
+        .unwrap();
+        let nuxt_plan = detect(&app_root, &names_for(&app_root).unwrap());
+        assert_eq!(nuxt_plan["framework"], "nuxt");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn python_static_and_unknown_projects_are_reported_without_fake_commands() {
+        let root =
+            std::env::temp_dir().join(format!("arg-buildplan-modes-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("requirements.txt"), "flask==3.0.0\n").unwrap();
+        let python = detect(&root, &names(&["requirements.txt"]));
+        assert_eq!(python["framework"], "python");
+        assert_eq!(python["commands"].as_array().unwrap().len(), 1);
+        assert_eq!(python["executes_commands"], false);
+
+        fs::remove_file(root.join("requirements.txt")).unwrap();
+        fs::write(root.join("index.html"), "<html></html>").unwrap();
+        let static_plan = detect(&root, &names(&["index.html"]));
+        assert_eq!(static_plan["framework"], "static");
+        assert!(static_plan["commands"].as_array().unwrap().is_empty());
+
+        fs::remove_file(root.join("index.html")).unwrap();
+        fs::write(root.join("README.md"), "review manually").unwrap();
+        let custom = detect(&root, &names(&["README.md"]));
+        assert_eq!(custom["framework"], "custom");
+        assert_eq!(custom["confidence"], 0);
+        assert!(custom["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|message| message.contains("Custom"))
+            }));
         let _ = fs::remove_dir_all(root);
     }
     #[test]
@@ -481,6 +688,52 @@ mod tests {
         )
         .unwrap();
         assert!(json_file(&root.join("package.json")).is_null());
+        let plan = detect(&root, &names(&["package.json"]));
+        assert!(plan["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|message| message.contains("سقف تحلیل"))
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_or_symlinked_manifests_are_reported_and_never_read_through() {
+        let root =
+            std::env::temp_dir().join(format!("arg-buildplan-invalid-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("package.json"), "{ invalid json").unwrap();
+        let malformed = detect(&root, &names(&["package.json"]));
+        assert!(malformed["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|message| message.contains("ساختار manifest معتبر نیست"))
+            }));
+
+        let outside = root.join("outside.json");
+        fs::write(
+            &outside,
+            r#"{"dependencies":{"next":"*"},"scripts":{"build":"next build"}}"#,
+        )
+        .unwrap();
+        fs::remove_file(root.join("package.json")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("package.json")).unwrap();
+        assert!(json_file(&root.join("package.json")).is_null());
+        let linked = detect(&root, &names(&["package.json"]));
+        assert_ne!(linked["framework"], "next");
+        assert!(linked["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|message| message.contains("symlink"))
+            }));
         let _ = fs::remove_dir_all(root);
     }
 }
