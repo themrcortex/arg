@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.9-dev.1 — 2026-11-01
+
+### Development
+- Start the next development line from stable v0.7.8; this version marker contains no additional application behavior.
+
 ## v0.7.8 — 2026-11-01
 
 ### Changed
