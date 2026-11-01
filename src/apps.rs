@@ -310,7 +310,13 @@ fn read_apps(
     let mut statement = db.prepare(sql)?;
     let rows = statement.query_map([owner], |row| {
         let labels_json: String = row.get(9)?;
-        let labels = serde_json::from_str::<Vec<String>>(&labels_json).unwrap_or_default();
+        let labels = serde_json::from_str::<Vec<String>>(&labels_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                9,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
         Ok(json!({
             "id": row.get::<_,String>(0)?, "owner_server_uuid": owner, "name": row.get::<_,String>(1)?,
             "description": row.get::<_,String>(2)?, "framework": row.get::<_,String>(3)?,
@@ -836,8 +842,8 @@ pub(super) async fn restore(
 mod tests {
     use super::{
         domain_patterns_overlap, is_auto_framework, is_node_runtime_framework, is_static_framework,
-        listening_tcp_ports, migrate, normalized_domain, template_framework, valid_domain,
-        valid_runtime_version, valid_static_output_path, AppInput, AppUpdate,
+        listening_tcp_ports, migrate, normalized_domain, read_apps, template_framework,
+        valid_domain, valid_runtime_version, valid_static_output_path, AppInput, AppUpdate,
     };
 
     #[test]
@@ -914,6 +920,23 @@ mod tests {
         assert_eq!(preserved, "server_name old.example.com;");
         assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='application_services')", [], |row| row.get::<_,bool>(0)).unwrap());
         assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('applications') WHERE name='runtime_version')", [], |row| row.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn application_list_reports_corrupt_labels_instead_of_silently_dropping_them() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid,name,labels_json,created_by,created_at,updated_at) VALUES('app','server','Existing','not-json','admin',1,1)",
+            [],
+        )
+        .unwrap();
+
+        let error = read_apps(&db, "server", false).unwrap_err();
+        assert!(matches!(
+            error,
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, _)
+        ));
     }
 
     #[test]
