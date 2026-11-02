@@ -224,6 +224,7 @@ function DeploymentPanel({ app, notify, launchPage = false, onLaunch, onLeaveLau
   const [detailsBusy, setDetailsBusy] = useState(false)
   const [detailsError, setDetailsError] = useState('')
   const [jobsLoadError, setJobsLoadError] = useState('')
+  const [jobsLoadedFor, setJobsLoadedFor] = useState('')
   const detailsLogCursor = useRef<Record<string, number>>({})
   const [jobsLoadGate] = useState(() => createSingleFlightGate())
   const jobsLoadToken = useRef<number | null>(null)
@@ -259,7 +260,8 @@ function DeploymentPanel({ app, notify, launchPage = false, onLaunch, onLeaveLau
   const [open, setOpen] = useState(launchPage)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const active = jobs.some((job) => ['queued', 'validating', 'running', 'verifying'].includes(job.state))
+  const jobsLoaded = jobsLoadedFor === app.id
+  const active = jobsLoaded && jobs.some((job) => ['queued', 'validating', 'running', 'verifying'].includes(job.state))
 
   useEffect(() => {
     if (!open || mode !== 'git' || gitAccess !== 'ssh') return
@@ -337,6 +339,7 @@ function DeploymentPanel({ app, notify, launchPage = false, onLaunch, onLeaveLau
       const result = await api<{ jobs: DeployJob[] }>(`apps/${encodeURIComponent(app.id)}/deploy/jobs`, { signal: controller.signal })
       if (!jobsRequestEpoch.isCurrent(request)) return
       setJobs(result.jobs)
+      setJobsLoadedFor(app.id)
       setJobsLoadError('')
       for (const job of result.jobs) {
         const first = job.logs?.[0]?.id
@@ -364,6 +367,12 @@ function DeploymentPanel({ app, notify, launchPage = false, onLaunch, onLeaveLau
       jobsLoadGate.release(token)
     }
   }, [app.id, jobsRequestEpoch, jobsLoadGate])
+
+  useEffect(() => {
+    setJobs([])
+    setJobsLoadError('')
+    setJobsLoadedFor('')
+  }, [app.id])
 
   async function loadOlderLogs(jobId: string) {
     const before = olderLogsBefore[jobId]
@@ -591,7 +600,8 @@ function DeploymentPanel({ app, notify, launchPage = false, onLaunch, onLeaveLau
     </form>}
     {error && !open && <p role="alert" className="mt-2 text-xs text-rose-200">{error}</p>}
     {jobsLoadError && <div role="alert" className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-400/25 bg-rose-400/[.05] p-2 text-xs text-rose-200"><span>{jobsLoadError}</span><Button size="sm" variant="outline" onClick={() => void loadJobs()}><RefreshCw size={12}/>تلاش دوباره</Button></div>}
-    {jobs.length > 0 && <div className="mt-3 space-y-2">{jobs.slice(0,3).map((job) => <article key={job.id} className="space-y-2 rounded-xl border border-border/70 bg-background/35 p-3">
+    {!launchPage && jobsLoaded && !jobsLoadError && jobs.length === 0 && <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed border-primary/25 bg-primary/[.035] p-4"><div><p className="text-sm font-medium">هنوز استقراری برای این اپلیکیشن ثبت نشده</p><p className="mt-1 text-xs leading-5 text-muted-foreground">سورس را انتخاب کن تا ARG اولین release را بسازد؛ تا پایان Health Check نسخه‌ای فعال نمی‌شود.</p></div><Button size="sm" onClick={() => { setError(''); onLaunch ? onLaunch() : setOpen(true) }}><Upload size={14}/>ساخت اولین استقرار</Button></div>}
+    {jobsLoaded && jobs.length > 0 && <div className="mt-3 space-y-2">{jobs.slice(0,3).map((job) => <article key={job.id} className="space-y-2 rounded-xl border border-border/70 bg-background/35 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex min-w-0 flex-wrap items-center gap-2"><Badge variant={job.state === 'failed' ? 'destructive' : job.state === 'succeeded' ? 'success' : 'info'}>{labels[job.state] || job.state}</Badge><Badge variant="outline">{job.environment_kind === 'staging' ? 'Staging' : job.environment_kind === 'production' ? 'Production' : 'محیط نامشخص'}</Badge><span className="max-w-40 truncate text-[10px]">{job.release_name || 'نسخهٔ بدون نام'}</span><Badge variant="outline">نسخه {job.version_number || '—'}</Badge><code dir="ltr" className="font-mono text-[10px] text-muted-foreground">{job.id.slice(0,8)} · {new Date(job.created_at * 1000).toLocaleString('fa-IR')}</code><span className="text-[10px] text-muted-foreground">{job.log_count || 0} رویداد · نگه‌داری {job.retention_count || 5}</span></div>
         <div className="flex flex-wrap justify-end gap-1.5"><Button size="sm" variant="outline" onClick={() => void openJobDetails(job)}><Activity size={13}/>مشاهدهٔ جزئیات فرایند</Button>{['queued','validating','running','verifying'].includes(job.state) ? <Button size="sm" variant="destructive" disabled={busy} onClick={() => void action(job,'cancel')}><X size={12}/>لغو</Button> : <>{job.state === 'failed' && mode !== 'archive' && <Button size="sm" variant="outline" disabled={busy} onClick={() => void action(job,'retry')}><RotateCcw size={12}/>اجرای دوباره</Button>}{job.state === 'succeeded' && job.previous_release && <Button size="sm" variant="outline" disabled={busy} onClick={() => void rollback(job)}><RotateCcw size={12}/>بازگشت</Button>}</>}</div>
       </div>
@@ -992,8 +1002,10 @@ function ApplicationDetailPage({
   onSectionChange: (section: ApplicationSection) => void
 }) {
   const { app, serverName } = row
+  const isolatedLaunch = section === 'launch' && !readOnly && !app.deleted_at
   const actions = <div className="flex flex-wrap gap-2"><Button variant="outline" onClick={onBack}><X size={14}/>همهٔ اپلیکیشن‌ها</Button>{!readOnly && (app.deleted_at ? <><Button onClick={onRestore}><RotateCcw size={14}/>بازیابی</Button><Button variant="destructive" onClick={onPurge}><Trash2 size={14}/>حذف کامل</Button></> : <><Button variant="outline" onClick={onEdit}><Pencil size={14}/>ویرایش مشخصات</Button><Button variant="outline" className="text-rose-200" onClick={onArchive}><Archive size={14}/>آرشیو</Button><Button variant="destructive" onClick={onPurge}><Trash2 size={14}/>حذف کامل</Button></>)}</div>
   return <>
+    {!isolatedLaunch && <>
     <PageHeading title={app.name} description={app.description || 'مدیریت مستقل انتشار، runtime، منابع و اتصال‌های این اپلیکیشن.'} action={actions}/>
     <Card className="mb-5 overflow-hidden border-border/80 bg-card/55">
       <CardContent className="flex flex-wrap items-center gap-4 p-4 sm:p-5">
@@ -1014,20 +1026,25 @@ function ApplicationDetailPage({
       </div>
     </Card>
     {readOnly && <Card className="mb-5 border-amber-400/20 bg-amber-400/[.04]"><CardContent className="p-4 text-xs leading-6 text-amber-100">نمایش همهٔ VPSها فقط‌خواندنی است. برای انجام عملیات، ابتدا فضای کار VPS میزبان را از انتخاب‌گر بالای پنل باز کن.</CardContent></Card>}
+    </>}
     {app.deleted_at ? <Card className="border-dashed"><CardContent className="p-5 text-sm text-muted-foreground">این اپلیکیشن آرشیو شده است؛ فایل‌ها و سرویس‌های VPS با آرشیو تغییر نمی‌کنند.</CardContent></Card> : !readOnly && (section === 'launch' ? <>
       <PageHeading title="استقرار جدید" description={`تنظیمات و مقصد انتشار ${app.name} را بازبینی کن؛ این صفحه پس از Refresh هم باز می‌ماند.`} action={<Button variant="outline" onClick={() => onSectionChange('deploy')}>بازگشت به نسخه‌ها</Button>}/>
       <DeploymentPanel app={app} notify={notify} launchPage onLeaveLaunch={() => onSectionChange('deploy')}/>
     </> : <>
       <SectionHeading title="مدیریت اپلیکیشن" description="هر بخش را جداگانه باز کن؛ عملیات این صفحه فقط برای همین اپلیکیشن هدف‌گذاری می‌شوند." icon={Layers3}/>
-      <Tabs key={app.id} value={section} onValueChange={(value) => { if (value === 'deploy' || value === 'runtime' || value === 'resources' || value === 'integrations') onSectionChange(value) }} dir="rtl" className="space-y-4">
+      <Tabs key={app.id} value={section} onValueChange={(value) => { if (value === 'deploy' || value === 'runtime' || value === 'resources' || value === 'nginx' || value === 'integrations') onSectionChange(value) }} dir="rtl" className="space-y-4">
         <TabsList className="h-auto w-full max-w-full flex-nowrap justify-start overflow-x-auto sm:w-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label={`بخش‌های اپلیکیشن ${app.name}`}>
           <TabsTrigger className="whitespace-nowrap" value="deploy">انتشار و نسخه‌ها</TabsTrigger>
+          <TabsTrigger className="whitespace-nowrap" value="nginx">دامنه و Nginx</TabsTrigger>
           <TabsTrigger className="whitespace-nowrap" value="runtime">Runtime و ابزارها</TabsTrigger>
           <TabsTrigger className="whitespace-nowrap" value="resources">مانیتورینگ و منابع</TabsTrigger>
-          <TabsTrigger className="whitespace-nowrap" value="integrations">Nginx، پشتیبان و گردش‌کار</TabsTrigger>
+          <TabsTrigger className="whitespace-nowrap" value="integrations">پشتیبان و گردش‌کار</TabsTrigger>
         </TabsList>
         <TabsContent value="deploy" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
           <DeploymentPanel app={app} notify={notify} onLaunch={() => onSectionChange('launch')}/>
+        </TabsContent>
+        <TabsContent value="nginx" className="space-y-4">
+          <ApplicationNginxLinkPanel app={app} notify={notify}/>
         </TabsContent>
         <TabsContent value="runtime" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
           <ApplicationDeveloperTools app={app} notify={notify}/>
@@ -1041,7 +1058,6 @@ function ApplicationDetailPage({
         </TabsContent>
         <TabsContent value="integrations" className="grid items-start gap-4 xl:grid-cols-2 [&>section]:mt-0 [&>div>section]:mt-0">
           <ApplicationStagingPanel app={app} notify={notify} onCreated={onStagingCreated}/>
-          <ApplicationNginxLinkPanel app={app} notify={notify}/>
           <ApplicationBackupPanel appId={app.id} notify={notify}/>
           <ApplicationWorkflowDraftPanel appId={app.id} notify={notify}/>
         </TabsContent>
@@ -1395,11 +1411,11 @@ export function ApplicationsPage({ Heading: PageHeading, notify, allServers, wor
         notify('مشخصات اپلیکیشن به‌روز شد؛ وضعیت اجرای سرویس تغییر نکرده است.')
       } else {
         if (selectedTemplate) {
-          await api(`app-templates/${encodeURIComponent(selectedTemplate)}/draft`, { method: 'POST', body: JSON.stringify({ name: draft.name.trim(), description: draft.description.trim(), domain: draft.domain.trim(), listen_port: draft.listen_port.trim() ? Number(draft.listen_port) : null, runtime_version: draft.runtime_version, build_runtime_version: draft.build_runtime_version, wordpress_version: draft.wordpress_version.trim(), environment_id: draft.environment_id || null }) })
-          notify('پیش‌نویس از قالب ساخته شد؛ سورس دریافت، پکیج نصب یا سرویسی اجرا نشد.')
+          const result = await api<{ nginx_setup?: { configured?: boolean; message?: string } }>(`app-templates/${encodeURIComponent(selectedTemplate)}/draft`, { method: 'POST', body: JSON.stringify({ name: draft.name.trim(), description: draft.description.trim(), domain: draft.domain.trim(), listen_port: draft.listen_port.trim() ? Number(draft.listen_port) : null, runtime_version: draft.runtime_version, build_runtime_version: draft.build_runtime_version, wordpress_version: draft.wordpress_version.trim(), environment_id: draft.environment_id || null }) })
+          notify(result.nginx_setup?.message || 'پیش‌نویس از قالب ساخته شد؛ سورس دریافت، پکیج نصب یا سرویسی اجرا نشد.')
         } else {
-          await api('apps', { method: 'POST', body: JSON.stringify(draftPayload(draft)) })
-          notify('رکورد اپلیکیشن ثبت شد؛ هیچ کد یا سرویسی اجرا نشده است.')
+          const result = await api<{ nginx_setup?: { configured?: boolean; message?: string } }>('apps', { method: 'POST', body: JSON.stringify(draftPayload(draft)) })
+          notify(result.nginx_setup?.message || 'رکورد اپلیکیشن ثبت شد؛ هیچ کد یا سرویسی اجرا نشده است.')
         }
       }
       setDialog(null); setSelectedTemplate(null); await load(true)

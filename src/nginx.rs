@@ -1884,6 +1884,30 @@ pub(super) fn nginx_server_names(content: &str) -> Vec<String> {
     names
 }
 
+pub(super) fn preserve_server_names(content: &str, names: &[String]) -> Result<String, String> {
+    let replacement = if names.is_empty() {
+        "_".to_owned()
+    } else {
+        names.join(" ")
+    };
+    let mut count = 0;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("server_name ") && trimmed.trim_end().ends_with(';') {
+            let indent = &line[..line.len() - trimmed.len()];
+            lines.push(format!("{indent}server_name {replacement};"));
+            count += 1;
+        } else {
+            lines.push(line.to_owned());
+        }
+    }
+    if count == 0 {
+        return Err("کانفیگ Nginx فاقد دستور server_name قابل مدیریت است.".into());
+    }
+    Ok(lines.join("\n") + if content.ends_with('\n') { "\n" } else { "" })
+}
+
 fn nginx_ensure_maintenance_public_dir() -> Result<(), String> {
     let directory = std::path::Path::new(NGINX_MAINTENANCE_PUBLIC);
     fs::create_dir_all(directory).map_err(|error| error.to_string())?;
@@ -2395,12 +2419,13 @@ fn nginx_list_sites() -> Result<Value, String> {
     Ok(json!(sites))
 }
 
-fn nginx_managed_application_id(content: &str) -> Option<String> {
+pub(super) fn nginx_managed_application_id(content: &str) -> Option<String> {
     let first_line = content.lines().next()?.trim();
     let marker = [
         "# ARG managed Laravel site app=",
         "# Managed by ARG Node runner app=",
         "# Managed by ARG Static runner app=",
+        "# ARG managed Application site app=",
     ]
     .iter()
     .find_map(|prefix| first_line.strip_prefix(*prefix))?;
@@ -2982,14 +3007,17 @@ fn configure_node_proxy_locked(
     let (available, _) = nginx_site_paths(&name)?;
     let expected_marker = format!("# Managed by ARG Node runner app={app_id} ");
     let expected_proxy = format!("proxy_pass http://127.0.0.1:{port};");
-    let expected_name = format!("server_name {domain};");
     let current = match fs::symlink_metadata(&available) {
         Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= 512 * 1024 => {
             let content = fs::read_to_string(&available).map_err(|error| error.to_string())?;
             if !content.starts_with(&expected_marker) {
                 return Err(format!("نام فایل رزروشدهٔ {name} متعلق به تنظیمی غیر از Node Runner است؛ فایل تغییر نکرد."));
             }
-            if !content.contains(&expected_name) || !content.contains(&expected_proxy) {
+            if !nginx_server_names(&content)
+                .iter()
+                .any(|name| name == &domain)
+                || !content.contains(&expected_proxy)
+            {
                 return Err("دامنه یا پورت اپ با Nginx فعلی فرق دارد؛ تنظیمات سایت را در صفحهٔ Nginx بازبینی کن. فایل موجود بازنویسی نشد.".into());
             }
             Some(content)
@@ -3361,7 +3389,7 @@ pub(super) fn configure_static_site(
             "مسیر انتشار شامل نویسه‌ای است که در دستور root مربوط به Nginx ایمن نیست.".into(),
         );
     }
-    let content = static_site_config(app_id, &domain, &root, spa_fallback);
+    let mut content = static_site_config(app_id, &domain, &root, spa_fallback);
     let previous = match std::fs::symlink_metadata(&available) {
         Ok(metadata) if metadata.file_type().is_file() && metadata.len() <= 512 * 1024 => {
             let existing =
@@ -3370,6 +3398,10 @@ pub(super) fn configure_static_site(
                 return Err(format!(
                     "فایل رزروشدهٔ {name} متعلق به پیکربندی دیگری است؛ تغییرش ندادم."
                 ));
+            }
+            let existing_names = nginx_server_names(&existing);
+            if existing_names.iter().any(|name| name == &domain) {
+                content = preserve_server_names(&content, &existing_names)?;
             }
             Some(existing)
         }
@@ -3537,7 +3569,7 @@ fn grant_static_web_access(
     Ok(())
 }
 
-fn static_site_config(
+pub(super) fn static_site_config(
     app_id: &str,
     domain: &str,
     root: &std::path::Path,
@@ -3551,7 +3583,7 @@ fn static_site_config(
     format!("# Managed by ARG Static runner app={app_id} domain={domain} spa={spa_fallback}\nserver {{\n    listen 80;\n    server_name {domain};\n    root {};\n    index index.html;\n    server_tokens off;\n    add_header X-Content-Type-Options nosniff always;\n    add_header X-Frame-Options SAMEORIGIN always;\n\n    location / {{ {fallback} }}\n    location ~* \\.[a-f0-9]{{8,}}\\.(?:css|js|svg|png|jpg|webp|woff2?)$ {{ expires 1y; add_header Cache-Control \"public, immutable\"; }}\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n    location ~* \\.(?:env|ini|log|sql|sqlite|bak|zip|gz|tar)$ {{ deny all; }}\n}}\n", root.display())
 }
 
-fn node_proxy_config(app_id: &str, domain: &str, port: u16) -> String {
+pub(super) fn node_proxy_config(app_id: &str, domain: &str, port: u16) -> String {
     format!("# Managed by ARG Node runner app={app_id} domain={domain} port={port}\nserver {{\n    listen 80;\n    server_name {domain};\n    server_tokens off;\n    client_max_body_size 32m;\n\n    location / {{\n        proxy_pass http://127.0.0.1:{port};\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_read_timeout 3600s;\n        proxy_send_timeout 3600s;\n    }}\n\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n    location ~* \\.(?:env|ini|log|sql|sqlite|bak|zip|gz|tar)$ {{ deny all; }}\n}}\n")
 }
 
@@ -3611,8 +3643,8 @@ fn nginx_config_claims_domain(content: &str, domain: &str) -> bool {
 mod node_proxy_tests {
     use super::{
         deployment_node_proxy_plan, detach_exact_server_name, nginx_config_claims_domain,
-        nginx_managed_application_id, node_proxy_config, safe_static_root_path,
-        server_name_overlaps, static_site_config, DeploymentNodeProxyPlan,
+        nginx_managed_application_id, nginx_server_names, node_proxy_config, preserve_server_names,
+        safe_static_root_path, server_name_overlaps, static_site_config, DeploymentNodeProxyPlan,
     };
 
     #[test]
@@ -3754,6 +3786,16 @@ mod node_proxy_tests {
     }
 
     #[test]
+    fn managed_runtime_refresh_preserves_domain_aliases() {
+        let aliases = vec!["example.com".to_owned(), "www.example.com".to_owned()];
+        let generated = "server {\n    server_name example.com;\n    root /srv/app/current;\n}\n";
+        let updated = preserve_server_names(generated, &aliases).unwrap();
+        assert!(updated.contains("server_name example.com www.example.com;"));
+        assert_eq!(nginx_server_names(&updated), aliases);
+        assert!(preserve_server_names("server { return 404; }", &aliases).is_err());
+    }
+
+    #[test]
     fn node_proxy_detects_literal_and_wildcard_domain_conflicts() {
         assert!(server_name_overlaps("api.example.com", "api.example.com"));
         assert!(server_name_overlaps("*.example.com", "api.example.com"));
@@ -3859,7 +3901,7 @@ mod node_proxy_tests {
     }
 }
 
-fn server_name_overlaps(name: &str, domain: &str) -> bool {
+pub(super) fn server_name_overlaps(name: &str, domain: &str) -> bool {
     if name.eq_ignore_ascii_case(domain) {
         return true;
     }

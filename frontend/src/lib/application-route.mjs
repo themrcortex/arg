@@ -1,4 +1,4 @@
-const sections = new Set(['deploy', 'launch', 'runtime', 'resources', 'integrations'])
+const sections = new Set(['deploy', 'launch', 'runtime', 'resources', 'nginx', 'integrations'])
 
 export function parseApplicationRoute(hash) {
   const query = String(hash).split('?')[1] || ''

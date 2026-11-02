@@ -14,6 +14,12 @@ test('new deployment has a shareable route that stays open after refresh', () =>
   assert.deepEqual(parseApplicationRoute(hash), { appId: 'node-app', serverUuid: 'vps-1', section: 'launch' })
 })
 
+test('application nginx tab has a stable shareable route', () => {
+  const hash = buildApplicationRoute({ appId: 'app-nginx', serverUuid: 'vps-1', section: 'nginx' })
+  assert.equal(hash, '#/apps?app=app-nginx&server=vps-1&section=nginx')
+  assert.deepEqual(parseApplicationRoute(hash), { appId: 'app-nginx', serverUuid: 'vps-1', section: 'nginx' })
+})
+
 test('legacy and invalid application routes safely default to deployments', () => {
   assert.deepEqual(parseApplicationRoute('#/apps?app=a&server=b'), { appId: 'a', serverUuid: 'b', section: 'deploy' })
   assert.deepEqual(parseApplicationRoute('#/apps?app=a&server=b&section=terminal'), { appId: 'a', serverUuid: 'b', section: 'deploy' })

@@ -325,8 +325,17 @@ pub(super) fn router(state: AppState) -> Router {
         .route(
             "/api/apps/{id}/nginx-site",
             get(nginx_domains::get)
+                .post(nginx_domains::ensure)
                 .put(nginx_domains::link)
                 .delete(nginx_domains::unlink),
+        )
+        .route(
+            "/api/apps/{id}/nginx-site/domains",
+            put(nginx_domains::update_domains),
+        )
+        .route(
+            "/api/apps/{id}/nginx-site/config",
+            put(nginx_domains::save_config),
         )
         .route(
             "/api/apps/{id}/backups",

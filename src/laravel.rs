@@ -765,7 +765,12 @@ fn php_fpm_pool_exists(app_id: &str, preferred_version: &str) -> bool {
         .any(|version| php_fpm_paths(version, app_id).is_ok_and(|(pool, _, _)| pool.is_file()))
 }
 
-fn app_nginx_config(app_id: &str, domain: &str, socket: &str, octane_port: Option<u16>) -> String {
+pub(super) fn app_nginx_config(
+    app_id: &str,
+    domain: &str,
+    socket: &str,
+    octane_port: Option<u16>,
+) -> String {
     let root = deployment_root()
         .join("apps")
         .join(app_id)
@@ -1058,13 +1063,20 @@ fn laravel_web_helper(request: &Value) -> Result<Value, String> {
         return Err("فایل .env پایدار پیدا نشد یا symlink نامعتبر است.".into());
     }
     let socket = socket_path.to_string_lossy().into_owned();
-    let content = app_nginx_config(app_id, domain, &socket, octane_port);
+    let mut content = app_nginx_config(app_id, domain, &socket, octane_port);
     let existing = nginx::execute_privileged_request("nginx-get", &json!({"name":site_name}));
     let already_exists = existing["ok"] == true;
+    let existing_content = existing["data"]["content"].as_str();
     let update_managed = already_exists
-        && existing["data"]["content"].as_str().is_some_and(|old| {
+        && existing_content.is_some_and(|old| {
             old.lines().next() == Some(format!("# ARG managed Laravel site app={app_id}").as_str())
         });
+    if update_managed {
+        let names = nginx::nginx_server_names(existing_content.unwrap_or_default());
+        if names.iter().any(|name| name == domain) {
+            content = nginx::preserve_server_names(&content, &names)?;
+        }
+    }
     if already_exists
         && existing["data"]["content"].as_str() != Some(content.as_str())
         && !update_managed

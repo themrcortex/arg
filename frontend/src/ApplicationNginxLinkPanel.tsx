@@ -1,83 +1,111 @@
-import { useEffect, useState } from 'react'
-import { Globe2, Link2, LoaderCircle, Unlink } from 'lucide-react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { Check, ExternalLink, Globe2, LoaderCircle, Plus, RefreshCw, Save, ToggleLeft } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog'
 
-type Site = { name: string; server_names?: string[]; enabled?: boolean; ssl_enabled?: boolean }
-type LinkState = { site: { name: string } | null; domain?: string | null }
-type Traffic = { available: boolean; sample_requests?: number; sample_body_bytes?: number; status_groups?: number[]; sample_limit?: number; message?: string }
+type Site = { name: string; content: string; content_hash: string; enabled: boolean; ssl_enabled?: boolean; application_id?: string }
+type SiteState = { configured: boolean; site: Site | null; domain: string | null; domains: string[]; framework?: string; warning?: string | null }
 
 export function ApplicationNginxLinkPanel({ app, notify }: { app: { id: string; name: string; domain?: string | null }; notify: (message: string) => void }) {
-  const [open, setOpen] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [link, setLink] = useState<LinkState | null>(null)
-  const [sites, setSites] = useState<Site[]>([])
-  const [selected, setSelected] = useState('')
-  const [confirm, setConfirm] = useState<'link' | 'unlink' | null>(null)
+  const [state, setState] = useState<SiteState | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
-  const [traffic, setTraffic] = useState<Traffic | null>(null)
-  const [trafficLoading, setTrafficLoading] = useState(false)
-  const [trafficRefresh, setTrafficRefresh] = useState(0)
-  const matching = sites.filter((site) => app.domain && site.server_names?.includes(app.domain))
+  const [primary, setPrimary] = useState(app.domain || '')
+  const [aliases, setAliases] = useState('')
+  const [config, setConfig] = useState('')
+  const [configDirty, setConfigDirty] = useState(false)
 
-  useEffect(() => {
-    if (!open) return
-    let active = true
-    setLoading(true); setError('')
-    Promise.all([api<LinkState>(`apps/${encodeURIComponent(app.id)}/nginx-site`), api<{ sites: Site[] }>('nginx/sites')])
-      .then(([current, inventory]) => { if (active) { setLink(current); setSites(inventory.sites || []); setSelected(inventory.sites?.find((site) => site.server_names?.includes(app.domain || ''))?.name || '') } })
-      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : 'اطلاعات اتصال Nginx دریافت نشد.') })
-      .finally(() => { if (active) setLoading(false) })
-    return () => { active = false }
-  }, [open, app.id, app.domain])
-
-  useEffect(() => {
-    if (!open || !link?.site?.name) { setTraffic(null); return }
-    let active = true
-    setTrafficLoading(true)
-    api<Traffic>(`nginx/sites/${encodeURIComponent(link.site.name)}/traffic`)
-      .then((result) => { if (active) setTraffic(result) })
-      .catch((cause) => { if (active) setTraffic({ available: false, message: cause instanceof Error ? cause.message : 'خواندن آمار Nginx ناموفق بود.' }) })
-      .finally(() => { if (active) setTrafficLoading(false) })
-    return () => { active = false }
-  }, [open, link?.site?.name, trafficRefresh])
-
-  async function apply() {
-    if (!confirm) return
-    setBusy(true); setError('')
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    setError('')
     try {
-      const endpoint = `apps/${encodeURIComponent(app.id)}/nginx-site`
-      if (confirm === 'link') {
-        const result = await api<{ site_name: string }>(endpoint, { method: 'PUT', body: JSON.stringify({ site_name: selected, confirmed: true }) })
-        setLink({ site: { name: result.site_name }, domain: app.domain }); notify('لینک مالکیت اپ و سایت Nginx ثبت شد؛ کانفیگ Nginx تغییر نکرد.')
-      } else {
-        await api(endpoint, { method: 'DELETE', body: JSON.stringify({ confirmed: true }) })
-        setLink({ site: null, domain: app.domain }); notify('لینک مدیریتی برداشته شد؛ سایت و تنظیمات Nginx دست‌نخورده ماندند.')
-      }
-      setConfirm(null)
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'تغییر لینک Nginx انجام نشد.') }
-    finally { setBusy(false) }
+      const result = await api<SiteState>(`apps/${encodeURIComponent(app.id)}/nginx-site`)
+      setState(result)
+      setPrimary(result.domain || '')
+      setAliases((result.domains || []).filter((domain) => domain !== result.domain).join(', '))
+      setConfig(result.site?.content || '')
+      setConfigDirty(false)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'وضعیت تنظیمات Nginx خوانده نشد.')
+    } finally {
+      setLoading(false)
+    }
+  }, [app.id])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  async function ensureSite() {
+    setBusy('create'); setError('')
+    try {
+      await api(`apps/${encodeURIComponent(app.id)}/nginx-site`, { method: 'POST' })
+      await refresh()
+      notify('کانفیگ Nginx ساخته و اعتبارسنجی شد؛ تا آماده‌شدن release غیرفعال می‌ماند.')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'ساخت تنظیمات Nginx ناموفق بود.') }
+    finally { setBusy('') }
   }
 
-  return <Card className="mt-3 border-border/70 bg-background/35">
-    <CardHeader className="flex-row items-center justify-between gap-3 py-3"><div><CardTitle className="flex items-center gap-2 text-sm"><Globe2 size={15} className="text-primary"/>دامنه و Nginx</CardTitle><CardDescription className="mt-1 text-[10px]">اتصال فقط بعد از تطبیق دامنهٔ اپ با server_name ثبت می‌شود؛ فایل کانفیگ تغییر نمی‌کند.</CardDescription></div><Button variant="outline" size="sm" onClick={() => setOpen((value) => !value)}>{open ? 'بستن' : 'مدیریت لینک'}</Button></CardHeader>
-    {open && <CardContent className="space-y-3 pt-1">{error && <p role="alert" className="rounded-lg border border-rose-300/20 p-2 text-xs text-rose-200">{error}</p>}{loading ? <LoaderCircle className="mx-auto animate-spin text-primary" size={18}/> : <>
-      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 p-3 text-xs"><span>دامنهٔ اپ:</span><code dir="ltr" className="font-mono">{app.domain || 'ثبت نشده'}</code>{link?.site && <><Badge variant="success">متصل به {link.site.name}</Badge><Button size="sm" variant="outline" onClick={() => setConfirm('unlink')}><Unlink size={13}/>قطع لینک</Button></>}</div>
-      {link?.site && <div className="space-y-2 rounded-lg border border-border/70 bg-background/35 p-3"><div className="flex items-center justify-between gap-2"><div><p className="text-xs font-medium">ترافیک درخواست‌های سایت</p><p className="mt-1 text-[10px] text-muted-foreground">نمونهٔ محدود لاگ دسترسی Nginx؛ آمار تجمعی شبکه یا latency نیست.</p></div><Button size="icon" variant="outline" aria-label="تازه‌سازی ترافیک سایت" title="تازه‌سازی" disabled={trafficLoading} onClick={() => setTrafficRefresh((value) => value + 1)}><LoaderCircle size={14} className={trafficLoading ? 'animate-spin' : ''}/></Button></div>{trafficLoading && !traffic ? <div className="h-12 animate-pulse rounded-md bg-muted/40"/> : traffic?.available ? <><div className="grid grid-cols-2 gap-2 text-xs"><div className="rounded-md bg-background/50 p-2">درخواست در نمونه<strong className="mt-1 block font-mono" dir="ltr">{new Intl.NumberFormat('fa-IR').format(traffic.sample_requests || 0)}</strong></div><div className="rounded-md bg-background/50 p-2">حجم پاسخ ثبت‌شده<strong className="mt-1 block font-mono" dir="ltr">{formatBytes(traffic.sample_body_bytes || 0)}</strong></div></div><div className="flex flex-wrap gap-1">{(traffic.status_groups || []).map((count, index) => <Badge key={index} variant="outline" dir="ltr">{index + 1}xx · {new Intl.NumberFormat('fa-IR').format(count)}</Badge>)}</div><p className="text-[10px] text-muted-foreground">از حداکثر {new Intl.NumberFormat('fa-IR').format(traffic.sample_limit || 5000)} خط آخر لاگ خوانده شده است؛ زمان آخرین درخواست یا تاریخچهٔ کامل از این نمونه قابل استنتاج نیست.</p></> : <p className="text-[11px] leading-5 text-muted-foreground">{traffic?.message || 'آمار در دسترس نیست؛ برای این سایت باید access_log اختصاصی تنظیم شده باشد.'}</p>}</div>}
-      {!link?.site && <div className="flex flex-wrap items-center gap-2"><select value={selected} onChange={(event) => setSelected(event.target.value)} disabled={!app.domain || !matching.length} className="h-10 min-w-0 flex-1 rounded-md border border-input bg-background px-3 text-xs"><option value="">{!app.domain ? 'ابتدا دامنهٔ اپ را ثبت کن' : matching.length ? 'سایت هم‌دامنه را انتخاب کن' : 'سایت Nginx با این دامنه پیدا نشد'}</option>{matching.map((site) => <option key={site.name} value={site.name}>{site.name}{site.ssl_enabled ? ' · HTTPS' : ''}</option>)}</select><Button size="sm" onClick={() => setConfirm('link')} disabled={!selected}><Link2 size={13}/>اتصال سایت</Button></div>}
-      <p className="text-[10px] leading-5 text-muted-foreground">این لینک مالکیت و ناوبری اپ را ثبت می‌کند. صدور SSL، reload، تغییر فایروال یا ویرایش کانفیگ در این دکمه انجام نمی‌شود.</p>
-    </>}</CardContent>}
-    <Dialog open={!!confirm} onOpenChange={(value) => { if (!value && !busy) setConfirm(null) }}><DialogContent className="sm:max-w-md"><DialogHeader><DialogTitle>{confirm === 'link' ? 'اتصال سایت Nginx به اپ' : 'قطع لینک مدیریتی'}</DialogTitle><DialogDescription>{confirm === 'link' ? `سایت «${selected}» به اپ «${app.name}» وصل می‌شود. سرور Nginx، فایل‌ها و SSL تغییر نمی‌کنند.` : `فقط لینک سایت «${link?.site?.name}» به اپ برداشته می‌شود. فایل و سرویس سایت باقی می‌مانند.`}</DialogDescription></DialogHeader><div className="flex justify-end gap-2"><Button variant="outline" onClick={() => setConfirm(null)} disabled={busy}>انصراف</Button><Button variant={confirm === 'unlink' ? 'destructive' : 'default'} onClick={() => void apply()} disabled={busy}>{busy && <LoaderCircle size={14} className="animate-spin"/>}{confirm === 'link' ? 'تأیید اتصال' : 'تأیید قطع لینک'}</Button></div></DialogContent></Dialog>
-  </Card>
-}
+  async function saveDomains(event: FormEvent) {
+    event.preventDefault()
+    const all = [primary, ...aliases.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean)].map((value) => value.trim()).filter(Boolean)
+    setBusy('domains'); setError('')
+    try {
+      await api(`apps/${encodeURIComponent(app.id)}/nginx-site/domains`, { method: 'PUT', body: JSON.stringify({ domains: all }) })
+      await refresh()
+      notify('دامنه‌ها و server_name همگام شدند؛ Nginx کانفیگ را اعتبارسنجی و در صورت نیاز امن reload کرد.')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'ذخیرهٔ دامنه‌ها ناموفق بود.') }
+    finally { setBusy('') }
+  }
 
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value < 0) return '—'
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']; let size = value; let index = 0
-  while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1 }
-  return `${new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(size)} ${units[index]}`
+  async function saveConfig() {
+    if (!state?.site) return
+    setBusy('config'); setError('')
+    try {
+      await api(`apps/${encodeURIComponent(app.id)}/nginx-site/config`, { method: 'PUT', body: JSON.stringify({ content: config, expected_hash: state.site.content_hash }) })
+      setConfigDirty(false)
+      await refresh()
+      notify('کانفیگ سفارشی ذخیره شد؛ nginx -t موفق بود و Nginx امن reload شد.')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'ذخیرهٔ کانفیگ Nginx ناموفق بود.') }
+    finally { setBusy('') }
+  }
+
+  async function toggleSite() {
+    if (!state?.site) return
+    setBusy('toggle'); setError('')
+    try {
+      await api(`nginx/sites/${encodeURIComponent(state.site.name)}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled: !state.site.enabled }) })
+      await refresh()
+      notify(state.site.enabled ? 'سایت Nginx غیرفعال شد.' : 'سایت Nginx فعال شد.')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'تغییر وضعیت سایت Nginx ناموفق بود.') }
+    finally { setBusy('') }
+  }
+
+  const openFullManager = (tab: 'overview' | 'domains' | 'config' = 'overview') => {
+    if (!state?.site) return
+    const query = new URLSearchParams({ site: state.site.name, tab })
+    window.location.hash = `#/nginx?${query.toString()}`
+  }
+
+  return <Card className="border-border/70 bg-background/35">
+    <CardHeader className="flex-row flex-wrap items-start justify-between gap-3 py-4">
+      <div><CardTitle className="flex items-center gap-2 text-sm"><Globe2 size={16} className="text-primary"/>دامنه و Nginx</CardTitle><CardDescription className="mt-1 max-w-3xl text-xs leading-5">کانفیگ مستقل همین اپ، دامنهٔ اصلی و Aliasها را مدیریت کن. هر ذخیره با nginx -t بررسی می‌شود و فایل سایت در شکست اعتبارسنجی دست‌نخورده می‌ماند.</CardDescription></div>
+      <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void refresh()} disabled={loading || !!busy}><RefreshCw size={13} className={loading ? 'animate-spin' : ''}/>تازه‌سازی</Button>{state?.site && <Button size="sm" variant="outline" onClick={() => openFullManager()}><ExternalLink size={13}/>صفحهٔ کامل Nginx</Button>}</div>
+    </CardHeader>
+    <CardContent className="space-y-4 pt-0">
+      {error && <p role="alert" className="rounded-lg border border-rose-300/20 bg-rose-300/[.04] p-3 text-xs leading-5 text-rose-100">{error}</p>}
+      {loading ? <div className="flex min-h-28 items-center justify-center"><LoaderCircle className="animate-spin text-primary" size={20}/></div> : <>
+        {state?.warning && <p role="status" className="rounded-lg border border-amber-300/20 bg-amber-300/[.04] p-3 text-xs leading-5 text-amber-100">{state.warning}</p>}
+        {!state?.site && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed border-primary/30 bg-primary/[.035] p-4"><div><p className="text-sm font-medium">{app.domain ? 'کانفیگ Nginx برای این اپ پیدا نشد' : 'برای ساخت سایت، دامنه لازم است'}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{app.domain ? 'ساخت کانفیگ امن و غیرفعال انجام می‌شود؛ پس از اولین انتشار، تنظیمات runtime تکمیل و سایت فعال می‌شود.' : 'دامنه را در فرم زیر اضافه کن. سپس کانفیگ سایت به‌صورت خودکار ساخته می‌شود.'}</p></div>{app.domain && <Button size="sm" onClick={() => void ensureSite()} disabled={!!busy}><Plus size={14}/>{busy === 'create' ? 'در حال ساخت…' : 'ساخت کانفیگ Nginx'}</Button>}</div>}
+        {state?.site && <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 bg-background/40 p-3"><div className="flex min-w-0 flex-wrap items-center gap-2"><Badge variant={state.site.enabled ? 'success' : 'outline'}>{state.site.enabled ? 'فعال' : 'غیرفعال'}</Badge><Badge variant={state.site.ssl_enabled ? 'success' : 'outline'}>{state.site.ssl_enabled ? 'HTTPS تنظیم شده' : 'SSL تنظیم نشده'}</Badge><code dir="ltr" className="font-mono text-xs">{state.site.name}</code></div><Button size="sm" variant="outline" onClick={() => void toggleSite()} disabled={!!busy}><ToggleLeft size={14}/>{state.site.enabled ? 'غیرفعال‌کردن' : 'فعال‌کردن'}</Button></div>}
+        <form onSubmit={(event) => void saveDomains(event)} className="space-y-3 rounded-xl border border-border/70 p-4">
+          <div><h3 className="text-sm font-semibold">دامنه‌ها</h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">اولین مقدار دامنهٔ اصلی است. Aliasها را با ویرگول یا خط جدید جدا کن؛ برای حذف همهٔ دامنه‌ها هر دو فیلد را خالی و ذخیره کن.</p></div>
+          <div className="grid gap-3 md:grid-cols-2"><label className="space-y-1.5 text-xs"><span>دامنهٔ اصلی</span><input dir="ltr" className="h-10 w-full rounded-md border border-input bg-background px-3 text-left font-mono text-xs" value={primary} onChange={(event) => setPrimary(event.target.value)} placeholder="app.example.com" /></label><label className="space-y-1.5 text-xs"><span>دامنه‌های جایگزین</span><input dir="ltr" className="h-10 w-full rounded-md border border-input bg-background px-3 text-left font-mono text-xs" value={aliases} onChange={(event) => setAliases(event.target.value)} placeholder="www.example.com, api.example.com" /></label></div>
+          <div className="flex flex-wrap gap-2"><Button size="sm" type="submit" disabled={!!busy}><Save size={14}/>{busy === 'domains' ? 'در حال ذخیره…' : 'ذخیرهٔ دامنه‌ها'}</Button>{state?.site && <Button size="sm" type="button" variant="outline" onClick={() => openFullManager('domains')}><ExternalLink size={13}/>DNS و SSL</Button>}</div>
+        </form>
+        {state?.site && <section className="space-y-3 rounded-xl border border-border/70 p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><h3 className="text-sm font-semibold">کانفیگ Nginx</h3><p className="mt-1 text-[11px] leading-5 text-muted-foreground">برای ویرایش کامل، متن کانفیگ را تغییر بده. نام دامنه‌ها را از فرم بالا نگه دار تا تنظیمات اپ و Nginx هماهنگ بماند.</p></div><Button size="sm" variant="outline" onClick={() => openFullManager('config')}><ExternalLink size={13}/>ویرایشگر کامل</Button></div><textarea dir="ltr" spellCheck={false} value={config} onChange={(event) => { setConfig(event.target.value); setConfigDirty(true) }} className="min-h-72 w-full resize-y rounded-lg border border-input bg-background p-3 text-left font-mono text-[11px] leading-5 outline-none focus-visible:ring-2 focus-visible:ring-primary" aria-label="کانفیگ Nginx اپلیکیشن"/><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-[10px] text-muted-foreground">سایت‌های مدیریت‌شده با اپ ممکن است هنگام استقرار runtime دوباره همگام شوند.</p><Button size="sm" onClick={() => void saveConfig()} disabled={!configDirty || !!busy}><Check size={14}/>{busy === 'config' ? 'در حال اعتبارسنجی…' : 'ذخیره و اعتبارسنجی'}</Button></div></section>}
+      </>}
+    </CardContent>
+  </Card>
 }

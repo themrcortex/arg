@@ -138,7 +138,7 @@ fn valid_name(value: &str) -> bool {
     !value.is_empty() && value.chars().count() <= 80 && !value.chars().any(char::is_control)
 }
 
-fn valid_domain(value: &str) -> bool {
+pub(super) fn valid_domain(value: &str) -> bool {
     let value = value.trim().trim_end_matches('.');
     if value.is_empty() || value.len() > 253 || value.contains(['*', '/', ':', '@', '\\']) {
         return false;
@@ -292,7 +292,7 @@ pub(super) fn valid_wordpress_version(value: &str) -> bool {
         })
 }
 
-fn domain_patterns_overlap(left: &str, right: &str) -> bool {
+pub(super) fn domain_patterns_overlap(left: &str, right: &str) -> bool {
     fn matches(pattern: &str, domain: &str) -> bool {
         if let Some(suffix) = pattern.strip_prefix("*.") {
             domain.ends_with(&format!(".{suffix}")) && domain != suffix
@@ -532,6 +532,7 @@ pub(super) async fn create(
     check_origin(&headers)?;
     let _operation_guard = APP_REGISTRY_OPERATION_LOCK.lock().await;
     let (name, domain) = validate_input(&input)?;
+    let mut listen_port = input.listen_port;
     let actor;
     let owner;
     {
@@ -549,7 +550,11 @@ pub(super) async fn create(
                 ));
             }
         }
-        validate_port_free(&db, input.listen_port, None)?;
+        if listen_port.is_none() && domain.is_some() && is_node_runtime_framework(&input.framework)
+        {
+            listen_port = Some(allocate_listen_port(&db)?);
+        }
+        validate_port_free(&db, listen_port, None)?;
         check_domain_conflicts(&db, &owner, domain.as_deref(), None)?;
         let duplicate_name: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM applications WHERE owner_server_uuid=?1 AND name=?2 COLLATE NOCASE AND deleted_at IS NULL)", params![owner,name], |row| row.get(0)).map_err(db_error)?;
         if duplicate_name {
@@ -604,63 +609,94 @@ pub(super) async fn create(
         .iter()
         .map(|label| label.trim())
         .collect::<Vec<_>>();
-    let db = state.lock().unwrap();
-    db.execute(
-        CREATE_APPLICATION_SQL,
-        params![
-            id,
-            owner,
-            name,
-            input.description.trim(),
-            input.framework,
-            input.runtime_version,
-            input.build_runtime_version,
-            input.source_type,
-            domain,
-            input.listen_port.map(i64::from),
-            serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),
-            input.desired_state,
-            actor,
-            at,
-            input.static_output_path,
-            input.static_spa_fallback,
-            input.wordpress_version.trim()
-        ],
-    )
-    .map_err(|error_value| {
-        if error_value.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
-            error(
-                StatusCode::CONFLICT,
-                "نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.",
-            )
+    let app = {
+        let db = state.lock().unwrap();
+        db.execute(
+            CREATE_APPLICATION_SQL,
+            params![
+                id,
+                owner,
+                name,
+                input.description.trim(),
+                input.framework,
+                input.runtime_version,
+                input.build_runtime_version,
+                input.source_type,
+                domain,
+                listen_port.map(i64::from),
+                serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),
+                input.desired_state,
+                actor,
+                at,
+                input.static_output_path,
+                input.static_spa_fallback,
+                input.wordpress_version.trim()
+            ],
+        )
+        .map_err(|error_value| {
+            if error_value.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+                error(
+                    StatusCode::CONFLICT,
+                    "نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.",
+                )
+            } else {
+                db_error(error_value)
+            }
+        })?;
+        if let Some(environment_id) = input.environment_id.as_deref() {
+            app_workspaces::set_application_environment(&db, &id, environment_id, &actor)
+                .map_err(db_error)?;
         } else {
-            db_error(error_value)
+            app_workspaces::assign_default(&db, &id, &owner, &actor).map_err(db_error)?;
         }
-    })?;
-    if let Some(environment_id) = input.environment_id.as_deref() {
-        app_workspaces::set_application_environment(&db, &id, environment_id, &actor)
-            .map_err(db_error)?;
+        audit(
+            &db,
+            &actor,
+            "application.create",
+            &format!(
+                "id={id}; server={owner}; framework={}; source={}",
+                input.framework, input.source_type
+            ),
+        );
+        let mut apps = read_apps(&db, &owner, false).map_err(db_error)?;
+        app_workspaces::add_context(&db, &mut apps).map_err(db_error)?;
+        apps.into_iter()
+            .find(|app| app["id"] == id)
+            .unwrap_or(Value::Null)
+    };
+    let nginx_setup = if domain.is_some() {
+        match nginx_domains::ensure_for_application(&state, &id, &actor).await {
+            Ok(result) => result,
+            Err((status, body)) => {
+                json!({"configured":false,"http_status":status.as_u16(),"message":body["error"].as_str().unwrap_or("ساخت تنظیمات Nginx ناموفق بود؛ از تب دامنه و Nginx دوباره تلاش کن.")})
+            }
+        }
     } else {
-        app_workspaces::assign_default(&db, &id, &owner, &actor).map_err(db_error)?;
-    }
-    audit(
-        &db,
-        &actor,
-        "application.create",
-        &format!(
-            "id={id}; server={owner}; framework={}; source={}",
-            input.framework, input.source_type
-        ),
-    );
-    let mut apps = read_apps(&db, &owner, false).map_err(db_error)?;
-    app_workspaces::add_context(&db, &mut apps).map_err(db_error)?;
-    let app = apps
-        .into_iter()
-        .find(|app| app["id"] == id)
-        .unwrap_or(Value::Null);
+        json!({"configured":false,"message":"دامنه‌ای ثبت نشده؛ در تب دامنه و Nginx می‌توانی دامنه را اضافه کنی."})
+    };
     Ok(Json(
-        json!({"app":app,"message":"رکورد اپلیکیشن ساخته شد؛ هنوز هیچ کدی دریافت یا سرویسی اجرا نشده است."}),
+        json!({"app":app,"nginx_setup":nginx_setup,"message":"رکورد اپلیکیشن ساخته شد؛ Nginx در صورت ثبت دامنه به‌صورت امن آماده شده است. هنوز هیچ کدی دریافت یا سرویسی اجرا نشده است."}),
     ))
+}
+
+fn allocate_listen_port(db: &Connection) -> Result<u16, (StatusCode, Json<Value>)> {
+    let mut statement = db
+        .prepare("SELECT listen_port FROM applications WHERE listen_port IS NOT NULL AND deleted_at IS NULL")
+        .map_err(db_error)?;
+    let reserved = statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(db_error)?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(db_error)?;
+    let listening = listening_tcp_ports();
+    (30000_u16..40000_u16)
+        .find(|port| !reserved.contains(&i64::from(*port)) && !listening.contains(port))
+        .ok_or_else(|| {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "پورت آزاد برای reverse proxy خودکار پیدا نشد؛ پورت برنامه را دستی تعیین کن.",
+            )
+        })
 }
 
 pub(super) async fn list_staging(
