@@ -4557,6 +4557,53 @@ fn parse_systemd_service_commands(output: &str) -> HashMap<String, String> {
     commands
 }
 
+fn installed_apt_package_versions() -> Result<std::collections::HashMap<String, String>, String> {
+    let mut command = std::process::Command::new("dpkg-query");
+    command.args([
+        "-W",
+        "-f=${binary:Package}\t${Version}\t${db:Status-Status}\n",
+    ]);
+    let (success, output) = command_result(&mut command)?;
+    if !success {
+        return Err(output);
+    }
+    Ok(parse_installed_apt_package_versions(&output))
+}
+
+fn parse_installed_apt_package_versions(output: &str) -> std::collections::HashMap<String, String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let package = fields.next()?.split(':').next()?;
+            let version = fields.next()?;
+            let state = fields.next()?;
+            (state == "installed").then(|| (package.to_owned(), version.to_owned()))
+        })
+        .collect()
+}
+
+fn missing_apt_packages(
+    packages: &[String],
+    installed: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    packages
+        .iter()
+        .filter(|spec| {
+            let (name, requested_version) = spec
+                .split_once('=')
+                .map_or((spec.as_str(), None), |(name, version)| {
+                    (name, Some(version))
+                });
+            match installed.get(name) {
+                Some(version) => requested_version.is_some_and(|requested| requested != version),
+                None => true,
+            }
+        })
+        .cloned()
+        .collect()
+}
+
 fn execute_apt_request(action: &str, request: &Value) -> Value {
     if action == "apt-preview" {
         let packages: Vec<&str> = request["packages"]
@@ -4597,6 +4644,12 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
             .filter(|name| valid_package_name(name))
             .map(str::to_owned)
             .collect();
+        let installed = match installed_apt_package_versions() {
+            Ok(packages) => packages,
+            Err(message) => {
+                return json!({"ok":false,"error":format!("Could not read installed package status: {message}")});
+            }
+        };
         let mut runtimes = Vec::<Value>::new();
 
         let mut php_versions = std::collections::BTreeSet::new();
@@ -4654,7 +4707,9 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
             packages.sort();
             packages.dedup();
             if !packages.is_empty() {
-                runtimes.push(json!({"id":format!("php-{version}"),"family":"php","version":version.clone(),"label":format!("PHP {version}"),"packages":packages}));
+                let missing = missing_apt_packages(&packages, &installed);
+                let is_installed = missing.is_empty();
+                runtimes.push(json!({"id":format!("php-{version}"),"family":"php","version":version.clone(),"label":format!("PHP {version}"),"packages":packages,"missing_packages":missing,"installed":is_installed}));
             }
         }
         for version in python_versions {
@@ -4670,7 +4725,9 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
             packages.sort();
             packages.dedup();
             if !packages.is_empty() {
-                runtimes.push(json!({"id":format!("python-{version}"),"family":"python","version":version.clone(),"label":format!("Python {version}"),"packages":packages}));
+                let missing = missing_apt_packages(&packages, &installed);
+                let is_installed = missing.is_empty();
+                runtimes.push(json!({"id":format!("python-{version}"),"family":"python","version":version.clone(),"label":format!("Python {version}"),"packages":packages,"missing_packages":missing,"installed":is_installed}));
             }
         }
         for version in java_versions {
@@ -4684,7 +4741,9 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
                 Vec::new()
             };
             if !packages.is_empty() {
-                runtimes.push(json!({"id":format!("java-{version}"),"family":"java","version":version.clone(),"label":format!("OpenJDK {version}"),"packages":packages}));
+                let missing = missing_apt_packages(&packages, &installed);
+                let is_installed = missing.is_empty();
+                runtimes.push(json!({"id":format!("java-{version}"),"family":"java","version":version.clone(),"label":format!("OpenJDK {version}"),"packages":packages,"missing_packages":missing,"installed":is_installed}));
             }
         }
         for version in ruby_versions {
@@ -4694,7 +4753,9 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
                 .filter(|name| available.contains(name))
                 .collect();
             if !packages.is_empty() {
-                runtimes.push(json!({"id":format!("ruby-{version}"),"family":"ruby","version":version.clone(),"label":format!("Ruby {version}"),"packages":packages}));
+                let missing = missing_apt_packages(&packages, &installed);
+                let is_installed = missing.is_empty();
+                runtimes.push(json!({"id":format!("ruby-{version}"),"family":"ruby","version":version.clone(),"label":format!("Ruby {version}"),"packages":packages,"missing_packages":missing,"installed":is_installed}));
             }
         }
 
@@ -4717,7 +4778,9 @@ fn execute_apt_request(action: &str, request: &Value) -> Value {
                 if available.contains("npm") {
                     packages.push("npm".into());
                 }
-                runtimes.push(json!({"id":format!("node-{version}"),"family":"node","version":version.to_owned(),"label":format!("Node.js {version}"),"packages":packages}));
+                let missing = missing_apt_packages(&packages, &installed);
+                let is_installed = missing.is_empty();
+                runtimes.push(json!({"id":format!("node-{version}"),"family":"node","version":version.to_owned(),"label":format!("Node.js {version}"),"packages":packages,"missing_packages":missing,"installed":is_installed}));
                 if seen.len() >= 20 {
                     break;
                 }
@@ -5543,7 +5606,8 @@ mod update_progress_tests {
         backup_database, default_update_build_mode, default_update_strategy,
         encode_bounded_privileged_response, ensure_federation_identity_columns,
         ensure_metric_storage_columns, firewall_rule_validation_error, login, login_client_ip,
-        login_throttle_keys, panel_tls_deploy_hook_contents, panel_tls_lineage_from_source,
+        login_throttle_keys, missing_apt_packages, panel_tls_deploy_hook_contents,
+        panel_tls_lineage_from_source, parse_installed_apt_package_versions,
         parse_systemd_exec_start, parse_systemd_service_commands, process_belongs_to_arg_service,
         read_bounded_privileged_response, read_privileged_line, role_has_admin_access,
         update_progress_payload, valid_apt_install_spec, valid_tls_source_path,
@@ -5564,6 +5628,37 @@ mod update_progress_tests {
         )
         .unwrap();
         db
+    }
+
+    #[test]
+    fn runtime_pack_status_checks_exact_package_versions_and_reports_only_missing_packages() {
+        let installed = std::collections::HashMap::from([
+            ("php8.4-cli".to_owned(), "8.4.3-1".to_owned()),
+            ("nodejs".to_owned(), "22.12.0-1".to_owned()),
+        ]);
+        let requested = vec![
+            "php8.4-cli".to_owned(),
+            "php8.4-fpm".to_owned(),
+            "nodejs=22.12.0-1".to_owned(),
+            "nodejs=22.13.0-1".to_owned(),
+        ];
+        assert_eq!(
+            missing_apt_packages(&requested, &installed),
+            vec!["php8.4-fpm", "nodejs=22.13.0-1"]
+        );
+    }
+
+    #[test]
+    fn runtime_pack_inventory_counts_only_dpkg_installed_packages() {
+        let installed = parse_installed_apt_package_versions(
+            "php8.4-cli:amd64\t8.4.3-1\tinstalled\nphp8.4-fpm:amd64\t8.4.3-1\tconfig-files\n",
+        );
+        assert_eq!(installed.len(), 1);
+        assert_eq!(
+            installed.get("php8.4-cli").map(String::as_str),
+            Some("8.4.3-1")
+        );
+        assert!(!installed.contains_key("php8.4-fpm"));
     }
 
     #[test]
