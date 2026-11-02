@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.7.9-dev.5 — 2026-11-02
+
+### Fixed
+- Fix WordPress core version validation by using a browser-safe dotted version pattern that matches backend rules, including leading-zero rejection.
+
+### Added
+- Show available, installed, and partially installed PHP, Python, and Node.js runtime packages in the application form.
+- Install a selected runtime package through the existing administrator-only APT preview and confirmation flow, then refresh the real runtime inventory and select the installed version for that app.
+
 ## v0.7.9-dev.4 — 2026-11-02
 
 ### Added
