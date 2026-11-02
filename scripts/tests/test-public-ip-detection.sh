@@ -20,6 +20,15 @@ esac
 printf '%s\n' "$value"
 MOCK
 chmod +x "$tmp/bin/curl"
+cat > "$tmp/bin/rg" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "${1:-}" != '-qi' || $# -ne 3 ]]; then
+  echo 'unexpected ripgrep invocation in installer test' >&2
+  exit 2
+fi
+exec grep -Eqi -- "$2" "$3"
+MOCK
+chmod +x "$tmp/bin/rg"
 export PATH="$tmp/bin:$PATH"
 source "$tmp/detect.sh"
 
@@ -70,6 +79,6 @@ issue_certificate 'panel.example.com' 'admin@example.com' '' n \
   'https://acme.zerossl.com/v2/DV90' "$tmp/zerossl.ini" >/dev/null
 trap 'rm -rf "$tmp"' EXIT
 test "$(cat "$ARG_TEST_CERTBOT_COUNT")" = 2
-rg -q -- '--server https://acme.zerossl.com/v2/DV90' "$ARG_TEST_CERTBOT_ARGS"
-rg -F -q -- "--config $tmp/zerossl.ini" "$ARG_TEST_CERTBOT_ARGS"
+grep -Eq -- '--server https://acme[.]zerossl[.]com/v2/DV90' "$ARG_TEST_CERTBOT_ARGS"
+grep -Fq -- "--config $tmp/zerossl.ini" "$ARG_TEST_CERTBOT_ARGS"
 printf 'public IPv4 validation and alternate ACME retry tests passed\n'
