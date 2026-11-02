@@ -2,7 +2,10 @@ import * as React from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'
 import { cn } from '../../lib/utils'
-const Dialog = DialogPrimitive.Root
+type DialogProps = Omit<DialogPrimitive.DialogProps, 'onOpenChange'> & {
+  onOpenChange?: (open: boolean) => void
+}
+const Dialog = (props: DialogProps) => <DialogPrimitive.Root {...props} />
 const DialogTrigger = DialogPrimitive.Trigger
 const DialogClose = DialogPrimitive.Close
 const DialogContent = React.forwardRef<

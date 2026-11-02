@@ -2,7 +2,11 @@ import * as React from 'react'
 import * as SelectPrimitive from '@radix-ui/react-select'
 import { Check, ChevronDown } from 'lucide-react'
 import { cn } from '../../lib/utils'
-const Select = SelectPrimitive.Root
+type SelectProps = Omit<SelectPrimitive.SelectProps, 'onOpenChange' | 'onValueChange'> & {
+  onOpenChange?: (open: boolean) => void
+  onValueChange?: (value: string) => void
+}
+const Select = (props: SelectProps) => <SelectPrimitive.Root {...props} />
 const SelectValue = SelectPrimitive.Value
 const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,

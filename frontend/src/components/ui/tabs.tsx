@@ -1,7 +1,16 @@
 import * as React from 'react'
 import * as TabsPrimitive from '@radix-ui/react-tabs'
 import { cn } from '../../lib/utils'
-const Tabs = TabsPrimitive.Root
+type TabsProps = React.ComponentPropsWithoutRef<'div'> & {
+  ref?: React.Ref<HTMLDivElement>
+  value?: string
+  defaultValue?: string
+  dir?: 'ltr' | 'rtl'
+  orientation?: 'horizontal' | 'vertical'
+  activationMode?: 'automatic' | 'manual'
+  onValueChange?: (value: string) => void
+}
+const Tabs = (props: TabsProps) => <TabsPrimitive.Root {...props} />
 const TabsList = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.List>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.List>
