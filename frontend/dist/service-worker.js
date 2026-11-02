@@ -1,5 +1,5 @@
 /* ARG shell-only offline support. Authenticated responses and all API traffic are excluded. */
-const CACHE_NAME = 'arg-shell-7148add8a68364cc'
+const CACHE_NAME = 'arg-shell-276a96626c49461e'
 const SHELL = ['/', '/manifest.webmanifest', '/arg/brand/arg-favicon.png', '/arg/brand/arg-app-icon.png']
 
 async function cacheAsset(request, response) {
