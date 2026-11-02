@@ -9,8 +9,10 @@ use ::s3::{
 };
 use axum::{body::Body, http::header, response::Response};
 use base64::Engine as _;
+use ring::rand::{SecureRandom, SystemRandom};
 use std::{
     collections::HashMap,
+    future::Future,
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     os::fd::AsRawFd,
@@ -40,6 +42,7 @@ const S3_PROXY_MAX_TARGET_ADDRESSES: usize = 16;
 const S3_PROXY_MAX_HEADERS: usize = 8 * 1024;
 const S3_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const S3_PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const S3_TEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 static S3_SCAN_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 static S3_SCAN_QUEUE: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(S3_SCAN_QUEUE_CAPACITY);
@@ -431,6 +434,8 @@ pub(super) struct DeleteConnectionInput {
 #[derive(Deserialize)]
 pub(super) struct TestInput {
     bucket_name: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -931,30 +936,7 @@ fn head_error_means_object_missing(error: &::s3::error::S3Error) -> bool {
     }
 }
 
-fn head_error_confirms_missing_key(error: &::s3::error::S3Error) -> bool {
-    matches!(error, ::s3::error::S3Error::HttpFailWithBody(404, body) if body.to_ascii_lowercase().contains("nosuchkey"))
-}
-
-fn head_error_is_access_denied(error: &::s3::error::S3Error) -> bool {
-    matches!(error, ::s3::error::S3Error::HttpFailWithBody(401 | 403, _))
-}
-
 const VERIFY_MARKER_BODY: &[u8] = b"ARG S3 connection verification marker\n";
-
-#[derive(Debug, PartialEq, Eq)]
-enum VerifyMarkerAction {
-    Create,
-    Reuse,
-    Conflict,
-}
-
-fn verify_marker_action(existing_body: Option<&[u8]>) -> VerifyMarkerAction {
-    match existing_body {
-        None => VerifyMarkerAction::Create,
-        Some(body) if body == VERIFY_MARKER_BODY => VerifyMarkerAction::Reuse,
-        Some(_) => VerifyMarkerAction::Conflict,
-    }
-}
 
 fn verify_marker_bucket(bucket: &Bucket) -> Result<Bucket, String> {
     let mut headers = bucket.extra_headers.clone();
@@ -1460,151 +1442,200 @@ fn stop_s3_mount(request: &Value) -> Value {
     }
 }
 
-async fn test_bucket_connection(bucket: &Bucket) -> Value {
-    const VERIFY_KEY: &str = "arg-verify";
+fn verification_object_key() -> Result<String, String> {
+    let mut random = [0_u8; 16];
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| "ساخت شناسهٔ فایل موقت آزمایش S3 ناموفق بود.".to_string())?;
+    Ok(format!("arg-verify-{}", hex::encode(random)))
+}
 
-    let list_objects = bucket
-        .list_page(String::new(), Some("/".into()), None, None, Some(1))
-        .await
-        .is_ok();
-
-    let existing_marker = match bucket.head_object(VERIFY_KEY).await {
-        Ok((_, status)) if (200..300).contains(&status) => {
-            let mut response = match bucket.get_object_stream(VERIFY_KEY).await {
-                Ok(response) if (200..300).contains(&response.status_code) => response,
-                Ok(_) => {
-                    return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"Object arg-verify موجود است اما خواندن آن تأیید نشد؛ برای جلوگیری از حذف داده آن را بازنویسی نکردیم."})
-                }
-                Err(error) => {
-                    return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":format!("Object arg-verify موجود است اما خواندن آن تأیید نشد؛ بازنویسی انجام نشد: {}",helper_error(&error))})
-                }
-            };
-            let mut body = Vec::with_capacity(VERIFY_MARKER_BODY.len());
-            while let Some(chunk) = response.bytes.next().await {
-                let Ok(chunk) = chunk else {
-                    return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"خواندن Object arg-verify ناقص بود؛ برای حفظ داده آن را بازنویسی نکردیم."});
-                };
-                if body.len().saturating_add(chunk.len()) > 1024 {
-                    return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"Object arg-verify بزرگ‌تر از حد انتظار است؛ برای حفظ داده آن را بازنویسی نکردیم."});
-                }
-                body.extend_from_slice(&chunk);
-            }
-            Some(body)
-        }
-        Err(error) if head_error_confirms_missing_key(&error) => None,
-        Err(error) if head_error_is_access_denied(&error) => {
-            return json!({
-                "ok":true,
-                "status":"degraded",
-                "checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},
-                "marker_key":VERIFY_KEY,
-                "marker_persisted":false,
-                "message":"Endpoint پاسخ داد، اما مجوز بررسی Object آزمایشی کافی نیست؛ ARG چیزی در Bucket ننوشته است.",
-                "error":format!("سرویس‌دهنده دسترسی HeadObject را رد کرد: {}",helper_error(&error))
-            });
-        }
-        Ok(_) => {
-            return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"وضعیت Object arg-verify قابل‌اعتماد نبود؛ برای جلوگیری از بازنویسی، آزمایش متوقف شد."})
-        }
-        Err(error) => {
-            return json!({"ok":false,"status":"failed","checks":{"endpoint":false,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":format!("بررسی امن Object arg-verify ناموفق بود؛ بازنویسی انجام نشد: {}",helper_error(&error))})
-        }
-    };
-    match verify_marker_action(existing_marker.as_deref()) {
-        VerifyMarkerAction::Conflict => {
-            return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"marker_persisted":true,"error":"Objectی با نام arg-verify از قبل وجود دارد و محتوای آن با نشانگر ARG فرق می‌کند؛ برای حفظ داده آن را بازنویسی نکردیم."})
-        }
-        VerifyMarkerAction::Reuse => {
-            return json!({"ok":true,"status":"degraded","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":true},"marker_key":VERIFY_KEY,"marker_size_bytes":VERIFY_MARKER_BODY.len(),"marker_persisted":true,"message":"نشانگر arg-verify موجود و سالم است؛ دادهٔ موجود حفظ شد. چون نوشتن دوباره انجام نشد، مجوز نوشتن در این آزمایش دوباره بررسی نشده است."})
-        }
-        VerifyMarkerAction::Create => {}
+fn connection_test_mode(mode: Option<&str>) -> Option<&'static str> {
+    match mode {
+        None | Some("read-write") => Some("read-write"),
+        Some("read-only") => Some("read-only"),
+        Some(_) => None,
     }
+}
 
-    let marker_bucket = match verify_marker_bucket(bucket) {
-        Ok(bucket) => bucket,
-        Err(error) => {
-            return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":error})
-        }
-    };
-    let write_marker = match marker_bucket
-        .put_object_with_content_type(VERIFY_KEY, VERIFY_MARKER_BODY, "text/plain; charset=utf-8")
+fn record_bucket_catalog_check(response: &mut Value, mode: &str, available: bool) {
+    if mode != "read-write" {
+        return;
+    }
+    if let Some(checks) = response["checks"].as_object_mut() {
+        checks.insert("list_buckets".into(), json!(available));
+    }
+    if !available {
+        let existing = response["message"]
+            .as_str()
+            .unwrap_or("بررسی Bucket انجام شد.");
+        response["message"] = json!(format!(
+            "{existing} دسترسی فهرست‌کردن همهٔ Bucketها موجود نیست؛ دسترسی به Bucket مشخص‌شده آزمایش شد."
+        ));
+    }
+}
+
+async fn await_s3_test_request<T>(
+    future: impl Future<Output = Result<T, ::s3::error::S3Error>>,
+) -> Result<T, String> {
+    await_s3_test_request_for(S3_TEST_REQUEST_TIMEOUT, future).await
+}
+
+async fn await_s3_test_request_for<T>(
+    timeout: Duration,
+    future: impl Future<Output = Result<T, ::s3::error::S3Error>>,
+) -> Result<T, String> {
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(helper_error(&error)),
+        Err(_) => Err("مهلت درخواست S3 برای آزمایش اتصال تمام شد.".into()),
+    }
+}
+
+async fn verify_uploaded_object(bucket: &Bucket, key: &str) -> Result<(), String> {
+    let mut response = await_s3_test_request(bucket.get_object_stream(key))
         .await
-    {
-        Ok(response) if response.status_code() < 300 => true,
-        Ok(_) => {
-            return json!({
-                "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},
-                "marker_key":VERIFY_KEY,"error":"سرویس‌دهنده آپلود فایل آزمایشی arg-verify را تأیید نکرد."
-            });
-        }
-        Err(error) => {
-            return json!({
-                "ok":false,"status":"failed","checks":{"endpoint":false,"list_objects":list_objects,"write_marker":false,"read_marker":false},
-                "marker_key":VERIFY_KEY,"error":format!("آپلود فایل آزمایشی arg-verify ناموفق بود: {}", helper_error(&error))
-            });
-        }
-    };
-
-    let (head_object, head_status) = match bucket.head_object(VERIFY_KEY).await {
-        Ok((_headers, status)) => (true, status),
-        Err(_) => (false, 0),
-    };
-    let mut response = match bucket.get_object_stream(VERIFY_KEY).await {
-        Ok(response) => response,
-        Err(error) => {
-            return json!({
-                "ok":true,"status":"degraded","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
-                "marker_key":VERIFY_KEY,"marker_persisted":true,"error":format!("فایل arg-verify آپلود شد، اما مجوز خواندن برای تأیید در دسترس نیست: {}", helper_error(&error))
-            });
-        }
-    };
-    if response.status_code >= 300 {
-        return json!({
-            "ok":true,"status":"degraded","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
-            "marker_key":VERIFY_KEY,"marker_persisted":true,"error":"فایل arg-verify آپلود شد، اما سرویس‌دهنده مجوز خواندن آن را نداد."
-        });
+        .map_err(|error| format!("خواندن فایل آزمایشی ناموفق بود: {error}"))?;
+    if !(200..300).contains(&response.status_code) {
+        return Err("سرویس‌دهنده مجوز خواندن فایل آزمایشی را نداد.".into());
     }
     let mut body = Vec::with_capacity(VERIFY_MARKER_BODY.len());
-    while let Some(chunk) = response.bytes.next().await {
-        let Ok(chunk) = chunk else {
-            return json!({
-                "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
-                "marker_key":VERIFY_KEY,"error":"پاسخ خواندن فایل arg-verify ناقص بود."
-            });
+    loop {
+        let chunk = match tokio::time::timeout(S3_TEST_REQUEST_TIMEOUT, response.bytes.next()).await
+        {
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(_))) => return Err("خواندن فایل آزمایشی ناقص بود.".into()),
+            Ok(None) => break,
+            Err(_) => return Err("مهلت خواندن فایل آزمایشی S3 تمام شد.".into()),
         };
         if body.len().saturating_add(chunk.len()) > 1024 {
-            return json!({
-                "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
-                "marker_key":VERIFY_KEY,"error":"محتوای arg-verify غیرمنتظره و بزرگ‌تر از حد مجاز است."
-            });
+            return Err("فایل آزمایشی بزرگ‌تر از حد انتظار است.".into());
         }
         body.extend_from_slice(&chunk);
     }
-    let read_marker = body.as_slice() == VERIFY_MARKER_BODY;
-    if !read_marker {
+    if body.as_slice() != VERIFY_MARKER_BODY {
+        return Err("محتوای فایل پس از آپلود با محتوای مورد انتظار یکسان نبود.".into());
+    }
+    Ok(())
+}
+
+async fn remove_verification_object(bucket: &Bucket, key: &str) -> bool {
+    matches!(await_s3_test_request(bucket.delete_object(key)).await, Ok(response) if response.status_code() < 300)
+}
+
+async fn test_bucket_connection(bucket: &Bucket, mode: &str) -> Value {
+    if mode == "read-only" {
+        return match await_s3_test_request(bucket.list_page(
+            String::new(),
+            Some("/".into()),
+            None,
+            None,
+            Some(1),
+        ))
+        .await
+        {
+            Ok(_) => json!({
+                "ok":true,
+                "status":"connected",
+                "mode":"read-only",
+                "checks":{"endpoint":true,"list_objects":true},
+                "message":"Endpoint و دسترسی خواندن Objectهای این Bucket تأیید شد؛ هیچ Objectی نوشته یا تغییر داده نشد."
+            }),
+            Err(error) => json!({
+                "ok":false,
+                "status":"failed",
+                "mode":"read-only",
+                "checks":{"endpoint":false,"list_objects":false},
+                "message":"درخواست فقط‌خواندنی Bucket ناموفق بود؛ دسترسی ListObjects این Bucket و جزئیات خطا را بررسی کن.",
+                "error":error
+            }),
+        };
+    }
+
+    let list_objects = await_s3_test_request(bucket.list_page(
+        String::new(),
+        Some("/".into()),
+        None,
+        None,
+        Some(1),
+    ))
+    .await
+    .is_ok();
+    let key = match verification_object_key() {
+        Ok(key) => key,
+        Err(error) => {
+            return json!({"ok":false,"status":"failed","mode":"read-write","error":error})
+        }
+    };
+    let marker_bucket = match verify_marker_bucket(bucket) {
+        Ok(bucket) => bucket,
+        Err(error) => {
+            return json!({"ok":false,"status":"failed","mode":"read-write","marker_key":key,"error":error})
+        }
+    };
+    match await_s3_test_request(marker_bucket.put_object_with_content_type(
+        &key,
+        VERIFY_MARKER_BODY,
+        "text/plain; charset=utf-8",
+    ))
+    .await
+    {
+        Ok(response) if response.status_code() < 300 => {}
+        Ok(_) => {
+            return json!({"ok":false,"status":"failed","mode":"read-write","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false},"marker_key":key,"marker_may_persist":true,"error":"آپلود مشروط فایل آزمایشی تأیید نشد. برای جلوگیری از حذف احتمالی Object موجود، پاک‌سازی خودکار انجام نشد؛ کلید گزارش را در Bucket بررسی کن."});
+        }
+        Err(error) => {
+            return json!({"ok":false,"status":"failed","mode":"read-write","checks":{"endpoint":false,"list_objects":list_objects,"write_marker":false},"marker_key":key,"marker_may_persist":true,"error":format!("آپلود مشروط فایل آزمایشی ناموفق یا نامشخص بود: {error}. برای جلوگیری از حذف احتمالی Object موجود، پاک‌سازی خودکار انجام نشد؛ کلید گزارش را در Bucket بررسی کن.")});
+        }
+    }
+
+    let (head_object, head_status) = match await_s3_test_request(bucket.head_object(&key)).await {
+        Ok((_headers, status)) => (true, status),
+        Err(_) => (false, 0),
+    };
+    let read_result = verify_uploaded_object(bucket, &key).await;
+    let deleted = remove_verification_object(bucket, &key).await;
+    let read_marker = read_result.is_ok();
+    let checks = json!({
+        "endpoint":true,
+        "list_objects":list_objects,
+        "write_marker":true,
+        "head_object":head_object && (200..300).contains(&head_status),
+        "read_marker":read_marker,
+        "delete_marker":deleted
+    });
+    if let Err(error) = read_result {
         return json!({
-            "ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object,"read_marker":false},
-            "marker_key":VERIFY_KEY,"error":"محتوای فایل arg-verify پس از آپلود با محتوای مورد انتظار یکسان نبود."
+            "ok":false,
+            "status":"failed",
+            "mode":"read-write",
+            "checks":checks,
+            "marker_key":key,
+            "marker_size_bytes":VERIFY_MARKER_BODY.len(),
+            "marker_persisted":!deleted,
+            "error":if deleted { error } else { format!("{error} Object موقت حذف نشد؛ کلید آن در گزارش آمده و باید دستی پاک شود.") }
         });
     }
-    let status = if list_objects && head_object && (200..300).contains(&head_status) {
-        "connected"
+
+    let status = if deleted { "connected" } else { "degraded" };
+    let message = if !deleted {
+        "مجوز نوشتن و خواندن تأیید شد، اما حذف Object آزمایشی مجاز نبود؛ فایل موقت در Bucket باقی ماند و کلید آن در گزارش آمده است."
+    } else if !list_objects || !head_object || !(200..300).contains(&head_status) {
+        "خواندن/نوشتن و پاک‌سازی تأیید شد؛ فهرست Object یا HEAD محدود است. هیچ Object آزمایشی در Bucket باقی نماند."
+    } else if status == "connected" {
+        "Endpoint، خواندن/نوشتن و پاک‌سازی فایل موقت آزمایش تأیید شد؛ هیچ Object آزمایشی در Bucket باقی نماند."
     } else {
-        "degraded"
-    };
-    let message = if status == "connected" {
-        "اتصال، فهرست، خواندن و نوشتن S3 تأیید شد؛ فایل arg-verify در Bucket قرار گرفت."
-    } else {
-        "اتصال و خواندن/نوشتن تأیید شد و فایل arg-verify در Bucket قرار گرفت؛ دسترسی فهرست یا HEAD محدود است."
+        "خواندن/نوشتن و پاک‌سازی تأیید شد؛ فهرست Object یا HEAD محدود است. هیچ Object آزمایشی در Bucket باقی نماند."
     };
     json!({
         "ok":true,
         "status":status,
+        "mode":"read-write",
         "message":message,
-        "checks":{"endpoint":true,"list_objects":list_objects,"write_marker":write_marker,"head_object":head_object && (200..300).contains(&head_status),"read_marker":read_marker},
-        "marker_key":VERIFY_KEY,
+        "checks":checks,
+        "marker_key":key,
         "marker_size_bytes":VERIFY_MARKER_BODY.len(),
-        "marker_persisted":true
+        "marker_persisted":!deleted
     })
 }
 
@@ -1663,7 +1694,11 @@ async fn execute_network_action(action: &str, request: &Value, secret: &SecretCo
                 Ok(bucket) => bucket,
                 Err(error) => return json!({"ok":false,"error":error}),
             };
-            test_bucket_connection(&bucket).await
+            let mode = match connection_test_mode(request["mode"].as_str()) {
+                Some(mode) => mode,
+                _ => return json!({"ok":false,"error":"حالت بررسی اتصال معتبر نیست."}),
+            };
+            test_bucket_connection(&bucket, mode).await
         }
         "s3-create-bucket" => {
             let Some(name) = request["bucket"]
@@ -2290,16 +2325,59 @@ mod tests {
     }
 
     #[test]
-    fn verify_marker_never_replaces_existing_unrelated_objects() {
-        assert_eq!(verify_marker_action(None), VerifyMarkerAction::Create);
+    fn verification_object_keys_are_unique_and_scoped() {
+        let first = verification_object_key().unwrap();
+        let second = verification_object_key().unwrap();
+        assert!(first.starts_with("arg-verify-"));
+        assert_eq!(first.len(), "arg-verify-".len() + 32);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn connection_test_mode_preserves_old_clients_and_rejects_unknown_modes() {
+        assert_eq!(connection_test_mode(None), Some("read-write"));
+        assert_eq!(connection_test_mode(Some("read-only")), Some("read-only"));
+        assert_eq!(connection_test_mode(Some("read-write")), Some("read-write"));
+        assert_eq!(connection_test_mode(Some("admin")), None);
+    }
+
+    #[tokio::test]
+    async fn s3_connection_test_requests_have_a_bounded_deadline() {
+        let pending = std::future::pending::<Result<(), ::s3::error::S3Error>>();
+        let result = await_s3_test_request_for(Duration::from_millis(1), pending).await;
+
         assert_eq!(
-            verify_marker_action(Some(VERIFY_MARKER_BODY)),
-            VerifyMarkerAction::Reuse
+            result.unwrap_err(),
+            "مهلت درخواست S3 برای آزمایش اتصال تمام شد."
         );
-        assert_eq!(
-            verify_marker_action(Some(b"user data")),
-            VerifyMarkerAction::Conflict
-        );
+    }
+
+    #[test]
+    fn bucket_scoped_credentials_remain_connected_when_account_listing_is_denied() {
+        let mut response = json!({
+            "ok": true,
+            "status": "connected",
+            "message": "Bucket-specific reads and writes succeeded.",
+            "checks": {"write_marker": true, "read_marker": true, "delete_marker": true}
+        });
+
+        record_bucket_catalog_check(&mut response, "read-write", false);
+
+        assert_eq!(response["status"], "connected");
+        assert_eq!(response["checks"]["list_buckets"], false);
+        assert!(response["message"]
+            .as_str()
+            .unwrap()
+            .contains("Bucket مشخص‌شده"));
+    }
+
+    #[test]
+    fn read_only_test_does_not_report_account_wide_bucket_listing() {
+        let mut response = json!({"checks":{"list_objects":true}});
+
+        record_bucket_catalog_check(&mut response, "read-only", false);
+
+        assert!(response["checks"]["list_buckets"].is_null());
     }
 
     #[test]
@@ -2358,29 +2436,6 @@ mod tests {
             "*"
         );
         assert!(bucket.extra_headers.get(header::IF_NONE_MATCH).is_none());
-    }
-
-    #[test]
-    fn verify_marker_requires_explicit_missing_key_evidence_before_creation() {
-        use ::s3::error::S3Error;
-        assert!(head_error_confirms_missing_key(&S3Error::HttpFailWithBody(
-            404,
-            "<Error><Code>NoSuchKey</Code></Error>".into(),
-        )));
-        assert!(!head_error_confirms_missing_key(
-            &S3Error::HttpFailWithBody(404, String::new(),)
-        ));
-        assert!(!head_error_confirms_missing_key(
-            &S3Error::HttpFailWithBody(404, "<Error><Code>NoSuchBucket</Code></Error>".into(),)
-        ));
-        assert!(head_error_is_access_denied(&S3Error::HttpFailWithBody(
-            403,
-            "<Error><Code>AccessDenied</Code></Error>".into(),
-        )));
-        assert!(!head_error_is_access_denied(&S3Error::HttpFailWithBody(
-            404,
-            "<Error><Code>NoSuchKey</Code></Error>".into(),
-        )));
     }
 
     #[test]
@@ -3299,27 +3354,25 @@ pub(super) async fn test_connection(
     if !valid_bucket_name(&bucket) {
         return Err(error(StatusCode::BAD_REQUEST, "نام Bucket معتبر نیست."));
     }
+    let mode = connection_test_mode(input.mode.as_deref()).ok_or_else(|| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "حالت بررسی اتصال باید فقط‌خواندنی یا خواندن/نوشتن باشد.",
+        )
+    })?;
     let mut response =
-        privileged_request_async(json!({"action":"s3-test","id":id,"bucket":bucket})).await?;
+        privileged_request_async(json!({"action":"s3-test","id":id,"bucket":bucket,"mode":mode}))
+            .await?;
     if response["ok"] == true {
-        let list_buckets = privileged_request_async(json!({"action":"s3-list-buckets","id":id}))
-            .await
-            .map(|result| result["ok"] == true)
-            .unwrap_or(false);
-        if let Some(checks) = response["checks"].as_object_mut() {
-            checks.insert("list_buckets".into(), json!(list_buckets));
-        }
-        if !list_buckets {
-            if response["status"] == "connected" {
-                response["status"] = json!("degraded");
-            }
-            let existing = response["message"]
-                .as_str()
-                .unwrap_or("بررسی Bucket انجام شد.");
-            response["message"] = json!(format!(
-                "{existing} مجوز فهرست‌کردن همهٔ Bucketها در دسترس نیست."
-            ));
-        }
+        let list_buckets = if mode == "read-write" {
+            privileged_request_async(json!({"action":"s3-list-buckets","id":id}))
+                .await
+                .map(|result| result["ok"] == true)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        record_bucket_catalog_check(&mut response, mode, list_buckets);
     }
     response["bucket"] = json!(bucket);
     let success = response["ok"] == true;
@@ -3336,7 +3389,7 @@ pub(super) async fn test_connection(
         let db = state.lock().unwrap();
         let warning = status != "connected";
         db.execute("UPDATE s3_connections SET status=?1,last_test_at=?2,last_error=?3,updated_at=?2 WHERE id=?4",params![status,now(),if warning {Some(message.to_string())} else {None::<String>},id]).map_err(db_error)?;
-        if response["marker_persisted"] == true {
+        if response["ok"] == true {
             let _ = db.execute(
                 "UPDATE s3_buckets SET verified_at=?1,updated_at=?1 WHERE connection_id=?2 AND bucket_name=?3",
                 params![now(), id, bucket],
@@ -3347,15 +3400,16 @@ pub(super) async fn test_connection(
             &actor.username,
             "s3.connection.test",
             &format!(
-                "id={id}; bucket={}; outcome={status}; marker={}; marker_persisted={}; write_marker={}; list_objects={}; list_buckets={}; head_object={}; read_marker={}",
+                "id={id}; bucket={}; mode={mode}; outcome={status}; marker={}; marker_may_persist={}; write_marker={}; list_objects={}; list_buckets={}; head_object={}; read_marker={}; delete_marker={}",
                 bucket,
                 response["marker_key"].as_str().unwrap_or("none"),
-                response["marker_persisted"].as_bool().unwrap_or(false),
+                response["marker_persisted"].as_bool().unwrap_or(false) || response["marker_may_persist"].as_bool().unwrap_or(false),
                 response["checks"]["write_marker"].as_bool().unwrap_or(false),
                 response["checks"]["list_objects"].as_bool().unwrap_or(false),
                 response["checks"]["list_buckets"].as_bool().unwrap_or(false),
                 response["checks"]["head_object"].as_bool().unwrap_or(false),
                 response["checks"]["read_marker"].as_bool().unwrap_or(false),
+                response["checks"]["delete_marker"].as_bool().unwrap_or(false),
             ),
         );
     }

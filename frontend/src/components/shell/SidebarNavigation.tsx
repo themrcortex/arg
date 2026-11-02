@@ -18,11 +18,11 @@ type SidebarNavigationProps = {
 }
 
 const sections: Array<{ title: string; ids: PageId[] }> = [
-  { title: 'نمای کلی', ids: ['dashboard'] },
-  { title: 'سرور و شبکه', ids: ['system', 'network', 'ports', 'firewall', 'nodes'] },
-  { title: 'اپلیکیشن‌ها و سرویس‌ها', ids: ['apps', 'ssh-keys', 'nginx', 'docker', 'files', 's3', 'dns'] },
-  { title: 'عملیات سرور', ids: ['terminal', 'packages', 'services', 'mysql', 'maintenance'] },
-  { title: 'مدیریت ARG', ids: ['users', 'audit', 'settings', 'account', 'bug-report'] },
+  { title: 'نمای کلی و سلامت', ids: ['dashboard', 'system', 'audit'] },
+  { title: 'وب‌سایت و اپلیکیشن', ids: ['apps', 'nginx', 'dns', 'docker', 'ssh-keys'] },
+  { title: 'زیرساخت و شبکه', ids: ['nodes', 'app-mesh', 'network', 'ports', 'firewall', 'services', 'terminal'] },
+  { title: 'ذخیره‌سازی و داده', ids: ['files', 's3', 'mysql'] },
+  { title: 'مدیریت ARG', ids: ['maintenance', 'packages', 'users', 'settings', 'account', 'bug-report'] },
 ]
 
 export function SidebarNavigation({ items, currentPage, collapsed, mobileOpen, disabled, mobileCloseButton, onSelectPage, onToggleCollapsed, onCloseMobile }: SidebarNavigationProps) {

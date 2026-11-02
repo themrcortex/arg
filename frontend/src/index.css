@@ -41,48 +41,48 @@
 @layer base {
   :root {
     color-scheme: dark;
-    --arg-glass: rgba(16, 16, 16, .82);
-    --arg-glass-strong: rgba(20, 20, 20, .96);
-    --arg-glass-edge: rgba(255, 255, 255, .11);
-    --arg-glass-highlight: rgba(255, 255, 255, .065);
-    --arg-glass-shadow: 0 12px 32px rgba(0, 0, 0, .12);
-    --arg-glass-blur: 14px;
-    --arg-bg: #000000;
-    --arg-sidebar-bg: #050505;
-    --arg-surface: #111111;
-    --arg-hover: #1b1b1b;
-    --arg-border: #303030;
-    --arg-accent: #dda46f;
-    --arg-accent-strong: #e7b27f;
-    --arg-text: #f2f0eb;
-    --arg-muted: #93a0aa;
-    --arg-success: #53c992;
-    --arg-warning: #e3b15d;
-    --arg-danger: #e87575;
-    --arg-info: #69acde;
-    --arg-viz-cpu: #53c992;
-    --arg-viz-memory: #dda46f;
-    --arg-viz-disk: #49b8a8;
-    --arg-viz-rx: #69acde;
-    --arg-viz-tx: #e3b15d;
-    --background: 0 0% 0%;
-    --foreground: 43 21% 94%;
-    --card: 0 0% 7%;
-    --card-foreground: 43 21% 94%;
-    --popover: 0 0% 9%;
-    --popover-foreground: 43 21% 94%;
-    --primary: 29 62% 65%;
-    --primary-foreground: 214 35% 7%;
-    --secondary: 0 0% 12%;
-    --secondary-foreground: 43 15% 89%;
-    --muted: 0 0% 13%;
-    --muted-foreground: 207 11% 62%;
-    --accent: 0 0% 16%;
-    --accent-foreground: 43 21% 94%;
-    --destructive: 2 81% 69%;
-    --border: 0 0% 19%;
-    --input: 0 0% 24%;
-    --ring: 29 62% 65%;
+    --arg-glass: rgba(28, 41, 52, .9);
+    --arg-glass-strong: rgba(36, 51, 64, .97);
+    --arg-glass-edge: rgba(255, 255, 255, .09);
+    --arg-glass-highlight: rgba(255, 255, 255, .035);
+    --arg-glass-shadow: 0 12px 32px rgba(0, 0, 0, .22);
+    --arg-glass-blur: 12px;
+    --arg-bg: #101820;
+    --arg-sidebar-bg: #131f29;
+    --arg-surface: #1c2934;
+    --arg-hover: #243340;
+    --arg-border: #344451;
+    --arg-accent: #d4a373;
+    --arg-accent-strong: #e4b98f;
+    --arg-text: #f4f6f8;
+    --arg-muted: #92a2b1;
+    --arg-success: #39a985;
+    --arg-warning: #d9a441;
+    --arg-danger: #d66a70;
+    --arg-info: #7f9bd2;
+    --arg-viz-cpu: #39a985;
+    --arg-viz-memory: #d4a373;
+    --arg-viz-disk: #4ba99c;
+    --arg-viz-rx: #7f9bd2;
+    --arg-viz-tx: #d9a441;
+    --background: 210 33% 9.4%;
+    --foreground: 210 22% 96.5%;
+    --card: 207 30% 15.7%;
+    --card-foreground: 210 20% 96%;
+    --popover: 208 28% 19.6%;
+    --popover-foreground: 210 20% 96%;
+    --primary: 30 53% 64.1%;
+    --primary-foreground: 210 33% 9.4%;
+    --secondary: 208 28% 19.6%;
+    --secondary-foreground: 210 18% 92%;
+    --muted: 207 25% 19%;
+    --muted-foreground: 209 17% 64%;
+    --accent: 207 24% 23%;
+    --accent-foreground: 210 20% 96%;
+    --destructive: 356 58% 63%;
+    --border: 207 22% 26.1%;
+    --input: 207 22% 30%;
+    --ring: 30 53% 64.1%;
     --radius: .875rem;
   }
   :root[data-theme='light'] {
@@ -201,7 +201,7 @@
 }
 
 :root:not([data-theme='light']),
-:root:not([data-theme='light']) body { background-color: #000; }
+:root:not([data-theme='light']) body { background-color: var(--arg-bg); }
 
 .brand-text {
   font-family: 'Oxanium', 'Arial Black', ui-sans-serif, sans-serif;

@@ -174,13 +174,18 @@ async function forceFreshPanelReload(showComplete = true) {
     try {
       if ('caches' in window) {
         const cacheNames = await window.caches.keys()
-        await Promise.all(cacheNames.map((name) => window.caches.delete(name)))
+        await Promise.all(cacheNames.filter((name) => name.startsWith('arg-shell-')).map((name) => window.caches.delete(name)))
       }
     } catch { /* Cache Storage may be unavailable; a cache-busting navigation still follows. */ }
     try {
       if ('serviceWorker' in navigator) {
         const registrations = await navigator.serviceWorker.getRegistrations()
-        await Promise.all(registrations.map((registration) => registration.unregister()))
+        const argWorkerUrl = new URL('/service-worker.js', window.location.origin).href
+        await Promise.all(registrations
+          .filter((registration) => registration.active?.scriptURL === argWorkerUrl
+            || registration.waiting?.scriptURL === argWorkerUrl
+            || registration.installing?.scriptURL === argWorkerUrl)
+          .map((registration) => registration.unregister()))
       }
     } catch { /* Service Workers may be unavailable in this browser context. */ }
   }
