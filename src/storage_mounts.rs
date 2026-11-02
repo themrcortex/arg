@@ -9,9 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+type DiskIoCounters = HashMap<String, (u64, u64)>;
+
 static INVENTORY_CACHE: OnceLock<Mutex<Option<(Instant, Value)>>> = OnceLock::new();
-static DISK_IO_CACHE: OnceLock<Mutex<Option<(Instant, HashMap<String, (u64, u64)>)>>> =
-    OnceLock::new();
+static DISK_IO_CACHE: OnceLock<Mutex<Option<(Instant, DiskIoCounters)>>> = OnceLock::new();
 
 fn parse_diskstats(content: &str) -> HashMap<String, (u64, u64)> {
     content

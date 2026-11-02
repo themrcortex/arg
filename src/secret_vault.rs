@@ -245,7 +245,11 @@ pub(crate) fn store(directory: &Path, reference: &str, plaintext: &[u8]) -> Resu
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&temp)
         .map_err(|_| "فایل موقت مخزن امن ساخته نشد.".to_string())?;
-    if let Err(_) = file.write_all(&encoded).and_then(|_| file.sync_all()) {
+    if file
+        .write_all(&encoded)
+        .and_then(|_| file.sync_all())
+        .is_err()
+    {
         let _ = fs::remove_file(&temp);
         return Err("ذخیرهٔ رمز‌شدهٔ مقدار محرمانه ناموفق بود.".into());
     }

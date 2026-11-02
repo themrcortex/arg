@@ -114,7 +114,7 @@ pub(super) async fn mesh(State(state): State<AppState>, headers: HeaderMap) -> A
         .cloned()
         .collect();
     let has_docker_networks = !docker_networks.is_empty();
-    let observed_results = futures_util::stream::iter(docker_networks.into_iter())
+    let observed_results = futures_util::stream::iter(docker_networks)
         .map(|network| async move {
             let result = privileged_request_async(json!({
                 "action":"app-network-operation",

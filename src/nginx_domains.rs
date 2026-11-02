@@ -681,22 +681,21 @@ async fn rollback_new_domain(
     site_was_created: bool,
 ) {
     if site_was_created {
-        if nginx::nginx_managed_application_id(original_content).as_deref() == Some(app_id) {
-            if nginx::nginx_manager_request_async(json!({"action":"nginx-delete","name":site_name}))
+        if nginx::nginx_managed_application_id(original_content).as_deref() == Some(app_id)
+            && nginx::nginx_manager_request_async(json!({"action":"nginx-delete","name":site_name}))
                 .await
                 .is_ok()
-            {
-                let db = state.lock().unwrap();
-                let _ = db.execute(
-                    "DELETE FROM app_nginx_sites WHERE application_id=?1 AND site_name=?2",
-                    params![app_id, site_name],
-                );
-                let _ = db.execute("DELETE FROM nginx_site_metadata WHERE name=?1", [site_name]);
-                let _ = db.execute(
-                    "DELETE FROM nginx_site_config_state WHERE name=?1",
-                    [site_name],
-                );
-            }
+        {
+            let db = state.lock().unwrap();
+            let _ = db.execute(
+                "DELETE FROM app_nginx_sites WHERE application_id=?1 AND site_name=?2",
+                params![app_id, site_name],
+            );
+            let _ = db.execute("DELETE FROM nginx_site_metadata WHERE name=?1", [site_name]);
+            let _ = db.execute(
+                "DELETE FROM nginx_site_config_state WHERE name=?1",
+                [site_name],
+            );
         }
     } else {
         let _ = nginx::nginx_manager_request_async(

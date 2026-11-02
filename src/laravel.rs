@@ -610,7 +610,7 @@ fn installed_php_fpm_versions() -> Vec<String> {
             .then_some(name)
         })
         .collect();
-    versions.sort_by(|left, right| php_version_key(left).cmp(&php_version_key(right)));
+    versions.sort_by_key(|left| php_version_key(left));
     versions
 }
 
@@ -1268,7 +1268,7 @@ fn laravel_service_helper(request: &Value) -> Result<Value, String> {
             return Err("Horizon فعال است؛ Queue Worker جداگانه را هم‌زمان اجرا نکن.".into());
         }
     }
-    let php = php_binary(version).map_err(|message| message)?;
+    let php = php_binary(version)?;
     let port = laravel_service_port(app_id, service);
     let was_active = systemd_unit_state(&unit_name) == "active";
     if !was_active

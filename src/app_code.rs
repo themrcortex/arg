@@ -1,4 +1,7 @@
 use super::*;
+
+type AppReleaseInfo = (FsPathBuf, String, Option<String>);
+type AppCodeApiError = (StatusCode, Json<Value>);
 use std::{
     fs,
     path::{Component, Path as FsPath},
@@ -143,7 +146,7 @@ fn app_release(
     state: &AppState,
     headers: &HeaderMap,
     app_id: &str,
-) -> Result<(FsPathBuf, String, Option<String>), (StatusCode, Json<Value>)> {
+) -> Result<AppReleaseInfo, AppCodeApiError> {
     let db = state.lock().unwrap();
     require_admin(&db, headers)?;
     let owner = federation::local_server_uuid(&db).map_err(db_error)?;

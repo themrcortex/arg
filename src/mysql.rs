@@ -1477,14 +1477,13 @@ pub(super) async fn save_preset(
         )
         .map_err(db_error)?;
     if count >= 40
-        && db
+        && !db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM mysql_sql_presets WHERE user_id=?1 AND title=?2)",
                 params![actor.id, input.title.trim()],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(db_error)?
-            == false
     {
         return Err(error(
             StatusCode::CONFLICT,
@@ -1546,7 +1545,6 @@ pub(super) async fn query(
     };
     let keyword = input
         .sql
-        .trim_start()
         .split_whitespace()
         .next()
         .unwrap_or("SQL")

@@ -268,7 +268,7 @@ fn detect(root: &FsPath, names: &std::collections::HashSet<String>) -> serde_jso
     if candidates.is_empty() && has(names, "index.html") {
         candidates.push(("static", 70, "index.html پیدا شد؛ فایل استاتیک احتمالی است"));
     }
-    candidates.sort_by(|left, right| right.1.cmp(&left.1));
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
     let selected = candidates.first().copied();
     let ambiguous = candidates
         .get(1)

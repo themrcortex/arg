@@ -1547,7 +1547,7 @@ async fn collect_metrics(state: AppState) {
                 for (hour, interface, rx_bytes, tx_bytes, eligible) in traffic_rows {
                     let _ = db.execute("INSERT INTO network_traffic_hourly(hour_start,interface,rx_bytes,tx_bytes,eligible_for_total) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(hour_start,interface) DO UPDATE SET rx_bytes=network_traffic_hourly.rx_bytes+excluded.rx_bytes,tx_bytes=network_traffic_hourly.tx_bytes+excluded.tx_bytes,eligible_for_total=MAX(network_traffic_hourly.eligible_for_total,excluded.eligible_for_total)", params![hour,interface,rx_bytes.min(i64::MAX as u64) as i64,tx_bytes.min(i64::MAX as u64) as i64,if eligible {1} else {0}]);
                 }
-                if sample_count % 60 == 0 {
+                if sample_count.is_multiple_of(60) {
                     let _ = db.execute(
                         "DELETE FROM metric_samples WHERE at<?1",
                         [at - (retention_days * 86400) as i64],
@@ -3867,14 +3867,16 @@ fn configure_panel_tls(request: &Value) -> Value {
     } else {
         "-checkhost"
     };
-    if let Err(_) = tls_openssl_output(&[
+    if tls_openssl_output(&[
         "x509",
         "-in",
         certificate_source.to_string_lossy().as_ref(),
         hostname_check,
         server_name,
         "-noout",
-    ]) {
+    ])
+    .is_err()
+    {
         return failure("The certificate is not valid for the panel's domain/IP. Use a certificate whose SAN includes this address.".into());
     }
     let cert_public_key = match tls_openssl_output(&[
@@ -4301,7 +4303,7 @@ fn execute_privileged_request(request: &Value) -> Value {
             .filter(|branch| valid_update_branch(branch))
             .unwrap_or(&fallback_branch);
         return match std::process::Command::new("/usr/local/lib/arg/update-helper")
-            .args(["run", "complete", &branch])
+            .args(["run", "complete", branch])
             .output()
         {
             Ok(output) if output.status.success() => {

@@ -84,39 +84,63 @@ fn store_admin_setup(request: &Value) -> Result<Value, String> {
     Ok(json!({"stored":true}))
 }
 
-fn validate_admin_setup(setup: &AdminSetup) -> Result<(), String> {
-    if setup.site_title.is_empty()
-        || setup.site_title.chars().count() > 100
-        || setup.site_title.chars().any(char::is_control)
+pub(super) fn validate_admin_setup_fields(
+    site_title: &str,
+    username: &str,
+    email: &str,
+    password: &str,
+) -> Result<(), &'static str> {
+    if site_title.is_empty()
+        || site_title.chars().count() > 100
+        || site_title.chars().any(char::is_control)
     {
-        return Err("عنوان سایت WordPress معتبر نیست.".into());
+        return Err(
+            "عنوان سایت WordPress باید بین ۱ تا ۱۰۰ نویسه باشد و نویسهٔ کنترلی نداشته باشد.",
+        );
     }
-    if !(1..=60).contains(&setup.username.len())
-        || !setup
-            .username
+    if !(1..=60).contains(&username.len())
+        || !username
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
     {
-        return Err("نام کاربری مدیر WordPress معتبر نیست.".into());
+        return Err(
+            "نام کاربری مدیر فقط می‌تواند ۱ تا ۶۰ حرف انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.",
+        );
     }
-    let Some((local, domain)) = setup.email.split_once('@') else {
-        return Err("ایمیل مدیر WordPress معتبر نیست.".into());
+    let email = email.trim();
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err("ایمیل مدیر WordPress معتبر نیست؛ نشانی کامل مانند admin@example.com وارد کن.");
     };
-    if setup.email.len() > 254
+    if email.len() > 254
         || local.is_empty()
         || local.len() > 64
         || local.chars().any(char::is_whitespace)
+        || domain.contains('@')
         || !valid_email_host(domain)
     {
-        return Err("ایمیل مدیر WordPress معتبر نیست.".into());
+        return Err("ایمیل مدیر WordPress معتبر نیست؛ نشانی کامل مانند admin@example.com وارد کن.");
     }
-    if !(12..=128).contains(&setup.password.len()) || setup.password.chars().any(char::is_control) {
-        return Err("گذرواژهٔ مدیر WordPress باید ۱۲ تا ۱۲۸ نویسه داشته باشد.".into());
+    let password_length = password.encode_utf16().count();
+    if !(12..=128).contains(&password_length) || password.chars().any(char::is_control) {
+        return Err(
+            "گذرواژهٔ مدیر WordPress باید ۱۲ تا ۱۲۸ نویسه داشته باشد و نویسهٔ کنترلی نداشته باشد.",
+        );
     }
     Ok(())
 }
 
+fn validate_admin_setup(setup: &AdminSetup) -> Result<(), String> {
+    validate_admin_setup_fields(
+        &setup.site_title,
+        &setup.username,
+        &setup.email,
+        &setup.password,
+    )
+    .map_err(str::to_owned)
+}
+
 fn valid_email_host(value: &str) -> bool {
+    let value = value.strip_suffix('.').unwrap_or(value);
     !value.is_empty()
         && value.len() <= 253
         && value.split('.').all(|label| {
@@ -1282,6 +1306,42 @@ mod tests {
         .is_err());
         assert!(valid_email_host("example.test"));
         assert!(!valid_email_host("bad host"));
+        assert!(validate_admin_setup_fields(
+            "سایت",
+            "site-manager",
+            "admin@example.test",
+            "۱۲۳۴۵۶۷۸۹۰ab"
+        )
+        .is_ok());
+        assert!(validate_admin_setup_fields(
+            "سایت",
+            "site-manager",
+            "admin@example.test.",
+            "0123456789ab"
+        )
+        .is_ok());
+        assert!(validate_admin_setup_fields(
+            "سایت",
+            "site-manager",
+            "admin@example.test",
+            &"😀".repeat(64)
+        )
+        .is_ok());
+        assert!(
+            validate_admin_setup_fields("سایت", "site-manager", "admin@example.test", "short")
+                .is_err()
+        );
+        assert!(
+            validate_admin_setup_fields("سایت", "site-manager", "bad-email", "0123456789ab")
+                .is_err()
+        );
+        assert!(validate_admin_setup_fields(
+            "سایت",
+            "site-manager",
+            "admin@example.test",
+            &"😀".repeat(65)
+        )
+        .is_err());
     }
 
     #[test]

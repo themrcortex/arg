@@ -149,11 +149,10 @@ async fn cf_request(
     Ok(value)
 }
 
-fn connection(
-    db: &Connection,
-    id: &str,
-    owner: &str,
-) -> Result<(String, String, String, String), (StatusCode, Json<Value>)> {
+type DnsConnection = (String, String, String, String);
+type DnsApiError = (StatusCode, Json<Value>);
+
+fn connection(db: &Connection, id: &str, owner: &str) -> Result<DnsConnection, DnsApiError> {
     let row=db.query_row("SELECT id,zone_id,zone_name,secret_ref FROM dns_connections WHERE id=?1 AND owner_server_uuid=?2 AND provider='cloudflare'",params![id,owner],|row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))).optional().map_err(db_error)?;
     let Some(row) = row else {
         return Err(error(StatusCode::NOT_FOUND, "اتصال DNS پیدا نشد."));

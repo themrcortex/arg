@@ -61,7 +61,7 @@ fn validate_fast_action(input: &FastActionInput) -> Result<(), (StatusCode, Json
     let allowed = ["nginx-test", "nginx-reload", "nginx-restart"];
     if operation != "custom-command"
         && !allowed.contains(&operation)
-        && service_operation.map_or(true, |op| !["start", "restart", "reload"].contains(&op))
+        && service_operation.is_none_or(|op| !["start", "restart", "reload"].contains(&op))
     {
         return Err(error(
             StatusCode::BAD_REQUEST,

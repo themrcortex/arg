@@ -2801,18 +2801,20 @@ pub(super) struct MountConfigInput {
     auto_mount: bool,
 }
 
-fn mount_public(
-    mount_id: i64,
+struct MountPublicInput<'a> {
+    id: i64,
     connection_id: i64,
     bucket_id: i64,
-    bucket: &str,
-    mount_path: &str,
+    bucket: &'a str,
+    mount_path: &'a str,
     read_only: bool,
     auto_mount: bool,
-    status: &str,
-    error: Option<&str>,
-) -> Value {
-    json!({"id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket,"mount_path":mount_path,"mount_name":format!("{bucket} · Mount شده در VPS"),"method":"rclone","read_only":read_only,"auto_mount":auto_mount,"status":status,"last_error":error,"capacity":"unknown","capacity_note":"S3 فضای ابری است؛ ظرفیت آن به دیسک محلی اضافه نمی‌شود و از statvfs قابل اتکا نیست."})
+    status: &'a str,
+    error: Option<&'a str>,
+}
+
+fn mount_public(input: MountPublicInput<'_>) -> Value {
+    json!({"id":input.id,"connection_id":input.connection_id,"bucket_id":input.bucket_id,"bucket":input.bucket,"mount_path":input.mount_path,"mount_name":format!("{} · Mount شده در VPS", input.bucket),"method":"rclone","read_only":input.read_only,"auto_mount":input.auto_mount,"status":input.status,"last_error":input.error,"capacity":"unknown","capacity_note":"S3 فضای ابری است؛ ظرفیت آن به دیسک محلی اضافه نمی‌شود و از statvfs قابل اتکا نیست."})
 }
 
 fn mount_runtime_blocks_detach(mounted: bool, unit_active: bool, path_mounted: bool) -> bool {
@@ -2874,6 +2876,8 @@ async fn refresh_mount_runtime_state(
     ))
 }
 
+type MountStatusRow = (i64, String, bool, bool, String, Option<String>, i64);
+
 pub(super) async fn get_bucket_mount(
     State(state): State<AppState>,
     Path(bucket_id): Path<i64>,
@@ -2889,7 +2893,7 @@ pub(super) async fn get_bucket_mount(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|_| error(StatusCode::NOT_FOUND, "Bucket پیدا نشد."))?;
-        let mount: Option<(i64,String,bool,bool,String,Option<String>,i64)> = db.query_row("SELECT id,mount_path,read_only!=0,auto_mount!=0,status,last_error,updated_at FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional().map_err(db_error)?;
+        let mount: Option<MountStatusRow> = db.query_row("SELECT id,mount_path,read_only!=0,auto_mount!=0,status,last_error,updated_at FROM s3_mounts WHERE bucket_id=?1",[bucket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).optional().map_err(db_error)?;
         (bucket.0, bucket.1, mount)
     };
     let Some((id, mount_path, read_only, auto_mount, stored_status, stored_error, updated_at)) =
@@ -2941,17 +2945,17 @@ pub(super) async fn get_bucket_mount(
                 .or_else(|| Some("خواندن وضعیت واقعی Mount ناموفق بود.".into())),
         ),
     };
-    let mount = mount_public(
+    let mount = mount_public(MountPublicInput {
         id,
         connection_id,
         bucket_id,
-        &bucket_name,
-        &mount_path,
+        bucket: &bucket_name,
+        mount_path: &mount_path,
         read_only,
         auto_mount,
-        &status,
-        last_error.as_deref(),
-    );
+        status: &status,
+        error: last_error.as_deref(),
+    });
     Ok(Json(json!({"mount":mount})))
 }
 
@@ -3020,7 +3024,7 @@ pub(super) async fn configure_bucket_mount(
         ));
     }
     Ok(Json(
-        json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,&mount_path,input.read_only,input.auto_mount,"mounted",None)}),
+        json!({"ok":true,"mount":mount_public(MountPublicInput { id: mount_id, connection_id, bucket_id, bucket: &bucket_name, mount_path: &mount_path, read_only: input.read_only, auto_mount: input.auto_mount, status: "mounted", error: None })}),
     ))
 }
 
@@ -3062,7 +3066,7 @@ pub(super) async fn stop_bucket_mount(
         &format!("mount={mount_id}; bucket_id={bucket_id}"),
     );
     Ok(Json(
-        json!({"ok":true,"mount":mount_public(mount_id,connection_id,bucket_id,&bucket_name,&mount_path,true,false,"unmounted",None)}),
+        json!({"ok":true,"mount":mount_public(MountPublicInput { id: mount_id, connection_id, bucket_id, bucket: &bucket_name, mount_path: &mount_path, read_only: true, auto_mount: false, status: "unmounted", error: None })}),
     ))
 }
 

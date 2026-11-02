@@ -179,13 +179,17 @@ mod tests {
     #[test]
     fn permits_all_current_presets_and_only_known_visibility_choices() {
         for preset in ["minimal", "devops", "hosting", "fleet", "custom"] {
-            let mut preferences = Preferences::default();
-            preferences.preset = preset.into();
-            preferences.hidden = vec!["history".into()];
+            let preferences = Preferences {
+                preset: preset.into(),
+                hidden: vec!["history".into()],
+                ..Preferences::default()
+            };
             assert!(valid(&preferences));
         }
-        let mut preferences = Preferences::default();
-        preferences.hidden = vec!["unknown".into()];
+        let preferences = Preferences {
+            hidden: vec!["unknown".into()],
+            ..Preferences::default()
+        };
         assert!(!valid(&preferences));
     }
 

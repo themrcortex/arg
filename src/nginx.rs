@@ -1022,7 +1022,6 @@ pub(super) async fn api_nginx_site_runtime(
         let db = state.lock().unwrap();
         db.query_row("SELECT unit,cpu_quota_percent,memory_max_bytes,last_cpu_usage_ns,last_sampled_at FROM nginx_site_runtime WHERE site_name=?1", [&name], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
             .optional().map_err(db_error)?
-            .map(|row| row)
             .unwrap_or_else(|| (String::new(),None,None,None,None))
     };
     if unit.is_empty() {
@@ -1369,13 +1368,8 @@ pub(super) async fn sync_nginx_site(
         nginx_site_content(&file)?.to_owned()
     };
     let parsed = settings.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    if input.source == "database" {
-        let db = state.lock().unwrap();
-        store_nginx_snapshot(&db, &name, &content, parsed.as_ref()).map_err(db_error)?;
-    } else {
-        let db = state.lock().unwrap();
-        store_nginx_snapshot(&db, &name, &content, parsed.as_ref()).map_err(db_error)?;
-    }
+    let db = state.lock().unwrap();
+    store_nginx_snapshot(&db, &name, &content, parsed.as_ref()).map_err(db_error)?;
     let db = state.lock().unwrap();
     audit(
         &db,
@@ -1936,18 +1930,18 @@ fn nginx_remove_maintenance_block(content: &str, name: &str) -> String {
     let mut skipping = false;
     content
         .lines()
-        .filter_map(|line| {
+        .filter(|line| {
             if line.contains(&begin) {
                 skipping = true;
-                return None;
+                return false;
             }
             if skipping {
                 if line.contains(&end) {
                     skipping = false;
                 }
-                return None;
+                return false;
             }
-            Some(line)
+            true
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -2413,7 +2407,7 @@ fn nginx_list_sites() -> Result<Value, String> {
             continue;
         }
         let enabled = nginx_site_enabled(&name)?;
-        let content = fs::read_to_string(&entry.path()).map_err(|error| error.to_string())?;
+        let content = fs::read_to_string(entry.path()).map_err(|error| error.to_string())?;
         let application_id = nginx_managed_application_id(&content);
         let content_hash = hex::encode(Sha256::digest(content.as_bytes()));
         let server_names = nginx_server_names(&content);

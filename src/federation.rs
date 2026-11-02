@@ -651,7 +651,7 @@ pub(super) async fn workspace_session_guard(
             .into_response()
         }
     };
-    if expires_at.map_or(true, |expires| expires <= now()) {
+    if expires_at.is_none_or(|expires| expires <= now()) {
         let db = state.lock().unwrap();
         let _ = db.execute(
             "DELETE FROM federation_proxy_sessions WHERE token_hash=?1",
@@ -2201,9 +2201,7 @@ fn node_identity_matches(
     remote_server_uuid: &str,
 ) -> bool {
     stored_node_id == remote_node_id
-        && stored_server_uuid.map_or(true, |stored| {
-            stored.eq_ignore_ascii_case(remote_server_uuid)
-        })
+        && stored_server_uuid.is_none_or(|stored| stored.eq_ignore_ascii_case(remote_server_uuid))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2263,7 +2261,7 @@ async fn ensure_workspace_session(
             .ok_or_else(|| error(StatusCode::NOT_FOUND, "Node پیدا نشد."))?;
         (workspace_token_path(&db, id)?, expires_at, scopes_json)
     };
-    if expires_at.map_or(false, |expires| expires > now() + 15 * 60) {
+    if expires_at.is_some_and(|expires| expires > now() + 15 * 60) {
         return read_node_token(&path);
     }
     if !decode_scopes(&scopes_json)
@@ -3494,7 +3492,7 @@ pub(super) async fn rotate_controller_credential(
         };
         if identity
             .token_expires_at
-            .map_or(false, |expires| expires <= now())
+            .is_some_and(|expires| expires <= now())
         {
             return Err(error(
                 StatusCode::UNAUTHORIZED,

@@ -206,11 +206,11 @@ pub(super) async fn scan(
     }
     let bytes = result["bytes"].as_u64().unwrap_or(0);
     let at = now();
-    let status = result["complete"]
-        .as_bool()
-        .unwrap_or(false)
-        .then_some("measured")
-        .unwrap_or("partial");
+    let status = if result["complete"].as_bool().unwrap_or(false) {
+        "measured"
+    } else {
+        "partial"
+    };
     let db = state.lock().unwrap();
     db.execute(
         "UPDATE application_volumes SET usage_bytes=?1,usage_status=?2,measured_at=?3,updated_at=?3 WHERE id=?4",

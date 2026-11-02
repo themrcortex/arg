@@ -135,7 +135,7 @@ fn prune_automatic_backups(directory: &FsPath, retention_count: usize) -> std::i
             Some((entry.path(), modified))
         })
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| right.1.cmp(&left.1));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     let mut removed = 0;
     for (path, _) in entries.into_iter().skip(retention_count) {
         fs::remove_file(path)?;
@@ -251,8 +251,18 @@ pub(super) async fn get_backup_policy(
     backup_policy_response(&db)
 }
 
+type BackupPolicyRow = (
+    bool,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+);
+
 fn backup_policy_response(db: &Connection) -> ApiResult {
-    let (enabled, interval_hours, retention_count, last_started_at, last_success_at, last_error, next_run_at): (bool, i64, i64, Option<i64>, Option<i64>, Option<String>, Option<i64>) = db.query_row(
+    let (enabled, interval_hours, retention_count, last_started_at, last_success_at, last_error, next_run_at): BackupPolicyRow = db.query_row(
         "SELECT enabled,interval_hours,retention_count,last_started_at,last_success_at,last_error,next_run_at FROM maintenance_backup_policy WHERE id=1",
         [],
         |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),

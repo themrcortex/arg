@@ -223,7 +223,7 @@ pub(super) fn execute_docker_status() -> Value {
             "block_io",
         ],
     ) {
-        if let Some(rows) = containers.as_mut().ok() {
+        if let Ok(rows) = containers.as_mut() {
             for container in rows {
                 if let Some(id) = container["id"].as_str() {
                     if let Some(stat) = stats.iter().find(|stat| {
@@ -387,19 +387,11 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
             if ["stop", "restart", "disable"].contains(&operation) && !confirmed {
                 return json!({"ok":false,"error":"Confirmation required"});
             }
-            if operation == "enable" || operation == "disable" {
-                args.extend([
-                    "systemctl".to_owned(),
-                    operation.to_owned(),
-                    "docker".to_owned(),
-                ]);
-            } else {
-                args.extend([
-                    "systemctl".to_owned(),
-                    operation.to_owned(),
-                    "docker".to_owned(),
-                ]);
-            }
+            args.extend([
+                "systemctl".to_owned(),
+                operation.to_owned(),
+                "docker".to_owned(),
+            ]);
             let mut command = std::process::Command::new(&args[0]);
             command.args(&args[1..]);
             return match command_result(&mut command) {

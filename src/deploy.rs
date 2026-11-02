@@ -853,6 +853,10 @@ fn ensure_app(db: &Connection, app_id: &str, owner: &str) -> Result<(), (StatusC
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Test-only adapter keeps every deployment fixture input visible at the call site."
+)]
 fn insert_job(
     state: &AppState,
     headers: &HeaderMap,
@@ -879,6 +883,10 @@ fn insert_job(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "This internal adapter mirrors the persisted job contract and is kept private to deployment orchestration."
+)]
 fn insert_job_with_release(
     state: &AppState,
     headers: &HeaderMap,
@@ -1146,6 +1154,10 @@ impl From<rusqlite::Error> for PersistJobError {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Test-only adapter keeps every persisted-job fixture input explicit."
+)]
 fn persist_new_job(
     db: &mut Connection,
     job_id: &str,
@@ -1177,6 +1189,10 @@ fn persist_new_job(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "This internal persistence adapter maps the existing deployment-job schema without changing its API contract."
+)]
 fn persist_new_job_with_release(
     db: &mut Connection,
     job_id: &str,
@@ -1337,9 +1353,7 @@ fn sanitize_deployment_output(input: &str) -> String {
             };
             let key_start = search_from + relative;
             let key_end = key_start + marker.len();
-            let Some(separator_offset) =
-                value[key_end..].find(|character| character == '=' || character == ':')
-            else {
+            let Some(separator_offset) = value[key_end..].find(['=', ':']) else {
                 search_from = key_end;
                 continue;
             };
@@ -1428,10 +1442,36 @@ fn job_event_revision(db: &Connection, job_id: &str) -> rusqlite::Result<Option<
     .optional()
 }
 
+struct DeploymentJobRow {
+    id: String,
+    application_id: String,
+    owner_server_uuid: String,
+    actor: String,
+    state: String,
+    attempt: i64,
+    created_at: i64,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
+    release_path: Option<String>,
+    previous_release: Option<String>,
+    source_commit: Option<String>,
+    error: Option<String>,
+    release_name: String,
+    retention_count: i64,
+    environment_kind: String,
+    version_number: i64,
+}
+
 fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
-    let row: (String,String,String,String,String,i64,i64,Option<i64>,Option<i64>,Option<String>,Option<String>,Option<String>,Option<String>,String,i64,String,i64) = db.query_row(
+    let row: DeploymentJobRow = db.query_row(
         "SELECT id,application_id,owner_server_uuid,actor,state,attempt,created_at,started_at,finished_at,release_path,previous_release,source_commit,error_summary,release_name,retention_count,environment_kind,version_number FROM deployment_jobs WHERE id=?1",
-        [job_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?,r.get(13)?,r.get(14)?,r.get(15)?,r.get(16)?)),
+        [job_id], |r| Ok(DeploymentJobRow {
+            id: r.get(0)?, application_id: r.get(1)?, owner_server_uuid: r.get(2)?, actor: r.get(3)?,
+            state: r.get(4)?, attempt: r.get(5)?, created_at: r.get(6)?, started_at: r.get(7)?,
+            finished_at: r.get(8)?, release_path: r.get(9)?, previous_release: r.get(10)?,
+            source_commit: r.get(11)?, error: r.get(12)?, release_name: r.get(13)?,
+            retention_count: r.get(14)?, environment_kind: r.get(15)?, version_number: r.get(16)?,
+        }),
     )?;
     let mut statement = db.prepare("SELECT sequence,step,state,message,started_at,finished_at FROM deployment_job_steps WHERE job_id=?1 ORDER BY sequence")?;
     let steps = statement.query_map([job_id], |r| Ok(json!({"sequence":r.get::<_,i64>(0)?,"step":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"message":r.get::<_,String>(3)?,"started_at":r.get::<_,i64>(4)?,"finished_at":r.get::<_,Option<i64>>(5)?})))?.collect::<Result<Vec<_>,_>>()?;
@@ -1444,7 +1484,7 @@ fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
         |r| r.get(0),
     )?;
     Ok(
-        json!({"id":row.0,"application_id":row.1,"owner_server_uuid":row.2,"actor":row.3,"state":row.4,"attempt":row.5,"created_at":row.6,"started_at":row.7,"finished_at":row.8,"release_path":row.9,"previous_release":row.10,"source_commit":row.11,"error":row.12,"release_name":row.13,"retention_count":row.14,"environment_kind":row.15,"version_number":row.16,"steps":steps,"logs":logs,"log_count":log_count}),
+        json!({"id":row.id,"application_id":row.application_id,"owner_server_uuid":row.owner_server_uuid,"actor":row.actor,"state":row.state,"attempt":row.attempt,"created_at":row.created_at,"started_at":row.started_at,"finished_at":row.finished_at,"release_path":row.release_path,"previous_release":row.previous_release,"source_commit":row.source_commit,"error":row.error,"release_name":row.release_name,"retention_count":row.retention_count,"environment_kind":row.environment_kind,"version_number":row.version_number,"steps":steps,"logs":logs,"log_count":log_count}),
     )
 }
 
@@ -1521,12 +1561,11 @@ pub(super) fn record_output(state: &AppState, job_id: &str, step: &str, output: 
     } else {
         0
     };
-    if line_count > 2_000 {
-        if transaction.execute(
+    if line_count > 2_000
+        && transaction.execute(
             "INSERT INTO deployment_job_logs(job_id,created_at,step,level,message) VALUES (?1,?2,?3,'warning',?4)",
             params![job_id, now(), step.chars().take(64).collect::<String>(), format!("بخش ابتدایی خروجی این مرحله به‌علت سقف امن ثبت لاگ کنار گذاشته شد ({skipped_lines} خط).")],
         ).is_err() { return; }
-    }
     for line in output
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -2612,7 +2651,7 @@ fn fail_database_job(state: &AppState, job_id: &str, operation: &str, cause: &ru
         "UPDATE deployment_jobs SET state='failed',error_summary=?1,finished_at=?2,updated_at=?2,lease_until=NULL,worker_id=NULL WHERE id=?3",
         params![message, at, job_id],
     ) {
-        Ok(0) => return,
+        Ok(0) => (),
         Ok(_) => { let _ = add_step(&db, job_id, "database", "failed", &message); }
         Err(persist_error) => eprintln!("ARG could not persist failure for deployment job {job_id}: {persist_error}"),
     }
@@ -3153,7 +3192,7 @@ async fn process_job(state: AppState, job_id: String) {
         Source::Directory { path } => acquire_directory(path, &stage).map(|_| None),
         Source::Archive { sha256 } => {
             let archive_path = root.join("uploads").join(format!("{job_id}.zip"));
-            verify_archive_digest(&archive_path, &sha256)
+            verify_archive_digest(&archive_path, sha256)
                 .and_then(|_| extract_archive(&archive_path, &stage))
                 .map(|_| None)
         }
@@ -3344,7 +3383,7 @@ async fn process_job(state: AppState, job_id: String) {
             return;
         }
     };
-    if static_site && domain.as_deref().map_or(true, str::is_empty) {
+    if static_site && domain.as_deref().is_none_or(str::is_empty) {
         let _ = fs::remove_dir_all(&stage);
         finish(
             &state,
@@ -4187,7 +4226,7 @@ async fn acquire_git(
             || private_key
                 .file_name()
                 .and_then(OsStr::to_str)
-                .map_or(true, |name| !ssh_keys::valid_key_id(name))
+                .is_none_or(|name| !ssh_keys::valid_key_id(name))
             || !private_key
                 .parent()
                 .is_some_and(|parent| parent == FsPath::new("/var/lib/arg/ssh-keys"))
@@ -4434,6 +4473,10 @@ where
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The process runner intentionally receives its operation context explicitly to preserve bounded logging, cancellation, timeout, and workspace behavior."
+)]
 async fn command_output_bounded<F>(
     state: &AppState,
     job_id: &str,

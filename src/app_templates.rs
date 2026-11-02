@@ -39,9 +39,9 @@ const TEMPLATE_IDS: &[&str] = &[
     "python-web",
     "wordpress-app",
 ];
-static WORDPRESS_VERSION_CACHE: std::sync::LazyLock<
-    tokio::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
-> = std::sync::LazyLock::new(|| tokio::sync::Mutex::const_new(None));
+static WORDPRESS_VERSION_CACHE: std::sync::LazyLock<tokio::sync::Mutex<CachedWordPressVersions>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::const_new(None));
+type CachedWordPressVersions = Option<(std::time::Instant, Vec<String>)>;
 
 async fn current_wordpress_versions() -> Vec<String> {
     let mut cache = WORDPRESS_VERSION_CACHE.lock().await;
@@ -162,41 +162,15 @@ pub(super) async fn create_draft(
                 "برای نصب خودکار WordPress یک دامنهٔ معتبر و بدون wildcard لازم است.",
             ));
         }
-        if input.wordpress_site_title.trim().is_empty()
-            || input.wordpress_site_title.trim().chars().count() > 100
-            || input.wordpress_site_title.chars().any(char::is_control)
-        {
-            return Err(error(
-                StatusCode::BAD_REQUEST,
-                "عنوان سایت WordPress باید بین ۱ تا ۱۰۰ نویسه باشد.",
-            ));
-        }
-        if !valid_admin_username(&input.wordpress_admin_username)
-            || !valid_admin_email(&input.wordpress_admin_email)
-            || !(12..=128).contains(&input.wordpress_admin_password.len())
-            || input.wordpress_admin_password.chars().any(char::is_control)
-        {
-            return Err(error(StatusCode::BAD_REQUEST, "نام کاربری، ایمیل یا گذرواژهٔ مدیر WordPress معتبر نیست؛ گذرواژه باید ۱۲ تا ۱۲۸ نویسه داشته باشد."));
-        }
+        wordpress::validate_admin_setup_fields(
+            input.wordpress_site_title.trim(),
+            input.wordpress_admin_username.trim(),
+            input.wordpress_admin_email.trim(),
+            &input.wordpress_admin_password,
+        )
+        .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
     }
     apps::create_from_template(State(state), headers, template_id, input).await
-}
-
-fn valid_admin_username(value: &str) -> bool {
-    (1..=60).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
-}
-
-fn valid_admin_email(value: &str) -> bool {
-    value.len() <= 254
-        && value.split_once('@').is_some_and(|(local, domain)| {
-            !local.is_empty()
-                && local.len() <= 64
-                && !local.chars().any(char::is_whitespace)
-                && apps::valid_domain(domain)
-        })
 }
 
 #[cfg(test)]
@@ -234,13 +208,5 @@ mod tests {
             {"version":"6.8.3"}, {"version":"latest"}
         ]}));
         assert_eq!(versions, vec!["7.1.4", "6.8.3"]);
-    }
-
-    #[test]
-    fn wordpress_initial_admin_inputs_are_bounded_and_safe() {
-        assert!(valid_admin_username("site_admin-1"));
-        assert!(!valid_admin_username("admin;id"));
-        assert!(valid_admin_email("admin@example.com"));
-        assert!(!valid_admin_email("admin@example.com;id"));
     }
 }

@@ -808,7 +808,7 @@ pub(super) fn prepare_release(app_id: &str, release: &FsPath) -> Result<(), Stri
         return Err("shared نباید symlink باشد.".into());
     }
     let environment = shared.join(".env");
-    if fs::symlink_metadata(&release.join(".env"))
+    if fs::symlink_metadata(release.join(".env"))
         .is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
         return Err(".env در منبع Node.js نباید symlink باشد.".into());
@@ -874,6 +874,10 @@ pub(super) fn activate_release(release: &FsPath) -> Result<(), String> {
         .map_err(|error_value| format!("Could not attach persistent environment: {error_value}"))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Build settings stay explicit at this module boundary so install/build/start commands and their environment cannot be confused."
+)]
 pub(super) async fn prepare_build(
     state: &AppState,
     app_id: &str,
@@ -1022,6 +1026,10 @@ pub(super) fn resolve_static_output_path(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The build executor carries distinct command, environment, and runtime policies that are intentionally explicit."
+)]
 async fn prepare_project_build(
     state: &AppState,
     app_id: &str,
@@ -1981,6 +1989,10 @@ fn deploy_service_action(
 /// Make a newly deployed SSR release available. Historically a first deploy
 /// only restarted an existing service, leaving a fresh Nginx proxy pointed at
 /// an unused port. Explicitly stopped applications remain stopped.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Activation is a private deployment boundary with independent release, health-check, and desired-state inputs."
+)]
 pub(super) async fn activate_after_deploy(
     app_id: &str,
     previous: Option<&str>,
@@ -3255,6 +3267,10 @@ fn chmod_tree(root: &FsPath, mode: &str) -> Result<(), String> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Sandbox execution keeps process identity, filesystem scope, environment, step logging, and output handle explicit for reviewability."
+)]
 fn run_sandboxed(
     release: &FsPath,
     cache: &FsPath,
@@ -3645,6 +3661,10 @@ fn sanitize_build_output(output: &str) -> String {
         .join("\n")
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "This pure renderer maps the complete systemd unit contract from explicit application runtime fields."
+)]
 fn render_node_unit(
     unit: &str,
     current: &FsPath,
