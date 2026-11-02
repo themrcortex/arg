@@ -935,6 +935,10 @@ fn head_error_confirms_missing_key(error: &::s3::error::S3Error) -> bool {
     matches!(error, ::s3::error::S3Error::HttpFailWithBody(404, body) if body.to_ascii_lowercase().contains("nosuchkey"))
 }
 
+fn head_error_is_access_denied(error: &::s3::error::S3Error) -> bool {
+    matches!(error, ::s3::error::S3Error::HttpFailWithBody(401 | 403, _))
+}
+
 const VERIFY_MARKER_BODY: &[u8] = b"ARG S3 connection verification marker\n";
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1193,7 +1197,7 @@ fn s3_mount_status(request: &Value) -> Value {
     } else {
         None
     };
-    json!({"ok":true,"status":status,"unit_active":active_state == "active","mounted":mounted,"error":error})
+    json!({"ok":true,"status":status,"unit_active":active_state == "active","path_mounted":path_mounted,"mounted":mounted,"error":error})
 }
 
 fn start_s3_mount(request: &Value) -> Value {
@@ -1488,6 +1492,17 @@ async fn test_bucket_connection(bucket: &Bucket) -> Value {
             Some(body)
         }
         Err(error) if head_error_confirms_missing_key(&error) => None,
+        Err(error) if head_error_is_access_denied(&error) => {
+            return json!({
+                "ok":true,
+                "status":"degraded",
+                "checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},
+                "marker_key":VERIFY_KEY,
+                "marker_persisted":false,
+                "message":"Endpoint پاسخ داد، اما مجوز بررسی Object آزمایشی کافی نیست؛ ARG چیزی در Bucket ننوشته است.",
+                "error":format!("سرویس‌دهنده دسترسی HeadObject را رد کرد: {}",helper_error(&error))
+            });
+        }
         Ok(_) => {
             return json!({"ok":false,"status":"failed","checks":{"endpoint":true,"list_objects":list_objects,"write_marker":false,"read_marker":false},"marker_key":VERIFY_KEY,"error":"وضعیت Object arg-verify قابل‌اعتماد نبود؛ برای جلوگیری از بازنویسی، آزمایش متوقف شد."})
         }
@@ -2288,6 +2303,40 @@ mod tests {
     }
 
     #[test]
+    fn stale_mount_database_status_does_not_block_detach_but_live_or_starting_mount_does() {
+        assert!(!mount_runtime_blocks_detach(false, false, false));
+        assert!(mount_runtime_blocks_detach(true, false, false));
+        assert!(mount_runtime_blocks_detach(false, true, false));
+        assert!(mount_runtime_blocks_detach(false, false, true));
+    }
+
+    #[test]
+    fn manual_s3_quota_survives_a_usage_scan_snapshot() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE s3_usage_snapshots(id INTEGER PRIMARY KEY,bucket_id INTEGER,quota_bytes INTEGER,quota_source TEXT,usage_source TEXT,scan_status TEXT,measured_at INTEGER);
+             INSERT INTO s3_usage_snapshots(bucket_id,quota_bytes,quota_source,usage_source,scan_status) VALUES (7,1073741824,'manual','inventory','not_measured');",
+        ).unwrap();
+        let (quota, source): (Option<i64>, Option<String>) = db.query_row(
+            "SELECT quota_bytes,quota_source FROM s3_usage_snapshots WHERE bucket_id=7 ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        db.execute(
+            "INSERT INTO s3_usage_snapshots(bucket_id,quota_bytes,quota_source,usage_source,scan_status) VALUES (7,?1,?2,'inventory','scanning')",
+            params![quota, source],
+        ).unwrap();
+        let copied: (i64, String) = db
+            .query_row(
+                "SELECT quota_bytes,quota_source FROM s3_usage_snapshots ORDER BY id DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(copied, (1_073_741_824, "manual".into()));
+    }
+
+    #[test]
     fn verify_marker_upload_uses_an_atomic_create_only_condition() {
         let credentials =
             Credentials::new(Some("test-access"), Some("test-secret"), None, None, None).unwrap();
@@ -2324,6 +2373,14 @@ mod tests {
         assert!(!head_error_confirms_missing_key(
             &S3Error::HttpFailWithBody(404, "<Error><Code>NoSuchBucket</Code></Error>".into(),)
         ));
+        assert!(head_error_is_access_denied(&S3Error::HttpFailWithBody(
+            403,
+            "<Error><Code>AccessDenied</Code></Error>".into(),
+        )));
+        assert!(!head_error_is_access_denied(&S3Error::HttpFailWithBody(
+            404,
+            "<Error><Code>NoSuchKey</Code></Error>".into(),
+        )));
     }
 
     #[test]
@@ -2701,6 +2758,65 @@ fn mount_public(
     error: Option<&str>,
 ) -> Value {
     json!({"id":mount_id,"connection_id":connection_id,"bucket_id":bucket_id,"bucket":bucket,"mount_path":mount_path,"mount_name":format!("{bucket} · Mount شده در VPS"),"method":"rclone","read_only":read_only,"auto_mount":auto_mount,"status":status,"last_error":error,"capacity":"unknown","capacity_note":"S3 فضای ابری است؛ ظرفیت آن به دیسک محلی اضافه نمی‌شود و از statvfs قابل اتکا نیست."})
+}
+
+fn mount_runtime_blocks_detach(mounted: bool, unit_active: bool, path_mounted: bool) -> bool {
+    mounted || unit_active || path_mounted
+}
+
+async fn refresh_mount_runtime_state(
+    state: &AppState,
+    mount_id: i64,
+    connection_id: i64,
+    bucket_id: i64,
+    mount_path: &str,
+) -> Result<bool, (StatusCode, Json<Value>)> {
+    let result = privileged_request_async(json!({
+        "action":"s3-mount-status",
+        "mount_id":mount_id,
+        "connection_id":connection_id,
+        "bucket_id":bucket_id,
+        "mount_path":mount_path
+    }))
+    .await?;
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            result["error"]
+                .as_str()
+                .unwrap_or("وضعیت واقعی Mount قابل بررسی نیست؛ اتصال حذف نشد."),
+        ));
+    }
+    let mounted = result["mounted"].as_bool().ok_or_else(|| {
+        error(
+            StatusCode::BAD_GATEWAY,
+            "مدیر S3 وضعیت واقعی Mount را برنگرداند؛ اتصال حذف نشد.",
+        )
+    })?;
+    let status = match result["status"].as_str() {
+        Some("mounted") => "mounted",
+        Some("mounting") => "mounting",
+        Some("failed") => "failed",
+        Some("unmounted") => "unmounted",
+        _ => {
+            return Err(error(
+                StatusCode::BAD_GATEWAY,
+                "وضعیت Mount ناشناخته است؛ اتصال حذف نشد.",
+            ))
+        }
+    };
+    let error_text = result["error"].as_str();
+    let db = state.lock().unwrap();
+    db.execute(
+        "UPDATE s3_mounts SET status=?1,last_error=?2 WHERE id=?3 AND bucket_id=?4",
+        params![status, error_text, mount_id, bucket_id],
+    )
+    .map_err(db_error)?;
+    Ok(mount_runtime_blocks_detach(
+        mounted,
+        result["unit_active"] == true,
+        result["path_mounted"] == true,
+    ))
 }
 
 pub(super) async fn get_bucket_mount(
@@ -3099,15 +3215,24 @@ pub(super) async fn delete_connection(
             "برای قطع اتصال، نام نمایشی آن را دقیقاً وارد کن.",
         ));
     }
-    {
+    let mounts: Vec<(i64, i64, String)> = {
         let db = state.lock().unwrap();
-        let active_mounts: i64 = db.query_row("SELECT COUNT(*) FROM s3_mounts m JOIN s3_buckets b ON b.id=m.bucket_id WHERE b.connection_id=?1 AND m.status='mounted'",[id],|row|row.get(0)).map_err(db_error)?;
-        if active_mounts > 0 {
+        let mut statement = db.prepare("SELECT m.id,b.id,m.mount_path FROM s3_mounts m JOIN s3_buckets b ON b.id=m.bucket_id WHERE b.connection_id=?1").map_err(db_error)?;
+        let rows = statement
+            .query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
+    };
+    for (mount_id, bucket_id, mount_path) in mounts {
+        if refresh_mount_runtime_state(&state, mount_id, id, bucket_id, &mount_path).await? {
             return Err(error(
                 StatusCode::CONFLICT,
-                "پیش از حذف اتصال، Mountهای فعال آن را Unmount کن.",
+                "پیش از حذف اتصال، Mount فعال آن را Unmount کن.",
             ));
         }
+    }
+    {
+        let db = state.lock().unwrap();
         let app_bindings:i64=db.query_row("SELECT COUNT(*) FROM application_s3_bindings x JOIN s3_buckets b ON b.id=x.bucket_id WHERE b.connection_id=?1",[id],|row|row.get(0)).map_err(db_error)?;
         if app_bindings > 0 {
             return Err(error(
@@ -3115,6 +3240,19 @@ pub(super) async fn delete_connection(
                 "این اتصال در تنظیمات اپلیکیشن‌ها استفاده می‌شود؛ ابتدا Bindingهای اپ را جدا کن.",
             ));
         }
+    }
+    let secret_result =
+        privileged_request_async(json!({"action":"s3-secret-delete","id":id})).await?;
+    if secret_result["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            secret_result["error"]
+                .as_str()
+                .unwrap_or("حذف امن اعتبارنامهٔ محلی ناموفق بود؛ اتصال در ARG حفظ شد."),
+        ));
+    }
+    {
+        let db = state.lock().unwrap();
         db.execute("DELETE FROM s3_buckets WHERE connection_id=?1", [id])
             .map_err(db_error)?;
         db.execute("DELETE FROM s3_connections WHERE id=?1", [id])
@@ -3126,7 +3264,6 @@ pub(super) async fn delete_connection(
             &format!("id={id}; remote data untouched"),
         );
     }
-    let _ = privileged_request_async(json!({"action":"s3-secret-delete","id":id})).await;
     Ok(Json(json!({"ok":true,"remote_bucket_data_deleted":false})))
 }
 pub(super) async fn test_connection(
@@ -3554,33 +3691,40 @@ pub(super) async fn detach_bucket(
         require_admin(&db, &headers)?
     };
     let confirm = input["confirm_bucket"].as_str().unwrap_or("");
-    let db = state.lock().unwrap();
-    let bucket: String = db
-        .query_row(
-            "SELECT bucket_name FROM s3_buckets WHERE id=?1",
-            [id],
-            |row| row.get(0),
-        )
-        .map_err(|_| error(StatusCode::NOT_FOUND, "Bucket در ARG پیدا نشد."))?;
+    let (bucket, connection_id, mount): (String, i64, Option<(i64, String)>) = {
+        let db = state.lock().unwrap();
+        let (bucket, connection_id): (String, i64) = db
+            .query_row(
+                "SELECT bucket_name,connection_id FROM s3_buckets WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| error(StatusCode::NOT_FOUND, "Bucket در ARG پیدا نشد."))?;
+        let mount = db
+            .query_row(
+                "SELECT id,mount_path FROM s3_mounts WHERE bucket_id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+        (bucket, connection_id, mount)
+    };
     if confirm != bucket {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "برای قطع اتصال، نام Bucket را دقیقاً تأیید کن.",
         ));
     }
-    let active_mount: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM s3_mounts WHERE bucket_id=?1 AND status='mounted')",
-            [id],
-            |row| row.get(0),
-        )
-        .map_err(db_error)?;
-    if active_mount {
-        return Err(error(
-            StatusCode::CONFLICT,
-            "پیش از قطع Bucket از ARG، Mount فعال آن را Unmount کن.",
-        ));
+    if let Some((mount_id, mount_path)) = mount {
+        if refresh_mount_runtime_state(&state, mount_id, connection_id, id, &mount_path).await? {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "پیش از قطع Bucket از ARG، Mount فعال آن را Unmount کن.",
+            ));
+        }
     }
+    let db = state.lock().unwrap();
     let app_bindings: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM application_s3_bindings WHERE bucket_id=?1",

@@ -15,6 +15,7 @@ import { FileManagerBrowser, type FileManagerEntry } from './components/file-man
 import { useConfirmDialog } from './hooks/useConfirmDialog'
 import { UnifiedStepper } from './components/ui/stepper'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
+import { quotaBytesFromGib } from './lib/s3-quota.mjs'
 
 type Provider = { id: string; label: string; rclone_provider: string; endpoint_required: boolean; region_required: boolean; region_default?: string; create_bucket: boolean; docs: string; endpoints?: { id: string; label: string; endpoint: string; region?: string }[] }
 type S3Connection = { id: number; display_name: string; description: string; provider_type: string; endpoint: string; region: string; address_style: string; allow_private_endpoint: boolean; credential_present: boolean; last_rotated_at: number; status: string; last_test_at: number | null; last_error: string | null; created_at: number; updated_at: number }
@@ -32,7 +33,7 @@ const MAX_SERVER_TRANSFER_FILE_BYTES = 512 * 1024 * 1024
 type Props = { Heading: (props: { title: string; description: string; action?: React.ReactNode }) => React.ReactNode; notify: (message: string) => void }
 type Draft = { display_name: string; description: string; provider_type: string; endpoint: string; region: string; access_key_id: string; secret_access_key: string; session_token: string; address_style: string; allow_private_endpoint: boolean }
 const emptyDraft: Draft = { display_name: '', description: '', provider_type: 'aws', endpoint: '', region: 'us-east-1', access_key_id: '', secret_access_key: '', session_token: '', address_style: 'auto', allow_private_endpoint: false }
-const statusText: Record<string, string> = { unverified: 'تأییدنشده', connected: 'متصل', degraded: 'محدودیت دسترسی', failed: 'خطای اتصال' }
+const statusText: Record<string, string> = { unverified: 'تأییدنشده', connected: 'متصل', degraded: 'محدودیت دسترسی', failed: 'بررسی ناموفق' }
 const statusVariant = (status: string) => status === 'connected' ? 'success' as const : status === 'degraded' ? 'warning' as const : status === 'failed' ? 'destructive' as const : 'outline' as const
 
 export function S3StoragePage({ Heading, notify }: Props) {
@@ -53,6 +54,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
   const [working, setWorking] = useState('')
   const [bucketName, setBucketName] = useState('')
   const [manualBucket, setManualBucket] = useState('')
+  const [quotaDraft, setQuotaDraft] = useState('')
   const [prefix, setPrefix] = useState('')
   const [searchPrefix, setSearchPrefix] = useState('')
   const [cursor, setCursor] = useState<string | null>(null)
@@ -141,6 +143,10 @@ export function S3StoragePage({ Heading, notify }: Props) {
     }).catch(() => { if (!cancelled) setMount(null) })
     return () => { cancelled = true }
   }, [selectedBucket?.id])
+
+  useEffect(() => {
+    setQuotaDraft(selectedBucket?.quota_bytes == null ? '' : String((selectedBucket.quota_bytes / (1024 ** 3)).toFixed(3)).replace(/\.?0+$/, ''))
+  }, [selectedBucket?.id, selectedBucket?.quota_bytes])
 
   useEffect(() => () => objectRequestEpoch.invalidate(), [objectRequestEpoch])
 
@@ -271,6 +277,21 @@ export function S3StoragePage({ Heading, notify }: Props) {
       setBucketData(refreshed)
       notify(result.started ? 'اسکن فهرست آبجکت‌ها در پس‌زمینه شروع شد؛ نتیجه خودکار به‌روز می‌شود.' : 'اسکن برای این Bucket در حال اجراست یا آمار آن تازه است.')
     } catch (error) { notify(error instanceof Error ? error.message : 'شروع اسکن حجم Bucket ناموفق بود.') }
+    finally { setWorking('') }
+  }
+  const saveBucketQuota = async (clear = false) => {
+    if (!selectedBucket) return
+    let quota_bytes: number | null = null
+    if (!clear) {
+      try { quota_bytes = quotaBytesFromGib(quotaDraft) }
+      catch { notify('سقف دستی باید عددی بزرگ‌تر از صفر و در محدودهٔ دقیق قابل ذخیره باشد.'); return }
+    }
+    setWorking('quota')
+    try {
+      await api(`s3/buckets/${selectedBucket.id}/usage`, { method: 'PUT', body: JSON.stringify({ quota_bytes }) })
+      if (selectedId) setBucketData(await api<{ provider_buckets: string[] | null; connections: BucketRow[] }>(`s3/connections/${selectedId}/buckets?local_only=1`))
+      notify(clear ? 'سقف دستی پاک شد.' : 'سقف برنامه‌ریزی‌شدهٔ Bucket ذخیره شد؛ این مقدار محدودیت ارائه‌دهنده را تغییر نمی‌دهد.')
+    } catch (error) { notify(error instanceof Error ? error.message : 'ذخیرهٔ سقف Bucket ناموفق بود.') }
     finally { setWorking('') }
   }
   const createBucket = async (name: string) => {
@@ -481,7 +502,7 @@ export function S3StoragePage({ Heading, notify }: Props) {
         </FileManagerBrowser>}
           </TabsContent>
           <TabsContent value="mount" className="min-w-0 space-y-4">
-        {selectedBucket && <Card className="rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3 space-y-0 p-4"><div><CardTitle className="flex items-center gap-2 text-sm"><HardDrive size={15} className="text-primary"/>مصرف واقعی Bucket</CardTitle><CardDescription className="mt-1">حجم با جمع اندازهٔ تمام آبجکت‌ها محاسبه می‌شود؛ نتیجه cache می‌شود و حداکثر هر 24 ساعت خودکار تازه می‌شود.</CardDescription></div><Button size="sm" variant="outline" onClick={() => void scanBucketUsage()} disabled={!!working || selectedBucket.scan_status === 'scanning'}>{working === 'usage' || selectedBucket.scan_status === 'scanning' ? <LoaderCircle size={14} className="animate-spin"/> : <RefreshCw size={14}/>}محاسبه / بازشماری</Button></CardHeader><CardContent className="grid gap-3 border-t border-border p-4 sm:grid-cols-3"><InfoCell label="حجم آبجکت‌ها" value={selectedBucket.used_bytes == null ? selectedBucket.scan_status === 'scanning' ? 'در حال محاسبه' : 'هنوز محاسبه نشده' : formatBytes(selectedBucket.used_bytes)} ltr/><InfoCell label="تعداد آبجکت‌ها" value={selectedBucket.object_count == null ? '—' : formatNumber(selectedBucket.object_count)}/><InfoCell label="آخرین اسکن" value={selectedBucket.scan_status === 'scanning' ? 'در حال اجرا' : selectedBucket.measured_at && selectedBucket.measured_at > 0 ? new Date(selectedBucket.measured_at * 1000).toISOString().slice(0, 16).replace('T', ' ') : '—'} ltr/>{selectedBucket.error && <p className="text-xs text-destructive sm:col-span-3">{selectedBucket.error}</p>}<p className="text-[10px] leading-5 text-muted-foreground sm:col-span-3">اسکن صفحه‌به‌صفحه و در پس‌زمینه انجام می‌شود؛ آبجکت‌ها در حافظه جمع نمی‌شوند. اسکن خودکار حداکثر روزی یک بار اجرا می‌شود. ارائه‌دهنده ممکن است سقف یا حجم صورتحسابی جداگانه داشته باشد.</p></CardContent></Card>}
+        {selectedBucket && <Card className="rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-center justify-between gap-3 space-y-0 p-4"><div><CardTitle className="flex items-center gap-2 text-sm"><HardDrive size={15} className="text-primary"/>مصرف واقعی Bucket</CardTitle><CardDescription className="mt-1">حجم با جمع اندازهٔ تمام آبجکت‌ها محاسبه می‌شود؛ نتیجه cache می‌شود و حداکثر هر 24 ساعت خودکار تازه می‌شود.</CardDescription></div><Button size="sm" variant="outline" onClick={() => void scanBucketUsage()} disabled={!!working || selectedBucket.scan_status === 'scanning'}>{working === 'usage' || selectedBucket.scan_status === 'scanning' ? <LoaderCircle size={14} className="animate-spin"/> : <RefreshCw size={14}/>}محاسبه / بازشماری</Button></CardHeader><CardContent className="grid gap-3 border-t border-border p-4 sm:grid-cols-3"><form className="sm:col-span-3 rounded-lg border border-border/70 bg-background/35 p-3" onSubmit={(event) => { event.preventDefault(); void saveBucketQuota() }}><div className="flex flex-wrap items-end gap-2"><label className="min-w-[180px] flex-1 space-y-1.5"><span className="text-xs font-medium">سقف دستی برنامه‌ریزی‌شده (GiB)</span><Input aria-label="سقف دستی Bucket بر حسب GiB" dir="ltr" inputMode="decimal" autoComplete="off" value={quotaDraft} onChange={(event) => setQuotaDraft(event.target.value)} placeholder="مثلاً 100"/></label><Button size="sm" type="submit" disabled={working === 'quota'}>{working === 'quota' ? <LoaderCircle size={14} className="animate-spin"/> : null}ذخیرهٔ سقف</Button><Button size="sm" type="button" variant="outline" disabled={working === 'quota' || selectedBucket.quota_bytes == null} onClick={() => { setQuotaDraft(''); void saveBucketQuota(true) }}>پاک‌کردن</Button></div><p className="mt-2 text-[10px] leading-5 text-muted-foreground">این سقف برای نمایش و برنامه‌ریزی ARG است و جلوی آپلود در Provider را نمی‌گیرد. محدودیت واقعی باید جداگانه در پنل سرویس‌دهنده تنظیم شود.{selectedBucket.quota_bytes != null && <span> مقدار فعلی: {formatBytes(selectedBucket.quota_bytes)}.</span>}</p></form><InfoCell label="حجم آبجکت‌ها" value={selectedBucket.used_bytes == null ? selectedBucket.scan_status === 'scanning' ? 'در حال محاسبه' : 'هنوز محاسبه نشده' : formatBytes(selectedBucket.used_bytes)} ltr/><InfoCell label="تعداد آبجکت‌ها" value={selectedBucket.object_count == null ? '—' : formatNumber(selectedBucket.object_count)}/><InfoCell label="آخرین اسکن" value={selectedBucket.scan_status === 'scanning' ? 'در حال اجرا' : selectedBucket.measured_at && selectedBucket.measured_at > 0 ? new Date(selectedBucket.measured_at * 1000).toISOString().slice(0, 16).replace('T', ' ') : '—'} ltr/>{selectedBucket.error && <p className="text-xs text-destructive sm:col-span-3">{selectedBucket.error}</p>}<p className="text-[10px] leading-5 text-muted-foreground sm:col-span-3">اسکن صفحه‌به‌صفحه و در پس‌زمینه انجام می‌شود؛ آبجکت‌ها در حافظه جمع نمی‌شوند. اسکن خودکار حداکثر روزی یک بار اجرا می‌شود. ارائه‌دهنده ممکن است سقف یا حجم صورتحسابی جداگانه داشته باشد.</p></CardContent></Card>}
         {selectedBucket && <Card className="rounded-[14px] border-border"><CardHeader className="flex-row flex-wrap items-start justify-between gap-3 space-y-0 p-4"><div><CardTitle className="flex items-center gap-2 text-sm"><HardDrive size={16} className="text-primary"/>Mount روی فایل‌سیستم VPS</CardTitle><CardDescription className="mt-1">دسترسی فایل‌مانند از مسیر سرور؛ فضای ابری ظرفیت فیزیکی دیسک را زیاد نمی‌کند و سهمیهٔ S3 ممکن است نامشخص باشد.</CardDescription></div><Badge variant={mount?.status === 'mounted' ? 'success' : mount?.status === 'failed' ? 'destructive' : mount?.status === 'mounting' ? 'warning' : 'outline'}>{mount?.status === 'mounted' ? 'متصل' : mount?.status === 'failed' ? 'خطا' : mount?.status === 'mounting' ? 'در حال اتصال' : mount?.status === 'unknown' ? 'وضعیت نامشخص' : 'Unmounted'}</Badge></CardHeader><CardContent className="space-y-3 border-t border-border p-4"><div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-background/30 p-3"><div className="min-w-0"><p className="text-xs font-medium">مسیر Mount روی سرور</p><code dir="ltr" className="mt-1 block truncate text-left font-mono text-[11px] text-muted-foreground">{mount?.mount_path || `پس از اتصال: /mnt/arg-s3/<connection-name>/<bucket-name>`}</code></div><div className="flex shrink-0 gap-2"><Button size="sm" variant="outline" disabled={!mount?.mount_path} onClick={() => { if (mount?.mount_path) { navigator.clipboard.writeText(mount.mount_path); notify('مسیر Mount کپی شد.') } }}><HardDrive size={13}/>کپی مسیر</Button><Button size="sm" variant="outline" disabled={!mount?.mount_path} onClick={() => { if (mount?.mount_path) window.location.hash = `#/files?path=${encodeURIComponent(mount.mount_path)}` }}><Folder size={13}/>مدیریت فایل‌ها</Button></div></div><div className="grid gap-2 sm:grid-cols-2"><label className="flex items-start gap-3 rounded-lg border border-border p-3"><Switch checked={mountReadOnly} onCheckedChange={setMountReadOnly}/><span className="text-xs leading-5"><b className="block">فقط‌خواندنی</b><span className="text-muted-foreground">برای شروع امن است؛ خاموش‌کردنش دسترسی نوشتن روی Bucket می‌دهد.</span></span></label><label className="flex items-start gap-3 rounded-lg border border-border p-3"><Switch checked={mountAutoStart} onCheckedChange={setMountAutoStart}/><span className="text-xs leading-5"><b className="block">اتصال خودکار پس از راه‌اندازی</b><span className="text-muted-foreground">سرویس systemd برای این Mount فعال می‌شود.</span></span></label></div>{mount?.last_error && <Alert className="border-amber-400/20 bg-amber-400/[.04]"><AlertDescription>{mount.last_error}</AlertDescription></Alert>}<div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => void configureMount()} disabled={!!working}>{working === 'mount' ? <LoaderCircle size={14} className="animate-spin"/> : <HardDrive size={14}/>}اتصال / اعمال تنظیمات</Button>{mount?.status === 'mounted' && <Button size="sm" variant="outline" onClick={() => void stopMount()} disabled={!!working}><X size={14}/>Unmount</Button>}<span className="self-center text-[10px] text-muted-foreground">نیازمند Rclone و FUSE · Cache محلی حداکثر 1 GiB است؛ ظرفیت Bucket همچنان جدا از دیسک محلی گزارش می‌شود.</span></div></CardContent></Card>}
         {!selectedBucket && <Card className="border-dashed"><CardContent className="p-5 text-sm text-muted-foreground">برای تنظیم Mount یا دیدن مصرف، ابتدا یک Bucket را در تب «فایل‌ها و Bucketها» انتخاب کن.</CardContent></Card>}
           </TabsContent>
