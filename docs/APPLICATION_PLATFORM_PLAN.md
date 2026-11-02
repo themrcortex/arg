@@ -24,7 +24,7 @@ This plan covers the application platform request and its follow-up requirements
 | 7. Database and container integration | Use existing protected MySQL tools and ARG-owned Docker networks; do not expose fake PostgreSQL controls. | Ownership checks, redacted DB metadata, Docker helper tests. | Implemented within current provider support |
 | 8. Cross-Node app mesh | Negotiate explicit Node capabilities and encrypted transport before showing remote links as active; otherwise maintain a clearly labeled design/backlog. | Two isolated Node integration environment required. | Blocked on available paired test Nodes |
 | 9. WordPress version selection | Fetch stable core versions from the WordPress API; validate and persist a selected semver; use the exact tag from the official WordPress GitHub mirror as the first deployment source; improve template cards with platform icons/brand accents. | Version parser and source-selection tests, legacy migration, frontend check/build. | Implemented; complete automated DB/wp-config/Nginx/SSL provisioning remains separate |
-| 10. Final quality gate and release | Format, Rust check/tests, frontend check/offline tests/build, docs review, separate commits, publish development release only after passing gates. | Rust 300/300 tests; format/check pass; frontend typecheck, 18/18 tests and production build pass. Release tag pending. | Gate passed; release pending |
+| 10. Final quality gate and release | Format, Rust check/tests, frontend check/offline tests/build, docs review, separate commits, publish development release only after passing gates. | Rust 300/300 tests; format/check pass; frontend typecheck, 18/18 tests and production build pass. GitHub release job 41407482986 succeeded. | Released as v0.7.9-dev.4 |
 
 ## Prompt-by-prompt task inventory
 
@@ -87,3 +87,10 @@ This does not yet provision a complete WordPress website: the current deployment
 - Same isolated target with `cargo test --locked`: 300 passed, 0 failed.
 - In a clean temporary frontend project copy with `npm ci`, `npm run check`: passed; `npm run test:offline`: 18 passed; `npm run build`: passed. Vite reports the existing 509 kB main bundle advisory.
 - Deployment against an actual privileged helper, Docker daemon, database server, production domain or paired Node was not run here. Cross-Node networking and end-to-end WordPress database/wp-config/Nginx/SSL provisioning remain unsupported as stated above.
+
+## Published development release
+
+- Version/tag: `v0.7.9-dev.4`.
+- Feature commit: `73e4f92`; version and release commit: `65a824c`.
+- GitHub Actions release run `41407482986` succeeded for x86_64 and aarch64 musl builds and published both binaries with SHA-256 sidecars.
+- Release page: https://github.com/themrcortex/arg/releases/tag/v0.7.9-dev.4
