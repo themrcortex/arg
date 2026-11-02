@@ -2,6 +2,8 @@ import type { KeyboardEvent, ReactNode } from 'react'
 import { Globe, Info, Pencil, Power, Trash2 } from 'lucide-react'
 import { Badge } from '../components/ui/badge'
 import { Button } from '../components/ui/button'
+import { tabsListClassName, tabsTriggerClassName } from '../components/ui/tabs'
+import { cn } from '../lib/utils'
 
 type Props = {
   name: string
@@ -29,11 +31,15 @@ const tabs: Array<{ id: NginxSiteTab; label: string }> = [
 
 export function NginxSiteWorkspace({ name, description, enabled, maintenanceEnabled, onMetadata, onEdit, onToggle, onDelete, activeTab, onTabChange, children }: Props) {
   function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
     event.preventDefault()
     const current = tabs.findIndex((tab) => tab.id === activeTab)
-    const direction = event.key === 'ArrowRight' ? 1 : -1
-    const next = tabs[(current + direction + tabs.length) % tabs.length]
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? tabs.length - 1
+        : (current + (event.key === 'ArrowRight' ? -1 : 1) + tabs.length) % tabs.length
+    const next = tabs[nextIndex]
     onTabChange(next.id)
     document.getElementById(`nginx-site-tab-${next.id}`)?.focus()
   }
@@ -52,21 +58,9 @@ export function NginxSiteWorkspace({ name, description, enabled, maintenanceEnab
         {onDelete && <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" onClick={onDelete}><Trash2 size={14}/>حذف سایت</Button>}
       </div>
     </section>
-    <nav aria-label="بخش‌های مدیریت سایت" role="tablist" className="sticky top-2 z-10 flex gap-1 overflow-x-auto rounded-xl border border-white/10 bg-background/90 p-2 backdrop-blur">
-      {tabs.map(({ id, label }) => <button key={id} id={`nginx-site-tab-${id}`} type="button" role="tab" aria-selected={activeTab === id} aria-controls="nginx-site-tab-panel" tabIndex={activeTab === id ? 0 : -1} onKeyDown={onTabKeyDown} onClick={() => onTabChange(id)} className="min-h-10 shrink-0 rounded-lg px-3 py-2 text-xs text-muted-foreground transition hover:bg-white/[.06] hover:text-white aria-selected:bg-primary/15 aria-selected:text-foreground">{label}</button>)}
+    <nav dir="rtl" aria-label="بخش‌های مدیریت سایت" role="tablist" className={tabsListClassName}>
+      {tabs.map(({ id, label }) => <button key={id} id={`nginx-site-tab-${id}`} type="button" role="tab" data-state={activeTab === id ? 'active' : 'inactive'} aria-selected={activeTab === id} aria-controls="nginx-site-tab-panel" tabIndex={activeTab === id ? 0 : -1} onKeyDown={onTabKeyDown} onClick={() => onTabChange(id)} className={cn(tabsTriggerClassName, 'text-xs')}>{label}</button>)}
     </nav>
-    <div id="nginx-site-tab-panel" role="tabpanel" aria-labelledby={`nginx-site-tab-${activeTab}`} data-active-tab={activeTab} className="nginx-site-tab-panels min-w-0 space-y-5">{children}</div>
-    <style>{`
-      .nginx-site-tab-panels [data-nginx-site-panel] { display: none; }
-      .nginx-site-tab-panels[data-active-tab="overview"] [data-nginx-site-panel="overview"],
-      .nginx-site-tab-panels[data-active-tab="config"] [data-nginx-site-panel="config"],
-      .nginx-site-tab-panels[data-active-tab="domains"] [data-nginx-site-panel="domains"],
-      .nginx-site-tab-panels[data-active-tab="operations"] [data-nginx-site-panel="operations"],
-      .nginx-site-tab-panels[data-active-tab="activity"] [data-nginx-site-panel="activity"] { display: block; }
-      /* This wrapper contains panels for several tabs; hide its overview cards, not their parent. */
-      .nginx-site-tab-panels [data-nginx-site-panel="overview-grid"] { display: contents; }
-      .nginx-site-tab-panels[data-active-tab="overview"] [data-nginx-site-panel="overview-grid"] { display: grid; }
-      .nginx-site-tab-panels[data-active-tab="overview"] [data-nginx-site-panel="overview-cards"] { display: grid; }
-    `}</style>
+    <div id="nginx-site-tab-panel" role="tabpanel" tabIndex={0} aria-labelledby={`nginx-site-tab-${activeTab}`} data-active-tab={activeTab} className="nginx-site-tab-panels min-w-0 space-y-5">{children}</div>
   </main>
 }

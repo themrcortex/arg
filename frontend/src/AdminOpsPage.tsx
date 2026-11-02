@@ -128,8 +128,8 @@ export function AptPage({ Heading, notify }: Common) {
   return <>
     <Heading title="مدیریت APT" description="عملیات بسته‌ها را دسته‌بندی‌شده اجرا کن و وضعیت هر کار را همان‌جا ببین." />
     {error && <Alert className="mb-4 border-rose-400/25 bg-rose-400/[.06]"><CircleAlert size={16}/><AlertDescription>{error}</AlertDescription></Alert>}
-    <Tabs value={aptTab} onValueChange={setAptTab} dir="rtl" className="space-y-4">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های مدیریت APT">
+    <Tabs value={aptTab} onValueChange={setAptTab} dir="rtl">
+      <TabsList aria-label="بخش‌های مدیریت APT">
         <TabsTrigger value="actions">عملیات و پاک‌سازی</TabsTrigger><TabsTrigger value="runtimes">Runtimeها و زبان‌ها</TabsTrigger><TabsTrigger value="packages">بسته‌های نصب‌شده</TabsTrigger>
       </TabsList>
       <TabsContent value="actions" className="space-y-4">
@@ -215,8 +215,8 @@ export function ServicesPage({ Heading, notify }: Common) {
     <Heading title="سرویس‌های سیستم" description="سرویس‌های systemd را جست‌وجو کن و وضعیت اجرا و فعال‌سازی آن‌ها را مدیریت کن." />
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><Card><CardContent className="flex items-center gap-3 p-4"><ServerCog className="text-[#dda46f]"/><div><div className="text-xl font-semibold tabular-nums">{services.length.toLocaleString('en-US')}</div><div className="text-xs text-muted-foreground">سرویس شناسایی‌شده</div></div></CardContent></Card><Card><CardContent className="flex items-center gap-3 p-4"><Activity className="text-emerald-300"/><div><div className="text-xl font-semibold tabular-nums">{services.filter((service) => service.state === 'active').length.toLocaleString('en-US')}</div><div className="text-xs text-muted-foreground">در حال اجرا</div></div></CardContent></Card><Card><CardContent className="flex items-center gap-3 p-4"><CircleAlert className="text-rose-300"/><div><div className="text-xl font-semibold tabular-nums">{services.filter((service) => service.state === 'failed').length.toLocaleString('en-US')}</div><div className="text-xs text-muted-foreground">دارای خطا</div></div></CardContent></Card></div>
     {error && <Alert className="mb-4 border-rose-400/25 bg-rose-400/[.06]"><CircleAlert size={16}/><AlertDescription>{error}</AlertDescription></Alert>}
-    <Tabs value={serviceTab} onValueChange={setServiceTab} dir="rtl" className="space-y-4">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های مدیریت سرویس‌های سیستم">
+    <Tabs value={serviceTab} onValueChange={setServiceTab} dir="rtl">
+      <TabsList aria-label="بخش‌های مدیریت سرویس‌های سیستم">
         <TabsTrigger value="services">سرویس‌ها</TabsTrigger><TabsTrigger value="activity">نتیجهٔ آخرین عملیات</TabsTrigger>
       </TabsList>
       <TabsContent value="services" className="min-w-0">

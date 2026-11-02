@@ -203,8 +203,8 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
   return <>
     <PageHeading title="همهٔ سرورها" description="نمای خواندنی وضعیت سرورهای متصل؛ برای انجام عملیات، ابتدا فضای‌کار همان سرور را انتخاب کن." action={action}/>
     {error && <p role="alert" className="mb-4 rounded-xl border border-rose-400/20 bg-rose-400/[.05] p-3 text-sm text-rose-200">{error}</p>}
-    <Tabs value={view} onValueChange={setView} dir="rtl" className="space-y-4">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="نمایش وضعیت همهٔ سرورها">
+    <Tabs value={view} onValueChange={setView} dir="rtl">
+      <TabsList aria-label="نمایش وضعیت همهٔ سرورها">
         <TabsTrigger value="topology"><Waypoints size={14} className="ml-2"/>نقشهٔ ارتباط</TabsTrigger>
         <TabsTrigger value="inventory"><Server size={14} className="ml-2"/>فهرست و منابع</TabsTrigger>
       </TabsList>

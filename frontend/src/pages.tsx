@@ -472,8 +472,8 @@ export function SystemPage({ Heading, notify }: Common) {
           <Metric icon={Clock} tone="blue" label="زمان روشن‌بودن" value={data ? formatUptime(data.uptime_seconds) : '—'} detail="از آخرین راه‌اندازی سیستم" direction="rtl"/>
         </div>
       </section>
-      <Tabs defaultValue="trends" className="mt-5" dir="rtl">
-        <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های سیستم و منابع">
+      <Tabs defaultValue="trends" dir="rtl">
+        <TabsList aria-label="بخش‌های سیستم و منابع">
           <TabsTrigger value="trends">نمودارها و روندها</TabsTrigger>
           <TabsTrigger value="storage">فضاهای ذخیره‌سازی</TabsTrigger>
           <TabsTrigger value="details">مشخصات و جزئیات</TabsTrigger>
@@ -888,8 +888,8 @@ export function FirewallPage({ Heading, notify, user }: Common & { user: User })
   return <>
     <Heading title="فایروال UFW" description="قوانین پنل را بساز، ویرایش کن یا موقتاً غیرفعال کن." action={<div className="flex flex-wrap gap-2"><RefreshButton onRefresh={refresh}/>{user.role === 'admin' && <Button size="sm" onClick={() => openEditor()}><Plus size={15}/> قانون جدید</Button>}</div>}/>
     <div className="mb-5 grid gap-3 sm:grid-cols-3"><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">وضعیت UFW</div><div className="mt-3 flex items-center gap-2 text-xl font-bold text-white"><span className={`h-2 w-2 rounded-full ${active ? 'bg-emerald-400' : 'bg-amber-400'}`}/>{loading ? 'در حال بررسی' : data?.available ? active ? 'فعال' : 'غیرفعال' : 'نصب نشده'}</div>{user.role === 'admin' && data?.available && <div className="mt-4 flex items-center gap-2 border-t border-white/10 pt-3 text-xs text-muted-foreground"><Switch checked={!!active} disabled={busy} onCheckedChange={() => void toggleFirewall()} aria-label="تغییر وضعیت UFW"/> تغییر وضعیت کلی UFW</div>}{user.role === 'admin' && !data?.available && <div className="mt-4 border-t border-white/10 pt-3"><Button size="sm" disabled={busy} onClick={() => void installFirewall()}>{busy ? 'در حال نصب…' : 'نصب UFW'}</Button><p className="mt-2 text-[11px] leading-5 text-amber-200/80">{data?.error || 'UFW روی این سرور نصب نشده است.'}</p></div>}</div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین فعال پنل</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => rule.enabled).length)}</div></div><div className="rounded-[14px] border border-white/10 bg-card p-5"><div className="text-xs text-muted-foreground">قوانین غیرفعال</div><div className="mt-3 text-2xl font-bold text-white" dir="ltr">{formatNumber(rules.filter((rule) => !rule.enabled).length)}</div></div></div>
-    <Tabs defaultValue="access" className="mt-5" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های فایروال">
+    <Tabs defaultValue="access" dir="rtl">
+      <TabsList aria-label="بخش‌های فایروال">
         <TabsTrigger value="access">دسترسی و وضعیت</TabsTrigger>
         <TabsTrigger value="managed">قوانین ARG</TabsTrigger>
         <TabsTrigger value="system">قوانین واقعی UFW</TabsTrigger>
@@ -1690,7 +1690,7 @@ export function NginxPage({ Heading, notify }: Common) {
           <DialogDescription>برای سایت <code dir="ltr" className="rounded bg-secondary px-1.5 py-0.5">{reconcileSite?.name}</code>، نسخهٔ ذخیره‌شده در ARG با فایل فعلی سرور تفاوت دارد. ممکن است فایل با SSH، Certbot یا ابزار دیگری تغییر کرده باشد؛ علت را نمی‌توان قطعی تشخیص داد. تا انتخاب تو هیچ نسخه‌ای بازنویسی نمی‌شود.</DialogDescription>
         </DialogHeader>
         <div className="mt-1 rounded-xl border border-amber-400/20 bg-amber-400/[.045] p-3 text-xs leading-6 text-amber-100"><b>دو منبع موجود است:</b> نسخهٔ پایگاه دادهٔ ARG و فایل فعلی سرور. انتخاب فایل، آن را وارد ARG می‌کند؛ بازگردانی ARG فایل سرور را جایگزین می‌کند و قبلش نسخهٔ فعلی پشتیبان می‌شود.</div>
-        <div className="mt-4 flex gap-2 sm:hidden" role="tablist" aria-label="نسخه‌های تنظیمات"><Button size="sm" variant={reconcileView === 'file' ? 'default' : 'outline'} role="tab" aria-selected={reconcileView === 'file'} onClick={() => setReconcileView('file')}>فایل فعلی سرور</Button><Button size="sm" variant={reconcileView === 'database' ? 'default' : 'outline'} role="tab" aria-selected={reconcileView === 'database'} onClick={() => setReconcileView('database')}>نسخهٔ ARG</Button></div>
+        <div className="mt-4 flex gap-2 sm:hidden" role="group" aria-label="نسخه‌های تنظیمات"><Button size="sm" variant={reconcileView === 'file' ? 'default' : 'outline'} aria-pressed={reconcileView === 'file'} onClick={() => setReconcileView('file')}>فایل فعلی سرور</Button><Button size="sm" variant={reconcileView === 'database' ? 'default' : 'outline'} aria-pressed={reconcileView === 'database'} onClick={() => setReconcileView('database')}>نسخهٔ ARG</Button></div>
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
           {(['file', 'database'] as const).map((source) => <section key={source} className={`${reconcileView === source ? 'block' : 'hidden'} rounded-xl border ${source === 'file' ? 'border-emerald-400/15' : 'border-primary/20'} bg-background/35 p-3 sm:block sm:p-4`}>
             <div className="flex items-center justify-between gap-3"><h3 className="font-semibold text-foreground">{source === 'file' ? 'فایل فعلی روی سرور' : 'نسخهٔ ذخیره‌شده در ARG'}</h3><Badge variant={source === 'file' ? 'outline' : 'success'}>{source === 'file' ? 'روی دیسک' : 'در دیتابیس'}</Badge></div>
@@ -2238,8 +2238,8 @@ export function SettingsPage({ Heading, notify, user, update, openUpdateDialog, 
   })()
   return <>
     <Heading title="تنظیمات" description="زمان نمونه‌برداری، نگه‌داری تاریخچه، امنیت نشست و پورت دسترسی" />
-    <Tabs defaultValue="monitoring" className="mt-5" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start" aria-label="دسته‌بندی تنظیمات پنل">
+    <Tabs defaultValue="monitoring" dir="rtl">
+      <TabsList aria-label="دسته‌بندی تنظیمات پنل">
         <TabsTrigger value="monitoring">تاریخچه و اعلان‌ها</TabsTrigger>
         <TabsTrigger value="access">دسترسی و پورت</TabsTrigger>
         <TabsTrigger value="tls">گواهی HTTPS</TabsTrigger>
@@ -2340,8 +2340,8 @@ export function AccountPage({ Heading, user, setUser, logout, notify }: { Headin
   }
   return <>
     <Heading title="حساب کاربری" description="اطلاعات ورود، امنیت حساب و نشست‌های فعال خودت را مدیریت کن." />
-    <Tabs defaultValue="profile" className="mt-5" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های حساب کاربری">
+    <Tabs defaultValue="profile" dir="rtl">
+      <TabsList aria-label="بخش‌های حساب کاربری">
         <TabsTrigger value="profile">حساب و امنیت</TabsTrigger>
         <TabsTrigger value="sessions">نشست‌های فعال</TabsTrigger>
       </TabsList>

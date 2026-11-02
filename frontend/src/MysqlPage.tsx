@@ -22,6 +22,7 @@ const mysqlSettingNames = ['max_connections', 'wait_timeout', 'interactive_timeo
 
 export function MysqlPage({ Heading, notify }: Common) {
   const [status, setStatus] = useState<MysqlStatus | null>(null)
+  const [databaseTab, setDatabaseTab] = useState<'mysql' | 'postgres'>('mysql')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState('')
   const [provider, setProvider] = useState<'mysql' | 'mariadb'>('mysql')
@@ -260,16 +261,16 @@ export function MysqlPage({ Heading, notify }: Common) {
   const stateLabel = !status?.installed ? 'نصب نشده' : status.active ? 'فعال' : 'متوقف'
   if (checkingAccess) return <>
     <Heading title="مدیریت دیتابیس" description="مدیریت MySQL و مشاهدهٔ وضعیت PostgreSQL."/>
-    <Tabs defaultValue="mysql" className="mt-5" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
+    <Tabs value={databaseTab} onValueChange={(value) => setDatabaseTab(value as typeof databaseTab)} dir="rtl">
+      <TabsList aria-label="موتور دیتابیس"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
       <TabsContent value="mysql"><div className="mt-3 grid gap-3 sm:grid-cols-3"><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/></div></TabsContent>
       <TabsContent value="postgres"><PostgresInventoryPanel/></TabsContent>
     </Tabs>
   </>
   if (!authorized) return <>
     <Heading title="مدیریت دیتابیس" description={mysqlApiUnavailable ? "API مدیریت دیتابیس روی VPS انتخاب‌شده در دسترس نیست." : "برای فعال‌سازی مدیریت MySQL، رمز پنل را یک‌بار برای نشست فعلی تأیید کن."}/>
-    <Tabs defaultValue="mysql" className="mt-5" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
+    <Tabs value={databaseTab} onValueChange={(value) => setDatabaseTab(value as typeof databaseTab)} dir="rtl">
+      <TabsList aria-label="موتور دیتابیس"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
       <TabsContent value="mysql">
         {mysqlApiUnavailable ? <Card className="mx-auto mt-4 max-w-xl border-amber-300/25 bg-amber-300/[.04]"><CardHeader><CardTitle className="flex items-center gap-2"><AlertTriangle size={18} className="text-amber-200"/>نسخهٔ Node با این بخش سازگار نیست</CardTitle><CardDescription>API مدیریت MySQL در VPS انتخاب‌شده پیدا نشد (HTTP 404). Node را به آخرین نسخه به‌روزرسانی کن تا این بخش را فعال کنی.</CardDescription></CardHeader><CardContent><Button variant="outline" onClick={() => setAccessRetry((value) => value + 1)} disabled={checkingAccess}><RefreshCw size={14} className={checkingAccess ? 'animate-spin' : ''}/>بررسی دوباره</Button></CardContent></Card> : <Card className="mx-auto mt-4 max-w-xl"><CardHeader><CardTitle className="flex items-center gap-2"><KeyRound size={18} className="text-primary"/>تأیید یک‌بارهٔ دسترسی</CardTitle><CardDescription>پس از تأیید، دیگر برای عملیات MySQL رمز پنل پرسیده نمی‌شود. این دسترسی با خروج از حساب باطل خواهد شد.</CardDescription></CardHeader><CardContent className="space-y-3"><Label htmlFor="mysql-unlock-password">رمز پنل</Label><div className="flex gap-2"><Input id="mysql-unlock-password" autoComplete="current-password" type={showPasswords ? 'text' : 'password'} value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void unlock() }}/><Button type="button" variant="outline" size="icon" onClick={() => setShowPasswords(v => !v)} aria-label={showPasswords ? 'پنهان‌کردن رمز' : 'نمایش رمز'}>{showPasswords ? <EyeOff size={15}/> : <Eye size={15}/>}</Button><Button onClick={() => void unlock()} disabled={!!busy}>{busy === 'unlock' ? <LoaderCircle size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}تأیید</Button></div>{error && <Alert className="border-rose-400/25"><AlertDescription>{error}</AlertDescription></Alert>}</CardContent></Card>}
       </TabsContent>
@@ -278,9 +279,9 @@ export function MysqlPage({ Heading, notify }: Common) {
   </>
   return <>
     <Heading title="مدیریت دیتابیس" description="مدیریت سرویس‌ها و داده‌های MySQL و PostgreSQL." action={<Button size="sm" variant="outline" onClick={() => void refresh()} disabled={loading || !!busy}><RefreshCw size={14} className={loading ? 'animate-spin' : ''}/>بررسی وضعیت MySQL</Button>}/>
-    <Tabs defaultValue="mysql" className="mt-5" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
-      <TabsContent value="mysql" className="mt-4 space-y-4">
+    <Tabs value={databaseTab} onValueChange={(value) => setDatabaseTab(value as typeof databaseTab)} dir="rtl">
+      <TabsList aria-label="موتور دیتابیس"><TabsTrigger value="mysql"><Database size={14} className="ml-2"/>MySQL</TabsTrigger><TabsTrigger value="postgres"><Database size={14} className="ml-2"/>PostgreSQL</TabsTrigger></TabsList>
+      <TabsContent value="mysql" className="space-y-4">
     {mysqlApiUnavailable && <Alert className="mt-4 border-amber-300/25 bg-amber-300/[.05]"><AlertTriangle size={16} className="text-amber-200"/><AlertDescription>بخشی از API مدیریت MySQL در Node انتخاب‌شده در دسترس نیست (HTTP 404). برای فعال‌شدن همهٔ عملیات، نسخهٔ ARG آن Node را به‌روزرسانی کن.</AlertDescription></Alert>}
     {loading && !status ? <div className="grid gap-3 sm:grid-cols-3"><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/><Skeleton className="h-28 rounded-2xl"/></div> : <div className="grid gap-3 sm:grid-cols-3">
       <Card><CardContent className="flex items-center gap-3 p-4"><Database className="text-primary"/><div><div className="font-semibold">وضعیت سرویس</div><Badge variant={status?.active ? 'success' : 'outline'} className="mt-2">{stateLabel}</Badge></div></CardContent></Card>
@@ -292,8 +293,8 @@ export function MysqlPage({ Heading, notify }: Common) {
 
     {status?.installed && <>
       <Alert className="border-emerald-400/20 bg-emerald-400/[.04]"><ShieldCheck size={16}/><AlertDescription>حساب مدیریتی داخلی ARG با رمز تصادفی و دسترسی کامل به دیتابیس‌ها ساخته شده است. رمز فقط در فایل root-only سرور نگه‌داری می‌شود و در پنل یا گزارش‌ها نمایش داده نمی‌شود.</AlertDescription></Alert>
-      <Tabs defaultValue="overview" className="mt-5" dir="rtl">
-        <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto">
+      <Tabs defaultValue="overview" dir="rtl">
+        <TabsList aria-label="بخش‌های مدیریت MySQL">
           <TabsTrigger value="overview"><Activity size={14} className="ml-2"/>نمای کلی</TabsTrigger>
           <TabsTrigger value="databases"><Database size={14} className="ml-2"/>دیتابیس و کاربران</TabsTrigger>
           <TabsTrigger value="sql"><Play size={14} className="ml-2"/>کنسول SQL</TabsTrigger>
@@ -345,7 +346,7 @@ export function MysqlPage({ Heading, notify }: Common) {
     {output && <Card className="mt-4"><CardHeader className="pb-2"><CardTitle className="text-sm">نتیجهٔ عملیات</CardTitle></CardHeader><CardContent><pre className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-[#090d12] p-4 text-left font-mono text-xs leading-5 text-muted-foreground" dir="ltr">{output}</pre></CardContent></Card>}
     <p className="mt-5 text-[11px] leading-5 text-muted-foreground">رمز کاربران MySQL قابل بازیابی نیست؛ برای دسترسی مجدد از بخش بازنشانی رمز استفاده کن. رمز حساب داخلی ARG در فایل محافظت‌شدهٔ root ذخیره می‌شود و به رابط یا گزارش‌ها برنمی‌گردد.</p>
       </TabsContent>
-      <TabsContent value="postgres" className="mt-4"><PostgresInventoryPanel/></TabsContent>
+      <TabsContent value="postgres"><PostgresInventoryPanel/></TabsContent>
     </Tabs>
     {confirmation && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) resolveConfirmation(false) }}>
       <section role="alertdialog" aria-modal="true" aria-labelledby="mysql-confirm-title" aria-describedby="mysql-confirm-description" className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-2xl">

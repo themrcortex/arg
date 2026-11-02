@@ -229,8 +229,8 @@ export function FileManagerPage({ Heading, notify }: { Heading: Heading; notify:
 
   return <>
     <Heading title="مدیریت فایل‌ها" description="فایل‌ها و پوشه‌های سرور را مرور کن، ویرایش و جابه‌جا کن یا انتقال بده." action={toolbar}/>
-    <Tabs value={fileView} onValueChange={(value) => { setFileView(value); setDiskScanOpen(value === 'disk') }} dir="rtl" className="space-y-4">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های مدیریت فایل و فضای دیسک">
+    <Tabs value={fileView} onValueChange={(value) => { setFileView(value); setDiskScanOpen(value === 'disk') }} dir="rtl">
+      <TabsList aria-label="بخش‌های مدیریت فایل و فضای دیسک">
         <TabsTrigger value="files"><Folder size={14} className="ml-2"/>فایل‌های سرور</TabsTrigger>
         <TabsTrigger value="disk"><HardDrive size={14} className="ml-2"/>تحلیل فضای دیسک</TabsTrigger>
       </TabsList>

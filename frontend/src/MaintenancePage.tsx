@@ -201,8 +201,8 @@ export function MaintenancePage({ Heading, notify }: Common) {
       {loading && !dashboard ? Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-[96px] rounded-2xl"/>) : specs.map(({ icon: Icon, label, value, dir }) => <Card key={label} className="min-w-0 rounded-2xl border-border/80 bg-card/80"><CardContent className="flex items-center gap-3 p-4"><span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-primary/15 bg-primary/[.08] text-primary"><Icon size={18}/></span><span className="min-w-0"><span className="block text-xs text-muted-foreground">{label}</span><b className="mt-1 block text-sm font-semibold text-foreground" dir={dir || 'rtl'} title={typeof value === 'string' ? value : undefined}>{value}</b></span></CardContent></Card>)}
     </section>
 
-    <Tabs defaultValue="overview" className="mt-5" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های مدیریت سرور و ARG">
+    <Tabs defaultValue="overview" dir="rtl">
+      <TabsList aria-label="بخش‌های مدیریت سرور و ARG">
         <TabsTrigger value="overview">سلامت و دسترسی</TabsTrigger>
         <TabsTrigger value="backups">بکاپ و بازیابی</TabsTrigger>
         <TabsTrigger value="maintenance">تعمیر و عملیات حساس</TabsTrigger>

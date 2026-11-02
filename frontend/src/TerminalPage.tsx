@@ -67,6 +67,21 @@ export function TerminalPage({ Heading, visible = true }: { Heading: (props: { t
     if (clean) setTabs((current) => current.map((tab) => tab.id === id ? { ...tab, name: clean } : tab))
     setRenameId(null)
   }
+  const navigateTabs = (event: React.KeyboardEvent<HTMLButtonElement>, id: string) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+    event.preventDefault()
+    const current = tabs.findIndex((tab) => tab.id === id)
+    const index = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? tabs.length - 1
+        : (current + (event.key === 'ArrowRight' ? -1 : 1) + tabs.length) % tabs.length
+    const next = tabs[index]
+    if (!next) return
+    setActiveId(next.id)
+    setClipboardNote('')
+    document.getElementById(`terminal-tab-${next.id}`)?.focus()
+  }
 
   return <>
     <Heading title="ترمینال سرور" description="نشست‌های مستقل و تعاملی؛ ترمینال معمولی و روت را جداگانه باز و نام‌گذاری کن." />
@@ -74,14 +89,14 @@ export function TerminalPage({ Heading, visible = true }: { Heading: (props: { t
     <TooltipProvider delayDuration={250}>
       <section className="arg-terminal-frame overflow-hidden rounded-2xl border">
         <div className="arg-terminal-toolbar flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
-          <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto" role="tablist" aria-label="نشست‌های ترمینال">
+          <div dir="rtl" className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto" role="tablist" aria-label="نشست‌های ترمینال">
             {tabs.map((tab, index) => <div key={tab.id} role="presentation" className={`group flex shrink-0 items-center rounded-lg border transition-colors ${activeId === tab.id ? 'border-white/15 bg-white/[.07] text-foreground' : 'border-transparent text-muted-foreground hover:bg-white/[.04]'}`}>
-              {renameId === tab.id ? <input autoFocus defaultValue={tab.name} maxLength={32} aria-label="نام تب" className="w-28 bg-transparent px-3 py-2 text-xs outline-none" onBlur={(event) => renameTab(tab.id, event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameTab(tab.id, event.currentTarget.value); if (event.key === 'Escape') setRenameId(null) }} /> : <button role="tab" aria-selected={activeId === tab.id} className="flex items-center gap-2 px-3 py-2 text-xs" onClick={() => { setActiveId(tab.id); setClipboardNote('') }}><TerminalSquare size={14} className={tab.mode === 'root' ? 'text-rose-300' : 'text-[#dda46f]'}/><span>{tab.name}</span><span className="font-mono text-[10px] opacity-45">{index + 1}</span></button>}
+              {renameId === tab.id ? <input autoFocus defaultValue={tab.name} maxLength={32} aria-label="نام تب" className="w-28 bg-transparent px-3 py-2 text-xs outline-none" onBlur={(event) => renameTab(tab.id, event.currentTarget.value)} onKeyDown={(event) => { if (event.key === 'Enter') renameTab(tab.id, event.currentTarget.value); if (event.key === 'Escape') setRenameId(null) }} /> : <button id={`terminal-tab-${tab.id}`} type="button" role="tab" aria-controls={`terminal-panel-${tab.id}`} aria-selected={activeId === tab.id} tabIndex={activeId === tab.id ? 0 : -1} onKeyDown={(event) => navigateTabs(event, tab.id)} className="flex min-h-10 items-center gap-2 px-3 py-2 text-xs" onClick={() => { setActiveId(tab.id); setClipboardNote('') }}><TerminalSquare size={14} className={tab.mode === 'root' ? 'text-rose-300' : 'text-[#dda46f]'}/><span>{tab.name}</span><span className="font-mono text-[10px] opacity-45">{index + 1}</span></button>}
               <Tooltip><TooltipTrigger asChild><button aria-label={`تغییر نام ${tab.name}`} className="rounded p-1 opacity-0 transition-opacity hover:text-[#dda46f] focus:opacity-100 group-hover:opacity-100" onClick={() => setRenameId(tab.id)}><Pencil size={12}/></button></TooltipTrigger><TooltipContent>تغییر نام تب</TooltipContent></Tooltip>
               <Tooltip><TooltipTrigger asChild><button aria-label={`بستن ${tab.name}`} className="ml-1 rounded p-1 opacity-0 transition-opacity hover:text-rose-300 focus:opacity-100 group-hover:opacity-100" onClick={() => closeTab(tab.id)}><X size={13}/></button></TooltipTrigger><TooltipContent>بستن نشست و تب</TooltipContent></Tooltip>
             </div>)}
-            <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label="تب جدید" onClick={addTab} className="h-8 w-8 shrink-0"><Plus size={15}/></Button></TooltipTrigger><TooltipContent>باز کردن نشست ترمینال جدید</TooltipContent></Tooltip>
           </div>
+          <Tooltip><TooltipTrigger asChild><Button size="icon" variant="ghost" aria-label="تب جدید" onClick={addTab} className="h-8 w-8 shrink-0"><Plus size={15}/></Button></TooltipTrigger><TooltipContent>باز کردن نشست ترمینال جدید</TooltipContent></Tooltip>
           <div className="flex shrink-0 items-center gap-2"><Button size="sm" variant="outline" className="h-8 border-rose-300/20 px-2.5 text-[11px] text-rose-100 hover:bg-rose-300/10" onClick={() => setRootPromptOpen(true)}><ShieldAlert size={14}/>Terminal Root</Button><span className="flex items-center gap-1.5 rounded-full border border-emerald-400/15 px-2.5 py-1 text-[11px] text-muted-foreground"><i className={`h-1.5 w-1.5 rounded-full ${tabs.length ? 'bg-emerald-400' : 'bg-slate-500'}`}/>{tabs.length ? `${tabs.length} نشست` : 'بدون نشست'}</span></div>
         </div>
         {tabs.length ? tabs.map((tab) => <SessionTerminal key={tab.id} tab={tab} active={visible && activeId === tab.id} onClose={() => closeTab(tab.id)} clipboardNote={visible && activeId === tab.id ? clipboardNote : ''} setClipboardNote={setClipboardNote} />) : <div className="grid min-h-[min(62vh,680px)] place-items-center p-8 text-center"><div className="max-w-sm"><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-[#dda46f]/20 bg-[#dda46f]/[.06] text-[#dda46f]"><TerminalSquare size={25}/></div><h3 className="mt-4 font-semibold text-foreground">ترمینالی باز نیست</h3><p className="mt-1 text-sm leading-6 text-muted-foreground">برای شروع یک نشست تازه بساز؛ این بخش تا آن زمان خالی می‌ماند.</p><Button className="mt-4" onClick={addTab}><Plus size={15}/>افزودن ترمینال</Button></div></div>}
@@ -273,7 +288,7 @@ function SessionTerminal({ tab, active, onClose, clipboardNote, setClipboardNote
   const stateLabel = connection === 'connected' ? 'متصل' : connection === 'connecting' ? 'در حال اتصال' : connection === 'error' ? 'نیاز به اتصال مجدد' : 'قطع‌شده'
   const action = (label: string, shortcut: string, icon: React.ReactNode, onClick: () => void, disabled = false) => <Tooltip key={label}><TooltipTrigger asChild><Button size="sm" variant="ghost" disabled={disabled} aria-label={label} onClick={onClick} className="h-8 gap-1.5 px-2 text-xs">{icon}<span className="hidden md:inline">{label}</span></Button></TooltipTrigger><TooltipContent>{label} <span dir="ltr" className="mr-1 font-mono opacity-70">{shortcut}</span></TooltipContent></Tooltip>
 
-  return <div className={active ? 'block' : 'hidden'} role="tabpanel" aria-label={tab.name}>
+  return <div id={`terminal-panel-${tab.id}`} aria-labelledby={`terminal-tab-${tab.id}`} tabIndex={-1} className={active ? 'block' : 'hidden'} role="tabpanel" aria-label={tab.name}>
     <div ref={shellRef} className={`arg-terminal-window overflow-hidden border-border bg-[#090d12] ${maximized && document.fullscreenElement !== shellRef.current ? 'arg-terminal-window-fallback' : ''}`}>
       <div className={`flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2 ${tab.mode === 'root' ? 'border-rose-300/20 bg-rose-950/30' : 'border-white/10 bg-[#111820]/90'}`}>
       <div className="flex min-w-0 items-center gap-2"><div className="flex items-center gap-1.5" aria-label="کنترل‌های پنجرهٔ ترمینال">

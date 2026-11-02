@@ -219,8 +219,8 @@ export function NodesPage({ Heading, notify, workspaceMode, onWorkspaceModeChang
 
   return <>
     <Heading title="Nodeهای ARG" description="پنل‌های ARG را با پروتکل امن اختصاصی جفت کن و وضعیت سرورها و سرویس‌هایشان را از اینجا مدیریت کن." action={headerAction}/>
-    <Tabs defaultValue="nodes" className="mt-4" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start" aria-label="بخش‌های مدیریت Nodeها">
+    <Tabs defaultValue="nodes" dir="rtl">
+      <TabsList aria-label="بخش‌های مدیریت Nodeها">
         <TabsTrigger value="nodes">سرورها و سرویس‌ها</TabsTrigger>
         <TabsTrigger value="pairing">جفت‌سازی</TabsTrigger>
         <TabsTrigger value="settings">فضای‌کار و هویت</TabsTrigger>

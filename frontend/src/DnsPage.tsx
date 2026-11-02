@@ -143,8 +143,8 @@ export function DnsPage({ Heading: PageHeading, notify }: { Heading: Heading; no
     <PageHeading title="مدیریت DNS" description="Zoneهای Cloudflare را با اتصال آزمایش‌شده مدیریت کن؛ عملیات هر رکورد مستقیم روی ارائه‌دهنده اعمال می‌شود." action={<div className="flex gap-2"><Button variant="outline" onClick={() => void refresh()} disabled={loading}><RefreshCw size={14}/>تازه‌سازی</Button><Button onClick={() => setConnectOpen(true)} disabled={apiUnavailable}><Plus size={15}/>اتصال Cloudflare</Button></div>} />
     {apiUnavailable && <div role="status" className="mb-4 rounded-xl border border-amber-300/25 bg-amber-300/[.05] p-4 text-xs leading-6 text-amber-100"><p className="font-medium">مدیریت DNS در VPS انتخاب‌شده در دسترس نیست</p><p className="text-amber-100/80">API اتصال‌های Cloudflare در این Node پیدا نشد (HTTP 404). این معمولاً یعنی نسخهٔ ARG روی Node قدیمی است. Node را به نسخهٔ جدید به‌روزرسانی کن، سپس «تازه‌سازی» را بزن. برای جلوگیری از ذخیرهٔ Token روی VPS اشتباه، اتصال تا آن زمان غیرفعال است.</p></div>}
     {error && <div role="alert" className="mb-4 rounded-xl border border-rose-300/20 bg-rose-400/5 p-3 text-sm text-rose-100">{error}</div>}
-    <Tabs defaultValue="zones" className="mt-4" dir="rtl">
-      <TabsList className="h-auto w-full flex-wrap justify-start sm:w-auto" aria-label="بخش‌های مدیریت DNS">
+    <Tabs defaultValue="zones" dir="rtl">
+      <TabsList aria-label="بخش‌های مدیریت DNS">
         <TabsTrigger value="zones">Zoneهای متصل</TabsTrigger>
         <TabsTrigger value="records">رکوردهای DNS</TabsTrigger>
       </TabsList>
