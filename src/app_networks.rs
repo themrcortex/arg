@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +50,148 @@ pub(super) async fn list(State(state): State<AppState>, headers: HeaderMap) -> A
     Ok(Json(
         json!({"networks":networks,"host_local_note":"Host-local endpoints use 127.0.0.1 and do not create process or network isolation."}),
     ))
+}
+
+pub(super) async fn mesh(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
+    let (owner, applications, networks, members) = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        let mut app_statement = db.prepare(
+            "SELECT id,name,framework,source_type,domain,listen_port,desired_state,observed_state FROM applications WHERE owner_server_uuid=?1 AND deleted_at IS NULL ORDER BY name COLLATE NOCASE LIMIT 500",
+        ).map_err(db_error)?;
+        let applications = app_statement
+            .query_map([&owner], |row| {
+                let id: String = row.get(0)?;
+                let framework: String = row.get(2)?;
+                Ok(json!({
+                    "id": id,
+                    "name": row.get::<_,String>(1)?,
+                    "framework": framework,
+                    "source_type": row.get::<_,String>(3)?,
+                    "domain": row.get::<_,Option<String>>(4)?,
+                    "listen_port": row.get::<_,Option<i64>>(5)?,
+                    "desired_state": row.get::<_,String>(6)?,
+                    "observed_state": row.get::<_,String>(7)?,
+                }))
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        let mut network_statement = db.prepare(
+            "SELECT id,name,driver,visibility,docker_network,created_at,(SELECT COUNT(*) FROM application_network_members m WHERE m.network_id=n.id) FROM application_networks n WHERE owner_server_uuid=?1 ORDER BY name COLLATE NOCASE LIMIT 128",
+        ).map_err(db_error)?;
+        let networks = network_statement.query_map([&owner], |row| {
+            Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"driver":row.get::<_,String>(2)?,"visibility":row.get::<_,String>(3)?,"docker_network":row.get::<_,Option<String>>(4)?,"created_at":row.get::<_,i64>(5)?,"member_count":row.get::<_,i64>(6)?}))
+        }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+        let mut member_statement = db.prepare(
+            "SELECT m.network_id,m.application_id,a.name,a.framework,a.source_type,m.container_name,m.alias,m.internal_port,m.created_at FROM application_network_members m JOIN application_networks n ON n.id=m.network_id JOIN applications a ON a.id=m.application_id WHERE n.owner_server_uuid=?1 AND a.deleted_at IS NULL ORDER BY n.name COLLATE NOCASE,a.name COLLATE NOCASE LIMIT 2000",
+        ).map_err(db_error)?;
+        let members = member_statement.query_map([&owner], |row| {
+            Ok(json!({"network_id":row.get::<_,String>(0)?,"application_id":row.get::<_,String>(1)?,"application_name":row.get::<_,String>(2)?,"framework":row.get::<_,String>(3)?,"source_type":row.get::<_,String>(4)?,"container_name":row.get::<_,String>(5)?,"alias":row.get::<_,String>(6)?,"internal_port":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?}))
+        }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+        (owner, applications, networks, members)
+    };
+
+    // Reading a Laravel .env is filesystem I/O. Do it after releasing the
+    // application registry lock so the dashboard cannot hold up app CRUD.
+    let applications: Vec<Value> = applications
+        .into_iter()
+        .map(|mut application| {
+            let app_id = application["id"].as_str().unwrap_or_default();
+            application["database"] = if application["framework"] == "laravel" {
+                laravel::database_connection_summary(app_id)
+            } else {
+                json!({"state":"unsupported","health":"not_checked"})
+            };
+            application
+        })
+        .collect();
+
+    let docker_networks: Vec<_> = networks
+        .iter()
+        .filter(|network| network["driver"] == "docker-bridge")
+        .cloned()
+        .collect();
+    let has_docker_networks = !docker_networks.is_empty();
+    let observed_results = futures_util::stream::iter(docker_networks.into_iter())
+        .map(|network| async move {
+            let result = privileged_request_async(json!({
+                "action":"app-network-operation",
+                "operation":"inspect",
+                "network":network["docker_network"],
+                "network_id":network["id"],
+            }))
+            .await;
+            (
+                network["id"].as_str().unwrap_or_default().to_owned(),
+                result,
+            )
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+    let mut observed = HashMap::<String, Value>::new();
+    for (network_id, result) in observed_results {
+        let value = match result {
+            Ok(value) if value["ok"] == true => value["data"].clone(),
+            Ok(value) => {
+                json!({"state":"unavailable","error":value["error"].as_str().unwrap_or("بررسی شبکهٔ Docker ناموفق بود.")} )
+            }
+            Err(_) => {
+                json!({"state":"unavailable","error":"Helper برای خواندن وضعیت واقعی Docker در دسترس نیست."})
+            }
+        };
+        observed.insert(network_id, value);
+    }
+    let networks: Vec<Value> = networks.into_iter().map(|mut network| {
+        let id = network["id"].as_str().unwrap_or_default();
+        if network["driver"] == "docker-bridge" {
+            network["observed"] = observed.remove(id).unwrap_or_else(|| json!({"state":"unavailable"}));
+        } else {
+            network["observed"] = json!({"state":"metadata_only","note":"Loopback metadata does not create a network namespace or isolation."});
+        }
+        network
+    }).collect();
+    let members: Vec<Value> = members
+        .into_iter()
+        .map(|mut member| {
+            let network_id = member["network_id"].as_str().unwrap_or_default();
+            let network = networks.iter().find(|network| network["id"] == network_id);
+            let driver = network
+                .and_then(|item| item["driver"].as_str())
+                .unwrap_or_default();
+            let live = network.and_then(|item| item["observed"]["containers"].as_array());
+            let app_id = member["application_id"].as_str().unwrap_or_default();
+            let container_name = member["container_name"].as_str().unwrap_or_default();
+            let state = if driver == "host-local" {
+                "metadata_only"
+            } else if network.is_some_and(|item| item["observed"]["state"] == "available") {
+                if live.is_some_and(|items| {
+                    items.iter().any(|container| {
+                        container["application_id"] == app_id && container["name"] == container_name
+                    })
+                }) {
+                    "connected"
+                } else {
+                    "not_connected"
+                }
+            } else {
+                "unknown"
+            };
+            member["observed_state"] = json!(state);
+            member
+        })
+        .collect();
+    Ok(Json(json!({
+        "server_uuid":owner,
+        "applications":applications,
+        "networks":networks,
+        "members":members,
+        "capabilities":{"docker_live_membership":has_docker_networks,"cross_node_overlay":false,"postgres_management":false,"laravel_database_metadata":true},
+        "limits":{"applications":500,"networks":128,"members":2000},
+        "notes":["Docker private bridge یک شبکهٔ داخلی واقعی روی همین VPS است؛ این endpoint بین Nodeها تونل نمی‌سازد.","عضویت Docker را از inspect واقعی daemon می‌خوانیم؛ host-local فقط metadata است.","اطلاعات دیتابیس فقط برای Laravel از فایل .env خوانده می‌شود؛ رمز و connection URL هرگز برگردانده نمی‌شوند و اتصال DB تست نمی‌شود."]
+    })))
 }
 
 pub(super) async fn list_members(
@@ -328,6 +471,21 @@ pub(super) fn execute_privileged_request(request: &Value) -> Value {
     }
     let mut cmd = std::process::Command::new("/usr/bin/docker");
     match op {
+        "inspect" => {
+            let mut inspect = std::process::Command::new("/usr/bin/docker");
+            inspect.args(["network", "inspect", "--format", "{{json .}}", network]);
+            let (success, output) = match command_result(&mut inspect) {
+                Ok(result) => result,
+                Err(error) => return json!({"ok":false,"error":error}),
+            };
+            if !success {
+                return json!({"ok":false,"error":"ARG Docker network is unavailable."});
+            }
+            return match docker_network_inspection_summary(&output, id) {
+                Ok(data) => json!({"ok":true,"data":data}),
+                Err(message) => json!({"ok":false,"error":message}),
+            };
+        }
         "create" => {
             cmd.args([
                 "network",
@@ -405,6 +563,41 @@ pub(super) fn execute_privileged_request(request: &Value) -> Value {
     }
 }
 
+fn docker_network_inspection_summary(raw: &str, expected_id: &str) -> Result<Value, &'static str> {
+    let inspected: Value = serde_json::from_str(raw.trim())
+        .map_err(|_| "Docker returned invalid network inspection data")?;
+    let labels = inspected.get("Labels").and_then(Value::as_object);
+    if labels
+        .and_then(|labels| labels.get("com.arg.managed"))
+        .and_then(Value::as_str)
+        != Some("true")
+        || labels
+            .and_then(|labels| labels.get("com.arg.network_id"))
+            .and_then(Value::as_str)
+            != Some(expected_id)
+    {
+        return Err("Docker network ownership labels do not match this ARG network");
+    }
+    let containers =
+        inspected
+            .get("Containers")
+            .and_then(Value::as_object)
+            .map(|items| {
+                items.iter().filter_map(|(id, value)| {
+            Some(json!({
+                "id":id,
+                "name":value.get("Name")?.as_str()?,
+                "ipv4":value.get("IPv4Address").and_then(Value::as_str).unwrap_or_default(),
+                "ipv6":value.get("IPv6Address").and_then(Value::as_str).unwrap_or_default(),
+            }))
+        }).collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+    Ok(
+        json!({"state":"available","name":inspected.get("Name").and_then(Value::as_str).unwrap_or_default(),"driver":inspected.get("Driver").and_then(Value::as_str).unwrap_or_default(),"internal":inspected.get("Internal").and_then(Value::as_bool).unwrap_or(false),"containers":containers}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +616,22 @@ mod tests {
         migrate(&db).unwrap();
         let count:i64=db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('application_networks','application_network_members')",[],|r|r.get(0)).unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn docker_inspection_requires_arg_owner_labels_and_returns_only_topology_fields() {
+        let expected_id = "123e4567-e89b-12d3-a456-426614174000";
+        let raw = format!(
+            r#"{{"Name":"arg-appnet-123e4567e89b","Driver":"bridge","Internal":true,"Labels":{{"com.arg.managed":"true","com.arg.network_id":"{expected_id}"}},"Containers":{{"abc":{{"Name":"api","IPv4Address":"172.20.0.2/16","EndpointID":"hidden"}}}}}}"#
+        );
+        let summary = docker_network_inspection_summary(&raw, expected_id).unwrap();
+        assert_eq!(summary["state"], "available");
+        assert_eq!(summary["containers"][0]["name"], "api");
+        assert!(summary["containers"][0].get("EndpointID").is_none());
+        let mut unowned_json: Value = serde_json::from_str(&raw).unwrap();
+        unowned_json["Labels"]["com.arg.managed"] = json!("false");
+        let unowned = serde_json::to_string(&unowned_json).unwrap();
+        assert!(docker_network_inspection_summary(&unowned, expected_id).is_err());
+        assert!(docker_network_inspection_summary(&raw, "different-id").is_err());
     }
 }

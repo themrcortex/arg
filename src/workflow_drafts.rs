@@ -10,6 +10,8 @@ pub(super) struct WorkflowStep {
     pub id: String,
     pub kind: String,
     #[serde(default)]
+    pub label: String,
+    #[serde(default)]
     pub depends_on: Vec<String>,
 }
 
@@ -66,6 +68,9 @@ fn validate(input: &WorkflowInput) -> Result<(), &'static str> {
     for step in &input.steps {
         if !valid_id(&step.id) || !ids.insert(step.id.as_str()) {
             return Err("شناسهٔ گام نامعتبر یا تکراری است.");
+        }
+        if step.label.chars().count() > 80 || step.label.chars().any(char::is_control) {
+            return Err("عنوان گام باید حداکثر ۸۰ نویسه و بدون نویسهٔ کنترلی باشد.");
         }
         if !STEP_KINDS.contains(&step.kind.as_str()) {
             return Err("نوع یکی از گام‌ها پشتیبانی نمی‌شود.");
@@ -155,12 +160,50 @@ pub(super) async fn list(
     let mut statement = db.prepare("SELECT id,schema_version,name,trigger_kind,workflow_json,created_by,created_at,updated_at FROM application_workflow_drafts WHERE application_id=?1 AND owner_server_uuid=?2 ORDER BY updated_at DESC,id").map_err(db_error)?;
     let rows = statement.query_map(params![app_id, owner], |row| {
         let json_text: String = row.get(4)?;
-        let workflow: Value = serde_json::from_str(&json_text).unwrap_or(Value::Null);
+        let workflow: Value = serde_json::from_str(&json_text).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
         Ok(json!({"id":row.get::<_,String>(0)?,"schema_version":row.get::<_,i64>(1)?,"name":row.get::<_,String>(2)?,"trigger":row.get::<_,String>(3)?,"workflow":workflow,"created_by":row.get::<_,String>(5)?,"created_at":row.get::<_,i64>(6)?,"updated_at":row.get::<_,i64>(7)?}))
     }).map_err(db_error)?;
     let workflows = rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
     Ok(Json(
-        json!({"workflows":workflows,"execution_enabled":false,"note":"این‌ها پیش‌نویس اعتبارسنجی‌شده هستند و هیچ Job یا دستور سیستمی اجرا نمی‌کنند."}),
+        json!({"workflows":workflows,"execution_enabled":false,"note":"این‌ها طرح‌های قابل‌ویرایش و اعتبارسنجی‌شده هستند. موتور اجرای workflow هنوز فعال نیست و هیچ Job یا دستور سیستمی اجرا نمی‌شود."}),
+    ))
+}
+
+pub(super) async fn update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((app_id, workflow_id)): Path<(String, String)>,
+    Json(input): Json<WorkflowInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    validate(&input).map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?;
+    let owner = app_scope(&db, &app_id)?;
+    let document = serde_json::to_string(&input)
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "ساختار workflow قابل ذخیره نیست."))?;
+    let current = now();
+    let changed = db.execute(
+        "UPDATE application_workflow_drafts SET schema_version=?1,name=?2,trigger_kind=?3,workflow_json=?4,updated_at=?5 WHERE id=?6 AND application_id=?7 AND owner_server_uuid=?8",
+        params![input.schema_version,input.name.trim(),input.trigger,document,current,workflow_id,app_id,owner],
+    ).map_err(db_error)?;
+    if changed == 0 {
+        return Err(error(StatusCode::NOT_FOUND, "طرح workflow پیدا نشد."));
+    }
+    audit(
+        &db,
+        &actor.username,
+        "app.workflow.draft.update",
+        &format!("app={app_id};workflow={workflow_id}"),
+    );
+    Ok(Json(
+        json!({"id":workflow_id,"workflow":input,"state":"draft","execution_enabled":false,"updated_at":current}),
     ))
 }
 
@@ -229,6 +272,7 @@ mod tests {
         WorkflowStep {
             id: id.into(),
             kind: kind.into(),
+            label: kind.replace('_', " "),
             depends_on: depends_on.iter().map(|item| (*item).into()).collect(),
         }
     }
@@ -267,6 +311,18 @@ mod tests {
                 .map(|index| step(&format!("s{index}"), "notify", &[]))
                 .collect(),
         );
+        assert!(validate(&input).is_err());
+    }
+
+    #[test]
+    fn step_labels_are_optional_for_old_drafts_but_bounded_when_supplied() {
+        let mut input = sample(vec![step("health", "health_check", &[])]);
+        assert!(validate(&input).is_ok());
+        input.steps[0].label = "بررسی سلامت release".into();
+        assert!(validate(&input).is_ok());
+        input.steps[0].label = "x".repeat(81);
+        assert!(validate(&input).is_err());
+        input.steps[0].label = "bad\nlabel".into();
         assert!(validate(&input).is_err());
     }
 

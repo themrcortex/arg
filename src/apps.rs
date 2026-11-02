@@ -24,6 +24,7 @@ const APP_SOURCES: &[&str] = &[
 ];
 pub(super) static APP_REGISTRY_OPERATION_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
+const CREATE_APPLICATION_SQL: &str = "INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at,static_output_path,static_spa_fallback,wordpress_version) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown','active','manual','manual',?13,?14,?14,?15,?16,?17)";
 
 #[derive(Deserialize)]
 pub(super) struct AppListQuery {
@@ -59,6 +60,8 @@ pub(super) struct AppInput {
     static_output_path: String,
     #[serde(default = "default_spa_fallback")]
     static_spa_fallback: bool,
+    #[serde(default)]
+    wordpress_version: String,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +74,16 @@ pub(super) struct AppUpdate {
 #[derive(Deserialize)]
 pub(super) struct AppVersionRequest {
     expected_version: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StagingApplicationInput {
+    name: String,
+    #[serde(default)]
+    domain: String,
+    listen_port: Option<u16>,
+    environment_id: String,
 }
 
 fn default_framework() -> String {
@@ -196,6 +209,19 @@ fn validate_input(input: &AppInput) -> Result<(String, Option<String>), (StatusC
             "نسخهٔ Runtime زمان ساخت باید system یا شماره نسخهٔ عددی باشد.",
         ));
     }
+    if input.framework == "wordpress" {
+        if !valid_wordpress_version(input.wordpress_version.trim()) {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "نسخهٔ WordPress باید یک نسخهٔ پایدار کامل مانند 7.1.4 باشد.",
+            ));
+        }
+    } else if !input.wordpress_version.trim().is_empty() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "نسخهٔ WordPress فقط برای اپلیکیشن WordPress قابل تنظیم است.",
+        ));
+    }
     if !valid_static_output_path(&input.static_output_path) {
         return Err(error(
             StatusCode::BAD_REQUEST,
@@ -255,6 +281,17 @@ fn valid_runtime_version(value: &str) -> bool {
             && value.split('.').all(|part| !part.is_empty()))
 }
 
+pub(super) fn valid_wordpress_version(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.len() <= 3
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (*part == "0" || !part.starts_with('0'))
+        })
+}
+
 fn domain_patterns_overlap(left: &str, right: &str) -> bool {
     fn matches(pattern: &str, domain: &str) -> bool {
         if let Some(suffix) = pattern.strip_prefix("*.") {
@@ -303,9 +340,9 @@ fn read_apps(
     include_deleted: bool,
 ) -> Result<Vec<Value>, rusqlite::Error> {
     let sql = if include_deleted {
-        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at,static_output_path,static_spa_fallback FROM applications WHERE owner_server_uuid=?1 ORDER BY deleted_at IS NOT NULL,name COLLATE NOCASE"
+        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at,static_output_path,static_spa_fallback,wordpress_version FROM applications WHERE owner_server_uuid=?1 ORDER BY deleted_at IS NOT NULL,name COLLATE NOCASE"
     } else {
-        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at,static_output_path,static_spa_fallback FROM applications WHERE owner_server_uuid=?1 AND deleted_at IS NULL ORDER BY name COLLATE NOCASE"
+        "SELECT id,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,observed_at,lifecycle_state,reconcile_policy,version,created_by,created_at,updated_at,deleted_at,static_output_path,static_spa_fallback,wordpress_version FROM applications WHERE owner_server_uuid=?1 AND deleted_at IS NULL ORDER BY name COLLATE NOCASE"
     };
     let mut statement = db.prepare(sql)?;
     let rows = statement.query_map([owner], |row| {
@@ -331,6 +368,7 @@ fn read_apps(
             "updated_at": row.get::<_,i64>(18)?, "deleted_at": row.get::<_,Option<i64>>(19)?,
             "static_output_path": row.get::<_,String>(20)?,
             "static_spa_fallback": row.get::<_,bool>(21)?,
+            "wordpress_version": row.get::<_,String>(22)?,
         }))
     })?;
     rows.collect()
@@ -419,6 +457,7 @@ fn check_domain_conflicts(
 
 pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS applications (id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',framework TEXT NOT NULL DEFAULT 'custom',runtime_version TEXT NOT NULL DEFAULT 'system',build_runtime_version TEXT NOT NULL DEFAULT 'system',source_type TEXT NOT NULL DEFAULT 'manual',domain TEXT,listen_port INTEGER,labels_json TEXT NOT NULL DEFAULT '[]',desired_state TEXT NOT NULL DEFAULT 'none',observed_state TEXT NOT NULL DEFAULT 'unknown',observed_at INTEGER,lifecycle_state TEXT NOT NULL DEFAULT 'active',reconcile_policy TEXT NOT NULL DEFAULT 'manual',origin_kind TEXT NOT NULL DEFAULT 'manual',origin_ref TEXT,version INTEGER NOT NULL DEFAULT 1,created_by TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,deleted_at INTEGER); CREATE UNIQUE INDEX IF NOT EXISTS applications_active_name ON applications(owner_server_uuid,name COLLATE NOCASE) WHERE deleted_at IS NULL; CREATE UNIQUE INDEX IF NOT EXISTS applications_active_domain ON applications(owner_server_uuid,domain COLLATE NOCASE) WHERE domain IS NOT NULL AND deleted_at IS NULL; CREATE INDEX IF NOT EXISTS applications_owner_updated ON applications(owner_server_uuid,updated_at DESC); CREATE TABLE IF NOT EXISTS application_services (id TEXT PRIMARY KEY,application_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,service_key TEXT NOT NULL,runtime_type TEXT NOT NULL DEFAULT 'unknown',systemd_unit TEXT,desired_state TEXT NOT NULL DEFAULT 'none',observed_state TEXT NOT NULL DEFAULT 'unknown',listen_port INTEGER,last_observed_at INTEGER,metadata_json TEXT NOT NULL DEFAULT '{}',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(application_id,service_key)); CREATE INDEX IF NOT EXISTS application_services_app ON application_services(application_id);")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS application_staging_links(source_app_id TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,staging_app_id TEXT NOT NULL UNIQUE REFERENCES applications(id) ON DELETE CASCADE,environment_id TEXT NOT NULL REFERENCES app_environments(id) ON DELETE RESTRICT,created_by TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(source_app_id,staging_app_id)); CREATE INDEX IF NOT EXISTS application_staging_source ON application_staging_links(source_app_id,created_at DESC);")?;
     let has_runtime_version = {
         let mut statement = db.prepare("PRAGMA table_info(applications)")?;
         let columns = statement
@@ -454,6 +493,7 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
         ("node_build_script", "TEXT NOT NULL DEFAULT 'auto'"),
         ("node_start_script", "TEXT NOT NULL DEFAULT 'auto'"),
         ("node_healthcheck_path", "TEXT NOT NULL DEFAULT '/'"),
+        ("wordpress_version", "TEXT NOT NULL DEFAULT ''"),
     ] {
         let mut statement = db.prepare("PRAGMA table_info(applications)")?;
         let columns = statement
@@ -565,7 +605,38 @@ pub(super) async fn create(
         .map(|label| label.trim())
         .collect::<Vec<_>>();
     let db = state.lock().unwrap();
-    db.execute("INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,created_by,created_at,updated_at,static_output_path,static_spa_fallback) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'unknown','active','manual','manual',?13,?14,?14,?15,?16)", params![id,owner,name,input.description.trim(),input.framework,input.runtime_version,input.build_runtime_version,input.source_type,domain,input.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),input.desired_state,actor,at,input.static_output_path,input.static_spa_fallback]).map_err(|error_value| if error_value.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.") } else { db_error(error_value) })?;
+    db.execute(
+        CREATE_APPLICATION_SQL,
+        params![
+            id,
+            owner,
+            name,
+            input.description.trim(),
+            input.framework,
+            input.runtime_version,
+            input.build_runtime_version,
+            input.source_type,
+            domain,
+            input.listen_port.map(i64::from),
+            serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_owned()),
+            input.desired_state,
+            actor,
+            at,
+            input.static_output_path,
+            input.static_spa_fallback,
+            input.wordpress_version.trim()
+        ],
+    )
+    .map_err(|error_value| {
+        if error_value.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+            error(
+                StatusCode::CONFLICT,
+                "نام، دامنه یا پورت با یک اپلیکیشن دیگر تداخل دارد.",
+            )
+        } else {
+            db_error(error_value)
+        }
+    })?;
     if let Some(environment_id) = input.environment_id.as_deref() {
         app_workspaces::set_application_environment(&db, &id, environment_id, &actor)
             .map_err(db_error)?;
@@ -592,6 +663,172 @@ pub(super) async fn create(
     ))
 }
 
+pub(super) async fn list_staging(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(source_app_id): Path<String>,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    let project_id: String = db.query_row(
+        "SELECT e.project_id FROM applications a JOIN application_context c ON c.application_id=a.id JOIN app_environments e ON e.id=c.environment_id WHERE a.id=?1 AND a.owner_server_uuid=?2 AND a.deleted_at IS NULL",
+        params![source_app_id,owner],
+        |row| row.get(0),
+    ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::CONFLICT,"اپلیکیشن هنوز به یک محیط پروژه متصل نیست؛ ابتدا محیط آن را در صفحهٔ اپلیکیشن تنظیم کن."))?;
+    let mut environments_stmt = db.prepare(
+        "SELECT id,name,kind,protected FROM app_environments WHERE project_id=?1 AND kind='staging' ORDER BY name COLLATE NOCASE",
+    ).map_err(db_error)?;
+    let environments = environments_stmt.query_map([&project_id], |row| {
+        Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"kind":row.get::<_,String>(2)?,"protected":row.get::<_,bool>(3)?}))
+    }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+    let mut staging_stmt = db.prepare(
+        "SELECT a.id,a.name,a.domain,a.listen_port,e.name,e.kind,l.created_at FROM application_staging_links l JOIN applications a ON a.id=l.staging_app_id JOIN app_environments e ON e.id=l.environment_id WHERE l.source_app_id=?1 AND a.owner_server_uuid=?2 AND a.deleted_at IS NULL ORDER BY l.created_at DESC",
+    ).map_err(db_error)?;
+    let staging_apps = staging_stmt.query_map(params![source_app_id,owner], |row| {
+        Ok(json!({"id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"domain":row.get::<_,Option<String>>(2)?,"listen_port":row.get::<_,Option<i64>>(3)?,"environment_name":row.get::<_,String>(4)?,"environment_kind":row.get::<_,String>(5)?,"created_at":row.get::<_,i64>(6)?}))
+    }).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
+    Ok(Json(
+        json!({"environments":environments,"staging_apps":staging_apps,"copies_secrets":false,"copies_release":false}),
+    ))
+}
+
+pub(super) async fn create_staging(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(source_app_id): Path<String>,
+    Json(input): Json<StagingApplicationInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let _operation_guard = APP_REGISTRY_OPERATION_LOCK.lock().await;
+    let name = input.name.trim();
+    let domain = normalized_domain(&input.domain);
+    if !valid_name(name)
+        || !valid_uuid(&input.environment_id)
+        || domain.as_deref().is_some_and(|value| !valid_domain(value))
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "نام، دامنه یا شناسهٔ محیط Staging معتبر نیست.",
+        ));
+    }
+    let (actor, owner, source) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?.username;
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        let source = db.query_row(
+            "SELECT a.name,a.description,a.framework,a.runtime_version,a.build_runtime_version,a.source_type,a.static_output_path,a.static_spa_fallback,a.listen_port,e.project_id,a.wordpress_version FROM applications a JOIN application_context c ON c.application_id=a.id JOIN app_environments e ON e.id=c.environment_id WHERE a.id=?1 AND a.owner_server_uuid=?2 AND a.deleted_at IS NULL",
+            params![source_app_id,owner],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,bool>(7)?,row.get::<_,Option<i64>>(8)?,row.get::<_,String>(9)?,row.get::<_,String>(10)?)),
+        ).optional().map_err(db_error)?.ok_or_else(||error(StatusCode::NOT_FOUND,"اپلیکیشن اصلی یا محیط آن پیدا نشد."))?;
+        let environment_valid: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_environments WHERE id=?1 AND project_id=?2 AND kind='staging')",
+            params![input.environment_id,source.9],
+            |row| row.get(0),
+        ).map_err(db_error)?;
+        if !environment_valid {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "محیط انتخاب‌شده Staging متعلق به همان پروژه نیست.",
+            ));
+        }
+        if is_node_runtime_framework(&source.2) && source.8.is_some() && input.listen_port.is_none()
+        {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "برای سرویس Node/SSR یک پورت مستقل و آزاد برای Staging مشخص کن.",
+            ));
+        }
+        if input
+            .listen_port
+            .is_some_and(|port| Some(i64::from(port)) == source.8)
+        {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "پورت Staging باید از پورت اپلیکیشن اصلی جدا باشد.",
+            ));
+        }
+        validate_port_free(&db, input.listen_port, None)?;
+        check_domain_conflicts(&db, &owner, domain.as_deref(), None)?;
+        let duplicate_name: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM applications WHERE owner_server_uuid=?1 AND name=?2 COLLATE NOCASE AND deleted_at IS NULL)",
+            params![owner,name],
+            |row| row.get(0),
+        ).map_err(db_error)?;
+        if duplicate_name {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "نام اپلیکیشن Staging در این VPS از قبل وجود دارد.",
+            ));
+        }
+        (actor, owner, source)
+    };
+    if let Some(domain) = domain.as_deref() {
+        let live = privileged_request_async(json!({"action":"nginx-list"})).await?;
+        if live["ok"] == true {
+            for site in live["data"]["sites"].as_array().into_iter().flatten() {
+                for existing in site["server_names"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    if domain_patterns_overlap(domain, existing) {
+                        return Err(error(
+                            StatusCode::CONFLICT,
+                            &format!("دامنهٔ {domain} در Nginx موجود به‌کار رفته است."),
+                        ));
+                    }
+                }
+            }
+        } else {
+            return Err(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "برای جلوگیری از تداخل دامنه، وضعیت Nginx قابل بررسی نیست.",
+            ));
+        }
+    }
+    let id = random_uuid();
+    let at = now();
+    let labels = serde_json::to_string(&vec![
+        "staging".to_owned(),
+        format!("from-{}", source_app_id),
+    ])
+    .map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "برچسب‌های Staging ساخته نشدند.",
+        )
+    })?;
+    let db = state.lock().unwrap();
+    let transaction = db.unchecked_transaction().map_err(db_error)?;
+    transaction.execute(
+        "INSERT INTO applications(id,owner_server_uuid,name,description,framework,runtime_version,build_runtime_version,source_type,domain,listen_port,labels_json,desired_state,observed_state,lifecycle_state,reconcile_policy,origin_kind,origin_ref,created_by,created_at,updated_at,static_output_path,static_spa_fallback,node_build_script,node_start_script,node_healthcheck_path,wordpress_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'none','unknown','active','manual','staging-copy',?12,?13,?14,?14,?15,?16,'auto','auto','/',?17)",
+        params![id,owner,name,format!("Staging کپی تنظیمات پایه از {}",source.0),source.2,source.3,source.4,source.5,domain,input.listen_port.map(i64::from),labels,source_app_id,actor,at,source.6,source.7,source.10],
+    ).map_err(|cause| if cause.sqlite_error_code()==Some(rusqlite::ErrorCode::ConstraintViolation) { error(StatusCode::CONFLICT,"نام، دامنه یا پورت Staging با منبع دیگری تداخل دارد.") } else { db_error(cause) })?;
+    transaction.execute(
+        "INSERT INTO application_context(application_id,environment_id,updated_by,updated_at) VALUES(?1,?2,?3,?4)",
+        params![id,input.environment_id,actor,at],
+    ).map_err(db_error)?;
+    transaction.execute(
+        "INSERT INTO application_staging_links(source_app_id,staging_app_id,environment_id,created_by,created_at) VALUES(?1,?2,?3,?4,?5)",
+        params![source_app_id,id,input.environment_id,actor,at],
+    ).map_err(db_error)?;
+    transaction.commit().map_err(db_error)?;
+    audit(
+        &db,
+        &actor,
+        "application.staging.create",
+        &format!(
+            "source={source_app_id}; staging={id}; environment={}",
+            input.environment_id
+        ),
+    );
+    Ok(Json(
+        json!({"id":id,"name":name,"domain":domain,"listen_port":input.listen_port,"environment_id":input.environment_id,"environment_kind":"staging","source_application_id":source_app_id,"copies_secrets":false,"copies_release":false,"message":"رکورد مستقل Staging ساخته شد. سورس را در اولین استقرار دوباره انتخاب کن؛ فایل‌های .env، release، پایگاه‌داده و Secretهای Production کپی نشده‌اند."}),
+    ))
+}
+
 pub(super) async fn create_from_template(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -614,6 +851,7 @@ pub(super) async fn create_from_template(
         desired_state: "none".to_owned(),
         static_output_path: "auto".to_owned(),
         static_spa_fallback: true,
+        wordpress_version: input.wordpress_version,
     };
     create(State(state), headers, Json(app)).await
 }
@@ -751,7 +989,7 @@ pub(super) async fn update(
         .map(|label| label.trim())
         .collect::<Vec<_>>();
     let db = state.lock().unwrap();
-    let changed = db.execute("UPDATE applications SET name=?1,description=?2,framework=?3,runtime_version=?4,build_runtime_version=?5,source_type=?6,domain=?7,listen_port=?8,labels_json=?9,desired_state=?10,static_output_path=?11,static_spa_fallback=?12,version=version+1,updated_at=?13 WHERE id=?14 AND owner_server_uuid=?15 AND version=?16 AND deleted_at IS NULL", params![name,input.app.description.trim(),input.app.framework,input.app.runtime_version,input.app.build_runtime_version,input.app.source_type,domain,input.app.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_|"[]".to_owned()),input.app.desired_state,input.app.static_output_path,input.app.static_spa_fallback,at,id,owner,input.expected_version]).map_err(db_error)?;
+    let changed = db.execute("UPDATE applications SET name=?1,description=?2,framework=?3,runtime_version=?4,build_runtime_version=?5,source_type=?6,domain=?7,listen_port=?8,labels_json=?9,desired_state=?10,static_output_path=?11,static_spa_fallback=?12,wordpress_version=?13,version=version+1,updated_at=?14 WHERE id=?15 AND owner_server_uuid=?16 AND version=?17 AND deleted_at IS NULL", params![name,input.app.description.trim(),input.app.framework,input.app.runtime_version,input.app.build_runtime_version,input.app.source_type,domain,input.app.listen_port.map(i64::from),serde_json::to_string(&labels).unwrap_or_else(|_|"[]".to_owned()),input.app.desired_state,input.app.static_output_path,input.app.static_spa_fallback,input.app.wordpress_version.trim(),at,id,owner,input.expected_version]).map_err(db_error)?;
     if changed == 0 {
         return Err(error(
             StatusCode::CONFLICT,
@@ -843,7 +1081,8 @@ mod tests {
     use super::{
         domain_patterns_overlap, is_auto_framework, is_node_runtime_framework, is_static_framework,
         listening_tcp_ports, migrate, normalized_domain, read_apps, template_framework,
-        valid_domain, valid_runtime_version, valid_static_output_path, AppInput, AppUpdate,
+        valid_domain, valid_runtime_version, valid_static_output_path, valid_wordpress_version,
+        AppInput, AppUpdate,
     };
 
     #[test]
@@ -968,6 +1207,55 @@ mod tests {
             )
             .unwrap();
         assert_eq!(build_environment, "{}");
+        let wordpress_version: String = db
+            .query_row(
+                "SELECT wordpress_version FROM applications WHERE id='old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(wordpress_version, "");
+    }
+
+    #[test]
+    fn wordpress_versions_are_fixed_stable_numeric_versions() {
+        assert!(valid_wordpress_version("7.1.4"));
+        assert!(valid_wordpress_version("6.8.3"));
+        assert!(!valid_wordpress_version("latest"));
+        assert!(!valid_wordpress_version("7.1.4-rc1"));
+        assert!(!valid_wordpress_version("7.1.4;id"));
+    }
+
+    #[test]
+    fn wordpress_version_is_stored_and_returned_with_the_application() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        db.execute(
+            super::CREATE_APPLICATION_SQL,
+            rusqlite::params![
+                "wp",
+                "server",
+                "WordPress",
+                "",
+                "wordpress",
+                "system",
+                "system",
+                "manual",
+                Option::<String>::None,
+                Option::<i64>::None,
+                "[]",
+                "none",
+                "admin",
+                1_i64,
+                "auto",
+                true,
+                "7.1.4"
+            ],
+        )
+        .unwrap();
+
+        let application = read_apps(&db, "server", false).unwrap().remove(0);
+        assert_eq!(application["wordpress_version"], "7.1.4");
     }
 
     #[test]

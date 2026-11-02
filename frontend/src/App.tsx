@@ -52,6 +52,7 @@ const TerminalPage = lazy(() => import('./TerminalPage').then((module) => ({ def
 const S3StoragePage = lazy(() => import('./S3StoragePage').then((module) => ({ default: module.S3StoragePage })))
 const DnsPage = lazy(() => import('./DnsPage').then((module) => ({ default: module.DnsPage })))
 const ApplicationsPage = lazy(() => import('./ApplicationsPage').then((module) => ({ default: module.ApplicationsPage })))
+const ApplicationMeshPage = lazy(() => import('./ApplicationMeshPage').then((module) => ({ default: module.ApplicationMeshPage })))
 const SshKeysPage = lazy(() => import('./SshKeysPage').then((module) => ({ default: module.SshKeysPage })))
 const DashboardPage = lazy(() => import('./pages').then((module) => ({ default: module.DashboardPage })))
 const SystemPage = lazy(() => import('./pages').then((module) => ({ default: module.SystemPage })))
@@ -554,6 +555,7 @@ const documentationTargetForPanelPage: Record<PageId, { page: string; heading: s
   system: { page: 'system-storage', heading: 'خواندن صفحهٔ سیستم و Mountها' },
   nodes: { page: 'federation', heading: 'Pairing مرحله‌به‌مرحله' },
   apps: { page: 'application-registry', heading: 'ثبت رکورد' },
+  'app-mesh': { page: 'application-mesh', heading: 'توپولوژی اپلیکیشن‌ها' },
   'ssh-keys': { page: 'ssh-deploy-keys', heading: 'ساخت و مدیریت کلیدهای SSH' },
   maintenance: { page: 'maintenance', heading: 'تعمیر، راه‌اندازی مجدد و حذف ARG' },
   mysql: { page: 'mysql', heading: 'ورود و بخش‌های مدیریت' },
@@ -1179,7 +1181,7 @@ export default function App() {
             {terminalMounted && workspaceNodeId !== 'all' && user.role === 'admin' && <div className={currentPage === 'terminal' && pageReady ? 'arg-terminal-page' : 'hidden'} aria-hidden={currentPage !== 'terminal'} inert={currentPage !== 'terminal'}><Suspense fallback={currentPage === 'terminal' ? <PageRouteSkeleton label="ترمینال"/> : null}><TerminalPage Heading={PageHeading} visible={currentPage === 'terminal' && pageReady} /></Suspense></div>}
             <div key={currentPage}>
             {!pageReady ? <PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/> : <Suspense fallback={<PageRouteSkeleton label={navigation.find((item) => item.id === currentPage)?.label || 'صفحه'}/>}><div className="arg-page-enter">
-            {currentPage === 'ssh-keys' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="کلیدهای SSH"/>}><SshKeysPage Heading={PageHeading} notify={notifyUser}/></Suspense> : currentPage === 'apps' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="اپلیکیشن‌ها"/>}><ApplicationsPage Heading={PageHeading} notify={notifyUser} allServers={workspaceNodeId === 'all'} workspaceKey={workspaceNodeId} onOpenWorkspace={openWorkspace}/></Suspense> : workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
+            {currentPage === 'ssh-keys' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="کلیدهای SSH"/>}><SshKeysPage Heading={PageHeading} notify={notifyUser}/></Suspense> : currentPage === 'apps' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="اپلیکیشن‌ها"/>}><ApplicationsPage Heading={PageHeading} notify={notifyUser} allServers={workspaceNodeId === 'all'} workspaceKey={workspaceNodeId} onOpenWorkspace={openWorkspace}/></Suspense> : currentPage === 'app-mesh' && user.role === 'admin' ? <Suspense fallback={<PageRouteSkeleton label="شبکهٔ اپلیکیشن‌ها"/>}><ApplicationMeshPage Heading={PageHeading} notify={notifyUser} allServers={workspaceNodeId === 'all'}/></Suspense> : workspaceNodeId === 'all' ? <AllServersPage Heading={PageHeading} onOpen={openWorkspace}/> : <>
               {currentPage === 'dashboard' && <DashboardPage Heading={PageHeading} notify={notifyUser} user={user} workspaceMode={workspaceMode} onOpenWorkspace={openWorkspace} />}
               {currentPage === 'system' && <SystemPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'nodes' && user.role === 'admin' && <NodesPage Heading={PageHeading} notify={notifyUser} workspaceMode={workspaceMode} onWorkspaceModeChange={changeWorkspaceMode} />}

@@ -276,6 +276,10 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/history", get(history))
         .route("/api/apps", get(apps::list).post(apps::create))
         .route(
+            "/api/apps/{id}/staging",
+            get(apps::list_staging).post(apps::create_staging),
+        )
+        .route(
             "/api/app-platform/workspaces",
             get(app_workspaces::list_workspaces).post(app_workspaces::create_workspace),
         )
@@ -308,7 +312,7 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route(
             "/api/apps/{id}/workflows/{workflow_id}",
-            axum::routing::delete(workflow_drafts::delete),
+            put(workflow_drafts::update).delete(workflow_drafts::delete),
         )
         .route(
             "/api/apps/{id}/containers",
@@ -373,6 +377,7 @@ pub(super) fn router(state: AppState) -> Router {
             "/api/app-networks",
             get(app_networks::list).post(app_networks::create),
         )
+        .route("/api/app-networks/mesh", get(app_networks::mesh))
         .route(
             "/api/app-networks/{id}/members",
             get(app_networks::list_members).post(app_networks::attach),
@@ -458,6 +463,10 @@ pub(super) fn router(state: AppState) -> Router {
             post(app_monitoring::acknowledge_event),
         )
         .route("/api/apps/{id}/deploy", post(deploy::create))
+        .route(
+            "/api/apps/{id}/deployment-settings",
+            get(deploy::settings).put(deploy::save_settings),
+        )
         .route(
             "/api/apps/{id}/deploy/archive",
             post(deploy::upload_archive)

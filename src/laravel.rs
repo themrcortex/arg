@@ -1831,6 +1831,38 @@ fn read_environment(path: &FsPath) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Return only non-secret database connection metadata for the application
+/// topology view. Passwords, connection URLs and all unrecognized variables
+/// must never leave the private environment file.
+pub(super) fn database_connection_summary(app_id: &str) -> Value {
+    let Ok(path) = environment_path(app_id) else {
+        return json!({"state":"unavailable","reason":"environment_missing"});
+    };
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return json!({"state":"unavailable","reason":"environment_missing"});
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 64 * 1024 {
+        return json!({"state":"unavailable","reason":"environment_file_invalid"});
+    }
+    let values = read_environment(&path);
+    let connection = values.get("DB_CONNECTION").cloned().unwrap_or_default();
+    let host = values.get("DB_HOST").cloned().unwrap_or_default();
+    let port = values.get("DB_PORT").cloned().unwrap_or_default();
+    let database = values.get("DB_DATABASE").cloned().unwrap_or_default();
+    let username = values.get("DB_USERNAME").cloned().unwrap_or_default();
+    let configured = !connection.is_empty() && !database.is_empty() && !host.is_empty();
+    json!({
+        "state": if configured { "configured" } else { "incomplete" },
+        "connection": connection,
+        "host": host,
+        "port": port,
+        "database": database,
+        "username": username,
+        "password_configured": values.get("DB_PASSWORD").is_some_and(|value| !value.is_empty()),
+        "health": "not_checked",
+    })
+}
+
 fn read_environment_for_update(path: &FsPath) -> io::Result<BTreeMap<String, String>> {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,

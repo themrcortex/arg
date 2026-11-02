@@ -50,9 +50,25 @@ pub(super) struct DeployRequest {
     source: Source,
     idempotency_key: String,
     #[serde(default)]
+    release_name: Option<String>,
+    #[serde(default)]
+    retention_count: Option<i64>,
+    #[serde(default)]
     healthcheck_file: Option<String>,
     #[serde(default)]
     pre_deploy_commands: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DeploymentSettingsInput {
+    retention_count: i64,
+    #[serde(default)]
+    healthcheck_file: Option<String>,
+    #[serde(default)]
+    default_source: Option<Source>,
+    #[serde(default)]
+    default_pre_deploy_commands: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -232,7 +248,31 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id),
             job_id TEXT NOT NULL UNIQUE REFERENCES deployment_jobs(id), path TEXT NOT NULL,
             state TEXT NOT NULL, source_commit TEXT, created_at INTEGER NOT NULL, activated_at INTEGER);
+         CREATE TABLE IF NOT EXISTS application_deployment_settings (
+            application_id TEXT PRIMARY KEY REFERENCES applications(id) ON DELETE CASCADE,
+            retention_count INTEGER NOT NULL DEFAULT 5,
+            default_healthcheck_file TEXT,
+            default_source_json TEXT,
+            default_pre_deploy_commands_json TEXT NOT NULL DEFAULT '[]',
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL DEFAULT 0
+         );
          ",
+    )?;
+    ensure_table_columns(
+        db,
+        "application_deployment_settings",
+        &[
+            ("retention_count", "INTEGER NOT NULL DEFAULT 5"),
+            ("default_healthcheck_file", "TEXT"),
+            ("default_source_json", "TEXT"),
+            (
+                "default_pre_deploy_commands_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            ),
+            ("updated_by", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+        ],
     )?;
     // CREATE TABLE IF NOT EXISTS does not update older deployment databases.
     // Add fields introduced after the original schema before any endpoint
@@ -260,6 +300,10 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
         ("started_at", "INTEGER"),
         ("finished_at", "INTEGER"),
         ("updated_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("release_name", "TEXT NOT NULL DEFAULT ''"),
+        ("retention_count", "INTEGER NOT NULL DEFAULT 5"),
+        ("environment_kind", "TEXT NOT NULL DEFAULT 'unassigned'"),
+        ("version_number", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !columns.contains(name) {
             db.execute(
@@ -268,6 +312,14 @@ pub(super) fn migrate(db: &Connection) -> rusqlite::Result<()> {
             )?;
         }
     }
+    db.execute(
+        "UPDATE deployment_jobs SET version_number=(SELECT COUNT(*) FROM deployment_jobs prior WHERE prior.application_id=deployment_jobs.application_id AND (prior.created_at<deployment_jobs.created_at OR (prior.created_at=deployment_jobs.created_at AND prior.id<=deployment_jobs.id))) WHERE version_number=0",
+        [],
+    )?;
+    db.execute(
+        "UPDATE deployment_jobs SET release_name='v'||version_number WHERE (release_name IS NULL OR trim(release_name)='') AND version_number>0",
+        [],
+    )?;
     // Repair duplicate active rows left by older non-transactional enqueue
     // paths before restoring the one-active-job constraint. Keep the newest
     // row for each app; mark older orphan rows failed instead of blocking the
@@ -545,12 +597,179 @@ fn valid_repo(value: &str) -> bool {
         })
 }
 
+fn valid_default_source(source: &Source) -> bool {
+    match source {
+        Source::Git {
+            repository,
+            reference,
+            ssh_key_id,
+        } => {
+            let public_https = valid_repo(repository) && ssh_key_id.is_none();
+            let private_ssh = ssh_keys::is_github_ssh_repository(repository)
+                && ssh_key_id.as_deref().is_some_and(ssh_keys::valid_key_id);
+            (public_https || private_ssh) && valid_reference(reference)
+        }
+        Source::Directory { path } => path.len() <= 1024 && !path.contains('\0'),
+        Source::Archive { .. } => false,
+    }
+}
+
 fn valid_relative_file(value: &str) -> bool {
     if value.is_empty() || value.len() > 512 || value.contains(['\\', '\0']) {
         return false;
     }
     let path = FsPath::new(value);
     path.components().all(|c| matches!(c, Component::Normal(_)))
+}
+
+fn valid_release_name(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value.chars().count() <= 80 && !value.chars().any(char::is_control)
+}
+
+fn wordpress_version_source(framework: &str, version: &str) -> Option<Source> {
+    if framework != "wordpress" || !apps::valid_wordpress_version(version) {
+        return None;
+    }
+    Some(Source::Git {
+        repository: "https://github.com/WordPress/WordPress.git".to_owned(),
+        reference: version.to_owned(),
+        ssh_key_id: None,
+    })
+}
+
+pub(super) async fn settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+) -> ApiResult {
+    let db = state.lock().unwrap();
+    require_admin(&db, &headers)?;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    ensure_app(&db, &app_id, &owner)?;
+    let wordpress = db.query_row(
+        "SELECT framework,wordpress_version FROM applications WHERE id=?1 AND owner_server_uuid=?2",
+        params![app_id, owner],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ).optional().map_err(db_error)?;
+    let saved = db.query_row(
+        "SELECT retention_count,default_healthcheck_file,updated_at,default_source_json,default_pre_deploy_commands_json FROM application_deployment_settings WHERE application_id=?1",
+        [&app_id],
+        |row| Ok((row.get::<_,i64>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,i64>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,String>(4)?)),
+    ).optional().map_err(db_error)?;
+    let (retention_count, healthcheck_file, updated_at, source_json, commands_json) =
+        saved.unwrap_or((5, None, 0, None, "[]".to_owned()));
+    let saved_source = source_json
+        .map(|value| serde_json::from_str::<Source>(&value))
+        .transpose()
+        .map_err(|cause| {
+            deployment_db_error(
+                "خواندن منبع پیش‌فرض استقرار",
+                &rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(cause),
+                ),
+            )
+        })?;
+    let default_source = saved_source.or_else(|| {
+        let (framework, version) = wordpress.as_ref()?;
+        wordpress_version_source(framework, version)
+    });
+    let default_pre_deploy_commands =
+        serde_json::from_str::<Vec<String>>(&commands_json).map_err(|cause| {
+            deployment_db_error(
+                "خواندن دستورهای پیش‌فرض استقرار",
+                &rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(cause),
+                ),
+            )
+        })?;
+    Ok(Json(
+        json!({"retention_count":retention_count,"healthcheck_file":healthcheck_file,"default_source":default_source,"default_pre_deploy_commands":default_pre_deploy_commands,"updated_at":updated_at,"defaults":{"source":if wordpress.as_ref().is_some_and(|(framework,_)|framework=="wordpress") { "official WordPress Git tag from this app's selected version" } else { "per-application saved source" },"runtime":"application runtime settings","retention_count":5}}),
+    ))
+}
+
+pub(super) async fn save_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    Json(input): Json<DeploymentSettingsInput>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    if !(1..=30).contains(&input.retention_count) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "تعداد releaseهای نگه‌داری‌شده باید بین ۱ تا ۳۰ باشد.",
+        ));
+    }
+    if input
+        .healthcheck_file
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty() && !valid_relative_file(path.trim()))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "مسیر Health Check باید نسبی و امن باشد.",
+        ));
+    }
+    let commands = validate_pre_deploy_commands(input.default_pre_deploy_commands)
+        .map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))?;
+    if let Some(source) = input.default_source.as_ref() {
+        if !valid_default_source(source) {
+            return Err(api_error(StatusCode::BAD_REQUEST, "منبع پیش‌فرض باید Git عمومی معتبر، GitHub SSH با Deploy Key انتخاب‌شده، یا مسیر پوشهٔ مجاز باشد؛ ZIP را نمی‌توان پیش‌فرض ذخیره کرد."));
+        }
+    }
+    let default_source_json = input
+        .default_source
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "منبع پیش‌فرض قابل ذخیره نیست."))?;
+    let commands_json = serde_json::to_string(&commands).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "دستورهای پیش‌فرض قابل ذخیره نیستند.",
+        )
+    })?;
+    let db = state.lock().unwrap();
+    let actor = require_admin(&db, &headers)?.username;
+    let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+    ensure_app(&db, &app_id, &owner)?;
+    if let Some(Source::Git {
+        repository,
+        ssh_key_id: Some(key_id),
+        ..
+    }) = input.default_source.as_ref()
+    {
+        ssh_keys::validate_key_for_deployment(&db, &app_id, repository, key_id)
+            .map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))?;
+    }
+    let healthcheck = input
+        .healthcheck_file
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty());
+    let at = now();
+    db.execute(
+        "INSERT INTO application_deployment_settings(application_id,retention_count,default_healthcheck_file,default_source_json,default_pre_deploy_commands_json,updated_by,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(application_id) DO UPDATE SET retention_count=excluded.retention_count,default_healthcheck_file=excluded.default_healthcheck_file,default_source_json=excluded.default_source_json,default_pre_deploy_commands_json=excluded.default_pre_deploy_commands_json,updated_by=excluded.updated_by,updated_at=excluded.updated_at",
+        params![app_id,input.retention_count,healthcheck,default_source_json,commands_json,actor,at],
+    ).map_err(db_error)?;
+    audit(
+        &db,
+        &actor,
+        "deployment.settings.update",
+        &format!(
+            "app={app_id}; release_retention={}; default_source={}; default_commands={}",
+            input.retention_count,
+            input.default_source.is_some(),
+            commands.len()
+        ),
+    );
+    Ok(Json(
+        json!({"saved":true,"retention_count":input.retention_count,"healthcheck_file":healthcheck,"default_source":input.default_source,"default_pre_deploy_commands":commands,"updated_at":at}),
+    ))
 }
 
 fn api_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
@@ -590,6 +809,7 @@ fn ensure_app(db: &Connection, app_id: &str, owner: &str) -> Result<(), (StatusC
     }
 }
 
+#[cfg(test)]
 fn insert_job(
     state: &AppState,
     headers: &HeaderMap,
@@ -600,6 +820,34 @@ fn insert_job(
     archive: Option<&[u8]>,
     archive_file: Option<&FsPath>,
     pre_deploy_commands: Vec<String>,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    insert_job_with_release(
+        state,
+        headers,
+        app_id,
+        source,
+        key,
+        healthcheck,
+        archive,
+        archive_file,
+        pre_deploy_commands,
+        None,
+        None,
+    )
+}
+
+fn insert_job_with_release(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id: &str,
+    source: Source,
+    key: String,
+    healthcheck: Option<String>,
+    archive: Option<&[u8]>,
+    archive_file: Option<&FsPath>,
+    pre_deploy_commands: Vec<String>,
+    requested_release_name: Option<String>,
+    requested_retention_count: Option<i64>,
 ) -> Result<Value, (StatusCode, Json<Value>)> {
     check_origin(headers)?;
     if !valid_key(&key) {
@@ -619,6 +867,22 @@ fn insert_job(
     }
     let pre_deploy_commands = validate_pre_deploy_commands(pre_deploy_commands)
         .map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))?;
+    let requested_healthcheck = healthcheck.clone();
+    if requested_release_name
+        .as_deref()
+        .is_some_and(|name| !valid_release_name(name))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "نام نسخه باید بین ۱ تا ۸۰ نویسه و بدون نویسهٔ کنترلی باشد.",
+        ));
+    }
+    if requested_retention_count.is_some_and(|count| !(1..=30).contains(&count)) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "تعداد releaseهای نگه‌داری‌شده باید بین ۱ تا ۳۰ باشد.",
+        ));
+    }
     if let Some(bytes) = archive {
         if bytes.is_empty() || bytes.len() > MAX_ARCHIVE_BYTES {
             return Err(api_error(
@@ -645,7 +909,7 @@ fn insert_job(
             return Err(api_error(StatusCode::BAD_REQUEST, "مسیر پوشه معتبر نیست."));
         }
     }
-    let (actor, owner) = {
+    let (actor, owner, environment_kind, retention_count, healthcheck) = {
         let db = state.lock().unwrap();
         let actor = require_admin(&db, headers)?.username;
         let owner = federation::local_server_uuid(&db)
@@ -661,10 +925,10 @@ fn insert_job(
                 .map_err(|message| api_error(StatusCode::BAD_REQUEST, &message))?;
         }
         if let Some(existing) = db.query_row(
-            "SELECT id,source_json,state,healthcheck_file,pre_deploy_commands_json FROM deployment_jobs WHERE application_id=?1 AND idempotency_key=?2",
-            params![app_id, key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?)),
+            "SELECT id,source_json,state,healthcheck_file,pre_deploy_commands_json,release_name,retention_count FROM deployment_jobs WHERE application_id=?1 AND idempotency_key=?2",
+            params![app_id, key], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,i64>(6)?)),
         ).optional().map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))? {
-            if existing.1 != serde_json::to_string(&source).unwrap_or_default() || existing.3 != healthcheck || serde_json::from_str::<Vec<String>>(&existing.4).unwrap_or_default() != pre_deploy_commands {
+            if existing.1 != serde_json::to_string(&source).unwrap_or_default() || requested_healthcheck.as_ref().is_some_and(|path| existing.3.as_deref() != Some(path.as_str())) || serde_json::from_str::<Vec<String>>(&existing.4).unwrap_or_default() != pre_deploy_commands || requested_release_name.as_deref().is_some_and(|name| name.trim() != existing.5) || requested_retention_count.is_some_and(|count| count != existing.6) {
                 return Err(api_error(StatusCode::CONFLICT, "این Idempotency key قبلاً برای منبع دیگری مصرف شده است."));
             }
             if let Some(path)=archive_file { let _=fs::remove_file(path); }
@@ -702,9 +966,39 @@ fn insert_job(
                 ));
             }
         }
-        (actor, owner)
+        let environment_kind = db.query_row(
+            "SELECT e.kind FROM application_context c JOIN app_environments e ON e.id=c.environment_id WHERE c.application_id=?1",
+            [app_id], |row| row.get::<_,String>(0),
+        ).optional().map_err(|cause| deployment_db_error("خواندن محیط اپلیکیشن", &cause))?.unwrap_or_else(|| "unassigned".into());
+        let saved_settings = db.query_row(
+            "SELECT retention_count,default_healthcheck_file FROM application_deployment_settings WHERE application_id=?1",
+            [app_id], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,Option<String>>(1)?)),
+        ).optional().map_err(|cause| deployment_db_error("خواندن تنظیمات استقرار", &cause))?.unwrap_or((5,None));
+        let healthcheck = healthcheck.or(saved_settings.1);
+        if healthcheck
+            .as_deref()
+            .is_some_and(|path| !valid_relative_file(path))
+        {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "مسیر پیش‌فرض Health Check باید نسبی و امن باشد.",
+            ));
+        }
+        (
+            actor,
+            owner,
+            environment_kind,
+            requested_retention_count
+                .unwrap_or(saved_settings.0)
+                .clamp(1, 30),
+            healthcheck,
+        )
     };
     let job_id = id();
+    let release_name = requested_release_name
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
     let at = now();
     let source_json = serde_json::to_string(&source).map_err(|_| {
         api_error(
@@ -760,7 +1054,7 @@ fn insert_job(
         None
     };
     let mut db = state.lock().unwrap();
-    let response = match persist_new_job(
+    let response = match persist_new_job_with_release(
         &mut db,
         &job_id,
         app_id,
@@ -772,6 +1066,9 @@ fn insert_job(
         at,
         source_kind(&source),
         &serde_json::to_string(&pre_deploy_commands).unwrap_or_else(|_| "[]".into()),
+        &release_name,
+        retention_count,
+        &environment_kind,
     ) {
         Ok(value) => value,
         Err(PersistJobError::QueueFull) => {
@@ -805,6 +1102,7 @@ impl From<rusqlite::Error> for PersistJobError {
     }
 }
 
+#[cfg(test)]
 fn persist_new_job(
     db: &mut Connection,
     job_id: &str,
@@ -818,6 +1116,40 @@ fn persist_new_job(
     source: &str,
     pre_deploy_commands_json: &str,
 ) -> Result<Value, PersistJobError> {
+    persist_new_job_with_release(
+        db,
+        job_id,
+        app_id,
+        owner,
+        actor,
+        source_json,
+        key,
+        healthcheck,
+        at,
+        source,
+        pre_deploy_commands_json,
+        "",
+        5,
+        "unassigned",
+    )
+}
+
+fn persist_new_job_with_release(
+    db: &mut Connection,
+    job_id: &str,
+    app_id: &str,
+    owner: &str,
+    actor: &str,
+    source_json: &str,
+    key: &str,
+    healthcheck: Option<&str>,
+    at: i64,
+    source: &str,
+    pre_deploy_commands_json: &str,
+    release_name: &str,
+    retention_count: i64,
+    environment_kind: &str,
+) -> Result<Value, PersistJobError> {
     let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let queued: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM deployment_jobs WHERE state='queued'",
@@ -827,9 +1159,19 @@ fn persist_new_job(
     if queued >= MAX_QUEUED_DEPLOYMENT_JOBS {
         return Err(PersistJobError::QueueFull);
     }
+    let version_number = transaction.query_row(
+        "SELECT COALESCE(MAX(version_number),0)+1 FROM deployment_jobs WHERE application_id=?1",
+        [app_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let release_name = if release_name.trim().is_empty() {
+        format!("v{version_number}")
+    } else {
+        release_name.trim().to_owned()
+    };
     transaction.execute(
-        "INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,healthcheck_file,pre_deploy_commands_json,created_at,updated_at) VALUES (?1,?2,?3,?4,'queued',?5,?6,?7,?8,?9,?9)",
-        params![job_id,app_id,owner,actor,source_json,key,healthcheck,pre_deploy_commands_json,at],
+        "INSERT INTO deployment_jobs(id,application_id,owner_server_uuid,actor,state,source_json,idempotency_key,healthcheck_file,pre_deploy_commands_json,release_name,retention_count,environment_kind,version_number,created_at,updated_at) VALUES (?1,?2,?3,?4,'queued',?5,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
+        params![job_id,app_id,owner,actor,source_json,key,healthcheck,pre_deploy_commands_json,release_name,retention_count,environment_kind,version_number,at],
     )?;
     add_step(
         &transaction,
@@ -1044,9 +1386,9 @@ fn job_event_revision(db: &Connection, job_id: &str) -> rusqlite::Result<Option<
 }
 
 fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
-    let row: (String,String,String,String,String,i64,i64,Option<i64>,Option<i64>,Option<String>,Option<String>,Option<String>,Option<String>) = db.query_row(
-        "SELECT id,application_id,owner_server_uuid,actor,state,attempt,created_at,started_at,finished_at,release_path,previous_release,source_commit,error_summary FROM deployment_jobs WHERE id=?1",
-        [job_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?)),
+    let row: (String,String,String,String,String,i64,i64,Option<i64>,Option<i64>,Option<String>,Option<String>,Option<String>,Option<String>,String,i64,String,i64) = db.query_row(
+        "SELECT id,application_id,owner_server_uuid,actor,state,attempt,created_at,started_at,finished_at,release_path,previous_release,source_commit,error_summary,release_name,retention_count,environment_kind,version_number FROM deployment_jobs WHERE id=?1",
+        [job_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,r.get(12)?,r.get(13)?,r.get(14)?,r.get(15)?,r.get(16)?)),
     )?;
     let mut statement = db.prepare("SELECT sequence,step,state,message,started_at,finished_at FROM deployment_job_steps WHERE job_id=?1 ORDER BY sequence")?;
     let steps = statement.query_map([job_id], |r| Ok(json!({"sequence":r.get::<_,i64>(0)?,"step":r.get::<_,String>(1)?,"state":r.get::<_,String>(2)?,"message":r.get::<_,String>(3)?,"started_at":r.get::<_,i64>(4)?,"finished_at":r.get::<_,Option<i64>>(5)?})))?.collect::<Result<Vec<_>,_>>()?;
@@ -1059,7 +1401,7 @@ fn read_job(db: &Connection, job_id: &str) -> rusqlite::Result<Value> {
         |r| r.get(0),
     )?;
     Ok(
-        json!({"id":row.0,"application_id":row.1,"owner_server_uuid":row.2,"actor":row.3,"state":row.4,"attempt":row.5,"created_at":row.6,"started_at":row.7,"finished_at":row.8,"release_path":row.9,"previous_release":row.10,"source_commit":row.11,"error":row.12,"steps":steps,"logs":logs,"log_count":log_count}),
+        json!({"id":row.0,"application_id":row.1,"owner_server_uuid":row.2,"actor":row.3,"state":row.4,"attempt":row.5,"created_at":row.6,"started_at":row.7,"finished_at":row.8,"release_path":row.9,"previous_release":row.10,"source_commit":row.11,"error":row.12,"release_name":row.13,"retention_count":row.14,"environment_kind":row.15,"version_number":row.16,"steps":steps,"logs":logs,"log_count":log_count}),
     )
 }
 
@@ -1190,7 +1532,7 @@ pub(super) async fn create(
     Json(input): Json<DeployRequest>,
 ) -> ApiResult {
     let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
-    Ok(Json(insert_job(
+    Ok(Json(insert_job_with_release(
         &state,
         &headers,
         &app_id,
@@ -1200,6 +1542,8 @@ pub(super) async fn create(
         None,
         None,
         input.pre_deploy_commands,
+        input.release_name,
+        input.retention_count,
     )?))
 }
 
@@ -1226,6 +1570,25 @@ pub(super) async fn upload_archive(
         .unwrap_or("")
         .to_owned();
     let pre_deploy_commands = pre_deploy_commands_from_header(&headers)?;
+    let release_name = headers
+        .get("x-arg-release-name")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let healthcheck_file = headers
+        .get("x-arg-healthcheck-file")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let retention_count = headers
+        .get("x-arg-release-retention")
+        .and_then(|value| value.to_str().ok())
+        .map(str::parse::<i64>)
+        .transpose()
+        .map_err(|_| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "تعداد releaseهای نگه‌داری‌شده نامعتبر است.",
+            )
+        })?;
     if !valid_key(&key) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -1360,16 +1723,18 @@ pub(super) async fn upload_archive(
         sha256: hex::encode(hasher.finalize()),
     };
     let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
-    match insert_job(
+    match insert_job_with_release(
         &state,
         &headers,
         &app_id,
         source,
         key,
-        None,
+        healthcheck_file,
         None,
         Some(&temp),
         pre_deploy_commands,
+        release_name,
+        retention_count,
     ) {
         Ok(job) => Ok(Json(job)),
         Err(problem) => {
@@ -1785,11 +2150,11 @@ pub(super) async fn retry(
         let actor = require_admin(&db, &headers)?.username;
         let owner = federation::local_server_uuid(&db)
             .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
-        let old: (String, String, String, Option<String>, String, Option<String>, String) = db
+        let old: (String, String, String, Option<String>, String, Option<String>, String, String, i64) = db
             .query_row(
-                "SELECT application_id,owner_server_uuid,source_json,healthcheck_file,state,source_commit,pre_deploy_commands_json FROM deployment_jobs WHERE id=?1",
+                "SELECT application_id,owner_server_uuid,source_json,healthcheck_file,state,source_commit,pre_deploy_commands_json,release_name,retention_count FROM deployment_jobs WHERE id=?1",
                 [job_id.as_str()],
-                |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,String>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,String>(6)?)),
+                |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,String>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?,row.get::<_,i64>(8)?)),
             )
             .optional()
             .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?
@@ -1844,7 +2209,7 @@ pub(super) async fn retry(
         None
     };
     let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
-    let result = insert_job(
+    let result = insert_job_with_release(
         &state,
         &headers,
         &old.0,
@@ -1854,6 +2219,8 @@ pub(super) async fn retry(
         None,
         archive_file.as_deref(),
         serde_json::from_str::<Vec<String>>(&old.6).unwrap_or_default(),
+        Some(old.7.clone()),
+        Some(old.8),
     );
     let mut value = match result {
         Ok(value) => value,
@@ -3169,10 +3536,15 @@ fn prune_releases_at(state: &AppState, root: &FsPath, app_id: &str) {
             path.file_name()
                 .map(|name| name.to_string_lossy().to_string())
         });
-    let entries = {
+    let (entries, retention_count) = {
         let db = state.lock().unwrap();
+        let retention_count = db.query_row(
+            "SELECT retention_count FROM deployment_jobs WHERE application_id=?1 ORDER BY created_at DESC,id DESC LIMIT 1",
+            [app_id],
+            |row| row.get::<_,i64>(0),
+        ).unwrap_or(5).clamp(1, 30) as usize;
         let Ok(mut statement)=db.prepare("SELECT id,path,state FROM deployment_releases WHERE application_id=?1 ORDER BY created_at DESC,id DESC")else{return};
-        statement
+        let rows = statement
             .query_map([app_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -3181,10 +3553,11 @@ fn prune_releases_at(state: &AppState, root: &FsPath, app_id: &str) {
                 ))
             })
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (rows, retention_count)
     };
     for (index, (release_id, path, state_name)) in entries.into_iter().enumerate() {
-        if index < 5
+        if index < retention_count
             || state_name == "active"
             || state_name == "previous"
             || current.as_deref() == Some(release_id.as_str())
@@ -3816,6 +4189,103 @@ mod tests {
         assert!(!valid_repo("https://user:secret@github.com/a/b"));
         assert!(!valid_repo("https://127.0.0.1/a/b"));
         assert!(!valid_repo("https://github.com/a/b?token=x"));
+    }
+
+    #[test]
+    fn wordpress_application_version_selects_only_the_matching_official_tag() {
+        let source = wordpress_version_source("wordpress", "7.1.4").unwrap();
+        assert!(valid_default_source(&source));
+        assert_eq!(
+            serde_json::to_value(source).unwrap(),
+            serde_json::json!({
+                "kind":"git",
+                "repository":"https://github.com/WordPress/WordPress.git",
+                "reference":"7.1.4"
+            })
+        );
+        assert!(wordpress_version_source("wordpress", "latest").is_none());
+        assert!(wordpress_version_source("node", "7.1.4").is_none());
+    }
+    #[test]
+    fn saved_default_source_rejects_credentials_archives_and_invalid_paths() {
+        let public = Source::Git {
+            repository: "https://github.com/acme/site.git".into(),
+            reference: "main".into(),
+            ssh_key_id: None,
+        };
+        assert!(valid_default_source(&public));
+        let credentialed = Source::Git {
+            repository: "https://user:token@github.com/acme/site.git".into(),
+            reference: "main".into(),
+            ssh_key_id: None,
+        };
+        assert!(!valid_default_source(&credentialed));
+        let archive = Source::Archive {
+            sha256: "a".repeat(64),
+        };
+        assert!(!valid_default_source(&archive));
+        assert!(valid_default_source(&Source::Directory {
+            path: "/var/www/site".into()
+        }));
+        assert!(!valid_default_source(&Source::Directory {
+            path: "x\0y".into()
+        }));
+    }
+
+    #[test]
+    fn deployment_version_numbers_are_monotonic_and_release_names_default_to_them() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);
+             CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        db.execute(
+            "INSERT INTO applications(id,owner_server_uuid) VALUES('app','server')",
+            [],
+        )
+        .unwrap();
+        let first = persist_new_job(
+            &mut db, "job-1", "app", "server", "admin", "{}", "key-1", None, 1, "git", "[]",
+        )
+        .unwrap();
+        assert_eq!(first["version_number"], 1);
+        assert_eq!(first["release_name"], "v1");
+        db.execute(
+            "UPDATE deployment_jobs SET state='succeeded' WHERE id='job-1'",
+            [],
+        )
+        .unwrap();
+        let second = persist_new_job(
+            &mut db, "job-2", "app", "server", "admin", "{}", "key-2", None, 2, "git", "[]",
+        )
+        .unwrap();
+        assert_eq!(second["version_number"], 2);
+        assert_eq!(second["release_name"], "v2");
+    }
+
+    #[test]
+    fn deployment_settings_migration_adds_defaults_to_existing_schema() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE applications(id TEXT PRIMARY KEY,owner_server_uuid TEXT NOT NULL);
+             CREATE TABLE audit(at INTEGER,actor TEXT,action TEXT,detail TEXT);
+             CREATE TABLE application_deployment_settings(application_id TEXT PRIMARY KEY,retention_count INTEGER NOT NULL DEFAULT 5,default_healthcheck_file TEXT,updated_by TEXT NOT NULL DEFAULT '',updated_at INTEGER NOT NULL DEFAULT 0);",
+        ).unwrap();
+        migrate(&db).unwrap();
+        let columns = {
+            let mut statement = db
+                .prepare("PRAGMA table_info(application_deployment_settings)")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<std::collections::HashSet<_>, _>>()
+                .unwrap()
+        };
+        assert!(columns.contains("default_source_json"));
+        assert!(columns.contains("default_pre_deploy_commands_json"));
     }
     #[test]
     fn existing_git_deploy_sources_default_to_no_ssh_key() {
@@ -4527,6 +4997,7 @@ mod tests {
             [],
         )
         .unwrap();
+        app_workspaces::migrate(&db).unwrap();
         db.execute("INSERT INTO users(id,username,role,enabled) VALUES(1,'admin','admin',1),(2,'viewer','viewer',1)",[]).unwrap();
         db.execute(
             "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES(?1,1,?3),(?2,2,?3)",
