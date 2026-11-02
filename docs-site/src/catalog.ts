@@ -36,6 +36,7 @@ export const pages: DocPage[] = [
   { id: 'laravel-runner', group: 'applications', title: { fa: 'مدیریت Laravel', en: 'Laravel runner' }, summary: { fa: 'بررسی release، تنظیم محیط خصوصی، نصب lockfile و عملیات محدود Artisan.', en: 'Release checks, private environment setup, locked Composer install, and allowlisted Artisan actions.' }, file: 'laravel-runner' },
   { id: 'node-runner', group: 'applications', title: { fa: 'اجرای اپلیکیشن Node.js', en: 'Node.js application runner' }, summary: { fa: 'تشخیص lockfile، build محدود، متغیرهای خصوصی، سرویس systemd و reverse proxy مدیریت‌شده.', en: 'Lockfile detection, sandboxed builds, private environment, systemd service, and guarded reverse proxy.' }, file: 'node-runner' },
   { id: 'static-and-ssr', group: 'applications', title: { fa: 'انتشار Static و اجرای SSR', en: 'Static publishing and SSR' }, summary: { fa: 'تشخیص خودکار و دستی React/Vue/Vite، خروجی Nginx، fallback، Next/Nuxt SSR و Rollback.', en: 'Auto/manual React/Vue/Vite detection, Nginx output, fallback, Next/Nuxt SSR, and rollback.' }, file: 'static-and-ssr' },
+  { id: 'wordpress-runner', group: 'applications', title: { fa: 'نصب اولیهٔ مدیریت‌شدهٔ WordPress', en: 'Managed WordPress first deployment' }, summary: { fa: 'Runtime، دیتابیس، پیکربندی امن، Nginx، تلاش SSL و بررسی سلامت اولین استقرار.', en: 'Runtime, database, protected configuration, Nginx, SSL attempt, and first-deployment health checks.' }, file: 'wordpress-runner' },
   { id: 'app-resources', group: 'applications', title: { fa: 'شبکه و منابع اپلیکیشن', en: 'Application networks and resources' }, summary: { fa: 'شبکهٔ داخلی، مسیر دادهٔ پایدار، اتصال S3 و مشاهدهٔ لاگ‌های journald برای هر اپ.', en: 'Per-app internal networks, durable data paths, S3 references, and journald logs.' }, file: 'app-resources' },
   { id: 'deployment-jobs', group: 'applications', title: { fa: 'استقرار منبع و Jobهای پایدار', en: 'Source deployments & durable jobs' }, summary: { fa: 'دریافت امن Git/ZIP/پوشه، پیگیری Job، لغو، retry و بازگشت release.', en: 'Safe Git/ZIP/directory acquisition, durable progress, cancel, retry, and release rollback.' }, file: 'deployment-jobs' },
   { id: 'ssh-deploy-keys', group: 'applications', title: { fa: 'کلیدهای SSH و استقرار مخزن خصوصی', en: 'SSH keys and private repository deployment' }, summary: { fa: 'ساخت کلید امن روی VPS، ثبت Deploy Key در GitHub، استفاده برای استقرار و لغو دسترسی.', en: 'Generate server-side keys, register a GitHub deploy key, deploy private repositories, and revoke access.' }, file: 'ssh-deploy-keys' },
@@ -63,7 +64,7 @@ const sectionFor = (id: string): string => {
   if (id === 'federation') return 'federation'
   if (id === 'application-registry') return 'registry'
   if (id === 'runtime-manager') return 'runtime'
-  if (['laravel-runner', 'node-runner', 'static-and-ssr'].includes(id)) return 'runtimes'
+  if (['laravel-runner', 'node-runner', 'static-and-ssr', 'wordpress-runner'].includes(id)) return 'runtimes'
   if (['app-resources', 'deployment-jobs'].includes(id)) return 'deployments'
   if (id === 'system-storage') return 'host'
   if (id === 'network-firewall') return 'network'

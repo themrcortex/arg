@@ -51,7 +51,8 @@ The optional pre-activation commands above are bounded and do not create a gener
 
 - **Laravel:** see [Laravel management](./laravel-runner.md) for Composer lockfile installs, private environment, approved Artisan operations, Nginx/PHP-FPM, and optional services.
 - **Node.js:** see [Node.js application runner](./node-runner.md) for supported lockfiles, bounded dependency/build steps, runtime environment, a per-app systemd service, loopback verification, guarded Nginx proxy creation, and release recovery.
-- **Other frameworks:** Python and WordPress do not have a managed runtime runner in this release. Static React/Vue/Vite publishing and Next.js/Nuxt SSR are covered in [Static and SSR publishing](./static-and-ssr.md). The pre-activation commands above do not create a permanent runtime or add framework support.
+- **WordPress:** the WordPress template has a managed local-VPS first-deployment path for PHP-FPM, MariaDB, Nginx, its database/configuration, optional SSL, and a real login-route health check. See [Managed WordPress first deployment](./wordpress-runner.md). Manually registered WordPress records and remote Node deployments do not invoke this workflow.
+- **Other frameworks:** Python does not have a managed application runtime runner in this release. Static React/Vue/Vite publishing and Next.js/Nuxt SSR are covered in [Static and SSR publishing](./static-and-ssr.md). The pre-activation commands above do not create a permanent runtime or add framework support.
 
 The optional `healthcheck_file` is a regular-file check inside the release. Laravel and Node runners add their own framework-specific activation checks; a file-existence check is not a substitute for those runtime checks. Database migrations or other external side effects produced by application code are not reversed by code rollback.
 

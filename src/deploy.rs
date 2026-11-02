@@ -638,6 +638,49 @@ fn wordpress_version_source(framework: &str, version: &str) -> Option<Source> {
     })
 }
 
+pub(super) async fn queue_wordpress_initial(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id: &str,
+    version: &str,
+    app_name: &str,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
+    let source = wordpress_version_source("wordpress", version).ok_or_else(|| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "نسخهٔ WordPress برای دریافت منبع رسمی معتبر نیست.",
+        )
+    })?;
+    insert_job_with_release(
+        state,
+        headers,
+        app_id,
+        source,
+        id(),
+        None,
+        None,
+        None,
+        Vec::new(),
+        Some(format!(
+            "wp-{}",
+            app_name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(24)
+                .collect::<String>()
+        )),
+        Some(5),
+    )
+}
+
+pub(super) fn verify_wordpress_release_source(
+    release: &FsPath,
+    expected_version: &str,
+) -> Result<(), String> {
+    wordpress::verify_release_source(release, expected_version)
+}
+
 pub(super) async fn settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2617,6 +2660,304 @@ async fn refresh_laravel_runtime(
     Ok(nginx_snapshot)
 }
 
+async fn configure_wordpress_web(
+    state: &AppState,
+    job_id: &str,
+    app_id: &str,
+    domain: &str,
+    acme_email: Option<&str>,
+) -> Result<(String, String, String, Option<String>), String> {
+    progress(
+        state,
+        job_id,
+        "verifying",
+        "nginx",
+        "تنظیمات Nginx برای دامنه ساخته و فعال می‌شود؛ سپس مسیر ورود WordPress از خود Nginx بررسی خواهد شد.",
+    );
+    let ensured = nginx_domains::ensure_for_application(state, app_id, "deployment-worker")
+        .await
+        .map_err(|(_, body)| {
+            body["error"]
+                .as_str()
+                .unwrap_or("ساخت تنظیم امن Nginx برای WordPress ناموفق بود.")
+                .to_owned()
+        })?;
+    let site_name = ensured["site"]["name"]
+        .as_str()
+        .ok_or("Nginx نام سایت مدیریت‌شدهٔ WordPress را برنگرداند.")?
+        .to_owned();
+    if ensured["configured"] != true {
+        return Err(ensured["message"]
+            .as_str()
+            .unwrap_or("Nginx برای دامنهٔ WordPress آماده نشد.")
+            .to_owned());
+    }
+    let toggle = nginx::nginx_manager_request_async(
+        json!({"action":"nginx-toggle","name":site_name,"enabled":true}),
+    )
+    .await
+    .map_err(|(_, body)| {
+        body["error"]
+            .as_str()
+            .unwrap_or("فعال‌سازی سایت WordPress در Nginx ناموفق بود.")
+            .to_owned()
+    })?;
+    let _ = toggle;
+    let manage_web_firewall = {
+        let db = state.lock().unwrap();
+        db.query_row(
+            "SELECT value FROM settings WHERE key='nginx_manages_web_firewall'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| "وضعیت خودکار فایروال وب از پایگاه‌داده خوانده نشد.".to_owned())?
+        .as_deref()
+            == Some("1")
+    };
+    if manage_web_firewall {
+        nginx::prepare_website_firewall(state)
+            .await
+            .map_err(|(_, body)| {
+                body["error"]
+                    .as_str()
+                    .unwrap_or("آماده‌سازی دسترسی وب در فایروال ناموفق بود.")
+                    .to_owned()
+            })?;
+    }
+
+    let live = nginx::nginx_manager_request_async(json!({"action":"nginx-get","name":site_name}))
+        .await
+        .map_err(|(_, body)| {
+            body["error"]
+                .as_str()
+                .unwrap_or("وضعیت سایت WordPress در Nginx خوانده نشد.")
+                .to_owned()
+        })?;
+    let initial_content = live["site"]["content"].as_str().unwrap_or_default();
+    let mut scheme = if initial_content.contains("ssl_certificate") {
+        "https"
+    } else {
+        "http"
+    };
+    let mut ssl_warning = None;
+    if scheme == "http" {
+        if let Some(email) = acme_email.filter(|email| !email.trim().is_empty()) {
+            if domain.parse::<std::net::IpAddr>().is_ok() {
+                ssl_warning = Some(
+                    "صدور خودکار SSL برای دامنهٔ IP انجام نمی‌شود؛ سایت با HTTP فعال ماند."
+                        .to_owned(),
+                );
+            } else {
+                progress(
+                    state,
+                    job_id,
+                    "running",
+                    "wordpress-ssl",
+                    "صدور SSL برای دامنه بررسی می‌شود؛ اگر DNS یا دسترسی HTTP آماده نباشد، نصب سالم WordPress حفظ و علت در لاگ ثبت می‌شود.",
+                );
+                match nginx::nginx_manager_request_async(json!({
+                    "action":"nginx-ssl-issue",
+                    "name":site_name,
+                    "email":email,
+                    "domains":[domain],
+                    "redirect":false
+                }))
+                .await
+                {
+                    Ok(_) => {
+                        let url = privileged_request_async(json!({
+                            "action":"wordpress-set-url",
+                            "app_id":app_id,
+                            "domain":domain,
+                            "scheme":"https"
+                        }))
+                        .await;
+                        let url_error = match url {
+                            Ok(value) if value["ok"] == true => None,
+                            Ok(value) => Some(
+                                value["error"]
+                                    .as_str()
+                                    .unwrap_or("به‌روزرسانی URLهای WordPress ناموفق بود.")
+                                    .to_owned(),
+                            ),
+                            Err((_, body)) => Some(
+                                body["error"]
+                                    .as_str()
+                                    .unwrap_or("ارتباط با helper برای تغییر URL WordPress قطع شد.")
+                                    .to_owned(),
+                            ),
+                        };
+                        if let Some(detail) = url_error {
+                            let _ = wordpress_set_url(app_id, domain, "http").await;
+                            ssl_warning = Some(format!(
+                                "گواهی صادر شد اما URL WordPress به HTTPS تغییر نکرد: {detail}"
+                            ));
+                            record_output(
+                                state,
+                                job_id,
+                                "wordpress-ssl",
+                                &format!("هشدار: {}", ssl_warning.as_deref().unwrap_or_default()),
+                            );
+                        } else {
+                            let health = wordpress_health(domain, "https").await;
+                            if health.is_ok() {
+                                scheme = "https";
+                                record_output(state, job_id, "wordpress-ssl", "گواهی SSL فعال شد، URL اصلی WordPress روی HTTPS قرار گرفت و پاسخ TLS محلی تأیید شد.");
+                            } else {
+                                let _ = wordpress_set_url(app_id, domain, "http").await;
+                                ssl_warning = Some(format!("گواهی صادر شد اما Health Check HTTPS شکست خورد؛ URL سایت به HTTP بازگشت. {}", health.err().unwrap_or_default()));
+                                record_output(
+                                    state,
+                                    job_id,
+                                    "wordpress-ssl",
+                                    &format!(
+                                        "هشدار: {}",
+                                        ssl_warning.as_deref().unwrap_or_default()
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Err((_, body)) => {
+                        let detail = body["error"]
+                            .as_str()
+                            .unwrap_or("صدور خودکار SSL انجام نشد.")
+                            .to_owned();
+                        ssl_warning = Some(format!(
+                            "SSL خودکار صادر نشد؛ WordPress با HTTP فعال می‌ماند. {detail}"
+                        ));
+                        record_output(
+                            state,
+                            job_id,
+                            "wordpress-ssl",
+                            &format!("هشدار: {}", ssl_warning.as_deref().unwrap_or_default()),
+                        );
+                    }
+                }
+            }
+        } else {
+            ssl_warning = Some(
+                "ایمیل معتبر برای صدور خودکار SSL در دسترس نیست؛ سایت با HTTP فعال ماند."
+                    .to_owned(),
+            );
+        }
+    } else {
+        if let Err(error) = wordpress_set_url(app_id, domain, "https").await {
+            scheme = "http";
+            let _ = wordpress_set_url(app_id, domain, "http").await;
+            ssl_warning = Some(format!(
+                "Nginx SSL داشت اما URL اصلی WordPress به HTTPS تغییر نکرد: {error}"
+            ));
+        }
+    }
+
+    let health = wordpress_health(domain, scheme).await;
+    if let Err(https_error) = health {
+        if scheme == "https" {
+            let _ = wordpress_set_url(app_id, domain, "http").await;
+            if wordpress_health(domain, "http").await.is_ok() {
+                scheme = "http";
+                ssl_warning = Some(format!(
+                    "HTTPS فعلی پاسخ سالم نداد؛ سایت با HTTP بررسی شد. {https_error}"
+                ));
+            } else {
+                return Err(https_error);
+            }
+        } else {
+            return Err(https_error);
+        }
+    }
+    record_output(
+        state,
+        job_id,
+        "wordpress-health",
+        &format!(
+            "مسیر /wp-login.php از Nginx با HTTP {} و پاسخ 200 تأیید شد.",
+            scheme.to_ascii_uppercase()
+        ),
+    );
+    let final_site =
+        nginx::nginx_manager_request_async(json!({"action":"nginx-get","name":site_name}))
+            .await
+            .map_err(|(_, body)| {
+                body["error"]
+                    .as_str()
+                    .unwrap_or("خواندن کانفیگ نهایی Nginx ناموفق بود.")
+                    .to_owned()
+            })?;
+    let content = final_site["site"]["content"]
+        .as_str()
+        .ok_or("کانفیگ نهایی Nginx برای WordPress موجود نیست.")?
+        .to_owned();
+    Ok((site_name, content, scheme.to_owned(), ssl_warning))
+}
+
+async fn wordpress_health(domain: &str, scheme: &str) -> Result<(), String> {
+    let response = privileged_request_async(json!({
+        "action":"wordpress-health",
+        "domain":domain,
+        "scheme":scheme
+    }))
+    .await
+    .map_err(|(_, body)| {
+        body["error"]
+            .as_str()
+            .unwrap_or("Health Check WordPress در دسترس نیست.")
+            .to_owned()
+    })?;
+    if response["ok"] == true {
+        Ok(())
+    } else {
+        Err(response["error"]
+            .as_str()
+            .unwrap_or("Health Check WordPress شکست خورد.")
+            .to_owned())
+    }
+}
+
+async fn wordpress_set_url(app_id: &str, domain: &str, scheme: &str) -> Result<(), String> {
+    let response = privileged_request_async(json!({
+        "action":"wordpress-set-url",
+        "app_id":app_id,
+        "domain":domain,
+        "scheme":scheme
+    }))
+    .await
+    .map_err(|(_, body)| {
+        body["error"]
+            .as_str()
+            .unwrap_or("URL WordPress به‌روز نشد.")
+            .to_owned()
+    })?;
+    if response["ok"] == true {
+        Ok(())
+    } else {
+        Err(response["error"]
+            .as_str()
+            .unwrap_or("URL WordPress به‌روز نشد.")
+            .to_owned())
+    }
+}
+
+async fn disable_nginx_for_application(app_id: &str) {
+    let Ok(inventory) = nginx::nginx_manager_request_async(json!({"action":"nginx-list"})).await
+    else {
+        return;
+    };
+    for site in inventory["sites"].as_array().into_iter().flatten() {
+        if site["application_id"].as_str() != Some(app_id) {
+            continue;
+        }
+        if let Some(name) = site["name"].as_str() {
+            let _ = nginx::nginx_manager_request_async(
+                json!({"action":"nginx-toggle","name":name,"enabled":false}),
+            )
+            .await;
+        }
+    }
+}
+
 fn persist_laravel_nginx_snapshot(
     state: &AppState,
     snapshot: &(String, String),
@@ -2846,9 +3187,9 @@ async fn process_job(state: AppState, job_id: String) {
     let app_settings = {
         let db = state.lock().unwrap();
         db.query_row(
-            "SELECT framework,build_runtime_version,runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json,node_build_script,node_start_script,node_healthcheck_path,listen_port,desired_state FROM applications WHERE id=?1",
+            "SELECT framework,build_runtime_version,runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json,node_build_script,node_start_script,node_healthcheck_path,listen_port,desired_state,wordpress_version,labels_json FROM applications WHERE id=?1",
             [&app_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, bool>(5)?, row.get::<_, String>(6)?, row.get::<_,String>(7)?, row.get::<_,String>(8)?, row.get::<_,String>(9)?, row.get::<_,Option<i64>>(10)?.and_then(|port| u16::try_from(port).ok()), row.get::<_,String>(11)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, bool>(5)?, row.get::<_, String>(6)?, row.get::<_,String>(7)?, row.get::<_,String>(8)?, row.get::<_,String>(9)?, row.get::<_,Option<i64>>(10)?.and_then(|port| u16::try_from(port).ok()), row.get::<_,String>(11)?, row.get::<_,String>(12)?, row.get::<_,String>(13)?)),
         )
         .optional()
     };
@@ -2865,6 +3206,8 @@ async fn process_job(state: AppState, job_id: String) {
         node_healthcheck_path,
         listen_port,
         desired_state,
+        wordpress_version,
+        labels_json,
     ) = match app_settings {
         Ok(Some(settings)) => settings,
         Ok(None) => {
@@ -2885,6 +3228,106 @@ async fn process_job(state: AppState, job_id: String) {
             return;
         }
     };
+    let managed_wordpress = framework == "wordpress"
+        && serde_json::from_str::<Vec<String>>(&labels_json)
+            .is_ok_and(|labels| labels.iter().any(|label| label == "wordpress-managed"));
+    if managed_wordpress {
+        let Some(domain) = domain
+            .as_deref()
+            .filter(|domain| apps::valid_domain(domain))
+        else {
+            let _ = fs::remove_dir_all(&stage);
+            finish(
+                &state,
+                &job_id,
+                "failed",
+                "برای استقرار خودکار WordPress یک دامنهٔ معتبر لازم است.",
+            );
+            return;
+        };
+        if let Err(message) = verify_wordpress_release_source(&stage, &wordpress_version) {
+            let _ = fs::remove_dir_all(&stage);
+            finish(
+                &state,
+                &job_id,
+                "failed",
+                &format!("بررسی سورس WordPress شکست خورد: {message}"),
+            );
+            return;
+        }
+        if cancelled(&state, &job_id) {
+            let _ = fs::remove_dir_all(&stage);
+            finish(
+                &state,
+                &job_id,
+                "cancelled",
+                "پیش از نصب پیش‌نیازهای WordPress لغو شد.",
+            );
+            return;
+        }
+        progress(
+            &state,
+            &job_id,
+            "running",
+            "wordpress-runtime",
+            "پیش‌نیازهای واقعی Nginx، PHP-FPM، افزونه‌های PHP و MariaDB با بسته‌های محدود و بدون ارتقای کلی سیستم آماده می‌شوند.",
+        );
+        let runtime_result = {
+            let _update_guard = UPDATE_OPERATION_GATE.read().await;
+            let _apt_guard = APT_OPERATION_LOCK.lock().await;
+            privileged_request_async(json!({
+                "action":"wordpress-runtime-install",
+                "runtime_version":node_runtime_version
+            }))
+            .await
+        };
+        match runtime_result {
+            Ok(value) if value["ok"] == true => {
+                let php_service = value["data"]["php_fpm_service"]
+                    .as_str()
+                    .unwrap_or("PHP-FPM");
+                record_output(
+                    &state,
+                    &job_id,
+                    "wordpress-runtime",
+                    &format!("Nginx، MariaDB و سرویس {php_service} بررسی و آماده شدند."),
+                );
+            }
+            Ok(value) => {
+                let message = value["error"]
+                    .as_str()
+                    .unwrap_or("نصب پیش‌نیازهای WordPress شکست خورد.");
+                finish_failure_or_cancel(&state, &job_id, message);
+                let _ = fs::remove_dir_all(&stage);
+                return;
+            }
+            Err((_, body)) => {
+                let message = body["error"]
+                    .as_str()
+                    .unwrap_or("دسترسی به helper برای نصب پیش‌نیازهای WordPress شکست خورد.");
+                finish_failure_or_cancel(&state, &job_id, message);
+                let _ = fs::remove_dir_all(&stage);
+                return;
+            }
+        }
+        if cancelled(&state, &job_id) {
+            let _ = fs::remove_dir_all(&stage);
+            finish(
+                &state,
+                &job_id,
+                "cancelled",
+                "پیش‌نیازهای WordPress آماده شدند اما Job پیش از ساخت release لغو شد.",
+            );
+            return;
+        }
+        record_output(
+            &state,
+            &job_id,
+            "wordpress-runtime",
+            "پیش‌نیازها آماده‌اند؛ سورس رسمی و نسخهٔ هسته تأیید شدند.",
+        );
+        let _ = domain;
+    }
     let build_environment = match node::parse_public_build_environment(&build_environment_json) {
         Ok(variables) => variables,
         Err(message) => {
@@ -3114,6 +3557,62 @@ async fn process_job(state: AppState, job_id: String) {
             return;
         }
     }
+    let wordpress_provision = if managed_wordpress {
+        let Some(domain) = domain.as_deref() else {
+            let _ = fs::remove_dir_all(&final_release);
+            finish(
+                &state,
+                &job_id,
+                "failed",
+                "دامنهٔ WordPress پیش از فعال‌سازی حذف شد.",
+            );
+            return;
+        };
+        progress(
+            &state,
+            &job_id,
+            "running",
+            "wordpress-database",
+            "دیتابیس اختصاصی و اعتبارنامهٔ محدود ساخته می‌شوند؛ wp-config امن و دادهٔ wp-content پایدار آماده خواهد شد.",
+        );
+        let response = privileged_request_async(json!({
+            "action":"wordpress-provision",
+            "app_id":app_id,
+            "release_path":final_release.to_string_lossy(),
+            "domain":domain,
+            "wordpress_version":wordpress_version
+        }))
+        .await;
+        match response {
+            Ok(value) if value["ok"] == true => {
+                record_output(
+                    &state,
+                    &job_id,
+                    "wordpress-database",
+                    "دیتابیس، wp-config، پوشهٔ پایدار uploads و نصب اولیهٔ WordPress آماده شدند.",
+                );
+                Some(value["data"].clone())
+            }
+            Ok(value) => {
+                let message = value["error"]
+                    .as_str()
+                    .unwrap_or("آماده‌سازی دیتابیس و نصب WordPress شکست خورد.");
+                let _ = fs::remove_dir_all(&final_release);
+                finish_failure_or_cancel(&state, &job_id, message);
+                return;
+            }
+            Err((_, body)) => {
+                let message = body["error"]
+                    .as_str()
+                    .unwrap_or("ارتباط با helper برای نصب WordPress برقرار نشد.");
+                let _ = fs::remove_dir_all(&final_release);
+                finish_failure_or_cancel(&state, &job_id, message);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     if current.exists() && !fs::symlink_metadata(&current).is_ok_and(|m| m.file_type().is_symlink())
     {
         finish(
@@ -3181,6 +3680,63 @@ async fn process_job(state: AppState, job_id: String) {
                         format!("{message}؛ بازگرداندن release قبلی هم ناموفق بود: {error}")
                     });
                 finish(&state, &job_id, "failed", &detail);
+                return;
+            }
+        }
+    }
+    let mut wordpress_ssl_warning = None;
+    let mut wordpress_site_ready = false;
+    if managed_wordpress {
+        let Some(domain) = domain.as_deref() else {
+            let _ = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+            finish(
+                &state,
+                &job_id,
+                "failed",
+                "دامنهٔ WordPress برای فعال‌سازی Nginx موجود نیست؛ release قبلی حفظ شد.",
+            );
+            return;
+        };
+        let acme_email = wordpress_provision
+            .as_ref()
+            .and_then(|value| value["acme_email"].as_str());
+        match configure_wordpress_web(&state, &job_id, &app_id, domain, acme_email).await {
+            Ok((name, content, scheme, warning)) => {
+                wordpress_site_ready = true;
+                wordpress_ssl_warning = warning;
+                nginx_snapshot = Some((name, content));
+                if wordpress_ssl_warning.is_some() {
+                    record_output(
+                        &state,
+                        &job_id,
+                        "wordpress-ssl",
+                        &format!(
+                            "هشدار: {}",
+                            wordpress_ssl_warning.as_deref().unwrap_or_default()
+                        ),
+                    );
+                }
+                record_output(
+                    &state,
+                    &job_id,
+                    "wordpress-health",
+                    &format!(
+                        "WordPress از مسیر دامنه و Nginx با پروتکل {} پاسخ سالم داد.",
+                        scheme.to_ascii_uppercase()
+                    ),
+                );
+            }
+            Err(message) => {
+                let recovery = restore_current_pointer(&app_root, previous.as_deref(), &job_id);
+                if previous.is_none() {
+                    disable_nginx_for_application(&app_id).await;
+                }
+                let detail = recovery
+                    .map(|_| format!("{message}؛ release قبلی حفظ شد."))
+                    .unwrap_or_else(|error| {
+                        format!("{message}؛ بازگرداندن release قبلی هم شکست خورد: {error}")
+                    });
+                finish_failure_or_cancel(&state, &job_id, &detail);
                 return;
             }
         }
@@ -3420,6 +3976,10 @@ async fn process_job(state: AppState, job_id: String) {
     drop(db);
     let success_message = snapshot_warning.map_or_else(
         || match framework.as_str() {
+            "wordpress" if managed_wordpress && wordpress_site_ready => wordpress_ssl_warning
+                .as_deref()
+                .map(|warning| format!("WordPress نصب و از مسیر Nginx/Health Check تأیید شد؛ SSL نیاز به بررسی دارد: {warning}"))
+                .unwrap_or_else(|| "WordPress نصب شد؛ دیتابیس جدا، wp-config امن، Nginx و Health Check واقعی تأیید شدند.".to_owned()),
             "laravel" => "release فعال شد؛ کانفیگ وب و سرویس‌های Laravel بررسی شدند. Migration دیتابیس خودکار اجرا نمی‌شود.".to_owned(),
             "node" | "next" | "nuxt" if node_service_ready == Some(true) => "release SSR فعال شد؛ سرویس Node با Health Check تأیید و تنظیم Nginx در صورت ثبت دامنه و پورت بررسی یا ساخته شد.".to_owned(),
             "node" | "next" | "nuxt" if desired_state == "stopped" => "release ساخته شد؛ سرویس طبق وضعیت صریح اپ متوقف ماند.".to_owned(),

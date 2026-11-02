@@ -18,6 +18,14 @@ pub(super) struct TemplateDraftInput {
     pub(super) build_runtime_version: String,
     #[serde(default)]
     pub(super) wordpress_version: String,
+    #[serde(default)]
+    pub(super) wordpress_site_title: String,
+    #[serde(default)]
+    pub(super) wordpress_admin_username: String,
+    #[serde(default)]
+    pub(super) wordpress_admin_email: String,
+    #[serde(default)]
+    pub(super) wordpress_admin_password: String,
 }
 
 fn default_runtime() -> String {
@@ -112,9 +120,9 @@ pub(super) async fn list(State(state): State<AppState>, headers: HeaderMap) -> A
             {"id":"react-vite-static","version":1,"name":"React / Vite static site","framework":"vite","source_type":"manual","runtime":"node-build","readiness":"draft_only","requirements":["Node.js برای build","ورودی index.html در خروجی build","دامنه در صورت انتشار عمومی"],"creates":"application_record","installs_packages":false,"creates_services":false},
             {"id":"node-api","version":1,"name":"Node.js API","framework":"node","source_type":"manual","runtime":"node","readiness":"draft_only","requirements":["package.json معتبر","اسکریپت start","پورت loopback آزاد و health check"],"creates":"application_record","installs_packages":false,"creates_services":false},
             {"id":"python-web","version":1,"name":"Python web application","framework":"python","source_type":"manual","runtime":"python-venv","readiness":"draft_only","requirements":["Python نصب‌شده و نسخهٔ پشتیبانی‌شده","یکی از Flask یا Django و فایل dependency قفل‌شده","نقطهٔ شروع WSGI/ASGI و پورت loopback"],"creates":"application_record","installs_packages":false,"creates_services":false},
-            {"id":"wordpress-app","version":1,"name":"WordPress site","framework":"wordpress","source_type":"manual","runtime":"php-fpm","readiness":"draft_only","requirements":["کد WordPress موجود یا منبعی که خودت بررسی کرده‌ای","PHP-FPM سازگار و دیتابیس MySQL/MariaDB آماده","دامنه، TLS و مسیرهای backup بررسی‌شده"],"creates":"application_record","installs_packages":false,"creates_services":false}
+            {"id":"wordpress-app","version":2,"name":"WordPress site","framework":"wordpress","source_type":"git","runtime":"php-fpm","readiness":"automated_initial_deployment","requirements":["دامنهٔ معتبر؛ برای SSL خودکار باید به همین سرور اشاره کند","ایمیل مدیر سایت و گذرواژهٔ امن"],"creates":"application_and_initial_deployment","installs_packages":true,"creates_services":true}
         ],
-        "note":"این preset فقط پیش‌نویس رکورد می‌سازد؛ سورس دریافت، پکیج نصب یا سرویس اجرا نمی‌کند. برای Deploy از Job استقرار همان اپ استفاده کن."
+        "note":"قالب WordPress نسخهٔ هستهٔ رسمی را دریافت می‌کند، پیش‌نیازهای PHP-FPM و MariaDB را آماده می‌کند، دیتابیس جدا و پیکربندی امن می‌سازد، سایت را نصب می‌کند و Nginx و Health Check را اعمال می‌کند. صدور SSL فقط وقتی انجام می‌شود که DNS و دسترسی HTTP آماده باشد."
     })))
 }
 
@@ -147,7 +155,48 @@ pub(super) async fn create_draft(
             "نسخهٔ WordPress باید یک نسخهٔ پایدار کامل مانند 7.1.4 باشد.",
         ));
     }
+    if template_id == "wordpress-app" {
+        if !apps::valid_domain(input.domain.trim()) || input.domain.trim().contains('*') {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "برای نصب خودکار WordPress یک دامنهٔ معتبر و بدون wildcard لازم است.",
+            ));
+        }
+        if input.wordpress_site_title.trim().is_empty()
+            || input.wordpress_site_title.trim().chars().count() > 100
+            || input.wordpress_site_title.chars().any(char::is_control)
+        {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "عنوان سایت WordPress باید بین ۱ تا ۱۰۰ نویسه باشد.",
+            ));
+        }
+        if !valid_admin_username(&input.wordpress_admin_username)
+            || !valid_admin_email(&input.wordpress_admin_email)
+            || !(12..=128).contains(&input.wordpress_admin_password.len())
+            || input.wordpress_admin_password.chars().any(char::is_control)
+        {
+            return Err(error(StatusCode::BAD_REQUEST, "نام کاربری، ایمیل یا گذرواژهٔ مدیر WordPress معتبر نیست؛ گذرواژه باید ۱۲ تا ۱۲۸ نویسه داشته باشد."));
+        }
+    }
     apps::create_from_template(State(state), headers, template_id, input).await
+}
+
+fn valid_admin_username(value: &str) -> bool {
+    (1..=60).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+fn valid_admin_email(value: &str) -> bool {
+    value.len() <= 254
+        && value.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && local.len() <= 64
+                && !local.chars().any(char::is_whitespace)
+                && apps::valid_domain(domain)
+        })
 }
 
 #[cfg(test)]
@@ -185,5 +234,13 @@ mod tests {
             {"version":"6.8.3"}, {"version":"latest"}
         ]}));
         assert_eq!(versions, vec!["7.1.4", "6.8.3"]);
+    }
+
+    #[test]
+    fn wordpress_initial_admin_inputs_are_bounded_and_safe() {
+        assert!(valid_admin_username("site_admin-1"));
+        assert!(!valid_admin_username("admin;id"));
+        assert!(valid_admin_email("admin@example.com"));
+        assert!(!valid_admin_email("admin@example.com;id"));
     }
 }

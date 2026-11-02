@@ -51,7 +51,8 @@ ARG فایل‌ها را در `/var/lib/arg/deployments/apps/<application-id>/re
 
 - **Laravel:** [مدیریت Laravel](./laravel-runner.md) نصب Composer از lockfile، فایل محیط خصوصی، عملیات تأییدشدهٔ Artisan، Nginx/PHP-FPM و سرویس‌های اختیاری را توضیح می‌دهد.
 - **Node.js:** [اجرای اپلیکیشن Node.js](./node-runner.md) lockfileهای پشتیبانی‌شده، نصب و build محدود، محیط Runtime، سرویس systemd مختص اپ، بررسی loopback، reverse proxy کنترل‌شدهٔ Nginx و بازیابی release را توضیح می‌دهد.
-- **چارچوب‌های دیگر:** Python و WordPress Runner مدیریت‌شدهٔ Runtime در این نسخه ندارند. انتشار استاتیک React/Vue/Vite و SSR مربوط به Next.js/Nuxt در [راهنمای Static و SSR](./static-and-ssr.md) آمده است. فرمان‌های پیش از فعال‌سازی که در بالا توضیح داده شد، Runtime دائمی یا پشتیبانی یک چارچوب جدید ایجاد نمی‌کنند.
+- **WordPress:** قالب WordPress مسیر استقرار اول مدیریت‌شده برای PHP-FPM، MariaDB، Nginx، دیتابیس/پیکربندی، تلاش SSL و Health Check واقعی مسیر ورود دارد و فقط روی VPS محلی اجرا می‌شود. [راهنمای نصب اولیهٔ WordPress](./wordpress-runner.md) را ببین. رکورد دستی WordPress و استقرار روی Node راه دور این جریان را اجرا نمی‌کنند.
+- **چارچوب‌های دیگر:** Python Runner مدیریت‌شدهٔ Runtime ندارد. انتشار استاتیک React/Vue/Vite و SSR مربوط به Next.js/Nuxt در [راهنمای Static و SSR](./static-and-ssr.md) آمده است. فرمان‌های پیش از فعال‌سازی که در بالا توضیح داده شد، Runtime دائمی یا پشتیبانی یک چارچوب جدید ایجاد نمی‌کنند.
 
 فیلد اختیاری `healthcheck_file` وجود یک فایل معمولی در release را بررسی می‌کند. Runnerهای Laravel و Node بررسی فعال‌سازی مخصوص خودشان را دارند؛ بررسی وجود فایل جای بررسی Runtime را نمی‌گیرد. rollback کد، migration دیتابیس یا اثرهای خارجی ایجادشده توسط کد اپ را برنمی‌گرداند.
 

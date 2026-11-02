@@ -529,6 +529,15 @@ pub(super) async fn create(
     headers: HeaderMap,
     Json(input): Json<AppInput>,
 ) -> ApiResult {
+    create_with_id(state, headers, input, None).await
+}
+
+async fn create_with_id(
+    state: AppState,
+    headers: HeaderMap,
+    input: AppInput,
+    requested_id: Option<String>,
+) -> ApiResult {
     check_origin(&headers)?;
     let _operation_guard = APP_REGISTRY_OPERATION_LOCK.lock().await;
     let (name, domain) = validate_input(&input)?;
@@ -602,7 +611,7 @@ pub(super) async fn create(
             }
         }
     }
-    let id = random_uuid();
+    let id = requested_id.unwrap_or_else(random_uuid);
     let at = now();
     let labels = input
         .labels
@@ -873,6 +882,9 @@ pub(super) async fn create_from_template(
 ) -> ApiResult {
     let framework = template_framework(&template_id)
         .ok_or_else(|| error(StatusCode::NOT_FOUND, "Preset اپلیکیشن پیدا نشد."))?;
+    if template_id == "wordpress-app" {
+        return create_wordpress_from_template(state, headers, input).await;
+    }
     let app = AppInput {
         name: input.name,
         description: input.description,
@@ -890,6 +902,89 @@ pub(super) async fn create_from_template(
         wordpress_version: input.wordpress_version,
     };
     create(State(state), headers, Json(app)).await
+}
+
+async fn create_wordpress_from_template(
+    state: AppState,
+    headers: HeaderMap,
+    input: app_templates::TemplateDraftInput,
+) -> ApiResult {
+    check_origin(&headers)?;
+    {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+    }
+    let app_id = random_uuid();
+    let stored = privileged_request_async(json!({
+        "action":"wordpress-admin-store",
+        "app_id":app_id,
+        "site_title":input.wordpress_site_title.trim(),
+        "username":input.wordpress_admin_username.trim(),
+        "email":input.wordpress_admin_email.trim(),
+        "password":input.wordpress_admin_password
+    }))
+    .await?;
+    if stored["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            stored["error"]
+                .as_str()
+                .unwrap_or("اعتبار مدیر WordPress در مخزن امن ذخیره نشد."),
+        ));
+    }
+
+    let app = AppInput {
+        name: input.name.clone(),
+        description: input.description,
+        framework: "wordpress".to_owned(),
+        runtime_version: input.runtime_version,
+        build_runtime_version: input.build_runtime_version,
+        source_type: "git".to_owned(),
+        domain: input.domain,
+        listen_port: None,
+        environment_id: input.environment_id,
+        labels: vec!["wordpress-managed".to_owned()],
+        desired_state: "running".to_owned(),
+        static_output_path: "auto".to_owned(),
+        static_spa_fallback: true,
+        wordpress_version: input.wordpress_version.trim().to_owned(),
+    };
+    let created = create_with_id(state.clone(), headers.clone(), app, Some(app_id.clone())).await;
+    let Json(created) = match created {
+        Ok(value) => value,
+        Err(problem) => {
+            let _ = privileged_request_async(
+                json!({"action":"wordpress-admin-delete","app_id":app_id}),
+            )
+            .await;
+            return Err(problem);
+        }
+    };
+
+    let initial_deployment = deploy::queue_wordpress_initial(
+        &state,
+        &headers,
+        &app_id,
+        &input.wordpress_version,
+        &input.name,
+    )
+    .await;
+    match initial_deployment {
+        Ok(job) => Ok(Json(json!({
+            "app":created["app"],
+            "nginx_setup":created["nginx_setup"],
+            "initial_deployment":job,
+            "message":"اپلیکیشن WordPress ثبت شد و استقرار اولیه در صف قرار گرفت. پیش‌نیازها، دیتابیس، Nginx، نصب سایت و بررسی دسترسی در همان Job انجام می‌شوند."
+        }))),
+        Err((status, body)) => Ok(Json(json!({
+            "app":created["app"],
+            "nginx_setup":created["nginx_setup"],
+            "initial_deployment":null,
+            "deployment_error":body["error"],
+            "http_status":status.as_u16(),
+            "message":"رکورد WordPress ساخته شد اما استقرار اولیه وارد صف نشد؛ تنظیمات مدیر در مخزن رمز‌شده مانده تا پس از رفع خطا استقرار را دوباره اجرا کنی."
+        }))),
+    }
 }
 
 fn template_framework(template_id: &str) -> Option<&'static str> {

@@ -104,6 +104,7 @@ mod secret_vault;
 mod security_posture;
 mod ssh_keys;
 mod storage_mounts;
+mod wordpress;
 mod workflow_drafts;
 
 #[derive(RustEmbed)]
@@ -4197,6 +4198,12 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("mysql-catalog") => "mysql-catalog",
         Some("mysql-service") => "mysql-service",
         Some("mysql-create-user") => "mysql-create-user",
+        Some("wordpress-admin-store") => "wordpress-admin-store",
+        Some("wordpress-admin-delete") => "wordpress-admin-delete",
+        Some("wordpress-runtime-install") => "wordpress-runtime-install",
+        Some("wordpress-provision") => "wordpress-provision",
+        Some("wordpress-set-url") => "wordpress-set-url",
+        Some("wordpress-health") => "wordpress-health",
         Some("tls-configure") => "tls-configure",
         Some("tls-port-change") => "tls-port-change",
         Some("tls-port-confirm") => "tls-port-confirm",
@@ -4377,6 +4384,9 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     if action.starts_with("mysql-") {
         return mysql::execute_privileged_request(action, request);
+    }
+    if action.starts_with("wordpress-") {
+        return wordpress::execute_privileged_request(action, request);
     }
     let mut args = vec![action.to_owned()];
     if action == "add" || action == "remove" {
