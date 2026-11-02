@@ -129,6 +129,10 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/nodes/{id}/status", get(federation::node_status))
         .route(
+            "/api/nodes/{id}/probe/bidirectional",
+            post(federation::node_bidirectional_probe),
+        )
+        .route(
             "/api/nodes/{id}/update",
             get(federation::node_update_check).post(federation::node_update_run),
         )
@@ -172,6 +176,14 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route("/api/federation/pair", post(federation::accept_pair))
         .route("/api/federation/status", get(federation::status))
+        .route(
+            "/api/federation/mesh-probe",
+            post(federation::remote_mesh_probe),
+        )
+        .route(
+            "/api/federation/mesh-probe/complete",
+            post(federation::complete_mesh_probe),
+        )
         .route(
             "/api/federation/update",
             get(federation::remote_update_check).post(federation::remote_update_run),

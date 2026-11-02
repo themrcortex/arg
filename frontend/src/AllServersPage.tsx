@@ -5,11 +5,12 @@ import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Skeleton } from './components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
+import { MeshPacket } from './components/MeshPacket'
 
 type Heading = (props: { title: string; description: string; action?: ReactNode }) => ReactNode
-type Node = { id: number; workspace_key: string; name: string; public_name?: string; server_uuid?: string | null; endpoint: string; last_seen: number | null; workspace_ready?: boolean }
+type Node = { id: number; workspace_key: string; name: string; public_name?: string; server_uuid?: string | null; endpoint: string; last_seen: number | null; workspace_ready?: boolean; scopes?: string[]; capabilities?: string[]; compatibility_state?: string }
 type Controller = { id: number; name: string; public_name?: string; server_uuid?: string | null; last_seen: number | null }
-type Status = { hostname: string; public_name?: string; os: string; architecture: string; arg_version: string; uptime_seconds: number; load: string; memory_total_kib: number; memory_available_kib: number }
+type Status = { hostname: string; public_name?: string; os: string; architecture: string; arg_version: string; role?: string; node_id?: string; server_uuid?: string; protocol_version?: number; capabilities_version?: number; cpu_cores?: number; uptime_seconds: number; load: string; memory_total_kib: number; memory_available_kib: number }
 type ServerRow = { key: string; name: string; endpoint: string; local: boolean; node?: Node; status?: Status; error?: string; lastSeen?: number | null; responseBytes?: number }
 type ProbePulse = { id: number; nodeId: number; bytes: number; at: number; durationMs: number; direction: 'request' | 'response' | 'error'; pending?: boolean }
 type BatchState = { nodeId: number; count: number; completed: number; succeeded: number; failed: number }
@@ -47,6 +48,8 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
   const [trafficTotals, setTrafficTotals] = useState({ responses: 0, bytes: 0, lastAt: 0 })
   const [probeCount, setProbeCount] = useState(3)
   const [batch, setBatch] = useState<BatchState | null>(null)
+  const [bidirectionalBusy, setBidirectionalBusy] = useState<number | null>(null)
+  const [bidirectionalResults, setBidirectionalResults] = useState<Record<number, { round_trip_ms: number; callback_ms: number; callback_bytes: number; error?: string }>>({})
   const pulseId = useRef(0)
   const loadInProgress = useRef(false)
   const manualProbe = useRef(false)
@@ -94,7 +97,7 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
         name: registry.public_name || local.hostname,
         endpoint: local.hostname,
         local: true,
-        status: { hostname: local.hostname, os: 'سرور فعلی', architecture: '', arg_version: '', uptime_seconds: local.uptime_seconds, load: local.load, memory_total_kib: local.memory_kib, memory_available_kib: local.available_kib },
+        status: { hostname: local.hostname, os: 'سرور فعلی', architecture: '', arg_version: '', uptime_seconds: local.uptime_seconds, cpu_cores: local.cpu_cores, load: local.load, memory_total_kib: local.memory_kib, memory_available_kib: local.available_kib },
       }
       setRows([localRow, ...remotes])
       if (received.length) {
@@ -150,6 +153,30 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
     }
   }, [probeCount])
 
+  const testBidirectional = useCallback(async (node: Node) => {
+    if (manualProbe.current || loadInProgress.current || bidirectionalBusy !== null || node.compatibility_state !== 'compatible' || !node.scopes?.includes('node.mesh.probe') || !node.capabilities?.includes('node.mesh.probe')) return
+    manualProbe.current = true
+    setBidirectionalBusy(node.id)
+    const pulse = ++pulseId.current
+    const startedAt = Date.now()
+    setPulses((current) => [...current, { id: pulse, nodeId: node.id, bytes: 0, at: startedAt, durationMs: PULSE_MS, direction: 'request' as const, pending: true }].slice(-100))
+    try {
+      const result = await api<{ bidirectional: boolean; outbound_ok: boolean; inbound_ok: boolean; round_trip_ms: number; callback_ms: number; callback_bytes: number }>(`nodes/${node.id}/probe/bidirectional`, { method: 'POST', signal: AbortSignal.timeout(25000) })
+      await wait(Math.max(0, PULSE_MS - (Date.now() - startedAt)))
+      setPulses((current) => current.map((item) => item.id === pulse ? { ...item, pending: false } : item))
+      setPulses((current) => [...current, { id: ++pulseId.current, nodeId: node.id, bytes: result.callback_bytes, at: Date.now(), durationMs: PULSE_MS, direction: 'response' as const }].slice(-100))
+      setBidirectionalResults((current) => ({ ...current, [node.id]: { round_trip_ms: result.round_trip_ms, callback_ms: result.callback_ms, callback_bytes: result.callback_bytes } }))
+      setTrafficTotals((current) => ({ responses: current.responses + 1, bytes: current.bytes + result.callback_bytes, lastAt: Date.now() }))
+    } catch (cause) {
+      setPulses((current) => current.map((item) => item.id === pulse ? { ...item, pending: false } : item))
+      setPulses((current) => [...current, { id: ++pulseId.current, nodeId: node.id, bytes: 0, at: Date.now(), durationMs: PULSE_MS, direction: 'error' as const }].slice(-100))
+      setBidirectionalResults((current) => ({ ...current, [node.id]: { round_trip_ms: 0, callback_ms: 0, callback_bytes: 0, error: cause instanceof Error ? cause.message : 'آزمون دوطرفه ناموفق بود.' } }))
+    } finally {
+      manualProbe.current = false
+      setBidirectionalBusy(null)
+    }
+  }, [bidirectionalBusy])
+
   useEffect(() => { void load() }, [load])
   useEffect(() => {
     if (!rows.some((row) => row.node)) return
@@ -189,8 +216,8 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
       </CardHeader>
       {loading ? <CardContent className="p-4 pt-0"><Skeleton className="h-72 rounded-xl"/></CardContent> : workers.length === 0 && parents.length === 0 ? <CardContent className="p-5 pt-0"><div className="flex min-h-36 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border text-center"><LockKeyhole size={22} className="text-muted-foreground"/><p className="text-sm font-medium">هنوز اتصال Node یا پنل مادر ثبت نشده است</p><p className="text-xs text-muted-foreground">پس از جفت‌سازی سرورها، ارتباط‌های ورودی و خروجی در این نقشه نمایش داده می‌شوند.</p></div></CardContent> : <CardContent className="p-0">
         <div className="overflow-x-auto px-3 pb-3 sm:px-4" dir="ltr">
-          <div className="relative mx-auto" style={{ width: graphWidth, height: 468 }}>
-            <svg className="pointer-events-none absolute inset-0 z-0" width={graphWidth} height="468" viewBox={`0 0 ${graphWidth} 468`} role="img" aria-label="نمودار ارتباط پنل‌های مادر، این سرور و Nodeهای ARG">
+          <div className="relative mx-auto" style={{ width: graphWidth, height: 496 }}>
+            <svg className="pointer-events-none absolute inset-0 z-0" width={graphWidth} height="496" viewBox={`0 0 ${graphWidth} 496`} role="img" aria-label="نمودار ارتباط پنل‌های مادر، این سرور و Nodeهای ARG">
               <defs><filter id="topology-glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
               {parents.map((parent, index) => {
                 const x = getParentCenter(index)
@@ -199,16 +226,17 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
               {workers.map((row, index) => {
                 const nodeId = row.node!.id
                 const x = getCardCenter(index)
+                const outboundPoints = [[graphCenter, 168], [graphCenter, 211], [x, 211], [x, CARD_TOP]] as const
+                const reversePoints = [[x, CARD_TOP], [x, 211], [graphCenter, 211], [graphCenter, 168]] as const
                 const linkPath = `M ${graphCenter} 168 L ${graphCenter} 211 L ${x} 211 L ${x} ${CARD_TOP}`
-                const reversePath = `M ${x} ${CARD_TOP} L ${x} 211 L ${graphCenter} 211 L ${graphCenter} 168`
                 const isOnline = Boolean(row.status)
                 return <g key={nodeId}>
                   <path d={linkPath} fill="none" stroke={isOnline ? LINK_COLOR : '#707786'} strokeOpacity={isOnline ? 0.55 : 0.38} strokeWidth="2" strokeDasharray={isOnline ? undefined : '5 7'}/>
                   {pulses.filter((pulse) => pulse.nodeId === nodeId).map((pulse) => {
-                    const path = pulse.direction === 'response' ? reversePath : linkPath
+                    const points = pulse.direction === 'response' ? reversePoints : pulse.direction === 'error' ? [[graphCenter, 168], [graphCenter, 168]] as const : outboundPoints
                     const color = pulse.direction === 'request' ? '#dda46f' : pulse.direction === 'error' ? '#fb7185' : '#8ef0bf'
-                    const label = pulse.direction === 'request' ? 'درخواست واقعی بررسی ارتباط' : pulse.direction === 'error' ? 'نتیجهٔ خطای درخواست واقعی' : `پاسخ واقعی Node · ${formatPayloadBytes(pulse.bytes)}`
-                    return <circle key={`packet-${pulse.id}`} className="arg-topology-packet" r="5" fill={color} filter="url(#topology-glow)"><title>{label}</title><animateMotion key={`motion-${pulse.id}`} begin="0s" restart="always" dur={`${pulse.durationMs}ms`} calcMode="spline" keyTimes="0;1" keySplines="0.42 0 0.58 1" fill="freeze" path={path}/></circle>
+                    const label = pulse.direction === 'request' ? 'درخواست واقعی بررسی ارتباط' : pulse.direction === 'error' ? 'درخواست ناموفق؛ پاسخ احرازشده دریافت نشد' : `پاسخ واقعی Node · ${formatPayloadBytes(pulse.bytes)}`
+                    return <MeshPacket key={`packet-${pulse.id}`} points={points} startedAt={pulse.at} durationMs={pulse.durationMs} radius={5} color={color} filter="url(#topology-glow)" title={label}/>
                   })}
                   <circle cx={x} cy={CARD_TOP} r="4" fill={isOnline ? LINK_COLOR : '#858b98'}/>
                 </g>
@@ -230,14 +258,19 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
                 const node = row.node!
                 const age = node.last_seen ? Math.max(0, Math.floor(Date.now() / 1000 - node.last_seen)) : null
                 const currentBatch = batch?.nodeId === node.id ? batch : null
-                return <div key={row.key} dir="rtl" className="flex h-[202px] w-[236px] shrink-0 flex-col rounded-2xl border border-border/80 bg-card/95 p-3 text-right shadow-lg shadow-black/10">
+                const memoryPercent = row.status?.memory_total_kib ? Math.max(0, Math.min(100, Math.round(((row.status.memory_total_kib - row.status.memory_available_kib) / row.status.memory_total_kib) * 100))) : null
+                const twoWay = bidirectionalResults[node.id]
+                const canProbeBothWays = node.compatibility_state === 'compatible' && node.scopes?.includes('node.mesh.probe') && node.capabilities?.includes('node.mesh.probe')
+                return <div key={row.key} dir="rtl" className="flex h-[230px] w-[236px] shrink-0 flex-col rounded-2xl border border-border/80 bg-card/95 p-3 text-right shadow-lg shadow-black/10">
                   <button type="button" className="flex min-h-0 flex-1 flex-col text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => onOpen(node.workspace_key)} disabled={!node.workspace_ready} aria-label={`${row.name}؛ ${node.workspace_ready ? 'ورود به فضای کار VPS' : 'اتصال کامل آماده نیست'}`}>
                     <span className="flex w-full items-start justify-between gap-2"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-primary/20 bg-primary/[.06] text-primary"><Server size={17}/></span><span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] ${row.status ? 'border-emerald-400/20 bg-emerald-400/[.05] text-emerald-100' : 'border-amber-400/20 bg-amber-400/[.05] text-amber-100'}`}>{row.status ? <CircleCheck size={11}/> : <CircleAlert size={11}/ >}{row.status ? 'متصل' : 'قطع'}</span></span>
                     <span className="mt-2 block w-full truncate text-sm font-semibold">{row.name}</span><span dir="ltr" className="mt-0.5 block w-full truncate text-left font-mono text-[10px] text-muted-foreground">{row.endpoint}</span>
                     <span className="mt-2 flex w-full items-center justify-between gap-2 border-t border-border/70 pt-2 text-[10px] text-muted-foreground"><span>{row.status ? `ARG v${row.status.arg_version}` : age === null ? 'هنوز ارتباط ثبت نشده' : `آخرین پاسخ ${age.toLocaleString('fa-IR')} ثانیه پیش`}</span><span>{row.responseBytes ? `≈ ${formatPayloadBytes(row.responseBytes)}` : '—'}</span></span>
+                    {row.status && <span className="mt-1 flex w-full items-center justify-between gap-2 text-[9px] text-muted-foreground"><span>{row.status.cpu_cores ? `${row.status.cpu_cores} هسته · Load ${row.status.load || '—'}` : `Load ${row.status.load || '—'}`}</span><span>{memoryPercent === null ? 'RAM —' : `RAM ${memoryPercent}٪`}</span></span>}
+                    {twoWay && <span className={`mt-1 w-full truncate text-[9px] ${twoWay.error ? 'text-rose-200' : 'text-emerald-200'}`}>{twoWay.error || `رفت‌وبرگشت ${twoWay.round_trip_ms} ms · callback ${twoWay.callback_ms} ms`}</span>}
                     <span className="mt-auto flex w-full items-center justify-between pt-2 text-[10px] text-primary">{node.workspace_ready ? 'ورود به پنل سرور' : 'نیاز به جفت‌سازی'}<span aria-hidden="true">←</span></span>
                   </button>
-                  <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/70 pt-2"><span className="truncate text-[9px] text-muted-foreground">{currentBatch ? `${currentBatch.completed}/${currentBatch.count} · موفق ${currentBatch.succeeded} · ناموفق ${currentBatch.failed}` : 'تست ارتباط واقعی'}</span><Button type="button" size="sm" variant="outline" className="h-7 shrink-0 px-2 text-[10px]" disabled={Boolean(batch) || loadInProgress.current} onClick={() => void testNode(node)}>{currentBatch ? <><RefreshCw size={11} className="animate-spin"/>{currentBatch.completed}/{currentBatch.count}</> : `تست ${probeCount.toLocaleString('fa-IR')} بار`}</Button></div>
+                  <div className="mt-2 flex items-center gap-1.5 border-t border-border/70 pt-2"><span className="min-w-0 flex-1 truncate text-[9px] text-muted-foreground">{currentBatch ? `${currentBatch.completed}/${currentBatch.count} · موفق ${currentBatch.succeeded} · ناموفق ${currentBatch.failed}` : 'تست واقعی'}</span><Button type="button" size="sm" variant="outline" className="h-7 shrink-0 px-2 text-[9px]" disabled={Boolean(batch) || loadInProgress.current || bidirectionalBusy !== null} onClick={() => void testNode(node)}>{currentBatch ? <><RefreshCw size={10} className="animate-spin"/>{currentBatch.completed}/{currentBatch.count}</> : `${probeCount} بار`}</Button><Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1 px-2 text-[9px]" disabled={Boolean(batch) || loadInProgress.current || bidirectionalBusy !== null || !canProbeBothWays} onClick={() => void testBidirectional(node)} title={canProbeBothWays ? 'بررسی واقعی مسیر HTTPS در هر دو جهت' : 'این Node قدیمی است یا مجوز آزمون دوطرفه ندارد؛ دوباره جفت‌سازی کن'}>{bidirectionalBusy === node.id ? <RefreshCw size={10} className="animate-spin"/> : <Waypoints size={10}/>}رفت‌وبرگشت</Button></div>
                 </div>
               })}
             </div>
@@ -261,13 +294,15 @@ export function AllServersPage({ Heading: PageHeading, onOpen }: { Heading: Head
           <CardHeader className="pb-3"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><CardTitle className="flex items-center gap-2 text-base"><Server size={16} className="shrink-0 text-primary"/><span className="truncate">{row.name}</span></CardTitle><CardDescription dir="ltr" className="mt-2 truncate text-left font-mono text-[11px]">{row.endpoint}</CardDescription></div><span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] ${row.status ? 'border-emerald-400/20 bg-emerald-400/[.06] text-emerald-200' : 'border-amber-400/20 bg-amber-400/[.06] text-amber-100'}`}>{row.status ? <CircleCheck size={12}/> : <CircleAlert size={12}/>} {row.status ? (row.local ? 'سرور فعلی' : 'پاسخ‌گو') : 'در دسترس نیست'}</span></div></CardHeader>
           <CardContent className="space-y-3">
             {row.error && <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">{row.error}{days !== null ? ` · آخرین ارتباط ${days.toLocaleString('fa-IR')} ثانیه پیش` : ''}</p>}
-            {row.status && <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4"><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">سیستم‌عامل</p><p className="mt-1 truncate">{row.status.os || '—'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">نسخه ARG</p><p dir="ltr" className="mt-1 truncate text-right font-mono">{row.status.arg_version || 'محلی'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">RAM مصرفی</p><p className="mt-1 truncate">{memoryUsed !== null ? `${formatBytes(memoryUsed)} (${memoryPercent}٪)` : 'نامشخص'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">Load</p><p dir="ltr" className="mt-1 truncate text-right font-mono">{row.status.load || '—'}</p></div></div>}
-            {row.node && <Button variant="outline" size="sm" className="w-full" disabled={!row.node.workspace_ready} onClick={() => onOpen(row.node!.workspace_key)}>{row.node.workspace_ready ? 'رفتن به فضای‌کار این سرور' : 'برای مدیریت، اتصال را دوباره جفت‌سازی کن'}</Button>}
+            {row.status && <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3 lg:grid-cols-6"><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">سیستم‌عامل</p><p className="mt-1 truncate">{row.status.os || '—'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">نسخه ARG</p><p dir="ltr" className="mt-1 truncate text-right font-mono">{row.status.arg_version || 'محلی'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">RAM مصرفی</p><p className="mt-1 truncate">{memoryUsed !== null ? `${formatBytes(memoryUsed)} (${memoryPercent}٪)` : 'نامشخص'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">Load · vCPU</p><p dir="ltr" className="mt-1 truncate text-right font-mono">{row.status.load || '—'}{row.status.cpu_cores ? ` · ${row.status.cpu_cores}` : ''}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">روشن بودن</p><p className="mt-1 truncate">{row.status.uptime_seconds ? `${Math.floor(row.status.uptime_seconds / 86400)} روز · ${Math.floor((row.status.uptime_seconds % 86400) / 3600)} ساعت` : '—'}</p></div><div className="rounded-lg border border-border/70 p-2"><p className="text-muted-foreground">نقش / معماری</p><p dir="ltr" className="mt-1 truncate text-right font-mono">{row.status.role || row.status.architecture || '—'}</p></div></div>}
+            {row.status?.server_uuid && <p dir="ltr" className="truncate text-[10px] font-mono text-muted-foreground" title={row.status.server_uuid}>Server UUID · {row.status.server_uuid}</p>}
+            {row.node && bidirectionalResults[row.node.id] && <p className={`text-xs ${bidirectionalResults[row.node.id].error ? 'text-rose-200' : 'text-emerald-200'}`}>{bidirectionalResults[row.node.id].error || `آزمون دوطرفه موفق · رفت‌وبرگشت ${bidirectionalResults[row.node.id].round_trip_ms} ms · callback ${bidirectionalResults[row.node.id].callback_ms} ms`}</p>}
+            {row.node && <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={!row.node.workspace_ready} onClick={() => onOpen(row.node!.workspace_key)}>{row.node.workspace_ready ? 'رفتن به فضای‌کار این سرور' : 'برای مدیریت، اتصال را دوباره جفت‌سازی کن'}</Button><Button variant="outline" size="sm" disabled={bidirectionalBusy !== null || loadInProgress.current || row.node.compatibility_state !== 'compatible' || !row.node.scopes?.includes('node.mesh.probe') || !row.node.capabilities?.includes('node.mesh.probe')} title="بررسی واقعی مسیر HTTPS از Node به این پنل" onClick={() => void testBidirectional(row.node!)}>{bidirectionalBusy === row.node.id ? <RefreshCw size={13} className="animate-spin"/> : <Waypoints size={13}/>}آزمون دوطرفه</Button></div>}
           </CardContent>
         </Card>
       })}
     </div>}
-    <p className="mt-4 text-xs leading-6 text-muted-foreground">وضعیت سرور راه‌دور فقط نتیجهٔ آخرین بررسی است و پایش پیوسته محسوب نمی‌شود. اگر ارتباط قطع باشد، ARG عملیات آن سرور را به سرور دیگری منتقل نمی‌کند.</p>
+    <p className="mt-4 text-xs leading-6 text-muted-foreground">وضعیت سرور راه‌دور فقط نتیجهٔ آخرین بررسی است و پایش پیوسته محسوب نمی‌شود. آزمون دوطرفه از challenge زمان‌دار و یک‌بارمصرف استفاده می‌کند؛ Node باید بتواند از HTTPS عمومی به همین پنل callback بزند. اگر ارتباط قطع باشد، ARG عملیات آن سرور را به سرور دیگری منتقل نمی‌کند.</p>
       </TabsContent>
     </Tabs>
   </>

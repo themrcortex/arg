@@ -107,6 +107,20 @@ pub(super) struct UpdateBranchQuery {
     branch: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct MeshProbeRequest {
+    callback_origin: String,
+    challenge: String,
+    controller_server_uuid: String,
+    expected_node_server_uuid: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct MeshProbeCompletion {
+    node_server_uuid: String,
+    controller_server_uuid: String,
+}
+
 fn default_node_update_branch() -> String {
     "main".to_owned()
 }
@@ -141,6 +155,7 @@ fn scopes_for_mode(mode: &str) -> Option<Vec<&'static str>> {
         "read-only" => Some(scopes),
         "full" => {
             scopes.extend([
+                "node.mesh.probe",
                 "node.services.manage",
                 "server.public_name.sync",
                 "server.credential.rotate",
@@ -157,6 +172,7 @@ fn scopes_for_mode(mode: &str) -> Option<Vec<&'static str>> {
 fn known_scope(scope: &str) -> bool {
     [
         "node.status.read",
+        "node.mesh.probe",
         "node.services.read",
         "node.services.manage",
         "server.identity.read",
@@ -175,6 +191,7 @@ fn known_scope(scope: &str) -> bool {
 fn known_capability(capability: &str) -> bool {
     [
         "node.status.read",
+        "node.mesh.probe",
         "node.services.read",
         "node.services.manage",
         "node.update.manage",
@@ -193,6 +210,7 @@ fn supported_capabilities() -> Vec<&'static str> {
     vec![
         "capabilities.negotiate.v1",
         "node.status.read",
+        "node.mesh.probe",
         "node.services.read",
         "node.services.manage",
         "node.update.manage",
@@ -1327,9 +1345,359 @@ pub(super) async fn status(State(state): State<AppState>, headers: HeaderMap) ->
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
+    let cpu_cores = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(0);
     Ok(Json(
-        json!({"protocol":"arg-node/2","protocol_version":PROTOCOL_VERSION,"minimum_protocol_version":PROTOCOL_VERSION,"maximum_protocol_version":PROTOCOL_VERSION,"capabilities_version":CAPABILITIES_VERSION,"node_id":node_id,"server_uuid":server_uuid,"public_name":public_name,"role":role,"hostname":hostname,"os":fs::read_to_string("/etc/os-release").unwrap_or_default().lines().find(|line| line.starts_with("PRETTY_NAME=")).map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"')).unwrap_or("Linux"),"architecture":std::env::consts::ARCH,"arg_version":env!("CARGO_PKG_VERSION"),"uptime_seconds":uptime as u64,"load":load,"memory_total_kib":total_kib,"memory_available_kib":available_kib,"capabilities":supported_capabilities()}),
+        json!({"protocol":"arg-node/2","protocol_version":PROTOCOL_VERSION,"minimum_protocol_version":PROTOCOL_VERSION,"maximum_protocol_version":PROTOCOL_VERSION,"capabilities_version":CAPABILITIES_VERSION,"node_id":node_id,"server_uuid":server_uuid,"public_name":public_name,"role":role,"hostname":hostname,"os":fs::read_to_string("/etc/os-release").unwrap_or_default().lines().find(|line| line.starts_with("PRETTY_NAME=")).map(|line| line.trim_start_matches("PRETTY_NAME=").trim_matches('"')).unwrap_or("Linux"),"architecture":std::env::consts::ARCH,"cpu_cores":cpu_cores,"arg_version":env!("CARGO_PKG_VERSION"),"uptime_seconds":uptime as u64,"load":load,"memory_total_kib":total_kib,"memory_available_kib":available_kib,"capabilities":supported_capabilities()}),
     ))
+}
+
+fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+fn consume_mesh_probe_challenge(
+    db: &Connection,
+    challenge_hash: &str,
+    node_uuid: &str,
+    controller_uuid: &str,
+    at_ms: i64,
+) -> Result<bool, rusqlite::Error> {
+    let changed = db.execute(
+        "UPDATE federation_mesh_probe_challenges SET completed_at_ms=?1 WHERE token_hash=?2 AND node_server_uuid=?3 AND controller_server_uuid=?4 AND expires_at_ms>=?1 AND completed_at_ms IS NULL",
+        params![at_ms, challenge_hash, node_uuid, controller_uuid],
+    )?;
+    Ok(changed == 1)
+}
+
+pub(super) async fn node_bidirectional_probe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> ApiResult {
+    check_origin(&headers)?;
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| error(StatusCode::FORBIDDEN, "Origin header required"))?;
+    let callback_endpoint =
+        validate_endpoint(origin).map_err(|message| error(StatusCode::BAD_REQUEST, &message))?;
+    if callback_endpoint.scheme() != "https" {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "برای آزمون دوطرفه، پنل باید از HTTPS باز شده باشد.",
+        ));
+    }
+    let callback_origin = callback_endpoint.as_str().trim_end_matches('/').to_owned();
+    let (controller_uuid, node_uuid, actor) = {
+        let db = state.lock().unwrap();
+        let actor = require_admin(&db, &headers)?;
+        let node_uuid: Option<String> = db
+            .query_row(
+                "SELECT server_uuid FROM federated_nodes WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let node_uuid = node_uuid
+            .filter(|value| valid_server_uuid(value))
+            .ok_or_else(|| {
+                error(
+                    StatusCode::UPGRADE_REQUIRED,
+                    "برای آزمون دوطرفه، Node باید شناسهٔ سرور معتبر و نسخهٔ سازگار داشته باشد.",
+                )
+            })?;
+        (
+            local_server_uuid(&db).map_err(db_error)?,
+            node_uuid,
+            actor.username,
+        )
+    };
+    let challenge = token();
+    let challenge_hash = token_hash(&challenge);
+    let issued_at_ms = unix_millis();
+    let expires_at_ms = issued_at_ms.saturating_add(45_000);
+    {
+        let db = state.lock().unwrap();
+        db.execute(
+            "DELETE FROM federation_mesh_probe_challenges WHERE expires_at_ms<=?1",
+            [issued_at_ms],
+        )
+        .map_err(db_error)?;
+        db.execute(
+            "INSERT INTO federation_mesh_probe_challenges(token_hash,node_id,node_server_uuid,controller_server_uuid,issued_at_ms,expires_at_ms) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![challenge_hash, id, node_uuid, controller_uuid, issued_at_ms, expires_at_ms],
+        )
+        .map_err(db_error)?;
+    }
+    let started = std::time::Instant::now();
+    let remote_result = remote_node_request_with_timeout(
+        &state,
+        id,
+        "node.mesh.probe",
+        reqwest::Method::POST,
+        "api/federation/mesh-probe",
+        Some(json!({
+            "callback_origin": callback_origin,
+            "challenge": challenge,
+            "controller_server_uuid": controller_uuid,
+            "expected_node_server_uuid": node_uuid,
+        })),
+        22,
+    )
+    .await;
+    let remote_result = match remote_result {
+        Ok(value) => value,
+        Err((status, body)) => {
+            let db = state.lock().unwrap();
+            let _ = db.execute(
+                "DELETE FROM federation_mesh_probe_challenges WHERE token_hash=?1",
+                [&challenge_hash],
+            );
+            audit(
+                &db,
+                &actor,
+                "federation.mesh.probe.failed",
+                &format!(
+                    "node_id={id}; reverse callback failed; http_status={}",
+                    status.as_u16()
+                ),
+            );
+            return Err((status, body));
+        }
+    };
+    let callback_at_ms: Option<i64> = {
+        let db = state.lock().unwrap();
+        db.query_row(
+            "SELECT completed_at_ms FROM federation_mesh_probe_challenges WHERE token_hash=?1 AND node_id=?2 AND expires_at_ms>=?3",
+            params![challenge_hash, id, unix_millis()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(db_error)?
+        .flatten()
+    };
+    let Some(callback_at_ms) = callback_at_ms else {
+        let db = state.lock().unwrap();
+        let _ = db.execute(
+            "DELETE FROM federation_mesh_probe_challenges WHERE token_hash=?1",
+            [&challenge_hash],
+        );
+        audit(
+            &db,
+            &actor,
+            "federation.mesh.probe.failed",
+            &format!("node_id={id}; authenticated reverse callback missing"),
+        );
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            "درخواست رفت به Node رسید، اما callback احرازشدهٔ برگشت دریافت نشد.",
+        ));
+    };
+    let db = state.lock().unwrap();
+    db.execute(
+        "DELETE FROM federation_mesh_probe_challenges WHERE token_hash=?1",
+        [&challenge_hash],
+    )
+    .map_err(db_error)?;
+    audit(
+        &db,
+        &actor,
+        "federation.mesh.probe.succeeded",
+        &format!("node_id={id}; elapsed_ms={}", started.elapsed().as_millis()),
+    );
+    Ok(Json(json!({
+        "bidirectional": true,
+        "outbound_ok": true,
+        "inbound_ok": true,
+        "node_server_uuid": node_uuid,
+        "controller_server_uuid": controller_uuid,
+        "round_trip_ms": started.elapsed().as_millis(),
+        "callback_ms": callback_at_ms.saturating_sub(issued_at_ms),
+        "callback_bytes": remote_result["callback_bytes"].as_u64().unwrap_or(0),
+        "protocol_version": remote_result["protocol_version"].as_u64().unwrap_or(0),
+    })))
+}
+
+pub(super) async fn remote_mesh_probe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<MeshProbeRequest>,
+) -> ApiResult {
+    let callback_endpoint = validate_endpoint(&input.callback_origin)
+        .map_err(|message| error(StatusCode::BAD_REQUEST, &message))?;
+    if callback_endpoint.scheme() != "https"
+        || callback_endpoint.as_str().trim_end_matches('/') != input.callback_origin
+        || input.challenge.len() != 64
+        || !input.challenge.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !valid_server_uuid(&input.controller_server_uuid)
+        || !valid_server_uuid(&input.expected_node_server_uuid)
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "پارامترهای آزمون دوطرفه معتبر نیستند.",
+        ));
+    }
+    let (controller_uuid, node_uuid, controller_name) = {
+        let db = state.lock().unwrap();
+        let controller = authorize_controller(&db, &headers, "node.mesh.probe")?;
+        let controller_uuid: Option<String> = db
+            .query_row(
+                "SELECT server_uuid FROM federation_controllers WHERE id=?1",
+                [controller.id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .flatten();
+        let controller_uuid = controller_uuid
+            .filter(|value| valid_server_uuid(value))
+            .ok_or_else(|| error(StatusCode::UPGRADE_REQUIRED, "شناسهٔ پنل کنترل‌کننده برای آزمون دوطرفه موجود نیست؛ اتصال را دوباره جفت‌سازی کن."))?;
+        if controller_uuid != input.controller_server_uuid {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "هویت پنل کنترل‌کننده با اتصال جفت‌شده تطبیق ندارد.",
+            ));
+        }
+        let node_uuid = local_server_uuid(&db).map_err(db_error)?;
+        if node_uuid != input.expected_node_server_uuid {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "هویت این Node با سرور مورد انتظار یکی نیست.",
+            ));
+        }
+        (controller_uuid, node_uuid, controller.name)
+    };
+    let addresses = resolve_endpoint_addresses(&callback_endpoint, false)
+        .await
+        .map_err(|message| error(StatusCode::BAD_GATEWAY, &message))?;
+    let url = callback_endpoint
+        .join("api/federation/mesh-probe/complete")
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "مسیر callback آزمون نامعتبر است."))?;
+    let client = http_client_for_endpoint(&callback_endpoint, &addresses, 12)?;
+    let callback_body = json!({
+        "node_server_uuid": node_uuid,
+        "controller_server_uuid": controller_uuid,
+    });
+    let callback_bytes = serde_json::to_vec(&callback_body)
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "ساخت callback ناموفق بود.",
+            )
+        })?
+        .len();
+    let response = client
+        .post(url)
+        .bearer_auth(&input.challenge)
+        .header("X-ARG-Transport", "https")
+        .header("X-ARG-Protocol", PROTOCOL_VERSION.to_string())
+        .json(&callback_body)
+        .send()
+        .await
+        .map_err(|_| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                "Node نتوانست از طریق HTTPS به پنل کنترل‌کننده callback بزند.",
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            "پنل کنترل‌کننده callback یک‌بارمصرف Node را نپذیرفت.",
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > 16_384)
+    {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            "پاسخ callback پنل کنترل‌کننده از حد مجاز بزرگ‌تر است.",
+        ));
+    }
+    let mut response = response;
+    let mut acknowledgement_bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        error(
+            StatusCode::BAD_GATEWAY,
+            "خواندن پاسخ callback پنل کنترل‌کننده ناموفق بود.",
+        )
+    })? {
+        if acknowledgement_bytes.len().saturating_add(chunk.len()) > 16_384 {
+            return Err(error(
+                StatusCode::BAD_GATEWAY,
+                "پاسخ callback پنل کنترل‌کننده از حد مجاز بزرگ‌تر است.",
+            ));
+        }
+        acknowledgement_bytes.extend_from_slice(&chunk);
+    }
+    let acknowledgement: Value = serde_json::from_slice(&acknowledgement_bytes).map_err(|_| {
+        error(
+            StatusCode::BAD_GATEWAY,
+            "پاسخ callback پنل کنترل‌کننده قابل‌خواندن نیست.",
+        )
+    })?;
+    if acknowledgement["ok"] != true {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            "پنل کنترل‌کننده callback آزمون را تأیید نکرد.",
+        ));
+    }
+    let db = state.lock().unwrap();
+    audit(
+        &db,
+        &controller_name,
+        "federation.mesh.probe.callback",
+        "short-lived authenticated reverse callback succeeded",
+    );
+    Ok(Json(json!({
+        "callback_completed": true,
+        "callback_bytes": callback_bytes,
+        "node_server_uuid": node_uuid,
+        "controller_server_uuid": controller_uuid,
+        "protocol_version": PROTOCOL_VERSION,
+    })))
+}
+
+pub(super) async fn complete_mesh_probe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<MeshProbeCompletion>,
+) -> ApiResult {
+    require_secure_transport(&headers)?;
+    let challenge = bearer(&headers)
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "ARG Mesh challenge نامعتبر است."))?;
+    if !valid_server_uuid(&input.node_server_uuid)
+        || !valid_server_uuid(&input.controller_server_uuid)
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "شناسهٔ سرور در callback معتبر نیست.",
+        ));
+    }
+    let db = state.lock().unwrap();
+    let accepted = consume_mesh_probe_challenge(
+        &db,
+        &token_hash(&challenge),
+        &input.node_server_uuid,
+        &input.controller_server_uuid,
+        unix_millis(),
+    )
+    .map_err(db_error)?;
+    if !accepted {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "ARG Mesh challenge منقضی، مصرف‌شده یا متعلق به این Node نیست.",
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub(super) async fn remote_update_check(
@@ -1702,6 +2070,16 @@ async fn remote_node_request_with_timeout(
                     .any(|capability| capability == "node.update.manage")
             {
                 return Err(error(StatusCode::UPGRADE_REQUIRED, "این Node هنوز قابلیت امن به‌روزرسانی راه‌دور را اعلام نکرده است؛ ابتدا خود Node را از SSH یا صفحهٔ محلی به نسخهٔ جدید ارتقا بده."));
+            }
+        }
+        if path == "api/federation/mesh-probe" {
+            let capabilities = decode_scopes(&capabilities_json);
+            if compatibility_state != "compatible"
+                || !capabilities
+                    .iter()
+                    .any(|capability| capability == "node.mesh.probe")
+            {
+                return Err(error(StatusCode::UPGRADE_REQUIRED, "آزمون دوطرفه به نسخهٔ سازگار ARG Node نیاز دارد؛ هر دو پنل را به‌روزرسانی و دوباره جفت‌سازی کن."));
             }
         }
         let token_path = token_path(&db, id)?;
@@ -3509,13 +3887,13 @@ pub(super) async fn sync_controller_public_name(
 #[cfg(test)]
 mod tests {
     use super::{
-        address_is_private, is_cloud_metadata_address, known_capability, node_identity_matches,
-        node_update_route, now, renew_workspace_session, resolve_workspace_node_id, role_valid,
-        scopes_for_mode, session_hash, session_scope_for, should_forget_node_after_revoke_failure,
-        supported_capabilities, terminal_mode_is_root, token_hash, valid_server_uuid,
-        valid_workspace_api_path, validate_endpoint, validate_public_name,
-        validate_resolved_addresses, workspace_key, workspace_session_scope_for, NodeUpdateRoute,
-        RenewWorkspaceRequest,
+        address_is_private, consume_mesh_probe_challenge, is_cloud_metadata_address,
+        known_capability, node_identity_matches, node_update_route, now, renew_workspace_session,
+        resolve_workspace_node_id, role_valid, scopes_for_mode, session_hash, session_scope_for,
+        should_forget_node_after_revoke_failure, supported_capabilities, terminal_mode_is_root,
+        token_hash, valid_server_uuid, valid_workspace_api_path, validate_endpoint,
+        validate_public_name, validate_resolved_addresses, workspace_key,
+        workspace_session_scope_for, NodeUpdateRoute, RenewWorkspaceRequest,
     };
     use axum::{
         extract::State,
@@ -3756,11 +4134,56 @@ mod tests {
         assert!(read_only.contains(&"workspace.read"));
         assert!(!read_only.contains(&"workspace.write"));
         assert!(!read_only.contains(&"server.credential.rotate"));
+        assert!(!read_only.contains(&"node.mesh.probe"));
         let full = scopes_for_mode("full").unwrap();
         assert!(full.contains(&"workspace.write"));
         assert!(full.contains(&"workspace.root_terminal"));
         assert!(full.contains(&"server.credential.rotate"));
+        assert!(full.contains(&"node.mesh.probe"));
         assert!(scopes_for_mode("unrestricted").is_none());
+    }
+
+    #[test]
+    fn mesh_callback_challenge_is_bound_to_both_identities_and_consumed_once() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE federation_mesh_probe_challenges(token_hash TEXT PRIMARY KEY,node_id INTEGER NOT NULL,node_server_uuid TEXT NOT NULL,controller_server_uuid TEXT NOT NULL,issued_at_ms INTEGER NOT NULL,expires_at_ms INTEGER NOT NULL,completed_at_ms INTEGER);").unwrap();
+        db.execute(
+            "INSERT INTO federation_mesh_probe_challenges(token_hash,node_id,node_server_uuid,controller_server_uuid,issued_at_ms,expires_at_ms) VALUES ('challenge-hash',9,'123e4567-e89b-42d3-a456-426614174000','123e4567-e89b-42d3-a456-426614174001',1000,5000)",
+            [],
+        )
+        .unwrap();
+        assert!(!consume_mesh_probe_challenge(
+            &db,
+            "challenge-hash",
+            "123e4567-e89b-42d3-a456-426614174999",
+            "123e4567-e89b-42d3-a456-426614174001",
+            2000,
+        )
+        .unwrap());
+        assert!(consume_mesh_probe_challenge(
+            &db,
+            "challenge-hash",
+            "123e4567-e89b-42d3-a456-426614174000",
+            "123e4567-e89b-42d3-a456-426614174001",
+            2000,
+        )
+        .unwrap());
+        assert!(!consume_mesh_probe_challenge(
+            &db,
+            "challenge-hash",
+            "123e4567-e89b-42d3-a456-426614174000",
+            "123e4567-e89b-42d3-a456-426614174001",
+            2001,
+        )
+        .unwrap());
+        assert!(!consume_mesh_probe_challenge(
+            &db,
+            "challenge-hash",
+            "123e4567-e89b-42d3-a456-426614174000",
+            "123e4567-e89b-42d3-a456-426614174001",
+            5001,
+        )
+        .unwrap());
     }
 
     #[test]

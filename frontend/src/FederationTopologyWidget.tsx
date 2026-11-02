@@ -4,12 +4,13 @@ import { api, type Dashboard } from './lib/api'
 import { Button } from './components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card'
 import { Skeleton } from './components/ui/skeleton'
+import { MeshPacket } from './components/MeshPacket'
 
-type Node = { id: number; workspace_key: string; name: string; public_name?: string; endpoint: string; last_seen: number | null; workspace_ready?: boolean }
+type Node = { id: number; workspace_key: string; name: string; public_name?: string; endpoint: string; last_seen: number | null; workspace_ready?: boolean; scopes?: string[]; capabilities?: string[]; compatibility_state?: string }
 type Controller = { id: number; name: string; public_name?: string; server_uuid?: string | null; last_seen: number | null }
-type Registry = { server_uuid: string; public_name: string; nodes: Node[]; controllers?: Controller[] }
-type Status = { hostname: string; public_name?: string; arg_version: string; load: string; memory_total_kib: number; memory_available_kib: number }
-type ServerRow = { key: string; name: string; endpoint: string; local: boolean; node?: Node; status?: Status; error?: string; responseBytes?: number; latencyMs?: number }
+type Registry = { server_uuid: string; public_name: string; role?: string; nodes: Node[]; controllers?: Controller[] }
+type Status = { hostname: string; public_name?: string; os?: string; architecture?: string; arg_version: string; role?: string; node_id?: string; server_uuid?: string; protocol_version?: number; capabilities_version?: number; cpu_cores?: number; uptime_seconds?: number; load: string; memory_total_kib: number; memory_available_kib: number }
+type ServerRow = { key: string; name: string; endpoint: string; local: boolean; node?: Node; status?: Status; error?: string; responseBytes?: number; latencyMs?: number; bidirectional?: { round_trip_ms: number; callback_ms: number; callback_bytes: number; at: number } }
 type Pulse = { id: number; nodeId: number; direction: 'request' | 'response' | 'error'; bytes: number; at: number; durationMs: number; pending?: boolean }
 type BatchState = { nodeId: number; count: number; completed: number; succeeded: number; failed: number }
 
@@ -39,6 +40,7 @@ export function FederationTopologyWidget({ onOpen }: { onOpen: (workspaceKey: st
   const [totals, setTotals] = useState({ checks: 0, bytes: 0, lastAt: 0 })
   const [probeCount, setProbeCount] = useState(3)
   const [batch, setBatch] = useState<BatchState | null>(null)
+  const [bidirectionalBusy, setBidirectionalBusy] = useState<number | null>(null)
   const sequence = useRef(0)
   const busy = useRef(false)
   const manualProbe = useRef(false)
@@ -87,7 +89,7 @@ export function FederationTopologyWidget({ onOpen }: { onOpen: (workspaceKey: st
         name: registry.public_name || local.hostname,
         endpoint: local.hostname,
         local: true,
-        status: { hostname: local.hostname, arg_version: '', load: local.load, memory_total_kib: local.memory_kib, memory_available_kib: local.available_kib },
+        status: { hostname: local.hostname, os: 'سرور فعلی', architecture: '', arg_version: '', role: registry.role, server_uuid: registry.server_uuid, uptime_seconds: local.uptime_seconds, cpu_cores: local.cpu_cores, load: local.load, memory_total_kib: local.memory_kib, memory_available_kib: local.available_kib },
       }
       setRows([localRow, ...remoteRows])
       if (completed.length) setTotals((current) => ({ checks: current.checks + completed.length, bytes: current.bytes + completed.reduce((sum, value) => sum + value, 0), lastAt: Date.now() }))
@@ -141,6 +143,31 @@ export function FederationTopologyWidget({ onOpen }: { onOpen: (workspaceKey: st
     }
   }, [probeCount])
 
+  const testBidirectional = useCallback(async (node: Node) => {
+    if (manualProbe.current || busy.current || bidirectionalBusy !== null || node.compatibility_state !== 'compatible' || !node.scopes?.includes('node.mesh.probe') || !node.capabilities?.includes('node.mesh.probe')) return
+    manualProbe.current = true
+    setBidirectionalBusy(node.id)
+    const requestId = ++sequence.current
+    const startedAt = Date.now()
+    setPulses((current) => [...current, { id: requestId, nodeId: node.id, direction: 'request' as const, bytes: 0, at: startedAt, durationMs: PULSE_MS, pending: true }].slice(-100))
+    try {
+      const result = await api<{ bidirectional: boolean; outbound_ok: boolean; inbound_ok: boolean; round_trip_ms: number; callback_ms: number; callback_bytes: number }>(`nodes/${node.id}/probe/bidirectional`, { method: 'POST', signal: AbortSignal.timeout(25000) })
+      await wait(Math.max(0, PULSE_MS - (Date.now() - startedAt)))
+      setPulses((current) => current.map((pulse) => pulse.id === requestId ? { ...pulse, pending: false } : pulse))
+      setPulses((current) => [...current, { id: ++sequence.current, nodeId: node.id, direction: 'response' as const, bytes: result.callback_bytes, at: Date.now(), durationMs: PULSE_MS }].slice(-100))
+      setRows((current) => current.map((row) => row.node?.id === node.id ? { ...row, bidirectional: { round_trip_ms: result.round_trip_ms, callback_ms: result.callback_ms, callback_bytes: result.callback_bytes, at: Date.now() }, error: undefined } : row))
+      setTotals((current) => ({ checks: current.checks + 1, bytes: current.bytes + result.callback_bytes, lastAt: Date.now() }))
+    } catch (cause) {
+      setPulses((current) => current.map((pulse) => pulse.id === requestId ? { ...pulse, pending: false } : pulse))
+      setPulses((current) => [...current, { id: ++sequence.current, nodeId: node.id, direction: 'error' as const, bytes: 0, at: Date.now(), durationMs: PULSE_MS }].slice(-100))
+      const message = cause instanceof Error ? cause.message : 'آزمون دوطرفه ناموفق بود.'
+      setRows((current) => current.map((row) => row.node?.id === node.id ? { ...row, error: message } : row))
+    } finally {
+      manualProbe.current = false
+      setBidirectionalBusy(null)
+    }
+  }, [bidirectionalBusy])
+
   useEffect(() => { void load() }, [load])
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -172,8 +199,8 @@ export function FederationTopologyWidget({ onOpen }: { onOpen: (workspaceKey: st
     {error && <CardContent className="pt-0"><p role="alert" className="rounded-lg border border-rose-400/20 bg-rose-400/[.05] p-3 text-xs text-rose-200">{error}</p></CardContent>}
     {loading ? <CardContent className="p-4 pt-0"><Skeleton className="h-72 rounded-xl"/></CardContent> : workers.length === 0 && parents.length === 0 ? <CardContent className="p-4 pt-0"><div className="flex min-h-36 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border text-center"><LockKeyhole size={22} className="text-muted-foreground"/><p className="text-sm font-medium">هنوز اتصال Node جفت نشده است</p><p className="text-xs text-muted-foreground">پس از جفت‌سازی، Nodeها و پنل بالادستی این سرور در نقشه نشان داده می‌شوند.</p><a href="#/nodes" className="mt-1 text-xs text-primary hover:underline">مدیریت Nodeها</a></div></CardContent> : <CardContent className="p-0">
       <div className="overflow-x-auto px-3 pb-3 sm:px-4" dir="ltr">
-        <div className="relative mx-auto" style={{ width: graphWidth, height: 468 }}>
-          <svg className="pointer-events-none absolute inset-0 z-0" width={graphWidth} height="468" viewBox={`0 0 ${graphWidth} 468`} role="img" aria-label="نمودار ارتباط ARG Mesh با پنل‌های بالادستی و Nodeهای مدیریت‌شده">
+        <div className="relative mx-auto" style={{ width: graphWidth, height: 496 }}>
+          <svg className="pointer-events-none absolute inset-0 z-0" width={graphWidth} height="496" viewBox={`0 0 ${graphWidth} 496`} role="img" aria-label="نمودار ارتباط ARG Mesh با پنل‌های بالادستی و Nodeهای مدیریت‌شده">
             <defs><filter id="arg-mesh-pulse-glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
             {parents.map((parent, index) => {
               const x = parentCenterOf(index)
@@ -182,16 +209,17 @@ export function FederationTopologyWidget({ onOpen }: { onOpen: (workspaceKey: st
             {workers.map((row, index) => {
               const nodeId = row.node!.id
               const x = centerOf(index)
+              const outboundPoints = [[graphCenter, 168], [graphCenter, 211], [x, 211], [x, CARD_TOP]] as const
+              const inboundPoints = [[x, CARD_TOP], [x, 211], [graphCenter, 211], [graphCenter, 168]] as const
               const outbound = `M ${graphCenter} 168 L ${graphCenter} 211 L ${x} 211 L ${x} ${CARD_TOP}`
-              const inbound = `M ${x} ${CARD_TOP} L ${x} 211 L ${graphCenter} 211 L ${graphCenter} 168`
               const connected = Boolean(row.status)
               return <g key={nodeId}>
                 <path d={outbound} fill="none" stroke={connected ? LINK_COLOR : '#737987'} strokeOpacity={connected ? 0.56 : 0.34} strokeWidth="2" strokeDasharray={connected ? undefined : '5 7'}/>
                 {pulses.filter((pulse) => pulse.nodeId === nodeId).map((pulse) => {
-                  const path = pulse.direction === 'response' ? inbound : outbound
+                  const points = pulse.direction === 'response' ? inboundPoints : pulse.direction === 'error' ? [[graphCenter, 168], [graphCenter, 168]] as const : outboundPoints
                   const color = pulse.direction === 'request' ? '#dda46f' : pulse.direction === 'error' ? '#fb7185' : '#8ef0bf'
-                  const title = pulse.direction === 'request' ? 'درخواست واقعی بررسی وضعیت Node' : pulse.direction === 'error' ? 'درخواست واقعی ناموفق؛ مسیر برگشت نشان‌دهندهٔ نتیجهٔ خطاست' : `پاسخ واقعی Node · payload تقریبی ${payload(pulse.bytes)}`
-                  return <circle key={`packet-${pulse.id}`} className="arg-topology-packet" r={pulse.direction === 'error' ? 4 : 5} fill={color} filter="url(#arg-mesh-pulse-glow)"><title>{title}</title><animateMotion key={`motion-${pulse.id}`} begin="0s" restart="always" dur={`${pulse.durationMs}ms`} calcMode="spline" keyTimes="0;1" keySplines="0.42 0 0.58 1" fill="freeze" path={path}/></circle>
+                  const title = pulse.direction === 'request' ? 'درخواست واقعی بررسی وضعیت Node' : pulse.direction === 'error' ? 'درخواست ناموفق؛ پاسخ معتبر برگشت دریافت نشد' : `پاسخ واقعی Node · payload تقریبی ${payload(pulse.bytes)}`
+                  return <MeshPacket key={`packet-${pulse.id}`} points={points} startedAt={pulse.at} durationMs={pulse.durationMs} radius={pulse.direction === 'error' ? 4 : 5} color={color} filter="url(#arg-mesh-pulse-glow)" title={title}/>
                 })}
                 <circle cx={x} cy={CARD_TOP} r="4" fill={connected ? LINK_COLOR : '#858b98'}/>
               </g>
@@ -209,20 +237,26 @@ export function FederationTopologyWidget({ onOpen }: { onOpen: (workspaceKey: st
               const node = row.node!
               const age = node.last_seen ? Math.max(0, Math.floor(Date.now() / 1000 - node.last_seen)) : null
               const currentBatch = batch?.nodeId === node.id ? batch : null
-              return <div key={row.key} dir="rtl" className="flex h-[190px] w-[204px] shrink-0 flex-col rounded-2xl border border-border/80 bg-card/95 p-3 text-right shadow-lg shadow-black/10">
+              const memoryPercent = row.status?.memory_total_kib ? Math.max(0, Math.min(100, Math.round(((row.status.memory_total_kib - row.status.memory_available_kib) / row.status.memory_total_kib) * 100))) : null
+              const canProbeBothWays = node.compatibility_state === 'compatible' && node.scopes?.includes('node.mesh.probe') && node.capabilities?.includes('node.mesh.probe')
+              return <div key={row.key} dir="rtl" className="flex h-[218px] w-[204px] shrink-0 flex-col rounded-2xl border border-border/80 bg-card/95 p-3 text-right shadow-lg shadow-black/10">
                 <button type="button" className="flex min-h-0 flex-1 flex-col text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => onOpen(node.workspace_key)} disabled={!node.workspace_ready} aria-label={`${row.name}؛ ${node.workspace_ready ? 'ورود به فضای کار VPS' : 'اتصال کامل آماده نیست'}`}>
                   <span className="flex w-full items-start justify-between gap-2"><span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-primary/20 bg-primary/[.06] text-primary"><Server size={16}/></span><span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] ${row.status ? 'border-emerald-400/20 bg-emerald-400/[.05] text-emerald-100' : 'border-amber-400/20 bg-amber-400/[.05] text-amber-100'}`}>{row.status ? <CircleCheck size={11}/> : <CircleAlert size={11}/ >}{row.status ? 'متصل' : 'قطع'}</span></span>
                   <span className="mt-2 block w-full truncate text-sm font-semibold">{row.name}</span><span dir="ltr" className="mt-0.5 block w-full truncate text-left font-mono text-[10px] text-muted-foreground">{row.endpoint}</span>
                   <span className="mt-2 flex w-full items-center justify-between gap-1 border-t border-border/70 pt-2 text-[10px] text-muted-foreground"><span>{row.status ? `پاسخ ${row.latencyMs ?? '—'} ms` : age === null ? 'هنوز ارتباط ثبت نشده' : `آخرین پاسخ ${age.toLocaleString('fa-IR')} ثانیه پیش`}</span><span>{row.responseBytes ? `≈ ${payload(row.responseBytes)}` : '—'}</span></span>
+                  {row.status && <span className="mt-1 flex w-full items-center justify-between gap-1 text-[9px] text-muted-foreground"><span dir="ltr" className="truncate">{row.status.os || row.status.architecture || 'OS —'}</span><span>{row.status.cpu_cores ? `${row.status.cpu_cores} vCPU` : 'CPU —'}</span></span>}
+                  {row.status && <span className="mt-1 flex w-full items-center justify-between gap-1 text-[9px] text-muted-foreground"><span>{memoryPercent === null ? 'RAM —' : `RAM ${memoryPercent}٪`}</span><span>{row.status.uptime_seconds ? `${Math.floor(row.status.uptime_seconds / 86400)} روز روشن` : `Load ${row.status.load || '—'}`}</span></span>}
+                  {row.status?.server_uuid && <span dir="ltr" title={row.status.server_uuid} className="mt-1 block w-full truncate text-left font-mono text-[8px] text-muted-foreground">{row.status.server_uuid}</span>}
+                  {row.bidirectional && <span className="mt-1 w-full truncate text-[9px] text-emerald-200">رفت‌وبرگشت: {row.bidirectional.round_trip_ms} ms · مسیر برگشت {row.bidirectional.callback_ms} ms</span>}
                   <span className="mt-auto flex w-full items-center justify-between pt-2 text-[10px] text-primary">{node.workspace_ready ? 'ورود به فضای کار' : 'نیاز به جفت‌سازی'}<span aria-hidden="true">←</span></span>
                 </button>
-                <div className="mt-2 flex items-center justify-between gap-2 border-t border-border/70 pt-2"><span className="truncate text-[9px] text-muted-foreground">{currentBatch ? `${currentBatch.completed}/${currentBatch.count} · موفق ${currentBatch.succeeded} · ناموفق ${currentBatch.failed}` : 'تست ارتباط واقعی'}</span><Button type="button" size="sm" variant="outline" className="h-7 shrink-0 px-2 text-[10px]" disabled={Boolean(batch) || busy.current} onClick={() => void testNode(node)}>{currentBatch ? <><RefreshCw size={11} className="animate-spin"/>{currentBatch.completed}/{currentBatch.count}</> : `تست ${probeCount.toLocaleString('fa-IR')} بار`}</Button></div>
+                <div className="mt-2 flex items-center gap-1.5 border-t border-border/70 pt-2"><span className="min-w-0 flex-1 truncate text-[9px] text-muted-foreground">{currentBatch ? `${currentBatch.completed}/${currentBatch.count} · موفق ${currentBatch.succeeded} · ناموفق ${currentBatch.failed}` : 'تست واقعی'}</span><Button type="button" size="sm" variant="outline" className="h-7 shrink-0 px-2 text-[9px]" disabled={Boolean(batch) || busy.current || bidirectionalBusy !== null} onClick={() => void testNode(node)}>{currentBatch ? <><RefreshCw size={10} className="animate-spin"/>{currentBatch.completed}/{currentBatch.count}</> : `${probeCount} بار`}</Button><Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1 px-2 text-[9px]" disabled={Boolean(batch) || busy.current || bidirectionalBusy !== null || !canProbeBothWays} onClick={() => void testBidirectional(node)} title={canProbeBothWays ? 'بررسی واقعی مسیر HTTPS در هر دو جهت' : 'این Node قدیمی است یا مجوز آزمون دوطرفه ندارد؛ دوباره جفت‌سازی کن'}>{bidirectionalBusy === node.id ? <RefreshCw size={10} className="animate-spin"/> : <Waypoints size={10}/>}رفت‌وبرگشت</Button></div>
               </div>
             })}
           </div>
         </div>
       </div>
-      <div className="flex flex-wrap items-start gap-2 border-t border-border/70 px-4 py-3 text-[10px] leading-5 text-muted-foreground"><Activity size={13} className="mt-0.5 shrink-0 text-primary"/><p>تست دستی برای هر Node، تعداد درخواست واقعی HTTPS را به‌ترتیب می‌فرستد. دایرهٔ درخواست هنگام شروع فراخوانی حرکت می‌کند و پس از دریافت پاسخ، دایرهٔ پاسخ مسیر برگشت را طی می‌کند؛ مدت نمایش حداقل‌دار است تا نتیجه‌های سریع هم قابل‌دیدن باشند. حجم فقط از JSON پاسخ برآورد می‌شود و کل ترافیک شبکه نیست. سرورهای مادر از اتصال‌های ورودی این پنل نمایش داده می‌شوند.</p><span className="mr-auto inline-flex shrink-0 items-center gap-1"><ArrowDownToLine size={11}/>پاسخ‌ها: {totals.checks.toLocaleString('fa-IR')} · {payload(totals.bytes)}{totals.lastAt ? ` · ${new Date(totals.lastAt).toLocaleTimeString('fa-IR')}` : ''}</span></div>
+      <div className="flex flex-wrap items-start gap-2 border-t border-border/70 px-4 py-3 text-[10px] leading-5 text-muted-foreground"><Activity size={13} className="mt-0.5 shrink-0 text-primary"/><p>تست پایه HTTPS درخواست واقعی و پاسخ روی همان اتصال را نمایش می‌دهد. «رفت‌وبرگشت» یک challenge زمان‌دار و یک‌بارمصرف می‌فرستد و Node از سمت خودش به همین پنل callback می‌زند؛ این آزمون به HTTPS عمومی و دسترسی ورودی پنل نیاز دارد. حرکت بسته با زمان‌بندی مسیرمحور اجرا می‌شود و حجم از payload واقعی JSON تخمین زده می‌شود، نه کل ترافیک شبکه.</p><span className="mr-auto inline-flex shrink-0 items-center gap-1"><ArrowDownToLine size={11}/>پاسخ‌ها: {totals.checks.toLocaleString('fa-IR')} · {payload(totals.bytes)}{totals.lastAt ? ` · ${new Date(totals.lastAt).toLocaleTimeString('fa-IR')}` : ''}</span></div>
     </CardContent>}
   </Card>
 }
