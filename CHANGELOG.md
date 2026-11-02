@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.9-dev.9 — 2026-11-02
+
+### Fixed
+- Standardized tab layout and keyboard behavior across panel pages; fixed the Nginx site configuration tab being hidden by its overview wrapper.
+
 ## v0.7.9-dev.8 — 2026-11-02
 
 ### Development
