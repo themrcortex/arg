@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.7.9-dev.12 — 2026-11-02
+
+### Development
+- Store WordPress setup secrets in isolated, root-owned per-application vaults; safely migrate existing vault entries only when the legacy vault ownership is valid.
+- Allow bounded alphanumeric secret references while continuing to reject path separators and traversal syntax.
+
 ## v0.7.9-dev.11 — 2026-11-02
 
 ### Development
