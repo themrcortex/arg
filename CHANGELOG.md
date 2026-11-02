@@ -1,5 +1,16 @@
 # ARG Change Log
 
+## v0.7.9-dev.6 — 2026-11-02
+
+### Added
+- Application creation provisions a validated, disabled Nginx site when a domain is supplied. Each application now has a shareable Nginx/domain management tab, and its deployment form has a separate persistent route with a first-deployment prompt.
+- ARG Mesh shows additional live node identity and resource data, animates probe packets along the complete link, and supports an authenticated, one-use HTTPS callback test in both directions.
+- S3 buckets support an explicitly informational manual GiB quota.
+
+### Fixed
+- S3 verification no longer labels a reachable endpoint disconnected when the provider denies `HeadObject`; mount removal checks the live system mount state.
+- Frontend Radix callback and xterm fit-addon declarations now pass the locked TypeScript check.
+
 ## v0.7.9-dev.5 — 2026-11-02
 
 ### Fixed
