@@ -1,5 +1,17 @@
 # ARG Change Log
 
+## v0.7.9-dev.4 — 2026-11-02
+
+### Added
+- Add editable, persisted application workflow drafts with dependency ordering, bounded validation and saved presets.
+- Add per-application Production/Staging records, launch settings, release names/version numbers, health checks and retention controls.
+- Add a local application mesh view backed by Docker inspection and safe Laravel database metadata.
+- Add selectable stable WordPress core versions and use the selected official Git tag as the default deployment source.
+
+### Improved
+- Keep application launch on a refreshable detail route, show persistent deployment events and make registered domains clickable.
+- Refresh application and template cards with platform icons and platform-specific accents.
+
 ## v0.7.9-dev.3 — 2026-11-02
 
 ### Development
