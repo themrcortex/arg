@@ -4,12 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
-const SECRET_DIR: &str = "/var/lib/arg/wordpress-secrets";
+const SECRET_ROOT_DIR: &str = "/etc/arg/wordpress-secrets";
+const LEGACY_SECRET_DIR: &str = "/var/lib/arg/wordpress-secrets";
+const VAULT_FORMAT_REF: &str = "format-v2";
+const LEGACY_SECRET_KINDS: [&str; 3] = ["admin", "db", "email"];
 const MAX_CAPTURE: usize = 32 * 1024;
 
 #[derive(Deserialize, Serialize)]
@@ -57,6 +60,94 @@ fn secret_ref(kind: &str, id: &str) -> String {
     format!("{kind}-{id}")
 }
 
+fn secret_directory(root: &Path, id: &str) -> Result<PathBuf, String> {
+    if !apps::valid_uuid(id) {
+        return Err("شناسهٔ اپلیکیشن WordPress معتبر نیست.".into());
+    }
+    Ok(root.join(id))
+}
+
+fn app_secret_directory(id: &str) -> Result<PathBuf, String> {
+    let root = Path::new(SECRET_ROOT_DIR);
+    secret_vault::ensure_root_directory(root)?;
+    secret_directory(root, id)
+}
+
+fn validate_legacy_secret_directory() -> Result<bool, String> {
+    let directory = Path::new(LEGACY_SECRET_DIR);
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err("بررسی مخزن قدیمی WordPress ناموفق بود.".into()),
+    };
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != 0
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(
+            "مخزن قدیمی WordPress امن نیست؛ کلید و داده‌ها را از پشتیبان مورد اعتماد بازیابی کن."
+                .into(),
+        );
+    }
+    Ok(true)
+}
+
+fn prepare_app_secret_vault(id: &str) -> Result<PathBuf, String> {
+    let directory = app_secret_directory(id)?;
+    if secret_vault::contains(&directory, VAULT_FORMAT_REF)? {
+        let format = secret_vault::read(&directory, VAULT_FORMAT_REF)?;
+        if format != b"v2" {
+            return Err("نسخهٔ مخزن امن WordPress معتبر نیست.".into());
+        }
+        return Ok(directory);
+    }
+
+    // Existing installations used one shared vault under /var/lib/arg. Only
+    // import it when its directory is still root-owned and private. A new app
+    // gets its own vault and never depends on an unrelated legacy key.
+    let legacy_directory = Path::new(LEGACY_SECRET_DIR);
+    let mut legacy_values = Vec::new();
+    if validate_legacy_secret_directory()? {
+        for kind in LEGACY_SECRET_KINDS {
+            let reference = secret_ref(kind, id);
+            if secret_vault::contains(legacy_directory, &reference)? {
+                legacy_values.push((
+                    reference.clone(),
+                    secret_vault::read(legacy_directory, &reference)?,
+                ));
+            }
+        }
+    }
+    for (reference, value) in &legacy_values {
+        secret_vault::store(&directory, reference, value)?;
+    }
+    secret_vault::store(&directory, VAULT_FORMAT_REF, b"v2")?;
+    for (reference, _) in legacy_values {
+        secret_vault::delete(legacy_directory, &reference)?;
+    }
+    Ok(directory)
+}
+
+fn app_secret_store(id: &str, kind: &str, value: &[u8]) -> Result<(), String> {
+    let directory = prepare_app_secret_vault(id)?;
+    secret_vault::store(&directory, &secret_ref(kind, id), value)
+}
+
+fn app_secret_read(id: &str, kind: &str) -> Result<Vec<u8>, String> {
+    let directory = prepare_app_secret_vault(id)?;
+    secret_vault::read(&directory, &secret_ref(kind, id))
+}
+
+fn app_secret_contains(id: &str, kind: &str) -> Result<bool, String> {
+    let directory = prepare_app_secret_vault(id)?;
+    secret_vault::contains(&directory, &secret_ref(kind, id))
+}
+
+fn app_secret_delete(id: &str, kind: &str) -> Result<(), String> {
+    let directory = prepare_app_secret_vault(id)?;
+    secret_vault::delete(&directory, &secret_ref(kind, id))
+}
+
 fn store_admin_setup(request: &Value) -> Result<Value, String> {
     let id = app_id(request)?;
     let setup = AdminSetup {
@@ -80,7 +171,9 @@ fn store_admin_setup(request: &Value) -> Result<Value, String> {
     validate_admin_setup(&setup)?;
     let encoded = serde_json::to_vec(&setup)
         .map_err(|_| "تنظیمات مدیر WordPress رمزگذاری نشد.".to_owned())?;
-    secret_vault::store(Path::new(SECRET_DIR), &secret_ref("admin", id), &encoded)?;
+    let directory = app_secret_directory(id)?;
+    secret_vault::store(&directory, VAULT_FORMAT_REF, b"v2")?;
+    secret_vault::store(&directory, &secret_ref("admin", id), &encoded)?;
     Ok(json!({"stored":true}))
 }
 
@@ -156,8 +249,7 @@ fn valid_email_host(value: &str) -> bool {
 
 fn delete_secret(request: &Value, kind: &str) -> Result<Value, String> {
     let id = app_id(request)?;
-    let reference = secret_ref(kind, id);
-    match secret_vault::delete(Path::new(SECRET_DIR), &reference) {
+    match app_secret_delete(id, kind) {
         Ok(()) => Ok(json!({"deleted":true})),
         Err(message) if message.contains("پیدا نشد") => Ok(json!({"deleted":false})),
         Err(message) => Err(message),
@@ -427,8 +519,7 @@ fn provision(request: &Value) -> Result<Value, String> {
 
     prepare_shared_files(id, &release, &credentials, domain)?;
     grant_runtime_read_access(id, &release)?;
-    let admin_reference = secret_ref("admin", id);
-    let admin = match secret_vault::read(Path::new(SECRET_DIR), &admin_reference) {
+    let admin = match app_secret_read(id, "admin") {
         Ok(value) => Some(
             serde_json::from_slice::<AdminSetup>(&value)
                 .map_err(|_| "اعتبار مدیر WordPress در مخزن امن قابل خواندن نیست.".to_owned())?,
@@ -440,17 +531,13 @@ fn provision(request: &Value) -> Result<Value, String> {
         validate_admin_setup(&admin)?;
         let acme_email = admin.email.clone();
         run_wordpress_installer(&release, domain, &admin)?;
-        secret_vault::store(
-            Path::new(SECRET_DIR),
-            &secret_ref("email", id),
-            acme_email.as_bytes(),
-        )?;
-        secret_vault::delete(Path::new(SECRET_DIR), &admin_reference)?;
+        app_secret_store(id, "email", acme_email.as_bytes())?;
+        app_secret_delete(id, "admin")?;
         Some(acme_email)
     } else if !wordpress_is_installed(&release, domain)? {
         return Err("رمز اولیهٔ مدیر WordPress در مخزن امن نیست و نصب دیتابیس کامل نشده است؛ برای بازیابی، قالب را دوباره با همان اپ اجرا کن.".into());
     } else {
-        secret_vault::read(Path::new(SECRET_DIR), &secret_ref("email", id))
+        app_secret_read(id, "email")
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
     };
@@ -465,9 +552,8 @@ fn provision(request: &Value) -> Result<Value, String> {
 }
 
 fn load_or_create_database_credential(app_id: &str) -> Result<DatabaseCredential, String> {
-    let reference = secret_ref("db", app_id);
-    if secret_vault::contains(Path::new(SECRET_DIR), &reference)? {
-        let value = secret_vault::read(Path::new(SECRET_DIR), &reference)?;
+    if app_secret_contains(app_id, "db")? {
+        let value = app_secret_read(app_id, "db")?;
         let credential = serde_json::from_slice::<DatabaseCredential>(&value)
             .map_err(|_| "اعتبار دیتابیس WordPress در مخزن امن معتبر نیست.".to_owned())?;
         if !valid_database_name(&credential.database)
@@ -492,7 +578,7 @@ fn load_or_create_database_credential(app_id: &str) -> Result<DatabaseCredential
     };
     let payload = serde_json::to_vec(&credential)
         .map_err(|_| "اعتبار دیتابیس WordPress ساخته نشد.".to_owned())?;
-    secret_vault::store(Path::new(SECRET_DIR), &reference, &payload)?;
+    app_secret_store(app_id, "db", &payload)?;
     Ok(credential)
 }
 
@@ -1286,6 +1372,21 @@ mod tests {
         ));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn wordpress_vault_directory_is_isolated_per_application() {
+        let root = temporary_directory();
+        let first = secret_directory(&root, APP_ID).unwrap();
+        let second_id = "8e2c4bf1-1e54-4d8f-a190-ccfd4f2d6d17";
+        let second = secret_directory(&root, second_id).unwrap();
+
+        assert_eq!(first, root.join(APP_ID));
+        assert_eq!(second, root.join(second_id));
+        assert_ne!(first, second);
+        assert!(secret_directory(&root, "../../outside").is_err());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

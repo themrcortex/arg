@@ -23,10 +23,10 @@ fn safe_reference(reference: &str) -> bool {
     (1..=64).contains(&reference.len())
         && reference
             .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-fn ensure_root_directory(directory: &Path) -> Result<(), String> {
+pub(crate) fn ensure_root_directory(directory: &Path) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|_| "ساخت مخزن امن ناموفق بود.".to_string())?;
     let metadata =
         fs::symlink_metadata(directory).map_err(|_| "بررسی مخزن امن ناموفق بود.".to_string())?;
@@ -346,6 +346,15 @@ mod tests {
         let last = encoded.len() - 1;
         encoded[last] ^= 0x80;
         assert!(open("a1b2", &encoded, &key).is_err());
+    }
+
+    #[test]
+    fn safe_reference_allows_wordpress_names_without_allowing_path_syntax() {
+        assert!(safe_reference("admin-3ac9ee2c-0dd6-4bfb-8c47-1f2213f81e19"));
+        assert!(safe_reference("format-v2"));
+        assert!(!safe_reference("../secret"));
+        assert!(!safe_reference("nested/name"));
+        assert!(!safe_reference(""));
     }
 
     #[test]
