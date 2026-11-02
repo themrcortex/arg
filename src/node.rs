@@ -1943,6 +1943,214 @@ pub(super) async fn refresh_after_deploy(
     ))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeployServiceAction {
+    Start,
+    Restart,
+    Stop,
+    LeaveUnconfigured,
+}
+
+fn deploy_service_action(
+    desired_state: &str,
+    state: &str,
+    enabled: bool,
+    has_port: bool,
+) -> DeployServiceAction {
+    if desired_state == "stopped" {
+        DeployServiceAction::Stop
+    } else if state == "active" || enabled {
+        DeployServiceAction::Restart
+    } else if has_port {
+        DeployServiceAction::Start
+    } else {
+        DeployServiceAction::LeaveUnconfigured
+    }
+}
+
+/// Make a newly deployed SSR release available. Historically a first deploy
+/// only restarted an existing service, leaving a fresh Nginx proxy pointed at
+/// an unused port. Explicitly stopped applications remain stopped.
+pub(super) async fn activate_after_deploy(
+    app_id: &str,
+    previous: Option<&str>,
+    node_version: &str,
+    port: Option<u16>,
+    domain_configured: bool,
+    start_script: &str,
+    healthcheck_path: &str,
+    desired_state: &str,
+) -> Result<bool, String> {
+    let status =
+        privileged_request_async(json!({"action":"node-service-status","application_id":app_id}))
+            .await
+            .map_err(|(_, body)| {
+                let message = body["error"]
+                    .as_str()
+                    .unwrap_or("وضعیت سرویس Node خوانده نشد.")
+                    .to_owned();
+                let restored = restore_previous_release(app_id, previous).is_ok();
+                format!(
+                    "{message}. {}",
+                    if restored {
+                        "release قبلی بازگردانده شد."
+                    } else {
+                        "بازیابی release قبلی ناموفق بود."
+                    }
+                )
+            })?;
+    if status["ok"] != true {
+        let message = status["error"]
+            .as_str()
+            .unwrap_or("وضعیت سرویس Node خوانده نشد.")
+            .to_owned();
+        let restored = restore_previous_release(app_id, previous).is_ok();
+        return Err(format!(
+            "{message}. {}",
+            if restored {
+                "release قبلی بازگردانده شد."
+            } else {
+                "بازیابی release قبلی ناموفق بود."
+            }
+        ));
+    }
+    let action = deploy_service_action(
+        desired_state,
+        status["data"]["state"].as_str().unwrap_or("inactive"),
+        status["data"]["enabled"].as_bool().unwrap_or(false),
+        port.is_some(),
+    );
+    match action {
+        DeployServiceAction::Restart => refresh_after_deploy(app_id, previous).await,
+        DeployServiceAction::Stop => {
+            let result = privileged_request_async(
+                json!({"action":"node-service-disable","application_id":app_id}),
+            )
+            .await;
+            match result {
+                Ok(value) if value["ok"] == true => Ok(false),
+                Ok(value) => {
+                    let message = value["error"]
+                        .as_str()
+                        .unwrap_or("توقف سرویس Node ناموفق بود.");
+                    let restored = restore_previous_release(app_id, previous).is_ok();
+                    Err(format!(
+                        "{message}. {}",
+                        if restored {
+                            "release قبلی بازگردانده شد."
+                        } else {
+                            "بازیابی release قبلی ناموفق بود."
+                        }
+                    ))
+                }
+                Err((_, body)) => {
+                    let message = body["error"]
+                        .as_str()
+                        .unwrap_or("توقف سرویس Node ناموفق بود.");
+                    let restored = restore_previous_release(app_id, previous).is_ok();
+                    Err(format!(
+                        "{message}. {}",
+                        if restored {
+                            "release قبلی بازگردانده شد."
+                        } else {
+                            "بازیابی release قبلی ناموفق بود."
+                        }
+                    ))
+                }
+            }
+        }
+        DeployServiceAction::LeaveUnconfigured if domain_configured => {
+            let restored = restore_previous_release(app_id, previous).is_ok();
+            Err(format!(
+                "برای این دامنه پورت سرویس Node ثبت نشده است؛ Nginx نمی‌تواند upstream بسازد. {}",
+                if restored {
+                    "release قبلی بازگردانده شد."
+                } else {
+                    "بازیابی release قبلی ناموفق بود."
+                }
+            ))
+        }
+        DeployServiceAction::LeaveUnconfigured => Ok(false),
+        DeployServiceAction::Start => {
+            let Some(port) = port else {
+                return Ok(false);
+            };
+            let result = privileged_request_async(json!({
+                "action":"node-service-enable",
+                "application_id":app_id,
+                "node_version":node_version,
+                "port":port,
+                "start_script":start_script,
+                "healthcheck_path":healthcheck_path
+            }))
+            .await;
+            match result {
+                Ok(value) if value["ok"] == true => Ok(true),
+                Ok(value) => {
+                    let message = value["error"]
+                        .as_str()
+                        .unwrap_or("راه‌اندازی اولیهٔ سرویس Node ناموفق بود.");
+                    let restored = restore_previous_release(app_id, previous).is_ok();
+                    Err(format!(
+                        "راه‌اندازی اولیهٔ سرویس Node شکست خورد: {message}. {}",
+                        if restored {
+                            "release قبلی بازگردانده شد."
+                        } else {
+                            "بازیابی release قبلی ناموفق بود."
+                        }
+                    ))
+                }
+                Err((_, body)) => {
+                    let message = body["error"]
+                        .as_str()
+                        .unwrap_or("ارتباط با helper برای راه‌اندازی Node برقرار نشد.");
+                    let restored = restore_previous_release(app_id, previous).is_ok();
+                    Err(format!(
+                        "راه‌اندازی اولیهٔ سرویس Node شکست خورد: {message}. {}",
+                        if restored {
+                            "release قبلی بازگردانده شد."
+                        } else {
+                            "بازیابی release قبلی ناموفق بود."
+                        }
+                    ))
+                }
+            }
+        }
+    }
+}
+
+pub(super) fn record_deploy_service_started(
+    state: &AppState,
+    app_id: &str,
+    port: u16,
+) -> Result<(), String> {
+    let mut db = state.lock().unwrap();
+    let at = now();
+    let unit = node_unit_name(app_id);
+    let transaction = db.transaction().map_err(|error| error.to_string())?;
+    transaction.execute(
+        "UPDATE applications SET desired_state='running',observed_state='running',observed_at=?1,updated_at=?1 WHERE id=?2 AND desired_state<>'stopped'",
+        params![at, app_id],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "INSERT INTO application_services(id,application_id,service_key,runtime_type,systemd_unit,desired_state,observed_state,listen_port,last_observed_at,metadata_json,created_at,updated_at) VALUES (?1,?2,'node-web','node',?3,'running','running',?4,?5,'{}',?5,?5) ON CONFLICT(application_id,service_key) DO UPDATE SET systemd_unit=excluded.systemd_unit,desired_state='running',observed_state='running',listen_port=excluded.listen_port,last_observed_at=excluded.last_observed_at,updated_at=excluded.updated_at",
+        params![service_record_id(), app_id, unit, i64::from(port), at],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+pub(super) fn record_deploy_service_stopped(state: &AppState, app_id: &str) -> Result<(), String> {
+    let mut db = state.lock().unwrap();
+    let at = now();
+    let unit = node_unit_name(app_id);
+    let transaction = db.transaction().map_err(|error| error.to_string())?;
+    transaction.execute(
+        "INSERT INTO application_services(id,application_id,service_key,runtime_type,systemd_unit,desired_state,observed_state,last_observed_at,metadata_json,created_at,updated_at) VALUES (?1,?2,'node-web','node',?3,'stopped','stopped',?4,'{}',?4,?4) ON CONFLICT(application_id,service_key) DO UPDATE SET systemd_unit=excluded.systemd_unit,desired_state='stopped',observed_state='stopped',last_observed_at=excluded.last_observed_at,updated_at=excluded.updated_at",
+        params![service_record_id(), app_id, unit, at],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 fn restore_previous_release(app_id: &str, previous: Option<&str>) -> Result<(), String> {
     let root = app_root(app_id).ok_or("Application path is invalid")?;
     let current = root.join("current");
@@ -2812,14 +3020,17 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
     };
     let unit = node_unit_name(app_id);
     let unit_path = PathBuf::from("/etc/systemd/system").join(&unit);
-    if logs && !managed_unit(&unit_path) {
-        return json!({"ok":true,"data":{"unit":unit,"logs":""}});
+    let configured = managed_unit(&unit_path);
+    if !configured && !logs {
+        return json!({"ok":true,"data":{"unit":unit,"configured":false,"state":"inactive","enabled":false}});
     }
-    if !managed_unit(&unit_path) {
-        return json!({"ok":true,"data":{"unit":unit,"state":"inactive","enabled":false}});
-    }
-    let active = systemctl_output(&["is-active", &unit]).unwrap_or_else(|_| "inactive".into());
-    let enabled = systemctl_output(&["is-enabled", &unit]).is_ok_and(|value| value == "enabled");
+    let active = if configured {
+        systemctl_output(&["is-active", &unit]).unwrap_or_else(|_| "inactive".into())
+    } else {
+        "not-configured".into()
+    };
+    let enabled = configured
+        && systemctl_output(&["is-enabled", &unit]).is_ok_and(|value| value == "enabled");
     if logs {
         let limit = request["limit"].as_u64().unwrap_or(100).clamp(1, 500);
         let cursor = request["after"]
@@ -2842,15 +3053,28 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         return match command.spawn() {
             Ok(mut child) => {
                 let Some(stdout) = child.stdout.take() else {
                     return json!({"ok":false,"error":"journalctl stdout unavailable"});
                 };
+                let Some(stderr) = child.stderr.take() else {
+                    return json!({"ok":false,"error":"journalctl stderr unavailable"});
+                };
                 let reader = thread::spawn(move || read_capped_sync(stdout));
-                let _ = child.wait();
+                let error_reader = thread::spawn(move || read_capped_sync(stderr));
+                let status = match child.wait() {
+                    Ok(status) => status,
+                    Err(error) => {
+                        return json!({"ok":false,"error":format!("journalctl did not finish: {error}")})
+                    }
+                };
                 let output = reader.join().unwrap_or_default();
+                let _stderr = error_reader.join().unwrap_or_default();
+                if !status.success() {
+                    return json!({"ok":false,"error":format!("journalctl exited with status {}", status.code().map_or_else(|| "unknown".to_owned(), |code| code.to_string()))});
+                }
                 let text = String::from_utf8_lossy(&output).into_owned();
                 let next_cursor = text
                     .lines()
@@ -2862,7 +3086,7 @@ fn helper_service_status(request: &Value, logs: bool) -> Value {
                     .join("\n");
                 let environment = app_root(app_id).map(|root| root.join("shared/.env"));
                 let logs = sanitize_node_runtime_logs(&raw_logs, environment.as_deref());
-                json!({"ok":true,"data":{"unit":unit,"logs":logs,"next_cursor":next_cursor,"source":"systemd-journal","persistent":true,"retention_scope":"host-journald"}})
+                json!({"ok":true,"data":{"unit":unit,"configured":configured,"state":active,"enabled":enabled,"logs":logs,"next_cursor":next_cursor,"source":"systemd-journal","persistent":true,"retention_scope":"host-journald"}})
             }
             Err(error_value) => {
                 json!({"ok":false,"error":format!("Could not read unit logs: {error_value}")})
@@ -3630,6 +3854,26 @@ fn parse_node_http_status(response: &[u8]) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn first_node_deploy_starts_service_unless_explicitly_stopped() {
+        assert_eq!(
+            deploy_service_action("none", "inactive", false, true),
+            DeployServiceAction::Start
+        );
+        assert_eq!(
+            deploy_service_action("running", "active", true, true),
+            DeployServiceAction::Restart
+        );
+        assert_eq!(
+            deploy_service_action("stopped", "active", true, true),
+            DeployServiceAction::Stop
+        );
+        assert_eq!(
+            deploy_service_action("none", "inactive", false, false),
+            DeployServiceAction::LeaveUnconfigured
+        );
+    }
+
     #[test]
     fn deployment_nginx_helper_rejects_invalid_app_before_touching_nginx() {
         let result = execute_privileged_request("node-nginx-deploy-proxy", &json!({}));

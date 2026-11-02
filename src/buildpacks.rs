@@ -451,7 +451,7 @@ pub(super) async fn list(
     if !valid {
         return Err(error(StatusCode::NOT_FOUND, "اپلیکیشن پیدا نشد."));
     }
-    let mut statement=db.prepare("SELECT id,release_id,source_commit,subdirectory,plan_json,created_by,created_at FROM app_build_plans WHERE application_id=?1 ORDER BY created_at DESC LIMIT 20").map_err(db_error)?;
+    let mut statement=db.prepare("SELECT id,release_id,source_commit,subdirectory,plan_json,created_by,created_at FROM app_build_plans WHERE application_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 20").map_err(db_error)?;
     let plans=statement.query_map([app_id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"release_id":r.get::<_,String>(1)?,"source_commit":r.get::<_,Option<String>>(2)?,"subdirectory":r.get::<_,String>(3)?,"plan":serde_json::from_str::<Value>(&r.get::<_,String>(4)?).unwrap_or(Value::Null),"created_by":r.get::<_,String>(5)?,"created_at":r.get::<_,i64>(6)?}))).map_err(db_error)?.collect::<Result<Vec<_>,_>>().map_err(db_error)?;
     Ok(Json(json!({"plans":plans})))
 }

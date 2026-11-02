@@ -2479,22 +2479,25 @@ async fn process_job(state: AppState, job_id: String) {
     let app_settings = {
         let db = state.lock().unwrap();
         db.query_row(
-            "SELECT framework,build_runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json,node_build_script,node_start_script,listen_port FROM applications WHERE id=?1",
+            "SELECT framework,build_runtime_version,runtime_version,domain,static_output_path,static_spa_fallback,build_environment_json,node_build_script,node_start_script,node_healthcheck_path,listen_port,desired_state FROM applications WHERE id=?1",
             [&app_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, String>(5)?, row.get::<_,String>(6)?, row.get::<_,String>(7)?, row.get::<_,Option<i64>>(8)?.and_then(|port| u16::try_from(port).ok()))),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?, row.get::<_, bool>(5)?, row.get::<_, String>(6)?, row.get::<_,String>(7)?, row.get::<_,String>(8)?, row.get::<_,String>(9)?, row.get::<_,Option<i64>>(10)?.and_then(|port| u16::try_from(port).ok()), row.get::<_,String>(11)?)),
         )
         .optional()
     };
     let (
         framework,
         build_runtime_version,
+        node_runtime_version,
         domain,
         static_output_path,
         static_spa_fallback,
         build_environment_json,
         node_build_script,
         node_start_script,
+        node_healthcheck_path,
         listen_port,
+        desired_state,
     ) = match app_settings {
         Ok(Some(settings)) => settings,
         Ok(None) => {
@@ -2849,12 +2852,68 @@ async fn process_job(state: AppState, job_id: String) {
             }
         }
     }
+    let mut node_service_ready = None;
     if apps::is_node_runtime_framework(&framework)
         || (apps::is_auto_framework(&framework) && !static_site)
     {
-        if let Err(message) = node::refresh_after_deploy(&app_id, previous.as_deref()).await {
-            finish(&state, &job_id, "failed", &message);
-            return;
+        match node::activate_after_deploy(
+            &app_id,
+            previous.as_deref(),
+            &node_runtime_version,
+            listen_port,
+            domain
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            &node_start_script,
+            &node_healthcheck_path,
+            &desired_state,
+        )
+        .await
+        {
+            Ok(true) => {
+                node_service_ready = Some(true);
+                if let Some(port) = listen_port {
+                    if let Err(message) = node::record_deploy_service_started(&state, &app_id, port)
+                    {
+                        let restored =
+                            restore_current_pointer(&app_root, previous.as_deref(), &job_id)
+                                .is_ok();
+                        let service_recovered = restored
+                            && node::refresh_after_deploy(&app_id, previous.as_deref())
+                                .await
+                                .is_ok();
+                        finish(&state, &job_id, "failed", &format!("سرویس Node اجرا شد، اما وضعیت پایدار آن در دیتابیس ثبت نشد: {message}. {}", if service_recovered { "release قبلی و سرویس آن بازیابی شدند." } else if restored { "release قبلی برگشت؛ وضعیت سرویس را بررسی کن." } else { "بازیابی release قبلی ناموفق بود." }));
+                        return;
+                    }
+                }
+                record_output(
+                    &state,
+                    &job_id,
+                    "starting",
+                    "سرویس Node با systemd فعال و Health Check روی loopback تأیید شد.",
+                );
+            }
+            Ok(false) if desired_state == "stopped" => {
+                node_service_ready = Some(false);
+                if let Err(message) = node::record_deploy_service_stopped(&state, &app_id) {
+                    finish(&state, &job_id, "failed", &format!("سرویس طبق وضعیت اپ متوقف ماند، اما وضعیت آن در دیتابیس ثبت نشد: {message}"));
+                    return;
+                }
+                record_output(
+                    &state,
+                    &job_id,
+                    "starting",
+                    "سرویس Node طبق وضعیت صریح اپ متوقف ماند.",
+                );
+            }
+            Ok(false) => {
+                node_service_ready = Some(false);
+                record_output(&state, &job_id, "starting", "برای اپ پورت سرویس ثبت نشده و دامنه‌ای هم تنظیم نیست؛ release ساخته شد اما سرویس Node راه‌اندازی نشد.");
+            }
+            Err(message) => {
+                finish(&state, &job_id, "failed", &message);
+                return;
+            }
         }
         let configured_domain = domain
             .as_deref()
@@ -2995,10 +3054,15 @@ async fn process_job(state: AppState, job_id: String) {
     let success_message = snapshot_warning.map_or_else(
         || match framework.as_str() {
             "laravel" => "release فعال شد؛ کانفیگ وب و سرویس‌های Laravel بررسی شدند. Migration دیتابیس خودکار اجرا نمی‌شود.".to_owned(),
-            "node" | "next" | "nuxt" => "release SSR فعال شد؛ سرویس Node بررسی شد و تنظیم Nginx در صورت ثبت دامنه و پورت بررسی یا ساخته شد.".to_owned(),
+            "node" | "next" | "nuxt" if node_service_ready == Some(true) => "release SSR فعال شد؛ سرویس Node با Health Check تأیید و تنظیم Nginx در صورت ثبت دامنه و پورت بررسی یا ساخته شد.".to_owned(),
+            "node" | "next" | "nuxt" if desired_state == "stopped" => "release ساخته شد؛ سرویس طبق وضعیت صریح اپ متوقف ماند.".to_owned(),
+            "node" | "next" | "nuxt" => "release ساخته شد؛ سرویس به‌علت ثبت‌نشدن پورت راه‌اندازی نشد.".to_owned(),
             "static" | "react" | "vue" | "vite" => "خروجی سایت Static ساخته و از طریق Nginx منتشر شد؛ برای این سایت process جداگانه اجرا نمی‌شود.".to_owned(),
             "auto" if static_site => "چارچوب از manifest تشخیص داده شد؛ خروجی Static از طریق Nginx منتشر شد و process جداگانه‌ای اجرا نمی‌شود.".to_owned(),
-            "auto" => "چارچوب از manifest تشخیص داده شد؛ release SSR فعال شد و سرویس Node و تنظیم Nginx بررسی شدند.".to_owned(),
+            "auto" if node_service_ready == Some(true) => "چارچوب از manifest تشخیص داده شد؛ release SSR فعال شد و سرویس Node با Health Check تأیید شد.".to_owned(),
+            "auto" if node_service_ready == Some(false) && desired_state == "stopped" => "چارچوب از manifest تشخیص داده شد؛ release فعال شد و سرویس طبق وضعیت صریح اپ متوقف ماند.".to_owned(),
+            "auto" if node_service_ready == Some(false) => "چارچوب از manifest تشخیص داده شد؛ release ساخته شد اما پورت سرویس ثبت نشده است.".to_owned(),
+            "auto" => "چارچوب از manifest تشخیص داده شد؛ release SSR فعال شد و سرویس Node با Health Check تأیید شد.".to_owned(),
             _ => "release فعال شد و اشاره‌گر جاری به‌صورت اتمی جابه‌جا شد.".to_owned(),
         },
         |warning| format!("release فعال شد، اما snapshot کانفیگ Nginx همگام نشد: {warning}"),
