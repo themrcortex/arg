@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.9-dev.7 — 2026-11-02
+
+### Fixed
+- WordPress applications now receive a WordPress rewrite and PHP-FPM Nginx configuration instead of a permanent 503 placeholder. Unsupported Python, custom, and auto runtimes no longer get a fake 503 site; existing custom Nginx edits are preserved.
+
 ## v0.7.9-dev.6 — 2026-11-02
 
 ### Added
