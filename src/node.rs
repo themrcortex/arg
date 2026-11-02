@@ -169,6 +169,7 @@ struct Manifest {
     scripts: Vec<String>,
     manager: Option<PackageManager>,
     detected_framework: String,
+    dependencies_declared: bool,
 }
 
 fn inspect_manifest(root: &FsPath) -> Result<Manifest, String> {
@@ -200,7 +201,20 @@ fn inspect_manifest(root: &FsPath) -> Result<Manifest, String> {
         value["dependencies"][name].is_string()
             || value["devDependencies"][name].is_string()
             || value["optionalDependencies"][name].is_string()
+            || value["peerDependencies"][name].is_string()
     };
+    let dependencies_declared = [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ]
+    .iter()
+    .any(|section| {
+        value[*section]
+            .as_object()
+            .is_some_and(|items| !items.is_empty())
+    });
     let detected_framework = if has_package("next") {
         "next"
     } else if has_package("nuxt") || has_package("nitropack") {
@@ -222,6 +236,7 @@ fn inspect_manifest(root: &FsPath) -> Result<Manifest, String> {
         scripts,
         manager,
         detected_framework: detected_framework.to_owned(),
+        dependencies_declared,
     })
 }
 
@@ -407,6 +422,19 @@ fn runtime_entrypoint(
     }
 }
 
+fn runtime_start_preflight(
+    manifest: &Manifest,
+    release: &FsPath,
+    configured_script: &str,
+) -> Result<RuntimeEntrypoint, &'static str> {
+    let entrypoint = runtime_entrypoint(manifest, release, false, configured_script)
+        .ok_or("A valid package start script or supported framework entrypoint is required")?;
+    if manifest.dependencies_declared && !release.join("node_modules").is_dir() {
+        return Err("Dependencies are declared in package.json, but node_modules is missing");
+    }
+    Ok(entrypoint)
+}
+
 pub(super) fn choose_package_manager(
     root: &FsPath,
     declaration: Option<&str>,
@@ -493,7 +521,7 @@ fn inspection_json(
         "runtime_missing_or_mismatched"
     } else if manager_binary.is_none() {
         "package_manager_missing"
-    } else if !dependencies_installed {
+    } else if manifest.dependencies_declared && !dependencies_installed {
         "dependencies_missing"
     } else if static_site && !manifest.scripts.iter().any(|script| script == "build") {
         "build_script_missing"
@@ -1396,27 +1424,9 @@ pub(super) async fn save_runtime_settings(
             "تا پایان استقرار نمی‌توان تنظیمات Runtime را تغییر داد.",
         ));
     }
-    if let Ok(release) = active_release(&app_id) {
-        if has_package_manifest(&release) {
-            let manifest = inspect_manifest(&release)
-                .map_err(|message| error(StatusCode::CONFLICT, &message))?;
-            if input.build_script != "auto"
-                && input.build_script != "none"
-                && !manifest.scripts.contains(&input.build_script)
-            {
-                return Err(error(
-                    StatusCode::BAD_REQUEST,
-                    "اسکریپت Build در package.json نسخهٔ فعلی پیدا نشد.",
-                ));
-            }
-            if input.start_script != "auto" && !manifest.scripts.contains(&input.start_script) {
-                return Err(error(
-                    StatusCode::BAD_REQUEST,
-                    "اسکریپت Runtime در package.json نسخهٔ فعلی پیدا نشد.",
-                ));
-            }
-        }
-    }
+    // Validate the script-name syntax here, but validate its existence against
+    // the incoming release during deployment. The selected version may add or
+    // rename scripts compared with the currently active release.
     db.execute(
         "UPDATE applications SET node_build_script=?1,node_start_script=?2,node_healthcheck_path=?3,version=version+1,updated_at=?4 WHERE id=?5 AND owner_server_uuid=?6 AND deleted_at IS NULL",
         params![input.build_script,input.start_script,input.healthcheck_path,now(),app_id,owner],
@@ -2665,10 +2675,10 @@ fn helper_service_enable(request: &Value) -> Value {
         Ok(value) => value,
         Err(message) => return json!({"ok":false,"error":message}),
     };
-    let entrypoint = runtime_entrypoint(&manifest, &release, false, start_script);
-    if entrypoint.is_none() || !release.join("node_modules").is_dir() {
-        return json!({"ok":false,"error":"A start script and installed dependencies are required"});
-    }
+    let entrypoint = match runtime_start_preflight(&manifest, &release, start_script) {
+        Ok(entrypoint) => entrypoint,
+        Err(message) => return json!({"ok":false,"error":message}),
+    };
     let group = app_group(app_id);
     if let Err(message) = ensure_group(&group)
         .and_then(|_| prepare_tree_for_service(&release, &root.join("shared"), &group))
@@ -2692,7 +2702,7 @@ fn helper_service_enable(request: &Value) -> Value {
         &package_manager,
         port,
         healthcheck_path,
-        entrypoint.unwrap(),
+        entrypoint,
     ) {
         Ok(content) => content,
         Err(message) => return json!({"ok":false,"error":message}),
@@ -3990,6 +4000,44 @@ mod tests {
         assert_eq!(m.node_engine.as_deref(), Some("^22"));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn dependency_free_node_app_can_start_without_a_node_modules_directory() {
+        let root = std::env::temp_dir().join(format!("arg-node-no-deps-{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"arg-nodejs-test-site","type":"module","scripts":{"build":"node scripts/build.mjs","start":"node server.mjs"}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("package-lock.json"), r#"{"lockfileVersion":3}"#).unwrap();
+
+        let manifest = inspect_manifest(&root).unwrap();
+        assert_eq!(manifest.manager, Some(PackageManager::Npm));
+        assert!(!manifest.dependencies_declared);
+        assert!(!root.join("node_modules").exists());
+        assert_eq!(
+            runtime_start_preflight(&manifest, &root, "auto"),
+            Ok(RuntimeEntrypoint::PackageScript("start".into()))
+        );
+
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"express":"^5"},"scripts":{"start":"node server.mjs"}}"#,
+        )
+        .unwrap();
+        let manifest = inspect_manifest(&root).unwrap();
+        assert!(manifest.dependencies_declared);
+        assert_eq!(
+            runtime_start_preflight(&manifest, &root, "auto"),
+            Err("Dependencies are declared in package.json, but node_modules is missing")
+        );
+        fs::create_dir(root.join("node_modules")).unwrap();
+        assert!(runtime_start_preflight(&manifest, &root, "auto").is_ok());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn conflicting_lockfiles_are_rejected_and_yarn_berry_is_not_guessed() {
         let root = std::env::temp_dir().join(format!("arg-node-test-{}", now()));
@@ -4268,6 +4316,7 @@ UNQUOTED=https://example.test/path?a=b
             scripts: vec!["start".to_owned(), "start:prod".to_owned()],
             manager: None,
             detected_framework: "node".to_owned(),
+            dependencies_declared: false,
         };
         assert_eq!(
             runtime_entrypoint(&manifest, FsPath::new("/unused"), false, "start:prod"),
