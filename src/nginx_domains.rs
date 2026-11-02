@@ -134,9 +134,9 @@ pub(super) async fn ensure_for_application(
         let db = state.lock().unwrap();
         let owner = federation::local_server_uuid(&db).map_err(db_error)?;
         db.query_row(
-            "SELECT domain,framework,listen_port,static_output_path,static_spa_fallback FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+            "SELECT domain,framework,listen_port,static_output_path,static_spa_fallback,runtime_version FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
             params![app_id, owner],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<u16>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?)),
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<u16>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?, row.get::<_, String>(5)?)),
         ).optional().map_err(db_error)?.ok_or_else(|| error(StatusCode::NOT_FOUND,"اپلیکیشن فعال پیدا نشد."))?
     };
     let Some(domain) = app.0.as_deref() else {
@@ -145,10 +145,10 @@ pub(super) async fn ensure_for_application(
         );
     };
     let name = site_name_for(app_id, &app.1);
-    let content = initial_config(app_id, domain, &app.1, app.2, &app.3, app.4)?;
+    let generated_config = initial_config(app_id, domain, &app.1, app.2, &app.3, app.4, &app.5);
     let existing =
         nginx::nginx_manager_request_async(json!({"action":"nginx-get","name":name})).await;
-    let (content, created) = match existing {
+    let (content, created, configured, enabled, message) = match existing {
         Ok(value) => {
             let current = value["site"]["content"].as_str().unwrap_or_default();
             if !nginx::nginx_managed_application_id(current).is_some_and(|id| id == app_id) {
@@ -157,18 +157,69 @@ pub(super) async fn ensure_for_application(
                     "فایل Nginx رزروشدهٔ اپ وجود دارد ولی مالکیت آن تأیید نشد؛ فایل تغییر نکرد.",
                 ));
             }
-            (current.to_owned(), false)
+            let currently_enabled = value["site"]["enabled"].as_bool().unwrap_or(false);
+            if is_legacy_application_placeholder(current, app_id) {
+                match generated_config {
+                    Ok(content) => {
+                        let saved = nginx::nginx_manager_request_async(
+                            json!({"action":"nginx-save","name":name,"content":content}),
+                        )
+                        .await?;
+                        let enabled = saved["site"]["enabled"]
+                            .as_bool()
+                            .unwrap_or(currently_enabled);
+                        (
+                            content,
+                            false,
+                            true,
+                            enabled,
+                            "کانفیگ پیش‌فرض 503 با تنظیمات واقعی Runtime جایگزین و اعتبارسنجی شد."
+                                .to_owned(),
+                        )
+                    }
+                    Err((_, body)) => {
+                        if currently_enabled {
+                            nginx::nginx_manager_request_async(
+                                json!({"action":"nginx-toggle","name":name,"enabled":false}),
+                            )
+                            .await?;
+                        }
+                        (
+                            current.to_owned(),
+                            false,
+                            false,
+                            false,
+                            body["error"].as_str().map(str::to_owned).unwrap_or_else(|| "Runtime وب این اپ آماده نیست؛ placeholder 503 برای جلوگیری از نمایش خطای ساختگی غیرفعال شد.".to_owned()),
+                        )
+                    }
+                }
+            } else {
+                (
+                    current.to_owned(),
+                    false,
+                    true,
+                    currently_enabled,
+                    "کانفیگ موجود اپ حفظ شد.".to_owned(),
+                )
+            }
         }
         Err((_, body))
             if body["error"]
                 .as_str()
                 .is_some_and(|message| message.contains("پیدا نشد")) =>
         {
+            let content = generated_config?;
             nginx::nginx_manager_request_async(
                 json!({"action":"nginx-create","name":name,"content":content}),
             )
             .await?;
-            (content, true)
+            (
+                content,
+                true,
+                true,
+                false,
+                "کانفیگ Nginx ساخته و بررسی شد؛ تا آماده‌شدن release غیرفعال می‌ماند.".to_owned(),
+            )
         }
         Err(problem) => return Err(problem),
     };
@@ -192,7 +243,7 @@ pub(super) async fn ensure_for_application(
         );
     }
     Ok(
-        json!({"configured":true,"created":created,"site":{"name":name,"enabled":false,"content":content,"content_hash":hex::encode(Sha256::digest(content.as_bytes())),"application_id":app_id},"domains":nginx::nginx_server_names(&content),"message":"کانفیگ Nginx ساخته و با nginx -t بررسی شد؛ تا آماده‌شدن release غیرفعال می‌ماند."}),
+        json!({"configured":configured,"created":created,"site":{"name":name,"enabled":enabled,"content":content,"content_hash":hex::encode(Sha256::digest(content.as_bytes())),"application_id":app_id},"domains":nginx::nginx_server_names(&content),"message":message}),
     )
 }
 
@@ -214,6 +265,7 @@ fn initial_config(
     port: Option<u16>,
     _output: &str,
     spa: bool,
+    runtime_version: &str,
 ) -> Result<String, (StatusCode, Json<Value>)> {
     if !apps::valid_domain(domain) || domain.contains('*') {
         return Err(error(
@@ -224,19 +276,121 @@ fn initial_config(
     Ok(match framework {
         "laravel" => {
             let socket = format!("/run/php/arg-app-{}.sock", &app_id[..8]);
-            laravel::app_nginx_config(app_id,domain,&socket,None)
+            laravel::app_nginx_config(app_id, domain, &socket, None)
         }
         "node" | "next" | "nuxt" => {
-            let port = port.filter(|port| *port >= 1024).ok_or_else(|| error(StatusCode::CONFLICT,"برای اپلیکیشن Node باید پورت loopback رزرو شود."))?;
-            nginx::node_proxy_config(app_id,domain,port)
+            let port = port.filter(|port| *port >= 1024).ok_or_else(|| {
+                error(
+                    StatusCode::CONFLICT,
+                    "برای اپلیکیشن Node باید پورت loopback رزرو شود.",
+                )
+            })?;
+            nginx::node_proxy_config(app_id, domain, port)
         }
         "static" | "react" | "vue" | "vite" => {
-            let root = std::env::var_os("ARG_DEPLOY_ROOT").map(std::path::PathBuf::from).unwrap_or_else(|| std::path::PathBuf::from("/var/lib/arg/deployments")).join("apps").join(app_id).join("current");
-            let root_text = root.to_str().filter(|path| path.starts_with('/') && !path.contains("..") && path.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))).ok_or_else(|| error(StatusCode::BAD_REQUEST,"مسیر انتشار برای ساخت امن کانفیگ Nginx معتبر نیست."))?;
-            nginx::static_site_config(app_id,domain,std::path::Path::new(root_text),spa)
+            let root = std::env::var_os("ARG_DEPLOY_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/arg/deployments"))
+                .join("apps")
+                .join(app_id)
+                .join("current");
+            let root_text = root
+                .to_str()
+                .filter(|path| {
+                    path.starts_with('/')
+                        && !path.contains("..")
+                        && path
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+                })
+                .ok_or_else(|| {
+                    error(
+                        StatusCode::BAD_REQUEST,
+                        "مسیر انتشار برای ساخت امن کانفیگ Nginx معتبر نیست.",
+                    )
+                })?;
+            nginx::static_site_config(app_id, domain, std::path::Path::new(root_text), spa)
         }
-        _ => format!("# ARG managed Application site app={app_id}\nserver {{\n    listen 80;\n    server_name {domain};\n    server_tokens off;\n    location / {{ return 503; }}\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n}}\n"),
+        "wordpress" => {
+            let socket = select_wordpress_fpm_socket(runtime_version, &nginx::php_fpm_sockets())
+                .ok_or_else(|| error(StatusCode::CONFLICT, "برای WordPress باید PHP-FPM سازگار و فعال باشد؛ نسخه و سرویس PHP-FPM را نصب یا راه‌اندازی کن، سپس ساخت تنظیمات Nginx را دوباره اجرا کن."))?;
+            let root = std::env::var_os("ARG_DEPLOY_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/arg/deployments"))
+                .join("apps")
+                .join(app_id)
+                .join("current");
+            let root_text = root
+                .to_str()
+                .filter(|path| {
+                    path.starts_with('/')
+                        && !path.contains("..")
+                        && path
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"._-/".contains(&byte))
+                })
+                .ok_or_else(|| {
+                    error(
+                        StatusCode::BAD_REQUEST,
+                        "مسیر انتشار WordPress برای ساخت امن کانفیگ Nginx معتبر نیست.",
+                    )
+                })?;
+            wordpress_app_config(app_id, domain, root_text, &socket)
+        }
+        _ => {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "برای این قالب هنوز Runtime وب و upstream مدیریت‌شده تعریف نشده است؛ کانفیگ خودکار Nginx ساخته نشد تا سایت با 503 گمراه‌کننده منتشر نشود. نوع Runtime و upstream را تنظیم کن یا سایت را از Nginx با کانفیگ سفارشی مدیریت کن.",
+            ));
+        }
     })
+}
+
+fn select_wordpress_fpm_socket(runtime_version: &str, available: &[String]) -> Option<String> {
+    let runtime_version = runtime_version.trim();
+    if runtime_version != "system" {
+        let expected = format!("unix:/run/php/php{runtime_version}-fpm.sock");
+        return available
+            .iter()
+            .find(|socket| socket.as_str() == expected.as_str())
+            .cloned();
+    }
+    if let Some(default_socket) = available
+        .iter()
+        .find(|socket| socket.as_str() == "unix:/run/php/php-fpm.sock")
+    {
+        return Some(default_socket.clone());
+    }
+    let mut versioned = available
+        .iter()
+        .filter_map(|socket| {
+            let filename = socket
+                .strip_prefix("unix:/run/php/php")?
+                .strip_suffix("-fpm.sock")?;
+            let version = filename
+                .split('.')
+                .map(str::parse::<u32>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            Some((version, socket.clone()))
+        })
+        .collect::<Vec<_>>();
+    versioned.sort_by(|left, right| left.0.cmp(&right.0));
+    versioned.pop().map(|(_, socket)| socket)
+}
+
+fn wordpress_app_config(app_id: &str, domain: &str, root: &str, socket: &str) -> String {
+    format!("# ARG managed WordPress Application site app={app_id}\nserver {{\n    listen 80;\n    server_name {domain};\n    root {root};\n    index index.php index.html;\n    charset utf-8;\n    server_tokens off;\n    client_max_body_size 64m;\n\n    location / {{\n        try_files $uri $uri/ /index.php?$args;\n    }}\n\n    location = /wp-config.php {{ deny all; }}\n    location ~* ^/(?:readme\\.html|license\\.txt)$ {{ deny all; }}\n    location ~* ^/wp-content/uploads/.*\\.php$ {{ deny all; }}\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n    location ~* \\.(?:env|ini|log|sql|sqlite|bak|zip|gz|tar)$ {{ deny all; }}\n\n    location ~ \\.php$ {{\n        try_files $uri =404;\n        include fastcgi_params;\n        fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;\n        fastcgi_param DOCUMENT_ROOT $realpath_root;\n        fastcgi_pass {socket};\n        fastcgi_hide_header X-Powered-By;\n    }}\n}}\n")
+}
+
+fn is_legacy_application_placeholder(content: &str, app_id: &str) -> bool {
+    let domains = nginx::nginx_server_names(content);
+    if domains.is_empty() {
+        return false;
+    }
+    let domain_list = domains.join(" ");
+    let legacy = format!("# ARG managed Application site app={app_id}\nserver {{\n    listen 80;\n    server_name {domain_list};\n    server_tokens off;\n    location / {{ return 503; }}\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n}}\n");
+    content == legacy
 }
 
 pub(super) async fn update_domains(
@@ -801,26 +955,85 @@ mod tests {
             Some(31234),
             "auto",
             true,
+            "system",
         )
         .unwrap();
         assert!(
             proxy.contains("# Managed by ARG Node runner app=12345678-1234-4234-8234-123456789abc")
         );
         assert!(proxy.contains("proxy_pass http://127.0.0.1:31234;"));
-        let placeholder =
-            initial_config(app_id, "app.example.test", "custom", None, "auto", true).unwrap();
-        assert!(placeholder
-            .contains("# ARG managed Application site app=12345678-1234-4234-8234-123456789abc"));
-        assert!(placeholder.contains("return 503;"));
+        for framework in ["auto", "custom", "python"] {
+            assert!(initial_config(
+                app_id,
+                "app.example.test",
+                framework,
+                None,
+                "auto",
+                true,
+                "system",
+            )
+            .is_err());
+        }
         assert!(initial_config(
             app_id,
             "app.example.test; include /tmp/evil",
             "custom",
             None,
             "auto",
-            true
+            true,
+            "system"
         )
         .is_err());
+    }
+
+    #[test]
+    fn wordpress_application_gets_wordpress_rewrites_and_php_fastcgi() {
+        let config = wordpress_app_config(
+            "12345678-1234-4234-8234-123456789abc",
+            "wp.example.test",
+            "/var/lib/arg/deployments/apps/12345678-1234-4234-8234-123456789abc/current",
+            "unix:/run/php/php8.5-fpm.sock",
+        );
+        assert!(config.contains("try_files $uri $uri/ /index.php?$args;"));
+        assert!(config.contains("fastcgi_pass unix:/run/php/php8.5-fpm.sock;"));
+        assert!(config.contains("SCRIPT_FILENAME $realpath_root$fastcgi_script_name;"));
+        assert!(config.contains("location = /wp-config.php { deny all; }"));
+        assert!(config.contains("/wp-content/uploads/.*\\.php$ { deny all; }"));
+        assert!(!config.contains("return 503;"));
+    }
+
+    #[test]
+    fn wordpress_socket_selection_respects_runtime_and_defaults_safely() {
+        let available = vec![
+            "unix:/run/php/php8.3-fpm.sock".to_owned(),
+            "unix:/run/php/php8.5-fpm.sock".to_owned(),
+            "unix:/run/php/php-fpm.sock".to_owned(),
+        ];
+        assert_eq!(
+            select_wordpress_fpm_socket("8.3", &available).as_deref(),
+            Some("unix:/run/php/php8.3-fpm.sock")
+        );
+        assert_eq!(
+            select_wordpress_fpm_socket("system", &available).as_deref(),
+            Some("unix:/run/php/php-fpm.sock")
+        );
+        assert_eq!(select_wordpress_fpm_socket("8.2", &available), None);
+        assert_eq!(select_wordpress_fpm_socket("system", &[]), None);
+    }
+
+    #[test]
+    fn only_pristine_legacy_wordpress_503_config_is_migrated() {
+        let app_id = "12345678-1234-4234-8234-123456789abc";
+        let legacy = format!("# ARG managed Application site app={app_id}\nserver {{\n    listen 80;\n    server_name wp.example.test www.wp.example.test;\n    server_tokens off;\n    location / {{ return 503; }}\n    location ~ /\\.(?!well-known(?:/|$)) {{ deny all; }}\n}}\n");
+        assert!(is_legacy_application_placeholder(&legacy, app_id));
+        assert!(!is_legacy_application_placeholder(
+            &legacy.replace("return 503;", "try_files $uri =404;"),
+            app_id
+        ));
+        assert!(!is_legacy_application_placeholder(
+            &legacy,
+            "different-app-id"
+        ));
     }
 
     #[test]

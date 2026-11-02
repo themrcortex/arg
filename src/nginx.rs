@@ -367,12 +367,21 @@ pub(super) async fn nginx_status(State(state): State<AppState>, headers: HeaderM
         require_admin(&db, &headers)?;
     }
     let mut result = nginx_manager_request_async(json!({"action":"nginx-status"})).await?;
+    let sockets = php_fpm_sockets();
+    result["php_fpm_sockets"] = json!(sockets);
+    Ok(Json(result))
+}
+
+pub(super) fn php_fpm_sockets() -> Vec<String> {
     let mut sockets = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/run/php") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with("php")
                 && name.ends_with("-fpm.sock")
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
                 && entry
                     .metadata()
                     .is_ok_and(|metadata| metadata.file_type().is_socket())
@@ -383,11 +392,13 @@ pub(super) async fn nginx_status(State(state): State<AppState>, headers: HeaderM
     }
     sockets.sort();
     sockets.dedup();
-    if sockets.is_empty() && std::path::Path::new("/run/php/php-fpm.sock").exists() {
+    if sockets.is_empty()
+        && std::fs::metadata("/run/php/php-fpm.sock")
+            .is_ok_and(|metadata| metadata.file_type().is_socket())
+    {
         sockets.push("unix:/run/php/php-fpm.sock".into());
     }
-    result["php_fpm_sockets"] = json!(sockets);
-    Ok(Json(result))
+    sockets
 }
 
 pub(super) async fn api_nginx_browse_files(
