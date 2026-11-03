@@ -1,6 +1,6 @@
 # ARG Change Log
 
-## Unreleased
+## v0.7.9-dev.16 — 2026-11-03
 
 ### Fixed
 - Prevent Nginx file reconciliation from deadlocking ARG by saving the synchronized snapshot and audit event under one database lock.
