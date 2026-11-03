@@ -71,6 +71,98 @@ pub(super) fn store_nginx_snapshot(
     db.execute("INSERT INTO nginx_site_config_state(name,content,settings_json,content_hash,updated_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(name) DO UPDATE SET content=excluded.content,settings_json=excluded.settings_json,content_hash=excluded.content_hash,updated_at=excluded.updated_at", params![name, content, settings.map(Value::to_string), nginx_content_hash(content), now()])?;
     Ok(())
 }
+
+fn persist_nginx_sync(
+    state: &AppState,
+    actor: &str,
+    name: &str,
+    source: &str,
+    content: &str,
+    settings: Option<&Value>,
+) -> Result<(), rusqlite::Error> {
+    // Snapshot and audit share the same global DB mutex. Keep both writes under
+    // one guard; reacquiring AppState's std::sync::Mutex before dropping it
+    // deadlocks the handler and blocks every request that needs the database.
+    let db = state.lock().unwrap();
+    store_nginx_snapshot(&db, name, content, settings)?;
+    audit(
+        &db,
+        actor,
+        "nginx.site.sync",
+        &format!("site={name} source={source}"),
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod nginx_sync_tests {
+    use super::persist_nginx_sync;
+    use crate::{AppState, Connection};
+    use serde_json::{json, Value};
+    use std::{
+        sync::{mpsc, Arc, Mutex},
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn syncing_current_file_persists_snapshot_and_audit_without_relocking() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE nginx_site_config_state (name TEXT PRIMARY KEY, content TEXT NOT NULL, settings_json TEXT, content_hash TEXT NOT NULL, updated_at INTEGER NOT NULL);
+             CREATE TABLE audit (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);",
+        )
+        .unwrap();
+        let state: AppState = Arc::new(Mutex::new(db));
+        let settings: Value = json!({"source":"current-file"});
+        let expected_settings = settings.to_string();
+        let (sender, receiver) = mpsc::channel();
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            let result = persist_nginx_sync(
+                &worker_state,
+                "admin",
+                "example.conf",
+                "file",
+                "server { listen 80; }",
+                Some(&settings),
+            );
+            let _ = sender.send(result);
+        });
+
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("sync persistence must not deadlock on the database mutex")
+            .unwrap();
+        worker.join().unwrap();
+
+        let db = state.lock().unwrap();
+        let snapshot: (String, Option<String>) = db
+            .query_row(
+                "SELECT content, settings_json FROM nginx_site_config_state WHERE name='example.conf'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(snapshot.0, "server { listen 80; }");
+        assert_eq!(snapshot.1.as_deref(), Some(expected_settings.as_str()));
+
+        let event: (String, String, String) = db
+            .query_row("SELECT actor, action, detail FROM audit", [], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(
+            event,
+            (
+                "admin".into(),
+                "nginx.site.sync".into(),
+                "site=example.conf source=file".into()
+            )
+        );
+    }
+}
+
 #[derive(Deserialize)]
 pub(super) struct NginxSiteRenameInput {
     new_name: String,
@@ -1368,15 +1460,15 @@ pub(super) async fn sync_nginx_site(
         nginx_site_content(&file)?.to_owned()
     };
     let parsed = settings.and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let db = state.lock().unwrap();
-    store_nginx_snapshot(&db, &name, &content, parsed.as_ref()).map_err(db_error)?;
-    let db = state.lock().unwrap();
-    audit(
-        &db,
+    persist_nginx_sync(
+        &state,
         &actor,
-        "nginx.site.sync",
-        &format!("site={name} source={}", input.source),
-    );
+        &name,
+        &input.source,
+        &content,
+        parsed.as_ref(),
+    )
+    .map_err(db_error)?;
     Ok(Json(
         json!({"ok":true,"source":input.source,"message":"همگام‌سازی انجام شد. کانفیگ Nginx نیز اعتبارسنجی شد."}),
     ))
