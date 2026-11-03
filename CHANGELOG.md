@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.7.9-dev.13 — 2026-11-03
+
+### Added
+- Add a scoped MCP interface for AI agents with revocable, hashed credentials, rate limits, and read-only application and deployment inspection.
+- Add documented, admin-approved application deployment proposals that reuse saved configuration and the standard deployment queue.
+
 ## v0.7.9-dev.12 — 2026-11-02
 
 ### Development
