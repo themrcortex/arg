@@ -18,10 +18,16 @@ const AGENT_SCOPES: &[&str] = &[
     "docs:read",
     "repository:read",
     "deployments:propose",
+    "terminal:root:propose",
 ];
 const AGENT_REQUESTS_PER_MINUTE: i64 = 30;
 const MAX_PENDING_PROPOSALS: i64 = 20;
 const MAX_AGENT_LIFETIME_DAYS: i64 = 30;
+const MAX_ROOT_COMMAND_BYTES: usize = 1200;
+const ROOT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const MAX_ROOT_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
+static ROOT_COMMAND_OUTPUTS: OnceLock<Mutex<HashMap<String, (i64, String, i64)>>> = OnceLock::new();
+static ROOT_COMMANDS: OnceLock<Mutex<HashMap<String, (i64, String, i64)>>> = OnceLock::new();
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +35,19 @@ pub(super) struct CreateAgentInput {
     label: String,
     expires_days: i64,
     scopes: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UpdateAgentScopesInput {
+    scopes: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ApproveProposalInput {
+    password: Option<String>,
+    confirmation: Option<String>,
 }
 
 #[derive(Clone)]
@@ -105,11 +124,30 @@ pub(super) fn revoke_if_owner_ineligible(
     if enabled && role == "admin" {
         return Ok(0);
     }
+    let token_ids = {
+        let mut statement = db.prepare("SELECT id FROM ai_agent_tokens WHERE user_id=?1")?;
+        let rows = statement.query_map([user_id], |row| row.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
     let changed = db.execute(
         "UPDATE ai_agent_tokens SET revoked_at=?1 WHERE user_id=?2 AND revoked_at IS NULL",
         params![now(), user_id],
     )?;
-    db.execute("UPDATE ai_agent_proposals SET state='rejected',reviewed_at=?1,reviewed_by='system:owner-ineligible' WHERE user_id=?2 AND state='pending'", params![now(),user_id])?;
+    db.execute("UPDATE ai_agent_proposals SET state='rejected',action_json='{}',reviewed_at=?1,reviewed_by='system:owner-ineligible' WHERE user_id=?2 AND state='pending'", params![now(),user_id])?;
+    if let Some(commands) = ROOT_COMMANDS.get() {
+        let ids = token_ids.iter().copied().collect::<HashSet<_>>();
+        commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, (token_id, _, _)| !ids.contains(token_id));
+    }
+    if let Some(outputs) = ROOT_COMMAND_OUTPUTS.get() {
+        let ids = token_ids.into_iter().collect::<HashSet<_>>();
+        outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, (token_id, _, _)| !ids.contains(token_id));
+    }
     Ok(changed)
 }
 
@@ -184,11 +222,7 @@ pub(super) async fn create(
             "مجوز انتخاب‌شده پشتیبانی نمی‌شود.",
         ));
     }
-    let scopes = AGENT_SCOPES
-        .iter()
-        .filter(|scope| input.scopes.iter().any(|selected| selected == **scope))
-        .copied()
-        .collect::<Vec<_>>();
+    let scopes = normalized_scopes(&input.scopes);
     let active: i64 = db.query_row(
         "SELECT COUNT(*) FROM ai_agent_tokens WHERE user_id=?1 AND revoked_at IS NULL AND expires_at>?2",
         params![admin.id, now()], |row| row.get(0),
@@ -219,6 +253,80 @@ pub(super) async fn create(
     ))
 }
 
+pub(super) async fn update_scopes(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<UpdateAgentScopesInput>,
+) -> ApiResult {
+    if !secure_transport(&headers, peer.ip()) {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "تغییر مجوز عامل فقط روی HTTPS مجاز است.",
+        ));
+    }
+    check_origin(&headers)?;
+    let db = state.lock().unwrap();
+    let admin = require_admin(&db, &headers)?;
+    if input.scopes.is_empty()
+        || input
+            .scopes
+            .iter()
+            .any(|scope| !AGENT_SCOPES.contains(&scope.as_str()))
+    {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "مجوز انتخاب‌شده پشتیبانی نمی‌شود.",
+        ));
+    }
+    let scopes = normalized_scopes(&input.scopes);
+    let prior: Option<String> = db.query_row(
+        "SELECT scopes_json FROM ai_agent_tokens WHERE id=?1 AND user_id=?2 AND revoked_at IS NULL AND expires_at>?3",
+        params![id, admin.id, now()],
+        |row| row.get(0),
+    ).optional().map_err(db_error)?;
+    let Some(prior) = prior else {
+        return Err(error(StatusCode::NOT_FOUND, "توکن فعال پیدا نشد."));
+    };
+    db.execute("UPDATE ai_agent_tokens SET scopes_json=?1 WHERE id=?2 AND user_id=?3 AND revoked_at IS NULL", params![serde_json::to_string(&scopes).unwrap_or_else(|_| "[]".into()),id,admin.id]).map_err(db_error)?;
+    if !scopes.iter().any(|scope| scope == "terminal:root:propose") {
+        db.execute("UPDATE ai_agent_proposals SET state='rejected',action_json='{}',reviewed_at=?1,reviewed_by='system:root-scope-removed' WHERE token_id=?2 AND action_type='root_command' AND state='pending'", params![now(),id]).map_err(db_error)?;
+        if let Some(outputs) = ROOT_COMMAND_OUTPUTS.get() {
+            outputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|_, (token_id, _, _)| *token_id != id);
+        }
+        if let Some(commands) = ROOT_COMMANDS.get() {
+            commands
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .retain(|_, (token_id, _, _)| *token_id != id);
+        }
+    }
+    let prior_scopes: Vec<String> = serde_json::from_str(&prior).unwrap_or_default();
+    audit(
+        &db,
+        &admin.username,
+        "ai_agent.token.scopes_update",
+        &format!(
+            "token_id={id}; previous={}; current={}",
+            prior_scopes.join(","),
+            scopes.join(",")
+        ),
+    );
+    Ok(Json(json!({"ok":true,"id":id,"scopes":scopes})))
+}
+
+fn normalized_scopes(selected: &[String]) -> Vec<String> {
+    AGENT_SCOPES
+        .iter()
+        .filter(|scope| selected.iter().any(|value| value == **scope))
+        .map(|scope| (*scope).to_owned())
+        .collect()
+}
+
 pub(super) async fn revoke(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -243,7 +351,19 @@ pub(super) async fn revoke(
     if changed == 0 {
         return Err(error(StatusCode::NOT_FOUND, "اتصال فعال عامل پیدا نشد."));
     }
-    db.execute("UPDATE ai_agent_proposals SET state='rejected',reviewed_at=?1,reviewed_by='system:token-revoked' WHERE token_id=?2 AND state='pending'", params![now(),id]).map_err(db_error)?;
+    db.execute("UPDATE ai_agent_proposals SET state='rejected',action_json='{}',reviewed_at=?1,reviewed_by='system:token-revoked' WHERE token_id=?2 AND state='pending'", params![now(),id]).map_err(db_error)?;
+    if let Some(outputs) = ROOT_COMMAND_OUTPUTS.get() {
+        outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, (token_id, _, _)| *token_id != id);
+    }
+    if let Some(commands) = ROOT_COMMANDS.get() {
+        commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, (token_id, _, _)| *token_id != id);
+    }
     audit(
         &db,
         &admin.username,
@@ -355,13 +475,28 @@ pub(super) async fn mcp(
         Ok(context) => context,
         Err((status, body)) => return (status, body).into_response(),
     };
+    if db.execute("UPDATE ai_agent_proposals SET state='expired',action_json=CASE WHEN action_type='root_command' THEN '{}' ELSE action_json END WHERE state='pending' AND expires_at<=?1", [now()]).is_err() {
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "درخواست‌های منقضی پاک‌سازی نشدند.").into_response();
+    }
+    if let Some(outputs) = ROOT_COMMAND_OUTPUTS.get() {
+        outputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, (_, _, expires)| *expires > now());
+    }
+    if let Some(commands) = ROOT_COMMANDS.get() {
+        commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, (_, _, expires)| *expires > now());
+    }
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
     let result = match method {
         "initialize" => Ok(json!({
             "protocolVersion":"2025-03-26",
             "capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false}},
             "serverInfo":{"name":"arg-control-center","version":env!("CARGO_PKG_VERSION")},
-            "instructions":"ARG MCP is scoped to the token's explicit permissions. Write operations are only submitted as proposals and require approval in the ARG panel. Arbitrary shell, secrets and unrestricted API forwarding are not available."
+            "instructions":"ARG MCP is scoped to the token's explicit permissions. Deployment and root-command operations are only submitted as proposals and require explicit approval in the ARG panel. Root commands additionally require fresh administrator password verification and a typed confirmation; no persistent interactive root shell is provided. Secrets and unrestricted API forwarding are not available."
         })),
         "notifications/initialized" => {
             return if is_notification {
@@ -440,6 +575,10 @@ fn available_tools(scopes: &[String]) -> Vec<Value> {
     }
     if scopes.iter().any(|scope| scope == "deployments:propose") {
         tools.push(json!({"name":"propose_application_deployment","description":"درخواست استقرار با منبع و فرمان پیش‌فرضی که مدیر قبلاً در ARG ذخیره کرده است. این فراخوانی هیچ استقراری اجرا نمی‌کند؛ مدیر باید آن را در پنل بررسی و تأیید کند.","inputSchema":{"type":"object","properties":{"application_id":{"type":"string","minLength":1,"maxLength":64},"reason":{"type":"string","maxLength":500}},"required":["application_id"],"additionalProperties":false}}));
+    }
+    if scopes.iter().any(|scope| scope == "terminal:root:propose") {
+        tools.push(json!({"name":"propose_root_command","description":"پیشنهاد یک فرمان یک‌خطی برای اجرای موقت در ترمینال root. تا وقتی مدیر در ARG فرمان دقیق را بررسی، رمز خود را دوباره وارد و صریحاً تأیید نکند، هیچ فرمانی اجرا نمی‌شود.","inputSchema":{"type":"object","properties":{"command":{"type":"string","minLength":1,"maxLength":1200},"reason":{"type":"string","maxLength":500}},"required":["command"],"additionalProperties":false}}));
+        tools.push(json!({"name":"get_root_command_result","description":"وضعیت درخواست فرمان root را بخوان؛ خروجی فقط یک‌بار و فقط برای همان توکن ارائه می‌شود و روی دیسک ذخیره نمی‌شود.","inputSchema":{"type":"object","properties":{"proposal_id":{"type":"string","minLength":1,"maxLength":64}},"required":["proposal_id"],"additionalProperties":false}}));
     }
     tools
 }
@@ -635,8 +774,268 @@ fn call_tool(db: &mut Connection, context: &AgentContext, params: &Value) -> Res
                 json!({"proposal_id":proposal_id,"application_id":app_id,"application_name":app_name,"action":"deploy_application","deployment":snapshot.get("source_summary"),"pre_deploy_command_count":snapshot.get("pre_deploy_command_count"),"state":"pending_approval","expires_at":created_at+1800,"message":"استقرار اجرا نشده است. مدیر باید درخواست را در ARG بررسی و تأیید کند."}),
             ))
         }
+        "propose_root_command" => {
+            ensure_scope(context, "terminal:root:propose")?;
+            let command = arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "فرمان لازم است.".to_owned())?;
+            if !valid_root_command(command) {
+                return Err("فرمان باید یک خط، حداکثر ۱۲۰۰ بایت و بدون نویسهٔ کنترلی باشد.".into());
+            }
+            let reason = arguments
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if reason.len() > 500 || reason.chars().any(char::is_control) {
+                return Err("توضیح درخواست حداکثر ۵۰۰ نویسه و بدون نویسهٔ کنترلی باشد.".into());
+            }
+            let pending: i64 = db.query_row("SELECT COUNT(*) FROM ai_agent_proposals WHERE token_id=?1 AND state IN ('pending','approving') AND expires_at>?2", params![context.id,now()], |row| row.get(0)).map_err(|_| "درخواست‌های معلق شمرده نشدند.".to_owned())?;
+            if pending >= MAX_PENDING_PROPOSALS {
+                return Err("این اتصال به سقف ۲۰ درخواست معلق رسیده است.".into());
+            }
+            let id = apps::random_uuid();
+            let created = now();
+            db.execute("INSERT INTO ai_agent_proposals(id,token_id,user_id,action_type,application_id,action_json,reason,state,created_at,expires_at) VALUES(?1,?2,?3,'root_command','','{}',?4,'pending',?5,?6)", params![id,context.id,context.user_id,reason,created,created+300]).map_err(|_| "درخواست فرمان ذخیره نشد.".to_owned())?;
+            ROOT_COMMANDS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(id.clone(), (context.id, command.to_owned(), created + 300));
+            audit(
+                db,
+                &format!("ai-agent:{}", context.label),
+                "ai_agent.root_command.propose",
+                &format!("proposal_id={id}; requester={}", context.username),
+            );
+            Ok(text_tool_result(
+                json!({"proposal_id":id,"action":"root_command","state":"pending_approval","expires_at":created+300,"message":"فرمان هنوز اجرا نشده است. مدیر باید متن دقیق فرمان را در ARG بررسی کند، رمز را دوباره وارد کند و تأیید صریح بدهد."}),
+            ))
+        }
+        "get_root_command_result" => {
+            ensure_scope(context, "terminal:root:propose")?;
+            let proposal_id = arguments
+                .get("proposal_id")
+                .and_then(Value::as_str)
+                .filter(|id| apps::valid_uuid(id))
+                .ok_or_else(|| "شناسهٔ درخواست معتبر نیست.".to_owned())?;
+            let state: Option<String> = db.query_row("SELECT state FROM ai_agent_proposals WHERE id=?1 AND token_id=?2 AND action_type='root_command'", params![proposal_id,context.id], |row| row.get(0)).optional().map_err(|_| "وضعیت درخواست خوانده نشد.".to_owned())?;
+            let Some(state) = state else {
+                return Err("درخواست برای این توکن پیدا نشد.".into());
+            };
+            if state != "approved" {
+                return Ok(text_tool_result(
+                    json!({"proposal_id":proposal_id,"state":state,"output":""}),
+                ));
+            }
+            let outputs = ROOT_COMMAND_OUTPUTS.get_or_init(|| Mutex::new(HashMap::new()));
+            let result = outputs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(proposal_id);
+            match result {
+                Some((token_id, output, exit_code)) if token_id == context.id => {
+                    Ok(text_tool_result(
+                        json!({"proposal_id":proposal_id,"state":"completed","exit_code":exit_code,"output":output,"notice":"این خروجی فقط یک‌بار قابل دریافت بود و از حافظهٔ موقت حذف شد."}),
+                    ))
+                }
+                _ => Ok(text_tool_result(
+                    json!({"proposal_id":proposal_id,"state":"completed","output":"خروجی موقت در دسترس نیست؛ احتمالاً قبلاً خوانده شده یا پنل راه‌اندازی مجدد شده است."}),
+                )),
+            }
+        }
         _ => Err("ابزار در این اتصال موجود نیست.".into()),
     }
+}
+
+fn valid_root_command(command: &str) -> bool {
+    !command.trim().is_empty()
+        && command.len() <= MAX_ROOT_COMMAND_BYTES
+        && !command.chars().any(|character| character.is_control())
+}
+
+fn verify_admin_reauthentication(
+    db: &Connection,
+    admin_id: i64,
+    password: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let throttle_key = format!("root-terminal:{admin_id}");
+    let attempts: Option<(i64, i64)> = db
+        .query_row(
+            "SELECT count,window_start FROM auth_failures WHERE username=?1",
+            [&throttle_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if attempts
+        .is_some_and(|(count, window_start)| count >= 8 && now().saturating_sub(window_start) < 600)
+    {
+        return Err(error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "تعداد تلاش رمز مدیر زیاد است؛ کمی بعد دوباره امتحان کن.",
+        ));
+    }
+    let password_hash: String = db
+        .query_row(
+            "SELECT password_hash FROM users WHERE id=?1 AND enabled=1 AND role='admin'",
+            [admin_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let parsed = PasswordHash::new(&password_hash).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "اعتبارسنجی رمز مدیر ممکن نیست.",
+        )
+    })?;
+    if Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_err()
+    {
+        let at = now();
+        db.execute(
+            "INSERT INTO auth_failures(username,count,window_start) VALUES(?1,1,?2) ON CONFLICT(username) DO UPDATE SET count=CASE WHEN ?2-window_start>=600 THEN 1 ELSE count+1 END,window_start=CASE WHEN ?2-window_start>=600 THEN ?2 ELSE window_start END",
+            params![throttle_key, at],
+        )
+        .map_err(db_error)?;
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "رمز مدیر نادرست است؛ فرمان root اجرا نشد.",
+        ));
+    }
+    db.execute(
+        "DELETE FROM auth_failures WHERE username=?1",
+        [&throttle_key],
+    )
+    .map_err(db_error)?;
+    Ok(())
+}
+
+fn execute_root_command(command: &str) -> Result<(String, i64), String> {
+    if !valid_root_command(command) {
+        return Err("فرمان root معتبر نیست.".into());
+    }
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 28,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|_| "ساخت محیط موقت ترمینال root ناموفق بود.".to_owned())?;
+    let master = pair.master;
+    let slave = pair.slave;
+    let tty = master
+        .tty_name()
+        .ok_or_else(|| "نشانی ترمینال موقت در دسترس نیست.".to_owned())?
+        .to_string_lossy()
+        .into_owned();
+    let response = privileged_request(
+        json!({"action":"terminal-root-start","tty":tty,"max_lifetime_seconds":30}),
+    )
+    .map_err(|_| "سرویس عملیات ممتاز در دسترس نیست.".to_owned())?;
+    if response.get("ok") != Some(&Value::Bool(true)) {
+        return Err(response
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("ساخت ترمینال root رد شد.")
+            .to_owned());
+    }
+    let pid = response
+        .get("pid")
+        .and_then(Value::as_u64)
+        .filter(|pid| *pid > 1 && *pid <= i32::MAX as u64)
+        .ok_or_else(|| "شناسهٔ فرایند root معتبر نیست.".to_owned())? as u32;
+    let result = (|| {
+        let mut writer = master
+            .take_writer()
+            .map_err(|_| "نوشتن در ترمینال root ممکن نیست.".to_owned())?;
+        let reader = master
+            .try_clone_reader()
+            .map_err(|_| "خواندن ترمینال root ممکن نیست.".to_owned())?;
+        let marker = format!("ARG_ROOT_DONE_{}", apps::random_uuid().replace('-', ""));
+        let script =
+            format!("{command}\n__arg_exit=$?; printf '\\n{marker}:%s\\n' \"$__arg_exit\"\n");
+        writer
+            .write_all(script.as_bytes())
+            .map_err(|_| "فرمان به ترمینال root ارسال نشد.".to_owned())?;
+        drop(writer);
+        drop(slave);
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buffer = [0_u8; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(size) if sender.send(buffer[..size].to_vec()).is_err() => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        let deadline = Instant::now() + ROOT_COMMAND_TIMEOUT;
+        let mut captured = Vec::new();
+        let marker_bytes = marker.as_bytes();
+        let status = loop {
+            if Instant::now() >= deadline {
+                return Err("اجرای فرمان root از مهلت ۲۰ ثانیه عبور کرد و متوقف شد.".to_owned());
+            }
+            match receiver.recv_timeout(std::time::Duration::from_millis(150)) {
+                Ok(chunk) => {
+                    captured.extend_from_slice(&chunk);
+                    if captured.len() > MAX_ROOT_COMMAND_OUTPUT_BYTES + 512 {
+                        let remove = captured.len() - MAX_ROOT_COMMAND_OUTPUT_BYTES - 512;
+                        captured.drain(..remove);
+                    }
+                    if let Some(start) = captured
+                        .windows(marker_bytes.len())
+                        .position(|window| window == marker_bytes)
+                    {
+                        let tail_start = start + marker_bytes.len();
+                        let tail = &captured[tail_start..];
+                        if let Some(colon) = tail.iter().position(|byte| *byte == b':') {
+                            let status_bytes = &tail[colon + 1..];
+                            if let Some(end) = status_bytes
+                                .iter()
+                                .position(|byte| *byte == b'\n' || *byte == b'\r')
+                            {
+                                break std::str::from_utf8(&status_bytes[..end])
+                                    .ok()
+                                    .and_then(|value| value.trim().parse::<i64>().ok())
+                                    .unwrap_or(255);
+                            }
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("ترمینال root پیش از پایان فرمان قطع شد.".to_owned())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        };
+        let output_end = captured
+            .windows(marker_bytes.len())
+            .position(|window| window == marker_bytes)
+            .unwrap_or(captured.len());
+        let output_start = captured
+            .len()
+            .saturating_sub(MAX_ROOT_COMMAND_OUTPUT_BYTES)
+            .min(output_end);
+        let output = String::from_utf8_lossy(&captured[output_start..output_end])
+            .chars()
+            .filter(|character| {
+                !character.is_control()
+                    || *character == '\n'
+                    || *character == '\t'
+                    || *character == '\r'
+            })
+            .collect::<String>();
+        Ok((output, status))
+    })();
+    let _ = privileged_request(json!({"action":"terminal-root-stop","pid":pid}));
+    result
 }
 
 fn ensure_scope(context: &AgentContext, required: &str) -> Result<(), String> {
@@ -667,15 +1066,27 @@ pub(super) async fn list_proposals(
     require_admin(&db, &headers)?;
     let stale_cutoff = now() - 60;
     let mut stale_query = db
-        .prepare("SELECT id FROM ai_agent_proposals WHERE state='approving' AND reviewed_at<=?1")
+        .prepare("SELECT id,action_type FROM ai_agent_proposals WHERE state='approving' AND reviewed_at<=?1")
         .map_err(db_error)?;
     let stale_ids = stale_query
-        .query_map([stale_cutoff], |row| row.get::<_, String>(0))
+        .query_map([stale_cutoff], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(db_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error)?;
     drop(stale_query);
-    for proposal_id in stale_ids {
+    for (proposal_id, action_type) in stale_ids {
+        if action_type == "root_command" {
+            db.execute("UPDATE ai_agent_proposals SET state='failed',action_json='{}',result_error='اجرای فرمان root کامل نشد یا نتیجه پس از راه‌اندازی مجدد قابل تأیید نیست؛ برای جلوگیری از اجرای تکراری، پیشنهاد خودکار تکرار نشد.' WHERE id=?1 AND state='approving'", [&proposal_id]).map_err(db_error)?;
+            audit(
+                &db,
+                "system",
+                "ai_agent.root_command.recovery_required",
+                &format!("proposal_id={proposal_id}; result=not_retried"),
+            );
+            continue;
+        }
         if let Some(job) = deploy::agent_approved_job(&db, &proposal_id).map_err(db_error)? {
             db.execute("UPDATE ai_agent_proposals SET state='approved',result_json=?1 WHERE id=?2 AND state='approving'", params![serde_json::to_string(&job).unwrap_or_else(|_| "{}".into()),proposal_id]).map_err(db_error)?;
             audit(
@@ -695,20 +1106,64 @@ pub(super) async fn list_proposals(
         }
     }
     db.execute(
-        "UPDATE ai_agent_proposals SET state='expired' WHERE state='pending' AND expires_at<=?1",
+        "UPDATE ai_agent_proposals SET state='expired',action_json=CASE WHEN action_type='root_command' THEN '{}' ELSE action_json END WHERE state='pending' AND expires_at<=?1",
         [now()],
     )
     .map_err(db_error)?;
-    let mut statement = db.prepare("SELECT p.id,p.action_type,p.application_id,COALESCE(a.name,'(حذف‌شده)'),p.reason,p.state,p.created_at,p.expires_at,p.reviewed_at,p.reviewed_by,p.result_json,p.result_error,t.label,u.username,p.action_json FROM ai_agent_proposals p LEFT JOIN applications a ON a.id=p.application_id LEFT JOIN ai_agent_tokens t ON t.id=p.token_id JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC LIMIT 100").map_err(db_error)?;
+    if let Some(commands) = ROOT_COMMANDS.get() {
+        commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|_, (_, _, expires)| *expires > now());
+    }
+    let pending_root = {
+        let mut statement = db.prepare("SELECT id,token_id FROM ai_agent_proposals WHERE action_type='root_command' AND state='pending'").map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
+    };
+    for (proposal_id, token_id) in pending_root {
+        let available = ROOT_COMMANDS.get().is_some_and(|commands| {
+            commands
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&proposal_id)
+                .is_some_and(|(stored_token, _, expires)| {
+                    *stored_token == token_id && *expires > now()
+                })
+        });
+        if !available {
+            db.execute("UPDATE ai_agent_proposals SET state='failed',action_json='{}',result_error='درخواست root پس از راه‌اندازی مجدد پنل از بین رفت؛ فرمان ذخیره نشده و دوباره اجرا نمی‌شود.' WHERE id=?1 AND state='pending'", [&proposal_id]).map_err(db_error)?;
+            audit(
+                &db,
+                "system",
+                "ai_agent.root_command.lost",
+                &format!("proposal_id={proposal_id}; result=not_retried"),
+            );
+        }
+    }
+    let mut statement = db.prepare("SELECT p.id,p.action_type,p.application_id,COALESCE(a.name,'(حذف‌شده)'),p.reason,p.state,p.created_at,p.expires_at,p.reviewed_at,p.reviewed_by,p.result_json,p.result_error,t.label,u.username,p.action_json,p.token_id FROM ai_agent_proposals p LEFT JOIN applications a ON a.id=p.application_id LEFT JOIN ai_agent_tokens t ON t.id=p.token_id JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC LIMIT 100").map_err(db_error)?;
     let rows = statement.query_map([], |row| {
         let action_json: String = row.get(14)?;
-        let deployment = serde_json::from_str::<Value>(&action_json).map(|snapshot| json!({
+        let action_type: String = row.get(1)?;
+        let state: String = row.get(5)?;
+        let action = serde_json::from_str::<Value>(&action_json).unwrap_or_else(|_| json!({}));
+        let deployment = serde_json::from_value::<Value>(action.clone()).map(|snapshot| json!({
             "source":snapshot.get("source_summary").cloned().unwrap_or(Value::Null),
             "pre_deploy_command_count":snapshot.get("pre_deploy_command_count").cloned().unwrap_or(json!(0)),
             "healthcheck_file":snapshot.get("healthcheck_file").cloned().unwrap_or(Value::Null),
             "retention_count":snapshot.get("retention_count").cloned().unwrap_or(json!(5))
         })).unwrap_or_else(|_| json!({"error":"Snapshot معتبر نیست"}));
-        Ok(json!({"id":row.get::<_,String>(0)?,"action_type":row.get::<_,String>(1)?,"application_id":row.get::<_,String>(2)?,"application_name":row.get::<_,String>(3)?,"reason":row.get::<_,String>(4)?,"state":row.get::<_,String>(5)?,"created_at":row.get::<_,i64>(6)?,"expires_at":row.get::<_,i64>(7)?,"reviewed_at":row.get::<_,Option<i64>>(8)?,"reviewed_by":row.get::<_,Option<String>>(9)?,"result":row.get::<_,Option<String>>(10)?,"error":row.get::<_,Option<String>>(11)?,"agent_label":row.get::<_,Option<String>>(12)?,"requested_by":row.get::<_,String>(13)?,"deployment":deployment}))
+        let proposal_id: String = row.get(0)?;
+        let token_id: i64 = row.get(15)?;
+        let root_command = if action_type == "root_command" && (state == "pending" || state == "approving") {
+            ROOT_COMMANDS.get().and_then(|commands| commands.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&proposal_id).filter(|(stored_token, _, expires)| *stored_token == token_id && *expires > now()).map(|(_, command, _)| command.clone()))
+        } else { None };
+        let application_name = if action_type == "root_command" { "ترمینال روت".to_owned() } else { row.get::<_,String>(3)? };
+        Ok(json!({"id":row.get::<_,String>(0)?,"action_type":action_type,"application_id":row.get::<_,String>(2)?,"application_name":application_name,"reason":row.get::<_,String>(4)?,"state":state,"created_at":row.get::<_,i64>(6)?,"expires_at":row.get::<_,i64>(7)?,"reviewed_at":row.get::<_,Option<i64>>(8)?,"reviewed_by":row.get::<_,Option<String>>(9)?,"result":row.get::<_,Option<String>>(10)?,"error":row.get::<_,Option<String>>(11)?,"agent_label":row.get::<_,Option<String>>(12)?,"requested_by":row.get::<_,String>(13)?,"deployment":deployment,"root_command":root_command}))
     }).map_err(db_error)?;
     let proposals: Vec<Value> = rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
     Ok(Json(json!({"proposals":proposals})))
@@ -719,6 +1174,7 @@ pub(super) async fn approve_proposal(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Json(input): Json<ApproveProposalInput>,
 ) -> ApiResult {
     if !secure_transport(&headers, peer.ip()) {
         return Err(error(
@@ -727,17 +1183,30 @@ pub(super) async fn approve_proposal(
         ));
     }
     check_origin(&headers)?;
-    let admin_name = {
+    let admin = {
         let db = state.lock().unwrap();
-        require_admin(&db, &headers)?.username
+        require_admin(&db, &headers)?
     };
     if !apps::valid_uuid(&id) {
         return Err(error(StatusCode::BAD_REQUEST, "شناسهٔ درخواست معتبر نیست."));
     }
-    let (app_id, snapshot) = {
+    let action_type = {
         let db = state.lock().unwrap();
-        let proposal: Option<(String, String, i64, String)> = db.query_row("SELECT p.action_type,p.application_id,p.expires_at,p.action_json FROM ai_agent_proposals p JOIN ai_agent_tokens t ON t.id=p.token_id JOIN users u ON u.id=p.user_id WHERE p.id=?1 AND p.state='pending' AND t.revoked_at IS NULL AND t.expires_at>?2 AND u.role='admin' AND u.enabled=1", params![id,now()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(db_error)?;
-        let Some((action, app_id, expires_at, action_json)) = proposal else {
+        db.query_row(
+            "SELECT action_type FROM ai_agent_proposals WHERE id=?1 AND state='pending'",
+            [&id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+    };
+    if action_type.as_deref() == Some("root_command") {
+        return approve_root_command(state, admin, id, input).await;
+    }
+    let (app_id, snapshot, token_id) = {
+        let db = state.lock().unwrap();
+        let proposal: Option<(String, String, i64, String, i64)> = db.query_row("SELECT p.action_type,p.application_id,p.expires_at,p.action_json,p.token_id FROM ai_agent_proposals p JOIN ai_agent_tokens t ON t.id=p.token_id JOIN users u ON u.id=p.user_id WHERE p.id=?1 AND p.state='pending' AND t.revoked_at IS NULL AND t.expires_at>?2 AND u.role='admin' AND u.enabled=1", params![id,now()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional().map_err(db_error)?;
+        let Some((action, app_id, expires_at, action_json, token_id)) = proposal else {
             return Err(error(
                 StatusCode::CONFLICT,
                 "درخواست پیدا نشد یا قبلاً بررسی شده است.",
@@ -745,7 +1214,7 @@ pub(super) async fn approve_proposal(
         };
         if expires_at <= now() {
             db.execute(
-                "UPDATE ai_agent_proposals SET state='expired' WHERE id=?1 AND state='pending'",
+                "UPDATE ai_agent_proposals SET state='expired',action_json=CASE WHEN action_type='root_command' THEN '{}' ELSE action_json END WHERE id=?1 AND state='pending'",
                 [&id],
             )
             .map_err(db_error)?;
@@ -758,20 +1227,21 @@ pub(super) async fn approve_proposal(
             ));
         }
         let snapshot = serde_json::from_str::<Value>(&action_json).map_err(|_| error(StatusCode::CONFLICT, "Snapshot درخواست عامل خراب است؛ برای جلوگیری از اجرای تنظیمات نامشخص، تأیید متوقف شد."))?;
-        let changed = db.execute("UPDATE ai_agent_proposals SET state='approving',reviewed_at=?1,reviewed_by=?2 WHERE id=?3 AND state='pending'", params![now(),admin_name,id]).map_err(db_error)?;
+        let changed = db.execute("UPDATE ai_agent_proposals SET state='approving',reviewed_at=?1,reviewed_by=?2 WHERE id=?3 AND state='pending'", params![now(),admin.username,id]).map_err(db_error)?;
         if changed != 1 {
             return Err(error(
                 StatusCode::CONFLICT,
                 "درخواست هم‌زمان توسط کاربر دیگری بررسی شد.",
             ));
         }
-        (app_id, snapshot)
+        (app_id, snapshot, token_id)
     };
+    let _ = token_id;
     let result = deploy::queue_agent_approved_snapshot(
         &state,
         &headers,
         &app_id,
-        &admin_name,
+        &admin.username,
         &id,
         &snapshot,
     )
@@ -782,7 +1252,7 @@ pub(super) async fn approve_proposal(
             db.execute("UPDATE ai_agent_proposals SET state='approved',result_json=?1 WHERE id=?2 AND state='approving'", params![serde_json::to_string(&job).unwrap_or_else(|_| "{}".into()),id]).map_err(db_error)?;
             audit(
                 &db,
-                &admin_name,
+                &admin.username,
                 "ai_agent.deployment.approve",
                 &format!(
                     "proposal_id={id}; app_id={app_id}; job_id={}",
@@ -801,11 +1271,128 @@ pub(super) async fn approve_proposal(
             db.execute("UPDATE ai_agent_proposals SET state='failed',result_error=?1 WHERE id=?2 AND state='approving'", params![message,id]).map_err(db_error)?;
             audit(
                 &db,
-                &admin_name,
+                &admin.username,
                 "ai_agent.deployment.approve_failed",
                 &format!("proposal_id={id}; app_id={app_id}; status={status}"),
             );
             Err((status, body))
+        }
+    }
+}
+
+async fn approve_root_command(
+    state: AppState,
+    admin: User,
+    id: String,
+    input: ApproveProposalInput,
+) -> ApiResult {
+    let (token_id, command) = {
+        let db = state.lock().unwrap();
+        let proposal: Option<(i64, i64)> = db.query_row("SELECT p.token_id,p.expires_at FROM ai_agent_proposals p JOIN ai_agent_tokens t ON t.id=p.token_id JOIN users u ON u.id=p.user_id WHERE p.id=?1 AND p.action_type='root_command' AND p.state='pending' AND t.revoked_at IS NULL AND t.expires_at>?2 AND u.role='admin' AND u.enabled=1", params![id,now()], |row| Ok((row.get(0)?,row.get(1)?))).optional().map_err(db_error)?;
+        let Some((token_id, expires_at)) = proposal else {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "درخواست پیدا نشد یا قبلاً بررسی شده است.",
+            ));
+        };
+        if expires_at <= now() {
+            db.execute("UPDATE ai_agent_proposals SET state='expired',action_json='{}' WHERE id=?1 AND state='pending'", [&id]).map_err(db_error)?;
+            if let Some(commands) = ROOT_COMMANDS.get() {
+                commands
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&id);
+            }
+            return Err(error(StatusCode::GONE, "مهلت درخواست پایان یافته است."));
+        }
+        let command = ROOT_COMMANDS.get().and_then(|commands| {
+            commands
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&id)
+                .filter(|(stored_token, _, expires)| *stored_token == token_id && *expires > now())
+                .map(|(_, command, _)| command.clone())
+        });
+        let Some(command) = command.filter(|value| valid_root_command(value)) else {
+            db.execute("UPDATE ai_agent_proposals SET state='failed',action_json='{}',result_error='متن موقت فرمان در دسترس نیست؛ فرمان اجرا نشد.' WHERE id=?1 AND state='pending'", [&id]).map_err(db_error)?;
+            return Err(error(
+                StatusCode::CONFLICT,
+                "متن موقت فرمان در دسترس نیست؛ برای امنیت هیچ فرمانی اجرا نشد.",
+            ));
+        };
+        if input.confirmation.as_deref() != Some("RUN AS ROOT") {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "برای تأیید فرمان، عبارت RUN AS ROOT را وارد کن.",
+            ));
+        }
+        let password = input
+            .password
+            .as_deref()
+            .filter(|value| !value.is_empty() && value.len() <= 1024)
+            .ok_or_else(|| {
+                error(
+                    StatusCode::UNAUTHORIZED,
+                    "برای اجرای فرمان root رمز مدیر لازم است.",
+                )
+            })?;
+        verify_admin_reauthentication(&db, admin.id, password)?;
+        let changed = db.execute("UPDATE ai_agent_proposals SET state='approving',reviewed_at=?1,reviewed_by=?2 WHERE id=?3 AND state='pending'", params![now(),admin.username,id]).map_err(db_error)?;
+        if changed != 1 {
+            return Err(error(
+                StatusCode::CONFLICT,
+                "درخواست هم‌زمان توسط کاربر دیگری بررسی شد.",
+            ));
+        }
+        if let Some(commands) = ROOT_COMMANDS.get() {
+            commands
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&id);
+        }
+        (token_id, command)
+    };
+
+    let result = tokio::task::spawn_blocking(move || execute_root_command(&command))
+        .await
+        .map_err(|_| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "اجرای فرمان root متوقف شد.",
+            )
+        })?;
+    match result {
+        Ok((output, exit_code)) => {
+            ROOT_COMMAND_OUTPUTS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(id.clone(), (token_id, output, now() + 300));
+            let db = state.lock().unwrap();
+            db.execute("UPDATE ai_agent_proposals SET state='approved',action_json='{}',result_json=?1 WHERE id=?2 AND state='approving'", params![json!({"exit_code":exit_code}).to_string(),id]).map_err(db_error)?;
+            audit(
+                &db,
+                &admin.username,
+                "ai_agent.root_command.approve",
+                &format!("proposal_id={id}; token_id={token_id}; exit_code={exit_code}"),
+            );
+            Ok(Json(
+                json!({"ok":true,"proposal_id":id,"state":"approved","exit_code":exit_code,"output_available_to_agent":true,"notice":"خروجی فقط یک‌بار از MCP قابل دریافت است و روی دیسک ثبت نشده است."}),
+            ))
+        }
+        Err(message) => {
+            let db = state.lock().unwrap();
+            db.execute("UPDATE ai_agent_proposals SET state='failed',action_json='{}',result_error=?1 WHERE id=?2 AND state='approving'", params![message,id]).map_err(db_error)?;
+            audit(
+                &db,
+                &admin.username,
+                "ai_agent.root_command.failed",
+                &format!("proposal_id={id}; token_id={token_id}"),
+            );
+            Err(error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "اجرای فرمان root کامل نشد؛ جزئیات حساس فرمان در گزارش ثبت نشده است.",
+            ))
         }
     }
 }
@@ -825,12 +1412,18 @@ pub(super) async fn reject_proposal(
     check_origin(&headers)?;
     let db = state.lock().unwrap();
     let admin = require_admin(&db, &headers)?;
-    let changed = db.execute("UPDATE ai_agent_proposals SET state='rejected',reviewed_at=?1,reviewed_by=?2 WHERE id=?3 AND state='pending'", params![now(),admin.username,id]).map_err(db_error)?;
+    let changed = db.execute("UPDATE ai_agent_proposals SET state='rejected',action_json=CASE WHEN action_type='root_command' THEN '{}' ELSE action_json END,reviewed_at=?1,reviewed_by=?2 WHERE id=?3 AND state='pending'", params![now(),admin.username,id]).map_err(db_error)?;
     if changed != 1 {
         return Err(error(
             StatusCode::CONFLICT,
             "درخواست پیدا نشد یا قبلاً بررسی شده است.",
         ));
+    }
+    if let Some(commands) = ROOT_COMMANDS.get() {
+        commands
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
     }
     audit(
         &db,
@@ -969,6 +1562,105 @@ mod tests {
         assert!(tools
             .iter()
             .any(|tool| tool["name"] == "propose_application_deployment"));
+    }
+
+    #[test]
+    fn root_terminal_tools_require_an_explicit_capability() {
+        let tools = available_tools(&["apps:read".into()]);
+        assert!(!tools
+            .iter()
+            .any(|tool| tool["name"] == "propose_root_command"));
+        let root_tools = available_tools(&["terminal:root:propose".into()]);
+        assert!(root_tools
+            .iter()
+            .any(|tool| tool["name"] == "propose_root_command"));
+        assert!(root_tools
+            .iter()
+            .any(|tool| tool["name"] == "get_root_command_result"));
+        assert!(!root_tools
+            .iter()
+            .any(|tool| tool["name"] == "root_terminal_open"));
+    }
+
+    #[test]
+    fn root_command_input_is_single_line_bounded_and_control_free() {
+        assert!(valid_root_command("systemctl status nginx"));
+        assert!(!valid_root_command("  \n "));
+        assert!(!valid_root_command("id\nwhoami"));
+        assert!(!valid_root_command(&"x".repeat(MAX_ROOT_COMMAND_BYTES + 1)));
+    }
+
+    #[test]
+    fn root_command_approval_requires_fresh_admin_password_and_throttles_failures() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY,password_hash TEXT,role TEXT,enabled INTEGER); CREATE TABLE auth_failures(username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL);").unwrap();
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(b"correct horse battery staple", &salt)
+            .unwrap()
+            .to_string();
+        db.execute("INSERT INTO users VALUES(1,?1,'admin',1)", [&hash])
+            .unwrap();
+        assert!(matches!(
+            verify_admin_reauthentication(&db, 1, "wrong"),
+            Err((StatusCode::UNAUTHORIZED, _))
+        ));
+        let failed_attempts: i64 = db
+            .query_row(
+                "SELECT count FROM auth_failures WHERE username='root-terminal:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed_attempts, 1);
+        assert!(verify_admin_reauthentication(&db, 1, "correct horse battery staple").is_ok());
+        let remaining: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM auth_failures WHERE username='root-terminal:1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        db.execute_batch("DROP TABLE auth_failures;").unwrap();
+        assert!(matches!(
+            verify_admin_reauthentication(&db, 1, "correct horse battery staple"),
+            Err((StatusCode::INTERNAL_SERVER_ERROR, _))
+        ));
+    }
+
+    #[test]
+    fn root_command_reauthentication_fails_closed_when_throttled() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE users(id INTEGER PRIMARY KEY,password_hash TEXT,role TEXT,enabled INTEGER); CREATE TABLE auth_failures(username TEXT PRIMARY KEY,count INTEGER NOT NULL,window_start INTEGER NOT NULL);").unwrap();
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(b"correct horse battery staple", &salt)
+            .unwrap()
+            .to_string();
+        db.execute("INSERT INTO users VALUES(1,?1,'admin',1)", [&hash])
+            .unwrap();
+        db.execute(
+            "INSERT INTO auth_failures VALUES('root-terminal:1',8,?1)",
+            [now()],
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_admin_reauthentication(&db, 1, "correct horse battery staple"),
+            Err((StatusCode::TOO_MANY_REQUESTS, _))
+        ));
+    }
+
+    #[test]
+    fn scopes_are_allowlisted_deduplicated_and_stably_ordered() {
+        assert_eq!(
+            normalized_scopes(&vec![
+                "terminal:root:propose".into(),
+                "apps:read".into(),
+                "apps:read".into()
+            ]),
+            vec!["apps:read", "terminal:root:propose"]
+        );
     }
 
     #[test]

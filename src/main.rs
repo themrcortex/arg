@@ -3504,12 +3504,37 @@ fn start_root_terminal(request: &Value) -> Result<u32, String> {
         .spawn()
         .map_err(|error| format!("Could not start root shell: {error}"))?;
     let pid = child.id();
+    let max_lifetime = root_terminal_max_lifetime(request);
     let pids = ROOT_TERMINAL_PIDS.get_or_init(|| Mutex::new(HashSet::new()));
     pids.lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(pid);
     std::thread::spawn(move || {
-        let _ = child.wait();
+        if let Some(max_lifetime) = max_lifetime {
+            let deadline = Instant::now() + max_lifetime;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() >= deadline => {
+                        unsafe {
+                            libc::kill(-(pid as i32), libc::SIGKILL);
+                        }
+                        let _ = child.wait();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    Err(_) => {
+                        unsafe {
+                            libc::kill(-(pid as i32), libc::SIGKILL);
+                        }
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+        } else {
+            let _ = child.wait();
+        }
         if let Some(pids) = ROOT_TERMINAL_PIDS.get() {
             pids.lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3517,6 +3542,13 @@ fn start_root_terminal(request: &Value) -> Result<u32, String> {
         }
     });
     Ok(pid)
+}
+
+fn root_terminal_max_lifetime(request: &Value) -> Option<std::time::Duration> {
+    request["max_lifetime_seconds"]
+        .as_u64()
+        .filter(|seconds| (1..=60).contains(seconds))
+        .map(std::time::Duration::from_secs)
 }
 
 fn stop_root_terminal(request: &Value) -> Result<(), String> {
@@ -6302,6 +6334,30 @@ mod update_progress_tests {
         assert!(super::valid_terminal_pty_path("/dev/pts/17"));
         assert!(!super::valid_terminal_pty_path("/dev/pts/../../etc/passwd"));
         assert!(!super::valid_terminal_pty_path("/dev/tty0"));
+    }
+
+    #[test]
+    fn root_terminal_lifetime_is_optional_and_capped() {
+        assert_eq!(
+            super::root_terminal_max_lifetime(&serde_json::json!({"max_lifetime_seconds":1})),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            super::root_terminal_max_lifetime(&serde_json::json!({"max_lifetime_seconds":60})),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            super::root_terminal_max_lifetime(&serde_json::json!({"max_lifetime_seconds":0})),
+            None
+        );
+        assert_eq!(
+            super::root_terminal_max_lifetime(&serde_json::json!({"max_lifetime_seconds":61})),
+            None
+        );
+        assert_eq!(
+            super::root_terminal_max_lifetime(&serde_json::json!({})),
+            None
+        );
     }
 
     #[test]

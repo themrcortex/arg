@@ -82,7 +82,9 @@ pub(super) fn router(state: AppState) -> Router {
         )
         .route(
             "/api/admin/ai-agents/{id}",
-            axum::routing::delete(ai_agents::revoke).layer(middleware::from_fn(api_keys::no_store)),
+            put(ai_agents::update_scopes)
+                .delete(ai_agents::revoke)
+                .layer(middleware::from_fn(api_keys::no_store)),
         )
         .route(
             "/api/agent/mcp",

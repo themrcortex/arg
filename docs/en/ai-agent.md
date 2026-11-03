@@ -29,7 +29,11 @@ Depending on token scopes, an agent can read application summaries, deployment j
 
 With `deployments:propose`, an agent can submit a deployment proposal for an application with a saved default source. The source, health check, release retention, and pre-deployment commands are snapshotted when proposed; later setting changes do not alter it. A proposal does not run anything. An administrator must inspect the app, reason, snapshotted source, and execution impact, then approve it in ARG. Approval creates a job through ARG's normal deployment validation and queue.
 
-The current MCP interface does not provide shell/root execution, secret access, an unrestricted API proxy, resource deletion, network changes, or direct service control. Use the normal ARG interface for those operations.
+The optional `terminal:root:propose` scope does not provide a direct shell. It only allows the agent to propose a single-line command. An administrator must review each exact command in ARG, re-enter the current password, and type `RUN AS ROOT` before it runs. Each command is limited to 20 seconds, and the privileged helper independently stops its process after at most 30 seconds. The agent never receives a persistent interactive root shell.
+
+To avoid storing privileged commands on disk, command text exists only in ARG's memory. A request expires after five minutes or when ARG restarts. Output is also memory-only, limited to 16 KiB, retained for up to five minutes, and returned to that same agent token once. The agent can see command output, which may contain sensitive data; approve only commands and agents you trust.
+
+Token scopes can be changed from the panel. Removing the root-command scope invalidates pending root requests. MCP still has no direct shell, secret-reading, unrestricted API proxy, resource-deletion, network-change, or direct service-control tool.
 
 ## Security controls
 
@@ -39,6 +43,8 @@ The current MCP interface does not provide shell/root execution, secret access, 
 * Up to 10 active tokens per administrator and 20 pending proposals per token are allowed.
 * Tokens are revoked when their owner loses administrator status or is disabled.
 * Proposals expire after 30 minutes and can only be approved through an administrator session with Origin validation.
+* Root command proposals expire after five minutes and require a fresh administrator password plus an explicit typed confirmation for every command.
+* Root commands and their output are not written to SQLite or the audit log; output is limited to 16 KiB and offered once from temporary memory.
 * Responses use `no-store`; creation, revocation, proposals, and reviews are written to the audit log.
 * Restricting network access to the panel and protecting MCP client credentials remain administrator responsibilities.
 
@@ -49,4 +55,4 @@ The current MCP interface does not provide shell/root execution, secret access, 
 * `429`: The 30 requests/minute limit was reached; reduce polling.
 * `repository:read` is required for source files and is separate from documentation access.
 * Deployment proposals require a saved default source.
-* Existing token scopes cannot be upgraded; create a new token with the required scopes.
+* Active token scopes can be edited in the panel. Root-command scope only enables requests and never bypasses per-command password verification and administrator approval.
