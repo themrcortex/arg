@@ -18,6 +18,7 @@ const AGENT_SCOPES: &[&str] = &[
     "docs:read",
     "repository:read",
     "deployments:propose",
+    "deployments:execute",
     "terminal:root:propose",
 ];
 const AGENT_REQUESTS_PER_MINUTE: i64 = 30;
@@ -26,8 +27,10 @@ const MAX_AGENT_LIFETIME_DAYS: i64 = 30;
 const MAX_ROOT_COMMAND_BYTES: usize = 1200;
 const ROOT_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const MAX_ROOT_COMMAND_OUTPUT_BYTES: usize = 16 * 1024;
-static ROOT_COMMAND_OUTPUTS: OnceLock<Mutex<HashMap<String, (i64, String, i64)>>> = OnceLock::new();
-static ROOT_COMMANDS: OnceLock<Mutex<HashMap<String, (i64, String, i64)>>> = OnceLock::new();
+type RootCommandRuntimeEntry = (i64, String, i64);
+type RootCommandRuntimeStore = OnceLock<Mutex<HashMap<String, RootCommandRuntimeEntry>>>;
+static ROOT_COMMAND_OUTPUTS: RootCommandRuntimeStore = OnceLock::new();
+static ROOT_COMMANDS: RootCommandRuntimeStore = OnceLock::new();
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -470,14 +473,17 @@ pub(super) async fn mcp(
         }
     }
     let is_notification = !request.get("id").is_some();
-    let mut db = state.lock().unwrap();
-    let context = match authorize(&db, &headers, None) {
-        Ok(context) => context,
-        Err((status, body)) => return (status, body).into_response(),
+    let context = {
+        let db = state.lock().unwrap();
+        let context = match authorize(&db, &headers, None) {
+            Ok(context) => context,
+            Err((status, body)) => return (status, body).into_response(),
+        };
+        if db.execute("UPDATE ai_agent_proposals SET state='expired',action_json=CASE WHEN action_type='root_command' THEN '{}' ELSE action_json END WHERE state='pending' AND expires_at<=?1", [now()]).is_err() {
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "درخواست‌های منقضی پاک‌سازی نشدند.").into_response();
+        }
+        context
     };
-    if db.execute("UPDATE ai_agent_proposals SET state='expired',action_json=CASE WHEN action_type='root_command' THEN '{}' ELSE action_json END WHERE state='pending' AND expires_at<=?1", [now()]).is_err() {
-        return error(StatusCode::INTERNAL_SERVER_ERROR, "درخواست‌های منقضی پاک‌سازی نشدند.").into_response();
-    }
     if let Some(outputs) = ROOT_COMMAND_OUTPUTS.get() {
         outputs
             .lock()
@@ -491,12 +497,26 @@ pub(super) async fn mcp(
             .retain(|_, (_, _, expires)| *expires > now());
     }
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    if is_notification && method == "tools/call" {
+        return mcp_accepted();
+    }
+    if method == "tools/call"
+        && params.get("name").and_then(Value::as_str) == Some("deploy_application")
+    {
+        return match execute_agent_deployment(state, &headers, &context, &params).await {
+            Ok(result) => jsonrpc_result(id, result),
+            Err(message) => jsonrpc_result(
+                id,
+                json!({"content":[{"type":"text","text":message}],"isError":true}),
+            ),
+        };
+    }
     let result = match method {
         "initialize" => Ok(json!({
             "protocolVersion":"2025-03-26",
             "capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false}},
             "serverInfo":{"name":"arg-control-center","version":env!("CARGO_PKG_VERSION")},
-            "instructions":"ARG MCP is scoped to the token's explicit permissions. Deployment and root-command operations are only submitted as proposals and require explicit approval in the ARG panel. Root commands additionally require fresh administrator password verification and a typed confirmation; no persistent interactive root shell is provided. Secrets and unrestricted API forwarding are not available."
+            "instructions":"ARG MCP is scoped to the token's explicit permissions. Read-only tools return only the data described by their scopes. Deployment proposals require administrator approval. If this token has deployments:execute, deploy_application queues a real deployment using only the application's saved deployment configuration; it does not accept an arbitrary source or command. Use a unique request_id per intended deployment and reuse it for retries. Root-command proposals always require an administrator to review the exact command, re-enter the current password, and type RUN AS ROOT; no scope disables this. There is no persistent interactive root shell, secret-reading tool, arbitrary API proxy, or ARG-side information archive/write tool."
         })),
         "notifications/initialized" => {
             return if is_notification {
@@ -515,10 +535,15 @@ pub(super) async fn mcp(
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         ),
-        "tools/call" => Ok(match call_tool(&mut db, &context, &params) {
-            Ok(result) => result,
-            Err(message) => json!({"content":[{"type":"text","text":message}],"isError":true}),
-        }),
+        "tools/call" => {
+            let mut db = state.lock().unwrap();
+            Ok(match call_tool(&mut db, &context, &params) {
+                Ok(result) => result,
+                Err(message) => {
+                    json!({"content":[{"type":"text","text":message}],"isError":true})
+                }
+            })
+        }
         _ => return jsonrpc_error(id, -32601, "روش MCP پشتیبانی نمی‌شود."),
     };
     if is_notification {
@@ -527,6 +552,131 @@ pub(super) async fn mcp(
     match result {
         Ok(result) => jsonrpc_result(id, result),
         Err(message) => jsonrpc_error(id, -32000, &message),
+    }
+}
+
+fn valid_agent_request_id(value: &str) -> bool {
+    (8..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
+fn agent_operation_id(token_id: i64, request_id: &str) -> String {
+    let digest = Sha256::digest(request_id.as_bytes());
+    format!("mcp-{token_id}-{}", hex::encode(&digest[..12]))
+}
+
+async fn execute_agent_deployment(
+    state: AppState,
+    headers: &HeaderMap,
+    context: &AgentContext,
+    params: &Value,
+) -> Result<Value, String> {
+    ensure_scope(context, "deployments:execute")?;
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let app_id = arguments
+        .get("application_id")
+        .and_then(Value::as_str)
+        .filter(|id| {
+            id.len() <= 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-".contains(&byte))
+        })
+        .ok_or_else(|| "شناسهٔ اپلیکیشن معتبر نیست.".to_owned())?;
+    let request_id = arguments
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|value| valid_agent_request_id(value))
+        .ok_or_else(|| "request_id باید ۸ تا ۶۴ نویسهٔ انگلیسی، عدد یا . _ : - باشد.".to_owned())?;
+    let reason = arguments
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if reason.len() > 500 || reason.chars().any(char::is_control) {
+        return Err("توضیح درخواست حداکثر ۵۰۰ نویسه و بدون نویسهٔ کنترلی باشد.".into());
+    }
+
+    let (app_name, snapshot) = {
+        let db = state.lock().unwrap();
+        let owner =
+            federation::local_server_uuid(&db).map_err(|_| "هویت VPS خوانده نشد.".to_owned())?;
+        let app_name: Option<String> = db
+            .query_row(
+                "SELECT name FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+                params![app_id, owner],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "اپلیکیشن بررسی نشد.".to_owned())?;
+        let app_name = app_name.ok_or_else(|| "اپلیکیشن فعال در همین VPS پیدا نشد.".to_owned())?;
+        let snapshot = deploy::agent_default_deployment_snapshot(&db, app_id, &owner)?;
+        (app_name, snapshot)
+    };
+
+    // A stable per-token key makes network retries idempotent without storing
+    // the caller-provided request id in logs or using it as a path.
+    let operation_id = agent_operation_id(context.id, request_id);
+    let request_suffix = operation_id.rsplit('-').next().unwrap_or_default();
+    match deploy::queue_agent_snapshot(
+        &state,
+        headers,
+        app_id,
+        &format!("ai-agent:{}", context.label),
+        &operation_id,
+        &snapshot,
+        false,
+    )
+    .await
+    {
+        Ok(job) => {
+            let job_id = job
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Job ساخته شد اما شناسهٔ آن از پاسخ خوانده نشد.".to_owned())?;
+            let state_name = job.get("state").and_then(Value::as_str).unwrap_or("queued");
+            let db = state.lock().unwrap();
+            audit(
+                &db,
+                &format!("ai-agent:{}", context.label),
+                "ai_agent.deployment.execute",
+                &format!(
+                    "token_id={}; app_id={app_id}; job_id={job_id}; request={request_suffix}; reason_length={}",
+                    context.id,
+                    reason.len()
+                ),
+            );
+            Ok(text_tool_result(json!({
+                "application_id":app_id,
+                "application_name":app_name,
+                "job_id":job_id,
+                "state":state_name,
+                "message":"Job متناظر با این request_id در ARG ثبت یا بازیابی شد؛ وضعیت نهایی و logها را از پنل ARG پیگیری کن."
+            })))
+        }
+        Err((status, body)) => {
+            let message = body
+                .0
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("استقرار در صف قرار نگرفت.");
+            let db = state.lock().unwrap();
+            audit(
+                &db,
+                &format!("ai-agent:{}", context.label),
+                "ai_agent.deployment.execute_failed",
+                &format!(
+                    "token_id={}; app_id={app_id}; request={request_suffix}; status={status}",
+                    context.id
+                ),
+            );
+            Err(message.to_owned())
+        }
     }
 }
 
@@ -575,6 +725,9 @@ fn available_tools(scopes: &[String]) -> Vec<Value> {
     }
     if scopes.iter().any(|scope| scope == "deployments:propose") {
         tools.push(json!({"name":"propose_application_deployment","description":"درخواست استقرار با منبع و فرمان پیش‌فرضی که مدیر قبلاً در ARG ذخیره کرده است. این فراخوانی هیچ استقراری اجرا نمی‌کند؛ مدیر باید آن را در پنل بررسی و تأیید کند.","inputSchema":{"type":"object","properties":{"application_id":{"type":"string","minLength":1,"maxLength":64},"reason":{"type":"string","maxLength":500}},"required":["application_id"],"additionalProperties":false}}));
+    }
+    if scopes.iter().any(|scope| scope == "deployments:execute") {
+        tools.push(json!({"name":"deploy_application","description":"یک Job استقرار واقعی با منبع، health check، فرمان‌های پیش از استقرار و نگهداری release که مدیر قبلاً در ARG ذخیره کرده ایجاد می‌کند. این عملیات خودکار است و تأیید جداگانه نمی‌گیرد؛ فقط برای اتصال مورداعتماد فعالش کن. منبع یا فرمان دلخواه از ورودی عامل پذیرفته نمی‌شود. request_id باید برای هر قصد استقرار یکتا و در retry همان مقدار باشد.","inputSchema":{"type":"object","properties":{"application_id":{"type":"string","minLength":1,"maxLength":64},"request_id":{"type":"string","minLength":8,"maxLength":64,"pattern":"^[A-Za-z0-9._:-]+$"},"reason":{"type":"string","maxLength":500}},"required":["application_id","request_id"],"additionalProperties":false}}));
     }
     if scopes.iter().any(|scope| scope == "terminal:root:propose") {
         tools.push(json!({"name":"propose_root_command","description":"پیشنهاد یک فرمان یک‌خطی برای اجرای موقت در ترمینال root. تا وقتی مدیر در ARG فرمان دقیق را بررسی، رمز خود را دوباره وارد و صریحاً تأیید نکند، هیچ فرمانی اجرا نمی‌شود.","inputSchema":{"type":"object","properties":{"command":{"type":"string","minLength":1,"maxLength":1200},"reason":{"type":"string","maxLength":500}},"required":["command"],"additionalProperties":false}}));
@@ -1237,13 +1390,14 @@ pub(super) async fn approve_proposal(
         (app_id, snapshot, token_id)
     };
     let _ = token_id;
-    let result = deploy::queue_agent_approved_snapshot(
+    let result = deploy::queue_agent_snapshot(
         &state,
         &headers,
         &app_id,
         &admin.username,
         &id,
         &snapshot,
+        true,
     )
     .await;
     match result {
@@ -1565,6 +1719,53 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_deployment_is_a_separate_explicit_scope() {
+        let proposal_tools = available_tools(&["deployments:propose".into()]);
+        assert!(proposal_tools
+            .iter()
+            .any(|tool| tool["name"] == "propose_application_deployment"));
+        assert!(!proposal_tools
+            .iter()
+            .any(|tool| tool["name"] == "deploy_application"));
+
+        let automatic_tools = available_tools(&["deployments:execute".into()]);
+        assert!(automatic_tools
+            .iter()
+            .any(|tool| tool["name"] == "deploy_application"));
+        assert!(!automatic_tools
+            .iter()
+            .any(|tool| tool["name"] == "propose_application_deployment"));
+
+        let root_tools = available_tools(&["terminal:root:propose".into()]);
+        assert!(!root_tools
+            .iter()
+            .any(|tool| tool["name"] == "deploy_application"));
+        assert!(root_tools
+            .iter()
+            .any(|tool| tool["name"] == "propose_root_command"));
+    }
+
+    #[test]
+    fn autonomous_deployment_request_ids_are_bounded_and_idempotent() {
+        assert!(valid_agent_request_id("deploy-2026-11"));
+        assert!(!valid_agent_request_id("short"));
+        assert!(!valid_agent_request_id("deploy\nnow-2026"));
+        assert!(!valid_agent_request_id(&"x".repeat(65)));
+        assert_eq!(
+            agent_operation_id(7, "request-123"),
+            agent_operation_id(7, "request-123")
+        );
+        assert_ne!(
+            agent_operation_id(7, "request-123"),
+            agent_operation_id(8, "request-123")
+        );
+        assert_ne!(
+            agent_operation_id(7, "request-123"),
+            agent_operation_id(7, "request-456")
+        );
+    }
+
+    #[test]
     fn root_terminal_tools_require_an_explicit_capability() {
         let tools = available_tools(&["apps:read".into()]);
         assert!(!tools
@@ -1654,7 +1855,7 @@ mod tests {
     #[test]
     fn scopes_are_allowlisted_deduplicated_and_stably_ordered() {
         assert_eq!(
-            normalized_scopes(&vec![
+            normalized_scopes(&[
                 "terminal:root:propose".into(),
                 "apps:read".into(),
                 "apps:read".into()

@@ -738,13 +738,17 @@ pub(super) fn agent_default_deployment_snapshot(
     }))
 }
 
-pub(super) async fn queue_agent_approved_snapshot(
+/// Queues an AI-authorized deployment snapshot through the normal release
+/// validation and worker path. Callers may only pass source and commands from
+/// the application's saved settings, never agent-supplied deployment input.
+pub(super) async fn queue_agent_snapshot(
     state: &AppState,
     headers: &HeaderMap,
     app_id: &str,
     approved_by: &str,
     proposal_id: &str,
     snapshot: &Value,
+    check_request_origin: bool,
 ) -> Result<Value, (StatusCode, Json<Value>)> {
     let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
     let source =
@@ -797,6 +801,7 @@ pub(super) async fn queue_agent_approved_snapshot(
         Some(format!("ai-{proposal_id}")),
         Some(retention),
         Some(approved_by),
+        check_request_origin,
     )
 }
 
@@ -1054,12 +1059,13 @@ fn insert_job_with_release(
         requested_release_name,
         requested_retention_count,
         None,
+        true,
     )
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "Internal entry point shares the validated deployment pipeline for human and explicitly approved agent actions."
+    reason = "Internal entry point shares the validated deployment pipeline for human and scoped agent actions."
 )]
 fn insert_job_with_release_as(
     state: &AppState,
@@ -1074,8 +1080,11 @@ fn insert_job_with_release_as(
     requested_release_name: Option<String>,
     requested_retention_count: Option<i64>,
     approved_actor: Option<&str>,
+    check_request_origin: bool,
 ) -> Result<Value, (StatusCode, Json<Value>)> {
-    check_origin(headers)?;
+    if check_request_origin {
+        check_origin(headers)?;
+    }
     if !valid_key(&key) {
         return Err(api_error(
             StatusCode::BAD_REQUEST,

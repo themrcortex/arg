@@ -25,11 +25,19 @@ Conceptual client configuration:
 
 ## Tools and resources
 
-Depending on token scopes, an agent can read application summaries, deployment job summaries, non-sensitive panel status, bundled Persian/English documentation, and the Rust/React TypeScript source snapshot shipped with this panel version. The `arg://repository` resource points to the public [themrcortex/arg](https://github.com/themrcortex/arg) repository. Source and documentation are read from files embedded in the binary; the panel endpoint does not fetch arbitrary URLs.
+Depending on token scopes, an agent can read application summaries, deployment job summaries, non-sensitive panel status, bundled Persian/English documentation, and the Rust/React TypeScript source snapshot shipped with this panel version. The `arg://repository` resource points to the public [themrcortex/arg](https://github.com/themrcortex/arg) repository. Source and documentation are read from files embedded in the binary; the panel endpoint does not fetch arbitrary URLs. MCP currently has no tool for writing a persistent information archive in ARG; the agent can read permitted data and summarize or organize it in its response.
 
 With `deployments:propose`, an agent can submit a deployment proposal for an application with a saved default source. The source, health check, release retention, and pre-deployment commands are snapshotted when proposed; later setting changes do not alter it. A proposal does not run anything. An administrator must inspect the app, reason, snapshotted source, and execution impact, then approve it in ARG. Approval creates a job through ARG's normal deployment validation and queue.
 
 The optional `terminal:root:propose` scope does not provide a direct shell. It only allows the agent to propose a single-line command. An administrator must review each exact command in ARG, re-enter the current password, and type `RUN AS ROOT` before it runs. Each command is limited to 20 seconds, and the privileged helper independently stops its process after at most 30 seconds. The agent never receives a persistent interactive root shell.
+
+### Optional automatic deployment
+
+The separate `deployments:execute` scope exposes `deploy_application`. When an administrator grants it, ARG no longer asks for per-deployment approval: the tool creates a real job in the normal ARG deployment queue. Grant this only to a trusted, narrowly scoped token because the project's saved pre-deploy commands and source code will run.
+
+The tool accepts only an active local application and its source, health check, release retention, and pre-deploy commands already saved in ARG. It does not accept an arbitrary source, command, or path from the agent. Normal validation, source security checks, queueing, and active-job conflict protection still apply. Supply a unique `request_id` (8–64 characters) for each intended deployment and reuse it for retries; a repeated request returns the existing job. The initial response contains the real job ID and state; follow final state and logs in ARG.
+
+This scope does not weaken root-command approvals. Root scope still only creates a proposal and every execution requires administrator review, password reauthentication, and typed confirmation.
 
 To avoid storing privileged commands on disk, command text exists only in ARG's memory. A request expires after five minutes or when ARG restarts. Output is also memory-only, limited to 16 KiB, retained for up to five minutes, and returned to that same agent token once. The agent can see command output, which may contain sensitive data; approve only commands and agents you trust.
 
@@ -42,10 +50,10 @@ Token scopes can be changed from the panel. Removing the root-command scope inva
 * Each token has independent scopes and a 30 requests/minute limit.
 * Up to 10 active tokens per administrator and 20 pending proposals per token are allowed.
 * Tokens are revoked when their owner loses administrator status or is disabled.
-* Proposals expire after 30 minutes and can only be approved through an administrator session with Origin validation.
+* Approval-required proposals expire after 30 minutes and can only be approved through an administrator session with Origin validation. Automatic deployment, when separately scoped, uses its Bearer token scope and the normal job pipeline.
 * Root command proposals expire after five minutes and require a fresh administrator password plus an explicit typed confirmation for every command.
 * Root commands and their output are not written to SQLite or the audit log; output is limited to 16 KiB and offered once from temporary memory.
-* Responses use `no-store`; creation, revocation, proposals, and reviews are written to the audit log.
+* Responses use `no-store`; creation, revocation, proposals, reviews, and automatic deployments are written to the audit log.
 * Restricting network access to the panel and protecting MCP client credentials remain administrator responsibilities.
 
 ## Troubleshooting
