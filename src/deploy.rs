@@ -674,6 +674,147 @@ pub(super) async fn queue_wordpress_initial(
     )
 }
 
+/// Queues the app's already-saved default deployment after an administrator has
+/// approved an AI-agent proposal. The proposal cannot supply a source or shell
+/// command; this reuses the normal validation, queue, release, and worker path.
+pub(super) fn agent_default_deployment_snapshot(
+    db: &Connection,
+    app_id: &str,
+    owner: &str,
+) -> Result<Value, String> {
+    let (framework, wordpress_version): (String, String) = db
+        .query_row(
+            "SELECT framework,wordpress_version FROM applications WHERE id=?1 AND owner_server_uuid=?2 AND deleted_at IS NULL",
+            params![app_id, owner],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "اپلیکیشن فعال در همین VPS پیدا نشد.".to_owned())?;
+    let saved = db.query_row(
+        "SELECT retention_count,default_healthcheck_file,default_source_json,default_pre_deploy_commands_json FROM application_deployment_settings WHERE application_id=?1",
+        [app_id],
+        |row| Ok((row.get::<_,i64>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?,row.get::<_,String>(3)?)),
+    ).optional().map_err(|_| "تنظیمات پیش‌فرض استقرار خوانده نشد.".to_owned())?;
+    let (retention, healthcheck, source_json, commands_json) =
+        saved.unwrap_or((5, None, None, "[]".to_owned()));
+    let source = match source_json {
+        Some(value) => serde_json::from_str::<Source>(&value)
+            .map_err(|_| "منبع پیش‌فرض استقرار معتبر نیست.".to_owned())?,
+        None => wordpress_version_source(&framework, &wordpress_version)
+            .ok_or_else(|| "برای این اپلیکیشن منبع پیش‌فرضی ذخیره نشده است.".to_owned())?,
+    };
+    if !valid_default_source(&source) {
+        return Err("منبع پیش‌فرض برای اجرای استقرار عامل معتبر نیست.".into());
+    }
+    if healthcheck
+        .as_deref()
+        .is_some_and(|path| !valid_relative_file(path))
+    {
+        return Err("Health Check پیش‌فرض مسیر امنی ندارد.".into());
+    }
+    let commands = serde_json::from_str::<Vec<String>>(&commands_json)
+        .map_err(|_| "دستورهای پیش‌فرض استقرار معتبر نیستند.".to_owned())?;
+    let commands = validate_pre_deploy_commands(commands)?;
+    let source_summary = match &source {
+        Source::Git {
+            repository,
+            reference,
+            ssh_key_id,
+            ..
+        } => {
+            json!({"kind":"git","repository":repository,"reference":reference,"private_key_configured":ssh_key_id.is_some()})
+        }
+        Source::Directory { path } => json!({"kind":"directory","path":path}),
+        Source::Archive { .. } => {
+            return Err("منبع ZIP به‌عنوان منبع پیش‌فرض قابل استفاده نیست.".into())
+        }
+    };
+    Ok(json!({
+        "source":source,
+        "source_summary":source_summary,
+        "healthcheck_file":healthcheck,
+        "pre_deploy_commands":commands,
+        "pre_deploy_command_count":commands.len(),
+        "retention_count":retention.clamp(1,30)
+    }))
+}
+
+pub(super) async fn queue_agent_approved_snapshot(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id: &str,
+    approved_by: &str,
+    proposal_id: &str,
+    snapshot: &Value,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    let _app_execution_guard = laravel::APP_EXECUTION_LOCK.lock().await;
+    let source =
+        serde_json::from_value::<Source>(snapshot.get("source").cloned().unwrap_or(Value::Null))
+            .map_err(|_| api_error(StatusCode::CONFLICT, "Snapshot منبع استقرار معتبر نیست."))?;
+    if !valid_default_source(&source) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "Snapshot منبع از نظر امنیتی معتبر نیست.",
+        ));
+    }
+    let healthcheck = snapshot
+        .get("healthcheck_file")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let commands = serde_json::from_value::<Vec<String>>(
+        snapshot
+            .get("pre_deploy_commands")
+            .cloned()
+            .unwrap_or(Value::Null),
+    )
+    .map_err(|_| {
+        api_error(
+            StatusCode::CONFLICT,
+            "Snapshot دستورهای استقرار معتبر نیست.",
+        )
+    })?;
+    let commands = validate_pre_deploy_commands(commands)
+        .map_err(|message| api_error(StatusCode::CONFLICT, &message))?;
+    let retention = snapshot
+        .get("retention_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(5)
+        .clamp(1, 30);
+    {
+        let db = state.lock().unwrap();
+        let owner = federation::local_server_uuid(&db).map_err(db_error)?;
+        ensure_app(&db, app_id, &owner)?;
+    }
+    insert_job_with_release_as(
+        state,
+        headers,
+        app_id,
+        source,
+        format!("ai-approved-{proposal_id}"),
+        healthcheck,
+        None,
+        None,
+        commands,
+        Some(format!("ai-{proposal_id}")),
+        Some(retention),
+        Some(approved_by),
+    )
+}
+
+pub(super) fn agent_approved_job(
+    db: &Connection,
+    proposal_id: &str,
+) -> rusqlite::Result<Option<Value>> {
+    let key = format!("ai-approved-{proposal_id}");
+    let job_id = db
+        .query_row(
+            "SELECT id FROM deployment_jobs WHERE idempotency_key=?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    job_id.map(|id| read_job(db, &id)).transpose()
+}
+
 pub(super) fn verify_wordpress_release_source(
     release: &FsPath,
     expected_version: &str,
@@ -900,6 +1041,40 @@ fn insert_job_with_release(
     requested_release_name: Option<String>,
     requested_retention_count: Option<i64>,
 ) -> Result<Value, (StatusCode, Json<Value>)> {
+    insert_job_with_release_as(
+        state,
+        headers,
+        app_id,
+        source,
+        key,
+        healthcheck,
+        archive,
+        archive_file,
+        pre_deploy_commands,
+        requested_release_name,
+        requested_retention_count,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Internal entry point shares the validated deployment pipeline for human and explicitly approved agent actions."
+)]
+fn insert_job_with_release_as(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id: &str,
+    source: Source,
+    key: String,
+    healthcheck: Option<String>,
+    archive: Option<&[u8]>,
+    archive_file: Option<&FsPath>,
+    pre_deploy_commands: Vec<String>,
+    requested_release_name: Option<String>,
+    requested_retention_count: Option<i64>,
+    approved_actor: Option<&str>,
+) -> Result<Value, (StatusCode, Json<Value>)> {
     check_origin(headers)?;
     if !valid_key(&key) {
         return Err(api_error(
@@ -962,7 +1137,10 @@ fn insert_job_with_release(
     }
     let (actor, owner, environment_kind, retention_count, healthcheck) = {
         let db = state.lock().unwrap();
-        let actor = require_admin(&db, headers)?.username;
+        let actor = approved_actor
+            .map(str::to_owned)
+            .map(Ok)
+            .unwrap_or_else(|| require_admin(&db, headers).map(|user| user.username))?;
         let owner = federation::local_server_uuid(&db)
             .map_err(|cause| deployment_db_error("اجرای عملیات پایگاه‌دادهٔ استقرار", &cause))?;
         ensure_app(&db, app_id, &owner)?;

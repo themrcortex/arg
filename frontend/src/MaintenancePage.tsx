@@ -9,7 +9,7 @@ import { Label } from './components/ui/label'
 import { Skeleton } from './components/ui/skeleton'
 import { HostSecurityPanel } from './HostSecurityPanel'
 import { ExtensionSecurityPanel } from './ExtensionSecurityPanel'
-import { ApiKeysPanel, DoctorPanel } from './PlatformReadinessPanels'
+import { AiAgentPanel, ApiKeysPanel, DoctorPanel } from './PlatformReadinessPanels'
 import { UnifiedStepper } from './components/ui/stepper'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 
@@ -211,6 +211,7 @@ export function MaintenancePage({ Heading, notify }: Common) {
     <HostSecurityPanel/>
     <ExtensionSecurityPanel notify={notify}/>
     <DoctorPanel />
+    <AiAgentPanel />
     <ApiKeysPanel />
       </TabsContent>
 

@@ -63,6 +63,7 @@ static ROOT_TERMINAL_PIDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 type AppState = Arc<Mutex<Connection>>;
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
+mod ai_agents;
 mod api_keys;
 mod app_backups;
 mod app_cleanup;
@@ -2780,12 +2781,15 @@ async fn update_user(
     let revoked_api_keys =
         api_keys::revoke_if_owner_ineligible(&db, id, &input.role, input.enabled)
             .map_err(db_error)?;
+    let revoked_ai_agents =
+        ai_agents::revoke_if_owner_ineligible(&db, id, &input.role, input.enabled)
+            .map_err(db_error)?;
     audit(
         &db,
         &actor.username,
         "user.update",
         &format!(
-            "id={id} role={} enabled={} revoked_api_keys={revoked_api_keys}",
+            "id={id} role={} enabled={} revoked_api_keys={revoked_api_keys} revoked_ai_agents={revoked_ai_agents}",
             input.role, input.enabled
         ),
     );
@@ -5476,6 +5480,7 @@ fn migrate_schema_with_checkpoint(
     run_migration!("workflow_drafts", workflow_drafts::migrate);
     run_migration!("dashboard_preferences", dashboard_preferences::migrate);
     run_migration!("api_keys", api_keys::migrate);
+    run_migration!("ai_agents", ai_agents::migrate);
     run_migration!("extensions", extensions::migrate);
     run_migration!("maintenance", maintenance::migrate);
 

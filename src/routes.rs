@@ -63,6 +63,32 @@ pub(super) fn router(state: AppState) -> Router {
             axum::routing::delete(api_keys::revoke).layer(middleware::from_fn(api_keys::no_store)),
         )
         .route(
+            "/api/admin/ai-agents",
+            get(ai_agents::list)
+                .post(ai_agents::create)
+                .layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/admin/ai-agent-proposals",
+            get(ai_agents::list_proposals).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/admin/ai-agent-proposals/{id}/approve",
+            post(ai_agents::approve_proposal).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/admin/ai-agent-proposals/{id}/reject",
+            post(ai_agents::reject_proposal).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/admin/ai-agents/{id}",
+            axum::routing::delete(ai_agents::revoke).layer(middleware::from_fn(api_keys::no_store)),
+        )
+        .route(
+            "/api/agent/mcp",
+            post(ai_agents::mcp).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
             "/api/v1/openapi.json",
             get(api_keys::openapi).layer(middleware::from_fn(api_keys::no_store)),
         )
