@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.7.9-dev.15 — 2026-11-03
+
+### Added
+- Add a separately granted `deployments:execute` MCP capability for starting standard ARG deployment jobs from applications' saved source and launch settings, without per-deployment approval.
+- Add an MCP client configuration and system-prompt helper that never includes the bearer token and explains the granted scopes and their safety boundaries.
+
+### Security
+- Keep root command proposals behind administrator review, password reauthentication, and typed confirmation even when automatic deployment is enabled; constrain deployment requests with per-token idempotency and audit records.
+
 ## v0.7.9-dev.14 — 2026-11-03
 
 ### Added
