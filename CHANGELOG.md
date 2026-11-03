@@ -1,5 +1,11 @@
 # ARG Change Log
 
+## v0.7.9-dev.14 — 2026-11-03
+
+### Added
+- Add editable, per-token MCP capability scopes, including optional Root command proposals.
+- Require fresh administrator password verification and typed confirmation before each Root command; keep command text and one-time output in bounded temporary memory.
+
 ## v0.7.9-dev.13 — 2026-11-03
 
 ### Added
