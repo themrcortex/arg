@@ -1,5 +1,14 @@
 # ARG Change Log
 
+## v0.7.9-dev.17 — 2026-11-13
+
+### Development
+- Add Docker network topology with live container membership, IP addresses, and ARG application links.
+- Add per-container CPU/RAM limits and isolated bridge network settings.
+- Add an optimization workspace for reclaimable Docker cache/images, inactive ARG S3 cache, old server logs, and APT archives, with confirmation and space estimates.
+- Align disk usage percentages across dashboard, history, and mount inventory with `df` by excluding reserved filesystem blocks.
+- Document Docker networking, cleanup effects, and disk usage semantics in Persian and English.
+
 ## v0.7.9-dev.16 — 2026-11-03
 
 ### Fixed
