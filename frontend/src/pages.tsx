@@ -171,7 +171,7 @@ function useDashboard(notify: (message: string) => void) {
   }, [refresh, refreshRequestEpoch])
   const history = samples.map((sample) => ({ at: sample.at, time: new Intl.DateTimeFormat('en-US', { timeZone, hour: '2-digit', minute: '2-digit' }).format(sample.at * 1000), rx: sample.rx, tx: sample.tx }))
   const resourceHistory = samples.map(({ at, cpu, memory, disk }) => ({ at, cpu, memory, disk }))
-  const diskCapacityHistory = samples.filter((sample) => sample.disk_total_bytes != null && sample.disk_total_bytes > 0 && sample.disk_used_bytes != null).map((sample) => ({ at: sample.at, capacity: Math.min(100, sample.disk_used_bytes! / sample.disk_total_bytes! * 100) }))
+  const diskCapacityHistory = samples.filter((sample) => sample.disk_total_bytes != null && sample.disk_total_bytes > 0).map((sample) => ({ at: sample.at, capacity: Math.min(100, sample.disk) }))
   const diskIoHistory = samples.filter((sample) => sample.disk_read != null && sample.disk_write != null).map((sample) => ({ at: sample.at, read: sample.disk_read!, write: sample.disk_write! }))
   function applyCustomRange() {
     const from = new Date(customFrom).getTime()
@@ -457,7 +457,7 @@ export function SystemPage({ Heading, notify }: Common) {
   const totalDisk = rootVolume?.total_bytes ?? data?.disk_total_bytes ?? null
   const usedDisk = rootVolume?.used_bytes ?? data?.disk_used_bytes ?? (totalDisk !== null && data?.disk_free_bytes != null ? Math.max(0, totalDisk - data.disk_free_bytes) : null)
   const freeDisk = rootVolume?.available_bytes ?? data?.disk_free_bytes ?? null
-  const diskPercent = rootVolume?.use_percent ?? (totalDisk && totalDisk > 0 && usedDisk !== null ? usedDisk / totalDisk * 100 : null)
+  const diskPercent = rootVolume?.use_percent ?? (usedDisk !== null && freeDisk !== null && usedDisk + freeDisk > 0 ? usedDisk / (usedDisk + freeDisk) * 100 : null)
   const load = (data?.load || '').trim().split(/\s+/)
   const memoryDetail = data?.memory_details
   return <>

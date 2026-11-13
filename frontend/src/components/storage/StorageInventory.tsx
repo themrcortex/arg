@@ -17,7 +17,10 @@ export function StorageOverviewKpi({ inventory, rootTotalBytes, rootUsedBytes, r
   const root = inventory?.volumes.find((volume) => volume.mount_point === '/')
   const total = local?.aggregation_reliable && local.total_bytes > 0 ? local.total_bytes : root?.total_bytes || rootTotalBytes
   const used = local?.aggregation_reliable && local.total_bytes > 0 ? local.used_bytes : root?.used_bytes ?? rootUsedBytes ?? (typeof rootTotalBytes === 'number' && typeof rootFreeBytes === 'number' ? Math.max(0, rootTotalBytes - rootFreeBytes) : undefined)
-  const percent = typeof total === 'number' && total > 0 && typeof used === 'number' ? Math.min(100, used / total * 100) : null
+  const available = local?.aggregation_reliable && local.total_bytes > 0 ? local.available_bytes : root?.available_bytes ?? rootFreeBytes
+  const percent = typeof used === 'number' && typeof available === 'number' && used + available > 0
+    ? Math.min(100, used / (used + available) * 100)
+    : root?.use_percent ?? null
   const important = [root, ...(inventory?.volumes.filter((volume) => volume.kind === 'local' && volume.mount_point !== '/') || [])].filter((volume) => volume?.total_bytes && volume.total_bytes > 0).slice(0, 2)
   return <section className="arg-kpi-card min-w-0 rounded-[14px] border border-border p-4" aria-label="فضای ذخیره‌سازی VPS">
     <div className="flex items-start justify-between gap-2"><div><p className="text-xs text-muted-foreground">{local?.aggregation_reliable ? 'مجموع دیسک‌های محلی VPS' : 'دیسک ریشه /'}</p><p className="mt-2 font-mono text-2xl font-semibold tabular-nums text-foreground" dir="ltr">{percent === null ? '—' : `${formatNumber(Math.round(percent * 10) / 10)}%`}</p></div><HardDrive size={19} className="text-primary" aria-hidden="true"/></div>

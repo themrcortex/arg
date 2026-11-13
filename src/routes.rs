@@ -579,6 +579,10 @@ pub(super) fn router(state: AppState) -> Router {
         .route("/api/services", get(list_system_services))
         .route("/api/services/action", post(run_service_operation))
         .route("/api/docker", get(docker::docker_status))
+        .route(
+            "/api/docker/optimization",
+            get(docker::docker_optimization_status),
+        )
         .route("/api/docker/action", post(docker::docker_operation))
         .route("/api/mysql/status", get(mysql::status))
         .route(

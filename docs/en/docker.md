@@ -70,3 +70,22 @@ Compose projects are identified by file and project name. Before Start/Apply, re
 ### Disk usage
 
 Docker image layers, writable layers, volumes, and build cache are separate. Read `docker system df -v` to find the source. A small container can have a multi-gigabyte database volume. Build cache reuses prior work; deleting it is not runtime data loss, but slows the next build. Image prune targets unused images; prune-all and volume cleanup have a wider impact.
+
+### Network topology and resource limits
+
+The **Network topology** tab reads attached containers from `docker network inspect` and displays their names, IP addresses, and ARG application ownership. Two applications on a shared network have a possible communication path; this does not prove that traffic is currently flowing. Use **Application networks** to manage ARG service aliases and controlled application links. The `Internal` option isolates a network from external routing and should only be used for services that do not need host or Internet access.
+
+When creating a container, optional CPU and memory limits are enforced by Docker. Leaving a limit blank keeps the default behavior. The create form does not change resource limits on an existing container; use that container's deployment or Compose settings.
+
+### Host cleanup and space estimates
+
+The **Optimization** tab reports Docker's reclaimable estimates from `docker system df` for build cache, images, and stopped containers. It separately measures inactive ARG cache, archived journal data, old rotated log files, and downloaded APT packages. Values are approximate: shared layers, sparse files, and measurement timing can change the actual space reclaimed. Potentially unused Docker volumes are excluded from automatic cleanup totals.
+
+- Pruning build cache can make later builds slower.
+- Removing unused images may require a new pull before a later run.
+- Stopped containers are removed; their attached volumes are kept.
+- ARG cache cleanup only removes cache directories for unmounted S3 mounts. ARG mount state and `/proc/self/mountinfo` protect active mounts; removed cache is recreated as needed.
+- Log cleanup supports 7, 30, or 90 days and targets archived journals and rotated files. Current logs are retained.
+- APT cleanup removes downloaded package archives without uninstalling packages.
+
+Review the estimate and confirm each cleanup separately. Operations are recorded in the audit log. Review consumers and back up data before using `docker volume prune`; volume cleanup remains a separate action on the Volumes tab.

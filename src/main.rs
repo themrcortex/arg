@@ -1518,12 +1518,16 @@ async fn collect_metrics(state: AppState) {
         } else {
             0.0
         };
-        let (disk_total, disk_used, _disk_available) = metrics::disk_usage();
-        let disk = if disk_total > 0 {
-            (100.0 * disk_used as f64 / disk_total as f64).clamp(0.0, 100.0)
-        } else {
-            0.0
-        };
+        let (disk_total, disk_used, _disk_available, disk) = storage_mounts::root_usage()
+            .unwrap_or_else(|| {
+                let (total, used, available) = metrics::disk_usage();
+                (
+                    total,
+                    used,
+                    available,
+                    storage_mounts::usage_percent(used, available).unwrap_or(0.0),
+                )
+            });
         let current_disk_io = storage_mounts::root_disk_io_counters();
         let disk_read_rate = previous_disk_io.zip(current_disk_io).and_then(
             |((previous_read, previous_write), (read, write))| {
@@ -4386,6 +4390,9 @@ fn execute_privileged_request(request: &Value) -> Value {
     }
     if action == "docker-status" {
         return docker::execute_docker_status();
+    }
+    if action == "docker-optimization-status" {
+        return docker::execute_docker_optimization_status(request);
     }
     if action == "runtime-inventory" {
         return runtimes::execute_inventory();

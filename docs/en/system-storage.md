@@ -10,6 +10,8 @@ The System page groups host information, uptime, CPU, RAM, Swap, and mounted fil
 - **Reserved/unavailable:** total minus used and available, when it can be calculated.
 - **Mount point:** where a filesystem is attached in Linux's directory tree, such as `/`, `/var`, or `/mnt/data`.
 
+Usage percentage follows `df`: `Used / (Used + Available)`. Blocks reserved for root are not part of Available; dividing Used by Total ignores that reserved space and reports a lower percentage. The dashboard, periodic samples, and mount inventory use the same formula.
+
 `/proc`, `/sys`, `tmpfs`, `overlay`, cgroups, and pseudo-filesystems are not independent physical disks and are excluded from local physical totals. FUSE/S3 mounts appear as remote/cloud storage rather than local capacity. Rclone's local cache still consumes VPS disk space.
 
 ## Find what occupies disk space
@@ -46,7 +48,7 @@ Summary aggregates only when non-overlapping filesystems can be identified. Dupl
 
 ### Capacity and I/O trends
 
-The Capacity graph plots used/total for the selected filesystem. Read/Write graphs show disk byte rates and may be unavailable for some mounts/drivers. Interpret data with its sample time; a zero is different from no measurement. Use point tooltips for dates on multi-day ranges.
+The Capacity graph plots the same `Used / (Used + Available)` percentage for the selected filesystem. Read/Write graphs show disk byte rates and may be unavailable for some mounts/drivers. Interpret data with its sample time; a zero is different from no measurement. Use point tooltips for dates on multi-day ranges.
 
 ### Find what fills the disk
 

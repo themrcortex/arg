@@ -27,6 +27,24 @@ pub(super) struct DockerOperation {
     confirmed: bool,
     #[serde(default)]
     application_id: Option<String>,
+    #[serde(default)]
+    memory_limit_mb: Option<u64>,
+    #[serde(default)]
+    cpu_limit: Option<f64>,
+    #[serde(default)]
+    internal: bool,
+    #[serde(default = "default_log_retention_days")]
+    retention_days: u16,
+}
+
+fn default_log_retention_days() -> u16 {
+    30
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct DockerOptimizationQuery {
+    #[serde(default = "default_log_retention_days")]
+    retention_days: u16,
 }
 
 pub(super) async fn docker_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult {
@@ -45,6 +63,39 @@ pub(super) async fn docker_status(State(state): State<AppState>, headers: Header
     }
     Ok(Json(result["data"].clone()))
 }
+
+pub(super) async fn docker_optimization_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DockerOptimizationQuery>,
+) -> ApiResult {
+    if ![7, 30, 90].contains(&query.retention_days) {
+        return Err(error(StatusCode::BAD_REQUEST, "مدت نگه‌داری لاگ معتبر نیست."));
+    }
+    let protected_cache_mount_ids = {
+        let db = state.lock().unwrap();
+        require_admin(&db, &headers)?;
+        let mut statement = db
+            .prepare("SELECT id FROM s3_mounts WHERE status != 'unmounted'")
+            .map_err(db_error)?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        ids
+    };
+    let result = privileged_request_async(json!({"action":"docker-optimization-status","protected_cache_mount_ids":protected_cache_mount_ids,"retention_days":query.retention_days})).await?;
+    if result["ok"] != true {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            result["error"]
+                .as_str()
+                .unwrap_or("وضعیت بهینه‌سازی سرور دریافت نشد."),
+        ));
+    }
+    Ok(Json(result["data"].clone()))
+}
 pub(super) async fn docker_operation(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -54,6 +105,20 @@ pub(super) async fn docker_operation(
     let actor = {
         let db = state.lock().unwrap();
         require_admin(&db, &headers)?.username
+    };
+    let protected_cache_mount_ids = if input.action == "arg-cache-prune" {
+        let db = state.lock().unwrap();
+        let mut statement = db
+            .prepare("SELECT id FROM s3_mounts WHERE status != 'unmounted'")
+            .map_err(db_error)?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        ids
+    } else {
+        Vec::new()
     };
     if let Some(application_id) = input.application_id.as_deref() {
         if input.action != "container-run" || !apps::valid_uuid(application_id) {
@@ -105,6 +170,12 @@ pub(super) async fn docker_operation(
         "compose-up",
         "compose-down",
         "compose-pull",
+        "docker-builder-prune",
+        "docker-container-prune",
+        "docker-network-prune",
+        "arg-cache-prune",
+        "server-logs-prune",
+        "apt-cache-clean",
     ];
     if !allowed.contains(&input.action.as_str()) {
         return Err(error(
@@ -122,6 +193,12 @@ pub(super) async fn docker_operation(
         "image-prune",
         "volume-prune",
         "system-prune",
+        "docker-builder-prune",
+        "docker-container-prune",
+        "docker-network-prune",
+        "arg-cache-prune",
+        "server-logs-prune",
+        "apt-cache-clean",
         "stop",
         "restart",
         "disable",
@@ -136,7 +213,10 @@ pub(super) async fn docker_operation(
         ));
     }
     let _update_guard = UPDATE_OPERATION_GATE.read().await;
-    let result = privileged_request_async(json!({"action":"docker-operation","operation":input.action,"target":input.target,"name":input.name,"image":input.image,"ports":input.ports,"env":input.env,"network":input.network,"restart":input.restart,"compose_file":input.compose_file,"context_path":input.context_path,"command":input.command,"confirmed":input.confirmed,"application_id":input.application_id})).await?;
+    if input.action == "server-logs-prune" && ![7, 30, 90].contains(&input.retention_days) {
+        return Err(error(StatusCode::BAD_REQUEST, "مدت نگه‌داری لاگ معتبر نیست."));
+    }
+    let result = privileged_request_async(json!({"action":"docker-operation","operation":input.action,"target":input.target,"name":input.name,"image":input.image,"ports":input.ports,"env":input.env,"network":input.network,"restart":input.restart,"compose_file":input.compose_file,"context_path":input.context_path,"command":input.command,"confirmed":input.confirmed,"application_id":input.application_id,"memory_limit_mb":input.memory_limit_mb,"cpu_limit":input.cpu_limit,"internal":input.internal,"retention_days":input.retention_days,"protected_cache_mount_ids":protected_cache_mount_ids})).await?;
     if result["ok"] != true {
         return Err(error(
             StatusCode::BAD_GATEWAY,
@@ -248,7 +328,7 @@ pub(super) fn execute_docker_status() -> Value {
         ],
         &["id", "repository", "tag", "size", "created"],
     );
-    let networks = docker_table(
+    let mut networks = docker_table(
         &[
             "network",
             "ls",
@@ -258,6 +338,56 @@ pub(super) fn execute_docker_status() -> Value {
         ],
         &["id", "name", "driver", "scope"],
     );
+    if let Ok(rows) = networks.as_mut() {
+        let names: Vec<&str> = rows
+            .iter()
+            .filter_map(|network| network["name"].as_str())
+            .collect();
+        if !names.is_empty() {
+            let mut inspect = std::process::Command::new("docker");
+            inspect.args(["network", "inspect"]).args(&names);
+            if let Ok((true, output)) = command_result(&mut inspect) {
+                if let Ok(details) = serde_json::from_str::<Vec<Value>>(&output) {
+                    for network in rows {
+                        let name = network["name"].as_str().unwrap_or_default();
+                        let detail = details.iter().find(|item| item["Name"] == name);
+                        let members = detail
+                            .and_then(|item| item["Containers"].as_object())
+                            .map(|attached| {
+                                attached
+                                    .iter()
+                                    .map(|(container_id, item)| {
+                                        let container = containers
+                                            .as_ref()
+                                            .ok()
+                                            .and_then(|items| {
+                                                items.iter().find(|container| {
+                                                    container["id"]
+                                                        .as_str()
+                                                        .is_some_and(|id| id.starts_with(container_id))
+                                                })
+                                            });
+                                        json!({
+                                            "id": container_id,
+                                            "name": item["Name"],
+                                            "ipv4": item["IPv4Address"],
+                                            "ipv6": item["IPv6Address"],
+                                            "application_id": container.and_then(|container| container["application_id"].as_str())
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        network["internal"] = json!(detail
+                            .and_then(|item| item["Internal"].as_bool())
+                            .unwrap_or(false));
+                        network["containers"] = json!(members);
+                        network["details_available"] = json!(detail.is_some());
+                    }
+                }
+            }
+        }
+    }
     let volumes = docker_table(
         &[
             "volume",
@@ -459,6 +589,26 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
             for value in envs {
                 args.extend(["--env".into(), value.into()]);
             }
+            if let Some(memory_mb) = request["memory_limit_mb"].as_u64() {
+                if !(16..=1_048_576).contains(&memory_mb) {
+                    return json!({"ok":false,"error":"Memory limit must be between 16 MB and 1 TB"});
+                }
+                args.extend(["--memory".into(), format!("{memory_mb}m")]);
+            }
+            if !request["memory_limit_mb"].is_null()
+                && request["memory_limit_mb"].as_u64().is_none()
+            {
+                return json!({"ok":false,"error":"Invalid memory limit"});
+            }
+            if let Some(cpu_limit) = request["cpu_limit"].as_f64() {
+                if !cpu_limit.is_finite() || !(0.1..=128.0).contains(&cpu_limit) {
+                    return json!({"ok":false,"error":"CPU limit must be between 0.1 and 128 cores"});
+                }
+                args.extend(["--cpus".into(), cpu_limit.to_string()]);
+            }
+            if !request["cpu_limit"].is_null() && request["cpu_limit"].as_f64().is_none() {
+                return json!({"ok":false,"error":"Invalid CPU limit"});
+            }
             let network = request["network"].as_str().unwrap_or_default();
             if !network.is_empty() {
                 if !valid_docker_object(network) {
@@ -579,16 +729,16 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
             if !valid_docker_object(value) || operation == "network-remove" && !confirmed {
                 return json!({"ok":false,"error":"Invalid network name or missing confirmation"});
             }
-            args.extend([
-                "network".into(),
-                if operation == "network-create" {
-                    "create"
-                } else {
-                    "rm"
+            args.extend(["network".into()]);
+            if operation == "network-create" {
+                args.extend(["create".into(), "--driver".into(), "bridge".into()]);
+                if request["internal"].as_bool().unwrap_or(false) {
+                    args.push("--internal".into());
                 }
-                .into(),
-                value.into(),
-            ]);
+                args.push(value.into());
+            } else {
+                args.extend(["rm".into(), value.into()]);
+            }
         }
         "volume-create" | "volume-remove" => {
             let value = if operation == "volume-create" {
@@ -622,6 +772,32 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
             }
             args.extend(["system".into(), "prune".into(), "-af".into()]);
         }
+        "docker-builder-prune" => {
+            if !confirmed {
+                return json!({"ok":false,"error":"Confirmation required"});
+            }
+            args.extend([
+                "builder".into(),
+                "prune".into(),
+                "--all".into(),
+                "--force".into(),
+            ]);
+        }
+        "docker-container-prune" => {
+            if !confirmed {
+                return json!({"ok":false,"error":"Confirmation required"});
+            }
+            args.extend(["container".into(), "prune".into(), "--force".into()]);
+        }
+        "docker-network-prune" => {
+            if !confirmed {
+                return json!({"ok":false,"error":"Confirmation required"});
+            }
+            args.extend(["network".into(), "prune".into(), "--force".into()]);
+        }
+        "arg-cache-prune" => return prune_arg_cache(request),
+        "server-logs-prune" => return prune_server_logs(request),
+        "apt-cache-clean" => return clean_apt_cache(request),
         "compose-up" | "compose-down" | "compose-pull" => {
             if operation == "compose-down" && !confirmed {
                 return json!({"ok":false,"error":"Confirmation required"});
@@ -666,6 +842,418 @@ pub(super) fn execute_docker_operation(request: &Value) -> Value {
         Ok((false, output)) => json!({"ok":false,"error":output}),
         Err(error) => json!({"ok":false,"error":error}),
     }
+}
+
+pub(super) fn execute_docker_optimization_status(request: &Value) -> Value {
+    let protected = protected_cache_mount_ids(request);
+    let docker_df = docker_reclaimable_bytes();
+    let retention_days = request["retention_days"]
+        .as_u64()
+        .filter(|days| [7, 30, 90].contains(days))
+        .unwrap_or(30) as u16;
+    let log_cutoff = retention_cutoff(retention_days);
+    let (journal_bytes, journal_error) = journal_disk_usage();
+    let data = json!({
+        "measured_at": crate::now(),
+        "docker": {
+            "available": docker_df.is_ok(),
+            "build_cache_bytes": docker_df.as_ref().ok().and_then(|items| items.get("build_cache")).copied().unwrap_or(0),
+            "images_bytes": docker_df.as_ref().ok().and_then(|items| items.get("images")).copied().unwrap_or(0),
+            "containers_bytes": docker_df.as_ref().ok().and_then(|items| items.get("containers")).copied().unwrap_or(0),
+            "volumes_bytes": docker_df.as_ref().ok().and_then(|items| items.get("volumes")).copied().unwrap_or(0),
+            "error": docker_df.err().unwrap_or_default()
+        },
+        "arg_cache": {
+            "reclaimable_bytes": arg_cache_reclaimable_bytes(&protected),
+            "protected_mounts": protected.len()
+        },
+        "logs": {
+            "journal_bytes": journal_bytes.unwrap_or(0),
+            "journal_reclaimable_bytes": old_journal_bytes(log_cutoff),
+            "rotated_reclaimable_bytes": old_rotated_log_bytes(log_cutoff),
+            "retention_days": retention_days,
+            "error": journal_error.unwrap_or_default()
+        },
+        "apt_cache_bytes": directory_size(std::path::Path::new("/var/cache/apt/archives"))
+    });
+    json!({"ok":true,"data":data})
+}
+
+fn docker_reclaimable_bytes() -> Result<std::collections::HashMap<String, u64>, String> {
+    let mut command = std::process::Command::new("docker");
+    command.args(["system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}"]);
+    let (success, output) = command_result(&mut command)?;
+    if !success {
+        return Err(output);
+    }
+    let mut result = std::collections::HashMap::new();
+    for line in output.lines() {
+        let Some((kind, size)) = line.split_once('\t') else {
+            continue;
+        };
+        let key = match kind.trim() {
+            "Build Cache" => "build_cache",
+            "Images" => "images",
+            "Containers" => "containers",
+            "Local Volumes" => "volumes",
+            _ => continue,
+        };
+        if let Some(bytes) = parse_human_bytes(size) {
+            result.insert(key.to_owned(), bytes);
+        }
+    }
+    Ok(result)
+}
+
+fn parse_human_bytes(value: &str) -> Option<u64> {
+    let token = value.trim().split_whitespace().next()?;
+    let split = token.find(|character: char| !character.is_ascii_digit() && character != '.')?;
+    let amount = token[..split].parse::<f64>().ok()?;
+    let unit = token[split..].to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "b" | "byte" | "bytes" => 1.0,
+        "kb" => 1_000.0,
+        "kib" => 1_024.0,
+        "mb" => 1_000_000.0,
+        "mib" => 1_048_576.0,
+        "gb" => 1_000_000_000.0,
+        "gib" => 1_073_741_824.0,
+        "tb" => 1_000_000_000_000.0,
+        "tib" => 1_099_511_627_776.0,
+        "pb" => 1_000_000_000_000_000.0,
+        "pib" => 1_125_899_906_842_624.0,
+        _ => return None,
+    };
+    (amount.is_finite() && amount >= 0.0).then(|| (amount * multiplier).min(u64::MAX as f64) as u64)
+}
+
+fn protected_cache_mount_ids(request: &Value) -> std::collections::HashSet<u64> {
+    let mut ids = request["protected_cache_mount_ids"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect::<std::collections::HashSet<_>>();
+    if let Ok(mountinfo) = std::fs::read_to_string("/proc/self/mountinfo") {
+        for line in mountinfo.lines() {
+            let Some((left, _)) = line.split_once(" - ") else {
+                continue;
+            };
+            let Some(mount_point) = left.split_whitespace().nth(4) else {
+                continue;
+            };
+            let mount_point = mount_point.replace("\\040", " ");
+            if let Some(id) = mount_point
+                .strip_prefix("/mnt/arg-s3/mount-")
+                .and_then(|value| value.parse().ok())
+            {
+                ids.insert(id);
+            }
+        }
+    }
+    ids
+}
+
+fn arg_cache_paths(protected: &std::collections::HashSet<u64>) -> Vec<std::path::PathBuf> {
+    let root = std::path::Path::new("/var/cache/arg-s3");
+    if !std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let id = name.strip_prefix("mount-")?.parse::<u64>().ok()?;
+            let kind = entry.file_type().ok()?;
+            (!protected.contains(&id) && kind.is_dir()).then(|| entry.path())
+        })
+        .collect()
+}
+
+fn arg_cache_reclaimable_bytes(protected: &std::collections::HashSet<u64>) -> u64 {
+    arg_cache_paths(protected)
+        .iter()
+        .map(|path| directory_size(path))
+        .fold(0, u64::saturating_add)
+}
+
+fn prune_arg_cache(request: &Value) -> Value {
+    if request["confirmed"].as_bool() != Some(true) {
+        return json!({"ok":false,"error":"Confirmation required"});
+    }
+    let protected = protected_cache_mount_ids(request);
+    let paths = arg_cache_paths(&protected);
+    let mut removed_bytes = 0u64;
+    let mut removed_directories = 0usize;
+    for path in paths {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_dir() {
+            continue;
+        }
+        removed_bytes = removed_bytes.saturating_add(directory_size(&path));
+        if std::fs::remove_dir_all(&path).is_ok() {
+            removed_directories += 1;
+        }
+    }
+    json!({"ok":true,"stdout":format!("پاک‌سازی Cacheهای S3 بلااستفادهٔ ARG انجام شد.\nپوشه‌های حذف‌شده: {removed_directories}\nحجم تقریبی آزادشده: {}", format_bytes(removed_bytes))})
+}
+
+fn clean_apt_cache(request: &Value) -> Value {
+    if request["confirmed"].as_bool() != Some(true) {
+        return json!({"ok":false,"error":"Confirmation required"});
+    }
+    let before = directory_size(std::path::Path::new("/var/cache/apt/archives"));
+    let mut command = std::process::Command::new("apt-get");
+    command.args(["clean"]);
+    match command_result(&mut command) {
+        Ok((true, output)) => {
+            let freed = before.saturating_sub(directory_size(std::path::Path::new(
+                "/var/cache/apt/archives",
+            )));
+            json!({"ok":true,"stdout":format!("{output}\nپاک‌سازی cache بسته‌های APT انجام شد.\nحجم آزادشده: {}", format_bytes(freed))})
+        }
+        Ok((false, output)) => json!({"ok":false,"error":output}),
+        Err(error) => json!({"ok":false,"error":error}),
+    }
+}
+
+fn retention_cutoff(days: u16) -> std::time::SystemTime {
+    std::time::SystemTime::now() - std::time::Duration::from_secs(u64::from(days) * 86_400)
+}
+
+fn journal_disk_usage() -> (Option<u64>, Option<String>) {
+    let mut command = std::process::Command::new("journalctl");
+    command.args(["--disk-usage"]);
+    match command_result(&mut command) {
+        Ok((true, output)) => {
+            let bytes = output.split_whitespace().find_map(parse_human_bytes);
+            (bytes, None)
+        }
+        Ok((false, output)) => (None, Some(output)),
+        Err(error) => (None, Some(error)),
+    }
+}
+
+fn old_journal_bytes(cutoff: std::time::SystemTime) -> u64 {
+    let mut budget = 100_000;
+    tree_bytes_matching(
+        std::path::Path::new("/var/log/journal"),
+        0,
+        cutoff,
+        &mut budget,
+        &|name| name.contains('@') && (name.ends_with(".journal") || name.ends_with(".journal~")),
+    )
+}
+
+fn old_rotated_log_bytes(cutoff: std::time::SystemTime) -> u64 {
+    let mut budget = 100_000;
+    tree_bytes_matching(
+        std::path::Path::new("/var/log"),
+        0,
+        cutoff,
+        &mut budget,
+        &rotation_log_name,
+    )
+}
+
+fn rotation_log_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let trimmed = lower
+        .strip_suffix(".gz")
+        .or_else(|| lower.strip_suffix(".xz"))
+        .or_else(|| lower.strip_suffix(".zst"))
+        .unwrap_or(&lower);
+    let numeric_suffix = trimmed.rsplit_once('.').is_some_and(|(_, suffix)| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    let dated_suffix = trimmed.rsplit_once('-').is_some_and(|(_, suffix)| {
+        suffix.len() == 8 && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    let known_log = ["messages", "wtmp", "btmp"]
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix));
+    (numeric_suffix || dated_suffix) && (trimmed.contains("log") || known_log)
+}
+
+fn tree_bytes_matching<F>(
+    root: &std::path::Path,
+    depth: usize,
+    cutoff: std::time::SystemTime,
+    budget: &mut usize,
+    matches_name: &F,
+) -> u64
+where
+    F: Fn(&str) -> bool,
+{
+    if depth > 32 || *budget == 0 {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries.filter_map(Result::ok).fold(0u64, |total, entry| {
+        if *budget == 0 {
+            return total;
+        }
+        *budget -= 1;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if root == std::path::Path::new("/var/log") && name == "journal" {
+            return total;
+        }
+        let Ok(kind) = entry.file_type() else {
+            return total;
+        };
+        let size = if kind.is_dir() {
+            tree_bytes_matching(&entry.path(), depth + 1, cutoff, budget, matches_name)
+        } else if kind.is_file() && matches_name(&name) {
+            entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| {
+                    metadata
+                        .modified()
+                        .ok()
+                        .filter(|modified| *modified < cutoff)
+                        .map(|_| metadata.len())
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        total.saturating_add(size)
+    })
+}
+
+fn prune_rotated_logs(
+    root: &std::path::Path,
+    cutoff: std::time::SystemTime,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<u64, String> {
+    if depth > 32 || *budget == 0 {
+        return Ok(0);
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut removed = 0u64;
+    for entry in entries {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if root == std::path::Path::new("/var/log") && name == "journal" {
+            continue;
+        }
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        if kind.is_dir() {
+            removed = removed.saturating_add(prune_rotated_logs(
+                &entry.path(),
+                cutoff,
+                depth + 1,
+                budget,
+            )?);
+        } else if kind.is_file() && rotation_log_name(&name) {
+            let metadata = entry.metadata().map_err(|error| error.to_string())?;
+            if metadata.modified().is_ok_and(|modified| modified < cutoff) {
+                let size = metadata.len();
+                if std::fs::remove_file(entry.path()).is_ok() {
+                    removed = removed.saturating_add(size);
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn prune_server_logs(request: &Value) -> Value {
+    if request["confirmed"].as_bool() != Some(true) {
+        return json!({"ok":false,"error":"Confirmation required"});
+    }
+    let days = request["retention_days"]
+        .as_u64()
+        .filter(|days| [7, 30, 90].contains(days))
+        .unwrap_or(30) as u16;
+    if !std::fs::symlink_metadata("/var/log").is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return json!({"ok":false,"error":"مسیر امن /var/log در دسترس نیست."});
+    }
+    let mut journal = std::process::Command::new("journalctl");
+    journal.args(["--rotate", &format!("--vacuum-time={days}d")]);
+    let journal_output = command_result(&mut journal);
+    let mut budget = 100_000;
+    let rotated = match prune_rotated_logs(
+        std::path::Path::new("/var/log"),
+        retention_cutoff(days),
+        0,
+        &mut budget,
+    ) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return json!({"ok":false,"error":format!("پاک‌سازی فایل‌های قدیمی لاگ ناموفق بود: {error}")})
+        }
+    };
+    let journal_text = match journal_output {
+        Ok((true, output)) => output,
+        Ok((false, output)) => format!("journalctl: {output}"),
+        Err(error) => format!("journalctl: {error}"),
+    };
+    json!({"ok":true,"stdout":format!("{journal_text}\nدورهٔ نگه‌داری: {days} روز\nحجم فایل‌های چرخشی حذف‌شده: {}\nJournalهای فعال نگه داشته شدند.", format_bytes(rotated))})
+}
+
+fn directory_size(path: &std::path::Path) -> u64 {
+    tree_size(path, 0, &mut 100_000)
+}
+
+fn tree_size(path: &std::path::Path, depth: usize, budget: &mut usize) -> u64 {
+    if depth > 32 || *budget == 0 {
+        return 0;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        let Ok(entry) = entry else { continue };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let size = if kind.is_dir() {
+            tree_size(&entry.path(), depth + 1, budget)
+        } else if kind.is_file() {
+            entry.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        total = total.saturating_add(size);
+    }
+    total
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1_000.0 && unit < UNITS.len() - 1 {
+        value /= 1_000.0;
+        unit += 1;
+    }
+    format!("{value:.2} {}", UNITS[unit])
 }
 
 fn application_container_ids(app_id: &str) -> Result<Vec<String>, String> {
@@ -728,4 +1316,25 @@ pub(super) fn purge_application_containers(app_id: &str) -> Result<Vec<String>, 
         ));
     }
     Ok(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_human_bytes, rotation_log_name};
+
+    #[test]
+    fn docker_human_sizes_are_parsed_in_decimal_and_binary_units() {
+        assert_eq!(parse_human_bytes("1.5GB (25%)"), Some(1_500_000_000));
+        assert_eq!(parse_human_bytes("2GiB"), Some(2_147_483_648));
+        assert_eq!(parse_human_bytes("0B (0%)"), Some(0));
+        assert_eq!(parse_human_bytes("unknown"), None);
+    }
+
+    #[test]
+    fn only_rotated_log_names_are_selected_for_old_log_cleanup() {
+        assert!(rotation_log_name("syslog.2.gz"));
+        assert!(rotation_log_name("access.log.1"));
+        assert!(!rotation_log_name("syslog"));
+        assert!(!rotation_log_name("database.dump.1.gz"));
+    }
 }

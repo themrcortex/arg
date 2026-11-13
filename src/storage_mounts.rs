@@ -165,6 +165,27 @@ fn capacity_values(
     (total, used, available, reserved)
 }
 
+/// Match `df`'s Use% semantics: reserved filesystem blocks are not counted as
+/// available to ordinary workloads, so the denominator is used + available.
+pub(super) fn usage_percent(used: u64, available: u64) -> Option<f64> {
+    let measurable = used.saturating_add(available);
+    (measurable > 0).then(|| ((used as f64 / measurable as f64) * 100.0).clamp(0.0, 100.0))
+}
+
+pub(super) fn root_usage() -> Option<(u64, u64, u64, f64)> {
+    let inventory = inventory();
+    let root = inventory["volumes"]
+        .as_array()?
+        .iter()
+        .find(|volume| volume["mount_point"] == "/")?;
+    Some((
+        root["total_bytes"].as_u64()?,
+        root["used_bytes"].as_u64()?,
+        root["available_bytes"].as_u64()?,
+        root["use_percent"].as_f64()?,
+    ))
+}
+
 /// Inventory mounted filesystems without summing pseudo, remote or cloud filesystems into local disk totals.
 pub(super) fn inventory() -> Value {
     let cache = INVENTORY_CACHE.get_or_init(|| Mutex::new(None));
@@ -243,10 +264,9 @@ fn build_inventory() -> Value {
                 )
             })
             .unwrap_or((None, None, None, None));
-        let use_percent = total_bytes
-            .filter(|value| *value > 0)
-            .zip(used_bytes)
-            .map(|(size, usage)| ((usage as f64 / size as f64) * 100.0).clamp(0.0, 100.0));
+        let use_percent = used_bytes
+            .zip(available_bytes)
+            .and_then(|(usage, free)| usage_percent(usage, free));
         let (read_bytes_per_sec, write_bytes_per_sec) =
             io_rates.get(device_id).cloned().unwrap_or((None, None));
         let is_mount = Path::new(&mount_point).exists();
@@ -305,7 +325,9 @@ fn build_inventory() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{capacity_values, filesystem_kind, parse_diskstats, unescape_mount_field};
+    use super::{
+        capacity_values, filesystem_kind, parse_diskstats, unescape_mount_field, usage_percent,
+    };
 
     #[test]
     fn capacity_separates_used_available_and_reserved_blocks() {
@@ -314,6 +336,14 @@ mod tests {
             capacity_values(100, 30, 20, 4096),
             (409_600, 286_720, 81_920, 40_960)
         );
+    }
+
+    #[test]
+    fn usage_percent_excludes_reserved_blocks_like_df() {
+        // With 60 blocks used, 35 available and 5 reserved, df reports 63.2%.
+        let percent = usage_percent(60, 35).unwrap();
+        assert!((percent - 63.1578947368).abs() < 0.0001);
+        assert_eq!(usage_percent(0, 0), None);
     }
 
     #[test]
