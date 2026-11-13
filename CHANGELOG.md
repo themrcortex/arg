@@ -1,5 +1,13 @@
 # ARG Change Log
 
+## v0.7.9-dev.18 — 2026-11-13
+
+### Fixed
+- Allow the privileged Docker optimization status request so disk-reclaimable estimates no longer fail with `Unsupported privileged action`.
+
+### Changed
+- Move server cleanup and space estimates into a dedicated **Server optimization** page in the sidebar.
+
 ## v0.7.9-dev.17 — 2026-11-13
 
 ### Development
