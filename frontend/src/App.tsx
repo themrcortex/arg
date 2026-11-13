@@ -67,6 +67,7 @@ const AccountPage = lazy(() => import('./pages').then((module) => ({ default: mo
 const AptPage = lazy(() => import('./AdminOpsPage').then((module) => ({ default: module.AptPage })))
 const ServicesPage = lazy(() => import('./AdminOpsPage').then((module) => ({ default: module.ServicesPage })))
 const DockerPage = lazy(() => import('./DockerPage').then((module) => ({ default: module.DockerPage })))
+const DockerOptimizationPage = lazy(() => import('./DockerPage').then((module) => ({ default: module.DockerOptimizationPage })))
 const FileManagerPage = lazy(() => import('./FileManagerPage').then((module) => ({ default: module.FileManagerPage })))
 const MaintenancePage = lazy(() => import('./MaintenancePage').then((module) => ({ default: module.MaintenancePage })))
 const MysqlPage = lazy(() => import('./MysqlPage').then((module) => ({ default: module.MysqlPage })))
@@ -569,6 +570,7 @@ const documentationTargetForPanelPage: Record<PageId, { page: string; heading: s
   firewall: { page: 'network-firewall', heading: 'UFW' },
   nginx: { page: 'nginx', heading: 'صفحهٔ سایت‌های Nginx' },
   docker: { page: 'docker', heading: 'فهرست تب‌ها و عملیات' },
+  optimization: { page: 'docker', heading: 'بهینه‌سازی فضای میزبان' },
   files: { page: 'files', heading: 'راهنمای قدم‌به‌قدم مرورگر فایل' },
   s3: { page: 's3', heading: 'اتصال S3 در پنل، فیلد به فیلد' },
   dns: { page: 'cloudflare-dns', heading: 'مشاهدهٔ رکوردها' },
@@ -1196,6 +1198,7 @@ export default function App() {
               {currentPage === 'firewall' && <FirewallPage Heading={PageHeading} notify={notifyUser} user={user} />}
               {currentPage === 'nginx' && user.role === 'admin' && <NginxPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'docker' && user.role === 'admin' && <DockerPage Heading={PageHeading} notify={notifyUser} />}
+              {currentPage === 'optimization' && user.role === 'admin' && <DockerOptimizationPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 'files' && user.role === 'admin' && <FileManagerPage Heading={PageHeading} notify={notifyUser} />}
               {currentPage === 's3' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="فضای ابری S3"/>}><S3StoragePage Heading={PageHeading} notify={notifyUser}/></Suspense>}
               {currentPage === 'dns' && user.role === 'admin' && <Suspense fallback={<PageRouteSkeleton label="مدیریت DNS"/>}><DnsPage Heading={PageHeading} notify={notifyUser}/></Suspense>}

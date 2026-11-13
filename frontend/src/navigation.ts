@@ -1,6 +1,6 @@
-import { AppWindow, Bug, Cloud, Container, Cpu, Files, Globe2, KeyRound, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, Waypoints, type LucideIcon } from 'lucide-react'
+import { AppWindow, Bug, Cloud, Container, Cpu, Files, Globe2, KeyRound, LayoutDashboard, Network, Package, PanelsTopLeft, Radio, ScrollText, ServerCog, Settings, Shield, Terminal, UserRound, Users, Wrench, Database, Server, Waypoints, Sparkles, type LucideIcon } from 'lucide-react'
 
-export type PageId = 'dashboard' | 'system' | 'nodes' | 'apps' | 'app-mesh' | 'ssh-keys' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'files' | 's3' | 'dns' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account' | 'bug-report'
+export type PageId = 'dashboard' | 'system' | 'nodes' | 'apps' | 'app-mesh' | 'ssh-keys' | 'maintenance' | 'mysql' | 'network' | 'ports' | 'firewall' | 'nginx' | 'docker' | 'optimization' | 'files' | 's3' | 'dns' | 'terminal' | 'packages' | 'services' | 'users' | 'audit' | 'settings' | 'account' | 'bug-report'
 export type NavigationItem = { id: PageId; label: string; icon: LucideIcon; admin?: boolean }
 
 export const navigation: NavigationItem[] = [
@@ -15,6 +15,7 @@ export const navigation: NavigationItem[] = [
   { id: 'firewall', label: 'فایروال UFW', icon: Shield },
   { id: 'nginx', label: 'سایت‌های Nginx', icon: PanelsTopLeft, admin: true },
   { id: 'docker', label: 'مدیریت Docker', icon: Container, admin: true },
+  { id: 'optimization', label: 'بهینه‌سازی سرور', icon: Sparkles, admin: true },
   { id: 'files', label: 'فایل‌های سرور', icon: Files, admin: true },
   { id: 's3', label: 'فضای ابری S3', icon: Cloud, admin: true },
   { id: 'dns', label: 'مدیریت DNS', icon: Globe2, admin: true },

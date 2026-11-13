@@ -20,6 +20,7 @@ type SidebarNavigationProps = {
 const sections: Array<{ title: string; ids: PageId[] }> = [
   { title: 'نمای کلی و سلامت', ids: ['dashboard', 'system', 'audit'] },
   { title: 'وب‌سایت و اپلیکیشن', ids: ['apps', 'nginx', 'dns', 'docker', 'ssh-keys'] },
+  { title: 'بهینه‌سازی', ids: ['optimization'] },
   { title: 'زیرساخت و شبکه', ids: ['nodes', 'app-mesh', 'network', 'ports', 'firewall', 'services', 'terminal'] },
   { title: 'ذخیره‌سازی و داده', ids: ['files', 's3', 'mysql'] },
   { title: 'مدیریت ARG', ids: ['maintenance', 'packages', 'users', 'settings', 'account', 'bug-report'] },

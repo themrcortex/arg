@@ -4220,6 +4220,7 @@ fn execute_privileged_request(request: &Value) -> Value {
         Some("service-resources") => "service-resources",
         Some("service-limits") => "service-limits",
         Some("docker-status") => "docker-status",
+        Some("docker-optimization-status") => "docker-optimization-status",
         Some("docker-operation") => "docker-operation",
         Some("app-network-operation") => "app-network-operation",
         Some("app-volume-operation") => "app-volume-operation",

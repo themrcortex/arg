@@ -79,7 +79,7 @@ When creating a container, optional CPU and memory limits are enforced by Docker
 
 ### Host cleanup and space estimates
 
-The **Optimization** tab reports Docker's reclaimable estimates from `docker system df` for build cache, images, and stopped containers. It separately measures inactive ARG cache, archived journal data, old rotated log files, and downloaded APT packages. Values are approximate: shared layers, sparse files, and measurement timing can change the actual space reclaimed. Potentially unused Docker volumes are excluded from automatic cleanup totals.
+The standalone **Server optimization** page in the sidebar reports Docker's reclaimable estimates from `docker system df` for build cache, images, and stopped containers. It separately measures inactive ARG cache, archived journal data, old rotated log files, and downloaded APT packages. Values are approximate: shared layers, sparse files, and measurement timing can change the actual space reclaimed. Potentially unused Docker volumes are excluded from automatic cleanup totals.
 
 - Pruning build cache can make later builds slower.
 - Removing unused images may require a new pull before a later run.
