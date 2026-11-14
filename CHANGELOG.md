@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.9-dev.20 — 2026-11-14
+
+### Fixed
+- Detach a Node locally whenever its remote revocation request fails with a gateway error, even when the saved connection state has not been updated; continue to block 403 permission failures.
+
 ## v0.7.9-dev.19 — 2026-11-14
 
 ### Fixed
