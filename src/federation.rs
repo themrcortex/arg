@@ -2238,11 +2238,12 @@ fn node_update_route(
 }
 
 fn should_forget_node_after_revoke_failure(status: StatusCode, connection_state: &str) -> bool {
-    // If the peer rejects this credential, or cannot be reached, removing the
-    // local pairing also deletes the only locally stored copy of that token.
-    // Keep 403s visible: they can mean a live credential lacks revoke scope.
+    // A failed gateway request cannot confirm a remote revoke. Let the
+    // administrator detach locally regardless of stale connection-state data;
+    // deleting the local token removes this panel's only credential copy.
+    // A 403 can mean a live credential lacks revoke scope, so keep it visible.
     (status == StatusCode::UNAUTHORIZED && connection_state == "untrusted")
-        || (status == StatusCode::BAD_GATEWAY && connection_state == "offline")
+        || status == StatusCode::BAD_GATEWAY
 }
 
 async fn ensure_workspace_session(
@@ -4288,12 +4289,12 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_or_offline_remote_revoke_failures_allow_local_node_cleanup() {
+    fn rejected_or_failed_remote_revoke_allows_local_cleanup_without_hiding_forbidden() {
         assert!(should_forget_node_after_revoke_failure(
             StatusCode::UNAUTHORIZED,
             "untrusted"
         ));
-        assert!(!should_forget_node_after_revoke_failure(
+        assert!(should_forget_node_after_revoke_failure(
             StatusCode::BAD_GATEWAY,
             "untrusted"
         ));
@@ -4301,9 +4302,13 @@ mod tests {
             StatusCode::BAD_GATEWAY,
             "offline"
         ));
-        assert!(!should_forget_node_after_revoke_failure(
+        assert!(should_forget_node_after_revoke_failure(
             StatusCode::BAD_GATEWAY,
             "degraded"
+        ));
+        assert!(!should_forget_node_after_revoke_failure(
+            StatusCode::UNAUTHORIZED,
+            "healthy"
         ));
         assert!(!should_forget_node_after_revoke_failure(
             StatusCode::FORBIDDEN,
