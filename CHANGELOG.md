@@ -1,5 +1,10 @@
 # ARG Change Log
 
+## v0.7.9-dev.19 — 2026-11-14
+
+### Fixed
+- Allow local Node disconnection when the destination is offline and cannot receive the remote credential-revocation request; retain the local credential rejection behavior and block removal on insufficient revoke permission.
+
 ## v0.7.9-dev.18 — 2026-11-13
 
 ### Fixed
