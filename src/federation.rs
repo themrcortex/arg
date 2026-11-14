@@ -2238,10 +2238,11 @@ fn node_update_route(
 }
 
 fn should_forget_node_after_revoke_failure(status: StatusCode, connection_state: &str) -> bool {
-    // A rejected credential (401) cannot revoke the peer-side grant, but it is
-    // safe to remove the unusable local pairing. A 403 may still represent an
-    // active credential without the revoke scope, so keep that pairing visible.
-    status == StatusCode::UNAUTHORIZED && connection_state == "untrusted"
+    // If the peer rejects this credential, or cannot be reached, removing the
+    // local pairing also deletes the only locally stored copy of that token.
+    // Keep 403s visible: they can mean a live credential lacks revoke scope.
+    (status == StatusCode::UNAUTHORIZED && connection_state == "untrusted")
+        || (status == StatusCode::BAD_GATEWAY && connection_state == "offline")
 }
 
 async fn ensure_workspace_session(
@@ -3433,7 +3434,7 @@ pub(super) async fn remove_node(
     let message = if remote_revoked {
         "اتصال Node از این پنل و پنل مقصد لغو شد."
     } else {
-        "اعتبارنامهٔ مقصد پذیرفته نشد؛ رکورد و کلید محلی حذف شد، اما لغو سمت مقصد قابل تأیید نبود."
+        "رکورد و کلید محلی حذف شد؛ لغو مجوز روی پنل مقصد قابل تأیید نبود."
     };
     Ok(Json(
         json!({"removed":true,"remote_revoked":remote_revoked,"message":message}),
@@ -4287,7 +4288,7 @@ mod tests {
     }
 
     #[test]
-    fn only_untrusted_remote_revoke_failures_allow_local_node_cleanup() {
+    fn untrusted_or_offline_remote_revoke_failures_allow_local_node_cleanup() {
         assert!(should_forget_node_after_revoke_failure(
             StatusCode::UNAUTHORIZED,
             "untrusted"
@@ -4296,7 +4297,7 @@ mod tests {
             StatusCode::BAD_GATEWAY,
             "untrusted"
         ));
-        assert!(!should_forget_node_after_revoke_failure(
+        assert!(should_forget_node_after_revoke_failure(
             StatusCode::BAD_GATEWAY,
             "offline"
         ));

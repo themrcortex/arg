@@ -43,7 +43,7 @@ Controller credentials expire. The rotate action first saves a random credential
 
 Workspace sessions last 12 hours. The controller renews them through the authenticated destination before expiry. Connection states are `healthy`, `degraded`, `offline`, `untrusted`, and `incompatible`. The node card shows sanitized errors and the last check time. `offline` means the secure remote connection is unavailable; it does not mean the local ARG service has stopped.
 
-To revoke access, remove the node on the controller or revoke that controller on the destination. The destination invalidates the credential and deletes the controller's proxy sessions. Removing a node never deletes files or applications from its VPS.
+To revoke access, remove the node on the controller or revoke that controller on the destination. When the node is reachable, the destination invalidates the credential and deletes the controller's proxy sessions. If the destination is offline, the controller removes its local node record and key so this panel is detached; remote revocation cannot be confirmed, so review registered Controllers on the destination when it is available again. A 403 stops removal because the credential may still be valid without the required revoke permission. Removing a node never deletes files or applications from its VPS.
 
 ## Current limits
 
